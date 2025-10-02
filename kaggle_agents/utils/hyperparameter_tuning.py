@@ -2,7 +2,7 @@
 
 import optuna
 from optuna.samplers import TPESampler
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Union
 import numpy as np
 from sklearn.model_selection import cross_val_score
 
@@ -21,7 +21,7 @@ class HyperparameterOptimizer:
         self.timeout = timeout
 
     def optimize_xgboost(
-        self, X, y, problem_type: str, scoring: str, cv: int = 5
+        self, X, y, problem_type: str, scoring: str, cv: Union[int, Any] = 5
     ) -> Dict[str, Any]:
         """Optimize XGBoost hyperparameters.
 
@@ -30,7 +30,7 @@ class HyperparameterOptimizer:
             y: Target variable
             problem_type: 'classification' or 'regression'
             scoring: Scoring metric
-            cv: Number of CV folds
+            cv: CV strategy (int for n_splits or CV object)
 
         Returns:
             Best hyperparameters
