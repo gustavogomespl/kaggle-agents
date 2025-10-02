@@ -55,6 +55,36 @@ def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:
     }
 
 
+def extract_competition_slug(competition_input: str) -> str:
+    """Extract competition slug from URL or name.
+
+    Args:
+        competition_input: Competition name or URL
+
+    Returns:
+        Competition slug (e.g., 'titanic')
+
+    Examples:
+        'titanic' -> 'titanic'
+        'https://www.kaggle.com/competitions/titanic' -> 'titanic'
+        'https://www.kaggle.com/c/titanic' -> 'titanic'
+    """
+    # Remove trailing slash
+    competition_input = competition_input.rstrip('/')
+
+    # If it's a URL, extract the slug
+    if 'kaggle.com' in competition_input:
+        # Handle both /competitions/ and /c/ URLs
+        parts = competition_input.split('/')
+        # Find 'competitions' or 'c' in the URL
+        for i, part in enumerate(parts):
+            if part in ('competitions', 'c') and i + 1 < len(parts):
+                return parts[i + 1]
+
+    # Otherwise, assume it's already a slug
+    return competition_input
+
+
 def main():
     """Main function to run Kaggle agents."""
     parser = argparse.ArgumentParser(
@@ -63,7 +93,7 @@ def main():
     parser.add_argument(
         "competition",
         type=str,
-        help="Kaggle competition name (e.g., 'titanic')",
+        help="Kaggle competition name or URL (e.g., 'titanic' or 'https://www.kaggle.com/competitions/titanic')",
     )
     parser.add_argument(
         "--max-iterations",
@@ -78,6 +108,9 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # Extract competition slug from URL or name
+    competition_slug = extract_competition_slug(args.competition)
 
     # Validate and configure
     try:
@@ -97,7 +130,9 @@ def main():
     print("=" * 80)
     print("Kaggle Agents - Multi-Agent Competition Framework")
     print("=" * 80)
-    print(f"Competition: {args.competition}")
+    print(f"Competition: {competition_slug}")
+    if args.competition != competition_slug:
+        print(f"  (from URL: {args.competition})")
     print(f"Max Iterations: {args.max_iterations}")
     print("=" * 80)
     print()
@@ -114,7 +149,7 @@ def main():
             print("⚠️  Visualization requires IPython. Install with: uv add ipython")
 
     # Initialize state
-    initial_state = initialize_state(args.competition, args.max_iterations)
+    initial_state = initialize_state(competition_slug, args.max_iterations)
 
     # Run workflow
     try:

@@ -204,4 +204,6 @@ Based on this information, provide a comprehensive strategy including:
         except Exception as e:
             error_msg = f"Strategy formulation failed: {str(e)}"
             print(f"Strategy Agent ERROR: {error_msg}")
-            return {"errors": [error_msg]}
+            # Return state with error appended, don't lose existing state
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            return {"errors": errors + [error_msg]}

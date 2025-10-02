@@ -74,6 +74,8 @@ What are the key characteristics of this competition and what should we focus on
         except Exception as e:
             error_msg = f"Data collection failed: {str(e)}"
             print(f"Data Collector ERROR: {error_msg}")
-            return {"errors": [error_msg]}
+            # Return state with error appended, don't lose existing state
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            return {"errors": errors + [error_msg]}
 
         return state

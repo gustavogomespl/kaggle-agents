@@ -133,4 +133,6 @@ class FeatureEngineeringAgent:
         except Exception as e:
             error_msg = f"Feature engineering failed: {str(e)}"
             print(f"Feature Engineering Agent ERROR: {error_msg}")
-            return {"errors": [error_msg]}
+            # Return state with error appended, don't lose existing state
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            return {"errors": errors + [error_msg]}

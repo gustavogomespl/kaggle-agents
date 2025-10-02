@@ -62,13 +62,18 @@ def create_kaggle_workflow(checkpointer: Optional[MemorySaver] = None) -> StateG
     # Conditional edge from leaderboard for iteration or completion
     def should_continue(state: KaggleState) -> Literal["feature_engineering", "__end__"]:
         """Determine whether to iterate or complete based on performance."""
+        # Handle both dict and dataclass state access
+        leaderboard_rank = state.get("leaderboard_rank", 0) if isinstance(state, dict) else state.leaderboard_rank
+        iteration = state.get("iteration", 0) if isinstance(state, dict) else state.iteration
+        max_iterations = state.get("max_iterations", 5) if isinstance(state, dict) else state.max_iterations
+
         # Check if we should iterate to improve
-        if state.leaderboard_rank > 0:
+        if leaderboard_rank > 0:
             # Calculate percentile (assuming top 1000 teams)
-            percentile = (state.leaderboard_rank / 1000) * 100
+            percentile = (leaderboard_rank / 1000) * 100
 
             # Iterate if not in top 20% and haven't exceeded max iterations
-            if percentile > 20 and state.iteration < state.max_iterations:
+            if percentile > 20 and iteration < max_iterations:
                 return "feature_engineering"
 
         return END
