@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# Environment
+.env
+
+# Kaggle
+.kaggle/
+
+# Data
+data/
+*.csv
+*.parquet
+*.pkl
+
+# Models
+models/
+*.joblib
+*.h5
+*.ckpt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# uv
+.python-version
+uv.lock
