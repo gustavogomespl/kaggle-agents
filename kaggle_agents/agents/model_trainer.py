@@ -14,16 +14,20 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..utils.config import Config
 from ..utils.state import KaggleState
+from ..utils.cross_validation import AdaptiveCrossValidator
+from ..utils.hyperparameter_tuning import HyperparameterOptimizer
 
 
 class ModelTrainingAgent:
-    """Agent responsible for training and evaluating models."""
+    """Agent responsible for training and evaluating models with optimization."""
 
     def __init__(self):
         """Initialize model training agent."""
         self.llm = ChatOpenAI(
             model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
         )
+        self.cv_adapter = AdaptiveCrossValidator()
+        self.optimizer = HyperparameterOptimizer(n_trials=30, timeout=180)
 
     def determine_problem_type(self, y: pd.Series) -> str:
         """Determine if problem is classification or regression.
