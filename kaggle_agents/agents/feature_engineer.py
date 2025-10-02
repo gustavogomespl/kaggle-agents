@@ -1,13 +1,13 @@
-"""Feature engineering agent."""
+"""Feature engineering agent with advanced techniques."""
 
 import pandas as pd
 import numpy as np
 from typing import Dict, Any, List
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..utils.config import Config
 from ..utils.state import KaggleState
+from ..utils.feature_engineering import AdvancedFeatureEngineer
 
 
 class FeatureEngineeringAgent:
@@ -18,83 +18,10 @@ class FeatureEngineeringAgent:
         self.llm = ChatOpenAI(
             model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
         )
-
-    def handle_missing_values(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Handle missing values in the dataframe.
-
-        Args:
-            df: Input dataframe
-
-        Returns:
-            DataFrame with missing values handled
-        """
-        # Numeric columns: fill with median
-        numeric_cols = df.select_dtypes(include=[np.number]).columns
-        for col in numeric_cols:
-            if df[col].isnull().any():
-                df[col].fillna(df[col].median(), inplace=True)
-
-        # Categorical columns: fill with mode or 'Unknown'
-        categorical_cols = df.select_dtypes(include=["object"]).columns
-        for col in categorical_cols:
-            if df[col].isnull().any():
-                df[col].fillna(df[col].mode()[0] if len(df[col].mode()) > 0 else "Unknown", inplace=True)
-
-        return df
-
-    def encode_categorical(self, train_df: pd.DataFrame, test_df: pd.DataFrame) -> tuple:
-        """Encode categorical variables.
-
-        Args:
-            train_df: Training dataframe
-            test_df: Test dataframe
-
-        Returns:
-            Tuple of (encoded_train, encoded_test)
-        """
-        categorical_cols = train_df.select_dtypes(include=["object"]).columns
-
-        for col in categorical_cols:
-            le = LabelEncoder()
-            # Fit on combined data to handle test categories not in train
-            combined = pd.concat([train_df[col], test_df[col]], axis=0)
-            le.fit(combined.astype(str))
-
-            train_df[col] = le.transform(train_df[col].astype(str))
-            test_df[col] = le.transform(test_df[col].astype(str))
-
-        return train_df, test_df
-
-    def create_features(self, df: pd.DataFrame, insights: List[str]) -> pd.DataFrame:
-        """Create new features based on domain knowledge and insights.
-
-        Args:
-            df: Input dataframe
-            insights: Insights from EDA
-
-        Returns:
-            DataFrame with new features
-        """
-        new_features = []
-
-        # Create interaction features for numeric columns
-        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-        if len(numeric_cols) >= 2:
-            # Create sum/product of first two numeric features
-            df[f"{numeric_cols[0]}_x_{numeric_cols[1]}"] = df[numeric_cols[0]] * df[numeric_cols[1]]
-            new_features.append(f"{numeric_cols[0]}_x_{numeric_cols[1]}")
-
-        # Create aggregated features if there are multiple numeric columns
-        if len(numeric_cols) >= 3:
-            df["numeric_sum"] = df[numeric_cols].sum(axis=1)
-            df["numeric_mean"] = df[numeric_cols].mean(axis=1)
-            df["numeric_std"] = df[numeric_cols].std(axis=1)
-            new_features.extend(["numeric_sum", "numeric_mean", "numeric_std"])
-
-        return df, new_features
+        self.engineer = AdvancedFeatureEngineer()
 
     def __call__(self, state: KaggleState) -> KaggleState:
-        """Execute feature engineering.
+        """Execute advanced feature engineering based on strategy.
 
         Args:
             state: Current workflow state
@@ -102,14 +29,21 @@ class FeatureEngineeringAgent:
         Returns:
             Updated state with engineered features
         """
-        print("🔧 Feature Engineering Agent: Creating features...")
+        print("Feature Engineering Agent: Creating features...")
 
         try:
             # Load data
-            train_df = pd.read_csv(state["train_data_path"])
-            test_df = pd.read_csv(state["test_data_path"])
+            train_df = pd.read_csv(state.train_data_path)
+            test_df = pd.read_csv(state.test_data_path)
 
-            # Identify target column (usually last column or 'target')
+            # Get strategy recommendations
+            strategy = state.eda_summary.get("strategy", {})
+            fe_priorities = strategy.get("feature_engineering_priorities", [])
+            encoding_strategy = strategy.get("encoding_strategy", {"low_cardinality": "label", "high_cardinality": "target"})
+            scaling_required = strategy.get("scaling_required", False)
+            date_columns = strategy.get("data_characteristics", {}).get("temporal", {}).get("date_columns", [])
+
+            # Identify target column
             potential_targets = ["target", "label", train_df.columns[-1]]
             target_col = None
             for col in potential_targets:
@@ -118,68 +52,85 @@ class FeatureEngineeringAgent:
                     break
 
             # Separate target
+            y_train = None
             if target_col:
                 y_train = train_df[target_col]
                 train_df = train_df.drop(columns=[target_col])
 
-            # Use LLM to suggest features
-            system_msg = SystemMessage(
-                content="""You are a feature engineering expert for Kaggle competitions.
-                Suggest specific feature engineering strategies based on the data insights."""
+            print(f"  Applying {len(fe_priorities)} feature engineering techniques...")
+
+            # 1. Handle missing values (advanced method)
+            train_df, test_df = self.engineer.handle_missing_values_advanced(
+                train_df, test_df, strategy="advanced"
             )
 
-            human_msg = HumanMessage(
-                content=f"""Data Insights:
-{chr(10).join(f'- {insight}' for insight in state.get('data_insights', []))}
+            # 2. Extract date features if applicable
+            if date_columns:
+                print(f"  Extracting features from {len(date_columns)} date columns")
+                train_df, test_df = self.engineer.extract_date_features(
+                    train_df, test_df, date_columns
+                )
 
-Competition Type: {state.get('competition_type', 'unknown')}
-Columns: {train_df.columns.tolist()}
+            # 3. Encode categorical variables adaptively
+            if target_col:
+                # Temporarily add target back for target encoding
+                train_df[target_col] = y_train
 
-Suggest 3-5 specific feature engineering techniques to apply."""
+            train_df, test_df = self.engineer.encode_categorical_adaptive(
+                train_df, test_df, target_col if target_col else "", encoding_strategy
             )
 
-            response = self.llm.invoke([system_msg, human_msg])
+            if target_col:
+                y_train = train_df[target_col]
+                train_df = train_df.drop(columns=[target_col])
 
-            # Handle missing values
-            train_df = self.handle_missing_values(train_df)
-            test_df = self.handle_missing_values(test_df)
+            # 4. Create polynomial features if recommended
+            if any("polynomial" in priority.lower() for priority in fe_priorities):
+                print("  Creating polynomial features")
+                train_df, test_df = self.engineer.create_polynomial_features(
+                    train_df, test_df, degree=2
+                )
 
-            # Encode categorical variables
-            train_df, test_df = self.encode_categorical(train_df, test_df)
+            # 5. Create aggregation features
+            train_df, test_df = self.engineer.create_aggregation_features(train_df, test_df)
 
-            # Create features
-            train_df, new_features = self.create_features(
-                train_df, state.get("data_insights", [])
-            )
-            test_df, _ = self.create_features(test_df, state.get("data_insights", []))
+            # 6. Scale features if required
+            if scaling_required:
+                print("  Scaling features")
+                train_df, test_df = self.engineer.scale_features(
+                    train_df, test_df, method="standard"
+                )
 
             # Re-add target to train
-            if target_col:
+            if target_col and y_train is not None:
                 train_df[target_col] = y_train
 
             # Save processed data
-            train_processed_path = state["train_data_path"].replace(".csv", "_processed.csv")
-            test_processed_path = state["test_data_path"].replace(".csv", "_processed.csv")
+            iteration_suffix = f"_iter{state.iteration}" if state.iteration > 0 else ""
+            train_processed_path = state.train_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
+            test_processed_path = state.test_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
 
             train_df.to_csv(train_processed_path, index=False)
             test_df.to_csv(test_processed_path, index=False)
 
             # Update state
-            state["train_data_path"] = train_processed_path
-            state["test_data_path"] = test_processed_path
-            state["features_engineered"] = new_features
+            new_features_count = len(self.engineer.created_features)
 
-            state["messages"].append(
+            state.messages.append(
                 HumanMessage(
-                    content=f"Feature engineering completed. Created {len(new_features)} new features. Strategies: {response.content}"
+                    content=f"Feature engineering completed. Created {new_features_count} new features using advanced techniques."
                 )
             )
 
-            print(f"Feature Engineering Agent: Created {len(new_features)} features")
+            print(f"Feature Engineering Agent: Created {new_features_count} features")
+
+            return {
+                "train_data_path": train_processed_path,
+                "test_data_path": test_processed_path,
+                "features_engineered": self.engineer.created_features,
+            }
 
         except Exception as e:
             error_msg = f"Feature engineering failed: {str(e)}"
             print(f"Feature Engineering Agent ERROR: {error_msg}")
             return {"errors": [error_msg]}
-
-        return state
