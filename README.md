@@ -4,32 +4,46 @@ Multi-agent framework for autonomous Kaggle competition participation using Lang
 
 ## Architecture
 
-The system implements a directed graph workflow where specialized agents handle distinct phases of the competition lifecycle:
+The system implements a directed graph workflow with intelligent decision-making at each phase:
 
 ```
-Data Collection → EDA → Feature Engineering → Model Training → Submission → Leaderboard Monitor
-                           ↑                                                       ↓
-                           └───────────────────────────────────────────────────────┘
+Data Collection → EDA → Strategy → Feature Engineering → Model Training → Ensemble → Submission → Leaderboard
+                                      ↑                                                              ↓
+                                      └──────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Components
 
-**State Management**: Uses dataclass-based state with custom reducers for efficient updates
+**State Management**: Dataclass-based state with custom reducers
 - List fields use `operator.add` for appending
 - Dict fields use custom merge reducer for updates
 - Extends `MessagesState` for LLM conversation tracking
 
-**Agent System**: Six specialized agents implement the competition pipeline
+**Agent System**: Eight specialized agents with advanced ML capabilities
 - **Data Collector**: Kaggle API integration for dataset acquisition
 - **EDA Agent**: Statistical analysis and insight generation
-- **Feature Engineer**: Automated feature creation and preprocessing
-- **Model Trainer**: Multi-model training with cross-validation (RF, XGBoost, LightGBM)
+- **Strategy Agent**: High-level decision making based on data characteristics
+  - Selects optimal models for the problem
+  - Determines feature engineering priorities
+  - Chooses encoding and validation strategies
+- **Feature Engineer**: Advanced feature creation
+  - Adaptive categorical encoding (Target, CatBoost, OneHot, Label)
+  - Polynomial feature generation
+  - Date feature extraction
+  - Missing value indicators
+  - Feature scaling when required
+- **Model Trainer**: Multi-model training with hyperparameter optimization
+  - Optuna-based tuning for XGBoost, LightGBM, CatBoost, Random Forest
+  - Adaptive cross-validation (StratifiedKFold, TimeSeriesSplit, etc.)
+- **Ensemble Agent**: Model combination for improved performance
+  - Stacking with meta-learner
+  - Blending with weighted averaging
 - **Submission Agent**: Prediction generation and Kaggle submission
-- **Leaderboard Monitor**: Performance tracking and iteration control
+- **Leaderboard Monitor**: Performance tracking and intelligent iteration
 
-**Workflow Control**: LangGraph orchestration with conditional routing
-- Linear progression through primary pipeline
-- Conditional iteration based on leaderboard percentile
+**Workflow Control**: LangGraph orchestration with adaptive routing
+- Strategy-driven pipeline execution
+- Conditional iteration based on performance analysis
 - Terminates at top 20% placement or max iterations
 
 ## Installation
@@ -121,43 +135,65 @@ The workflow uses LangGraph's `StateGraph` with:
 - **Conditional edges**: Route based on performance metrics
 - **Checkpointer**: Optional persistence for state recovery
 
-### Model Training
+### Advanced Model Training
 
-Automated training pipeline with cross-validation:
-- Automatic problem type detection (classification/regression)
-- Parallel model training: Random Forest, XGBoost, LightGBM, Linear models
-- 5-fold cross-validation for robust evaluation
+State-of-the-art model optimization pipeline:
+- **Hyperparameter Optimization**: Optuna-based tuning with TPE sampler
+  - XGBoost: learning rate, max depth, subsample, regularization
+  - LightGBM: num_leaves, learning rate, feature fraction
+  - CatBoost: depth, learning rate, l2 regularization
+  - Random Forest: n_estimators, max depth, min samples
+- **Adaptive Cross-Validation**: Strategy selection based on data type
+  - StratifiedKFold for imbalanced classification
+  - TimeSeriesSplit for temporal data
+  - GroupKFold for grouped data
+- **Ensemble Methods**:
+  - Stacking: Out-of-fold predictions with meta-learner
+  - Blending: Weighted averaging of top models
+- Automatic problem type detection
 - Feature importance extraction
-- Best model selection based on CV scores
+- Model persistence and versioning
 
-### Feature Engineering
+### Intelligent Feature Engineering
 
-Automated feature generation pipeline:
-- Missing value imputation (median for numeric, mode for categorical)
-- Categorical encoding using LabelEncoder
-- Interaction feature creation
-- Aggregation features (sum, mean, std)
-- LLM-guided feature strategy generation
+Strategy-driven feature creation:
+- **Missing Value Handling**:
+  - Missing value indicators
+  - Context-aware imputation
+- **Adaptive Categorical Encoding**:
+  - Low cardinality: OneHot or Label encoding
+  - High cardinality: Target or CatBoost encoding
+- **Advanced Feature Creation**:
+  - Polynomial features for non-linear relationships
+  - Date decomposition (year, month, day, dayofweek, quarter)
+  - Interaction features between numeric columns
+  - Aggregation features (sum, mean, std, min, max)
+- **Feature Scaling**: StandardScaler or MinMaxScaler when required
+- LLM-guided strategy formulation
 
 ## Project Structure
 
 ```
 kaggle_agents/
 ├── agents/
-│   ├── data_collector.py      # Kaggle API integration
-│   ├── eda_agent.py            # Statistical analysis
-│   ├── feature_engineer.py    # Feature generation
-│   ├── model_trainer.py        # Multi-model training
-│   ├── submission_agent.py     # Prediction and submission
-│   └── leaderboard_monitor.py # Performance tracking
+│   ├── data_collector.py       # Kaggle API integration
+│   ├── eda_agent.py             # Statistical analysis
+│   ├── strategy_agent.py        # High-level decision making
+│   ├── feature_engineer.py      # Advanced feature engineering
+│   ├── model_trainer.py         # Model training with optimization
+│   ├── ensemble_agent.py        # Model ensembling
+│   ├── submission_agent.py      # Prediction and submission
+│   └── leaderboard_monitor.py   # Performance tracking
 ├── workflows/
-│   └── kaggle_workflow.py      # LangGraph orchestration
+│   └── kaggle_workflow.py       # LangGraph orchestration
 ├── tools/
-│   └── kaggle_api.py           # Kaggle API client
+│   └── kaggle_api.py            # Kaggle API client
 ├── utils/
-│   ├── config.py               # Configuration management
-│   └── state.py                # State schema and reducers
-└── main.py                     # CLI entrypoint
+│   ├── config.py                # Configuration management
+│   ├── state.py                 # State schema and reducers
+│   ├── feature_engineering.py   # Advanced FE utilities
+│   └── hyperparameter_tuning.py # Optuna optimization
+└── main.py                      # CLI entrypoint
 ```
 
 ## Monitoring and Debugging
@@ -193,11 +229,25 @@ workflow = create_kaggle_workflow(checkpointer=MemorySaver())
 
 - **langgraph** (0.6.8): Agent orchestration framework
 - **langchain**: LLM interface and abstractions
+- **optuna**: Hyperparameter optimization with TPE sampler
 - **kaggle**: Official Kaggle API client
 - **scikit-learn**: Classical ML models and preprocessing
 - **xgboost**: Gradient boosting implementation
 - **lightgbm**: Efficient gradient boosting
+- **catboost**: Gradient boosting with categorical support
+- **category-encoders**: Advanced categorical encoding
 - **pandas/numpy**: Data manipulation
+
+## Key Differentiators
+
+This system achieves competitive performance through:
+
+1. **Strategy-First Approach**: LLM-powered analysis determines optimal approach before execution
+2. **Adaptive Feature Engineering**: Encoding and transformation strategies adapt to data characteristics
+3. **Hyperparameter Optimization**: Automated tuning with Optuna for all major models
+4. **Ensemble Methods**: Stacking and blending for robust predictions
+5. **Intelligent Iteration**: Performance-based decisions on when and where to improve
+6. **Production-Ready**: Full error handling, logging, checkpointing, and tracing
 
 ## References
 
