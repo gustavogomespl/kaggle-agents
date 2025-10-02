@@ -110,7 +110,7 @@ Provide 5-7 key insights about this data and what we should focus on."""
             insights = [
                 line.strip("- ").strip()
                 for line in response.content.split("\n")
-                if line.strip().startswith("-") or line.strip()[0].isdigit()
+                if line.strip() and (line.strip().startswith("-") or (len(line.strip()) > 0 and line.strip()[0].isdigit()))
             ]
 
             state["data_insights"] = insights

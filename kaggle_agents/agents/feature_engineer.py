@@ -32,12 +32,18 @@ class FeatureEngineeringAgent:
         print("Feature Engineering Agent: Creating features...")
 
         try:
+            # Handle both dict and dataclass state access
+            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
+            test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
+            eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
+            iteration = state.get("iteration", 0) if isinstance(state, dict) else state.iteration
+
             # Load data
-            train_df = pd.read_csv(state.train_data_path)
-            test_df = pd.read_csv(state.test_data_path)
+            train_df = pd.read_csv(train_data_path)
+            test_df = pd.read_csv(test_data_path)
 
             # Get strategy recommendations
-            strategy = state.eda_summary.get("strategy", {})
+            strategy = eda_summary.get("strategy", {})
             fe_priorities = strategy.get("feature_engineering_priorities", [])
             encoding_strategy = strategy.get("encoding_strategy", {"low_cardinality": "label", "high_cardinality": "target"})
             scaling_required = strategy.get("scaling_required", False)
@@ -106,9 +112,9 @@ class FeatureEngineeringAgent:
                 train_df[target_col] = y_train
 
             # Save processed data
-            iteration_suffix = f"_iter{state.iteration}" if state.iteration > 0 else ""
-            train_processed_path = state.train_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
-            test_processed_path = state.test_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
+            iteration_suffix = f"_iter{iteration}" if iteration > 0 else ""
+            train_processed_path = train_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
+            test_processed_path = test_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
 
             train_df.to_csv(train_processed_path, index=False)
             test_df.to_csv(test_processed_path, index=False)

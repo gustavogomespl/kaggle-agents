@@ -127,8 +127,11 @@ class StrategyAgent:
         print("Strategy Agent: Analyzing competition and formulating approach...")
 
         try:
+            # Handle both dict and dataclass state access
+            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
+
             # Load training data
-            train_df = pd.read_csv(state.train_data_path)
+            train_df = pd.read_csv(train_data_path)
 
             # Analyze data characteristics
             data_chars = self.analyze_data_characteristics(train_df)
