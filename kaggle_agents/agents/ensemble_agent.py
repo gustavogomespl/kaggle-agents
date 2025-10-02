@@ -184,13 +184,20 @@ class EnsembleAgent:
         print("Ensemble Agent: Creating model ensemble...")
 
         try:
+            # Handle both dict and dataclass state access
+            models_trained = state.get("models_trained", []) if isinstance(state, dict) else state.models_trained
+            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
+            competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
+            eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
+            best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
+
             # Check if we have multiple models
-            if len(state.models_trained) < 2:
+            if len(models_trained) < 2:
                 print("  Only one model trained, skipping ensemble")
                 return state
 
             # Load processed data
-            train_df = pd.read_csv(state.train_data_path)
+            train_df = pd.read_csv(train_data_path)
 
             # Identify target
             potential_targets = ["target", "label", train_df.columns[-1]]
@@ -213,8 +220,8 @@ class EnsembleAgent:
 
             # Load top models (top 3)
             top_models = []
-            for model_info in sorted(state.models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]:
-                model_path = f"{Config.MODELS_DIR}/{model_info['name']}_{state.competition_name}.joblib"
+            for model_info in sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]:
+                model_path = f"{Config.MODELS_DIR}/{model_info['name']}_{competition_name}.joblib"
                 if Path(model_path).exists():
                     model = joblib.load(model_path)
                     top_models.append(model)
@@ -224,7 +231,7 @@ class EnsembleAgent:
                 return state
 
             # Get ensemble strategy from state
-            strategy = state.eda_summary.get("strategy", {})
+            strategy = eda_summary.get("strategy", {})
             ensemble_strategy = strategy.get("ensemble_strategy", "stacking")
 
             # Create ensemble
@@ -234,7 +241,7 @@ class EnsembleAgent:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
 
             # Save ensemble
-            ensemble_path = f"{Config.MODELS_DIR}/ensemble_{state.competition_name}.joblib"
+            ensemble_path = f"{Config.MODELS_DIR}/ensemble_{competition_name}.joblib"
             joblib.dump({
                 "ensemble": ensemble,
                 "problem_type": problem_type,
@@ -247,12 +254,13 @@ class EnsembleAgent:
                 "best_model": {
                     "name": f"ensemble_{ensemble_strategy}",
                     "path": ensemble_path,
-                    "mean_cv_score": state.best_model.get("mean_cv_score", 0.0),  # Use best individual score
+                    "mean_cv_score": best_model.get("mean_cv_score", 0.0) if best_model else 0.0,  # Use best individual score
                 }
             }
 
         except Exception as e:
             error_msg = f"Ensemble creation failed: {str(e)}"
             print(f"Ensemble Agent ERROR: {error_msg}")
-            # Don't fail the whole pipeline, just skip ensemble
-            return state
+            # Return state with error appended, don't lose existing state
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            return {"errors": errors + [error_msg]}

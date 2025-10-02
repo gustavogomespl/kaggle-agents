@@ -48,11 +48,27 @@ class ModelTrainingAgent:
         Returns:
             Problem type: 'classification' or 'regression'
         """
-        # Check if target is numeric and has many unique values
+        # Check if target is numeric
         if pd.api.types.is_numeric_dtype(y):
-            unique_ratio = y.nunique() / len(y)
+            # Check if values are floating point (not integers)
+            if pd.api.types.is_float_dtype(y):
+                # If we have continuous values (not just .0), it's regression
+                non_integer_mask = (y % 1) != 0
+                if non_integer_mask.any():
+                    return "regression"
+
+            # Check number of unique values
+            n_unique = y.nunique()
+
+            # If very few unique values relative to size, likely classification
+            if n_unique < 20:
+                return "classification"
+
+            # If many unique values, likely regression
+            unique_ratio = n_unique / len(y)
             if unique_ratio > 0.05:  # More than 5% unique values
                 return "regression"
+
         return "classification"
 
     def get_models(self, problem_type: str) -> Dict[str, Any]:

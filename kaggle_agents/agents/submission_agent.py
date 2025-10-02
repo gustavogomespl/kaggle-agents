@@ -33,14 +33,24 @@ class SubmissionAgent:
         print("📤 Submission Agent: Creating submission...")
 
         try:
+            # Handle both dict and dataclass state access
+            test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
+            sample_submission_path = state.get("sample_submission_path", "") if isinstance(state, dict) else state.sample_submission_path
+            best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
+            competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
+
+            # Check if we have a best model
+            if not best_model or "path" not in best_model:
+                raise ValueError("No trained model available. Model training may have failed.")
+
             # Load test data
-            test_df = pd.read_csv(state["test_data_path"])
+            test_df = pd.read_csv(test_data_path)
 
             # Load sample submission to understand format
-            sample_sub = pd.read_csv(state["sample_submission_path"])
+            sample_sub = pd.read_csv(sample_submission_path)
 
             # Load best model
-            model = joblib.load(state["best_model"]["path"])
+            model = joblib.load(best_model["path"])
 
             # Get ID column (usually first column in sample submission)
             id_col = sample_sub.columns[0]
@@ -66,20 +76,18 @@ class SubmissionAgent:
             # Save submission
             Path(Config.SUBMISSIONS_DIR).mkdir(parents=True, exist_ok=True)
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            submission_filename = f"submission_{state['competition_name']}_{timestamp}.csv"
+            submission_filename = f"submission_{competition_name}_{timestamp}.csv"
             submission_path = f"{Config.SUBMISSIONS_DIR}/{submission_filename}"
             submission.to_csv(submission_path, index=False)
-
-            state["submission_path"] = submission_path
 
             # Submit to Kaggle if credentials are available
             if Config.KAGGLE_USERNAME and Config.KAGGLE_KEY:
                 try:
                     print("  Submitting to Kaggle...")
-                    submission_message = f"AutoKaggle: {state['best_model']['name']} (CV: {state['best_model']['mean_cv_score']:.4f})"
+                    submission_message = f"AutoKaggle: {best_model['name']} (CV: {best_model['mean_cv_score']:.4f})"
 
                     self.kaggle_client.submit_prediction(
-                        state["competition_name"],
+                        competition_name,
                         submission_path,
                         submission_message
                     )
@@ -95,12 +103,16 @@ class SubmissionAgent:
 
                     print(f"Submission Agent: Submitted to Kaggle")
 
+                    return {"submission_path": submission_path, "messages": messages}
+
                 except Exception as e:
                     print(f"WARNING: Could not submit to Kaggle: {str(e)}")
                     print(f"Submission saved locally at: {submission_path}")
+                    return {"submission_path": submission_path}
             else:
                 print(f"Submission Agent: Saved submission to {submission_path}")
                 print("Set KAGGLE_USERNAME and KAGGLE_KEY to submit automatically")
+                return {"submission_path": submission_path}
 
         except Exception as e:
             error_msg = f"Submission failed: {str(e)}"

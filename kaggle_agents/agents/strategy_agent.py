@@ -24,8 +24,13 @@ class CompetitionStrategy(BaseModel):
     validation_strategy: str = Field(
         description="Recommended cross-validation strategy (e.g., 'StratifiedKFold', 'TimeSeriesSplit', 'GroupKFold')"
     )
-    encoding_strategy: Dict[str, str] = Field(
-        description="Encoding strategy for categoricals: 'low_cardinality' and 'high_cardinality' strategies"
+    encoding_low_cardinality: str = Field(
+        default="label",
+        description="Encoding strategy for low cardinality categoricals (e.g., 'label', 'onehot')"
+    )
+    encoding_high_cardinality: str = Field(
+        default="target",
+        description="Encoding strategy for high cardinality categoricals (e.g., 'target', 'catboost', 'frequency')"
     )
     scaling_required: bool = Field(
         description="Whether feature scaling is required based on selected models"
@@ -190,7 +195,10 @@ Based on this information, provide a comprehensive strategy including:
                 "recommended_models": strategy.recommended_models,
                 "feature_engineering_priorities": strategy.feature_engineering_priorities,
                 "validation_strategy": strategy.validation_strategy,
-                "encoding_strategy": strategy.encoding_strategy,
+                "encoding_strategy": {
+                    "low_cardinality": strategy.encoding_low_cardinality,
+                    "high_cardinality": strategy.encoding_high_cardinality,
+                },
                 "scaling_required": strategy.scaling_required,
                 "ensemble_strategy": strategy.ensemble_strategy,
                 "data_characteristics": data_chars,
