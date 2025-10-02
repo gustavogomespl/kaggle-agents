@@ -24,7 +24,7 @@ class Config:
     LANGSMITH_PROJECT = os.getenv("LANGSMITH_PROJECT", "kaggle-agents")
 
     # Model settings
-    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4-turbo-preview")
+    LLM_MODEL = os.getenv("LLM_MODEL", "gpt-5-mini")
     TEMPERATURE = float(os.getenv("TEMPERATURE", "0.0"))
 
     # Workflow settings
