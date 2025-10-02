@@ -97,10 +97,18 @@ class AdvancedFeatureEngineer:
                     dummies_train = pd.get_dummies(train_df[col], prefix=col, drop_first=True)
                     dummies_test = pd.get_dummies(test_df[col], prefix=col, drop_first=True)
 
-                    # Align columns
+                    # Align columns - ensure test has same columns as train
                     for dummy_col in dummies_train.columns:
                         if dummy_col not in dummies_test.columns:
                             dummies_test[dummy_col] = 0
+
+                    # Remove any columns in test that aren't in train
+                    for dummy_col in dummies_test.columns:
+                        if dummy_col not in dummies_train.columns:
+                            dummies_test = dummies_test.drop(columns=[dummy_col])
+
+                    # Ensure column order matches
+                    dummies_test = dummies_test[dummies_train.columns]
 
                     train_df = pd.concat([train_df.drop(columns=[col]), dummies_train], axis=1)
                     test_df = pd.concat([test_df.drop(columns=[col]), dummies_test], axis=1)
@@ -231,7 +239,10 @@ class AdvancedFeatureEngineer:
         Returns:
             Tuple of (train_df, test_df) with aggregation features
         """
-        numeric_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
+        # Get numeric columns that exist in both train and test
+        train_numeric = set(train_df.select_dtypes(include=[np.number]).columns)
+        test_numeric = set(test_df.select_dtypes(include=[np.number]).columns)
+        numeric_cols = list(train_numeric & test_numeric)  # Intersection
 
         if len(numeric_cols) >= 3:
             train_df["numeric_sum"] = train_df[numeric_cols].sum(axis=1)

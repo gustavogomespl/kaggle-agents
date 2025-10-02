@@ -107,6 +107,25 @@ class FeatureEngineeringAgent:
                     train_df, test_df, method="standard"
                 )
 
+            # 7. Final cleanup: handle any remaining NaNs from feature engineering
+            # Fill numeric NaNs with 0 (common for aggregations like std on single values)
+            numeric_cols = train_df.select_dtypes(include=[np.number]).columns
+            train_df[numeric_cols] = train_df[numeric_cols].fillna(0)
+            test_df[numeric_cols] = test_df[numeric_cols].fillna(0)
+
+            # 8. Ensure train and test have same columns (excluding target)
+            train_cols = set(train_df.columns)
+            test_cols = set(test_df.columns)
+
+            # Add missing columns to test with 0s
+            for col in train_cols - test_cols:
+                if col != target_col:
+                    test_df[col] = 0
+
+            # Remove extra columns from test
+            for col in test_cols - train_cols:
+                test_df = test_df.drop(columns=[col])
+
             # Re-add target to train
             if target_col and y_train is not None:
                 train_df[target_col] = y_train
