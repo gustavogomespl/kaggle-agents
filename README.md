@@ -246,8 +246,36 @@ This system achieves competitive performance through:
 2. **Adaptive Feature Engineering**: Encoding and transformation strategies adapt to data characteristics
 3. **Hyperparameter Optimization**: Automated tuning with Optuna for all major models
 4. **Ensemble Methods**: Stacking and blending for robust predictions
-5. **Intelligent Iteration**: Performance-based decisions on when and where to improve
-6. **Production-Ready**: Full error handling, logging, checkpointing, and tracing
+5. **Intelligent Iteration**: Performance-based decisions with overfitting detection
+   - Compares CV scores with public leaderboard scores
+   - Detects overfitting severity (moderate/severe)
+   - Automatically adjusts strategy based on diagnostics
+6. **Adaptive Cross-Validation**: CV strategy selection based on data type
+   - StratifiedKFold for imbalanced classification
+   - TimeSeriesSplit for temporal data
+   - GroupKFold for grouped data
+7. **Production-Ready**: Full error handling, logging, checkpointing, and tracing
+8. **Test Coverage**: Comprehensive unit and integration tests
+
+## Testing
+
+Run the test suite:
+
+```bash
+# Install dev dependencies
+uv sync --extra dev
+
+# Run all tests
+uv run pytest
+
+# Run with coverage
+uv run pytest --cov=kaggle_agents --cov-report=html
+
+# Run specific tests
+uv run pytest tests/test_cross_validation.py -v
+```
+
+See `tests/README.md` for detailed testing documentation.
 
 ## References
 
