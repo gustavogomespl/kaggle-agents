@@ -122,7 +122,9 @@ class FeatureEngineeringAgent:
             # Update state
             new_features_count = len(self.engineer.created_features)
 
-            state.messages.append(
+            # Handle messages state access
+            messages = state.get("messages", []) if isinstance(state, dict) else state.messages
+            messages.append(
                 HumanMessage(
                     content=f"Feature engineering completed. Created {new_features_count} new features using advanced techniques."
                 )
@@ -134,6 +136,7 @@ class FeatureEngineeringAgent:
                 "train_data_path": train_processed_path,
                 "test_data_path": test_processed_path,
                 "features_engineered": self.engineer.created_features,
+                "messages": messages,
             }
 
         except Exception as e:

@@ -154,12 +154,18 @@ class StrategyAgent:
 
             # Build detailed prompt with all information
             characteristics_str = "\n".join([f"- {k}: {v}" for k, v in data_chars.items()])
-            insights_str = "\n".join([f"- {insight}" for insight in state.data_insights]) if state.data_insights else "No insights yet"
+            data_insights = state.get("data_insights", []) if isinstance(state, dict) else state.data_insights
+            insights_str = "\n".join([f"- {insight}" for insight in data_insights]) if data_insights else "No insights yet"
+
+            # Handle more state access for competition details
+            competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
+            competition_type = state.get("competition_type", "") if isinstance(state, dict) else state.competition_type
+            metric = state.get("metric", "") if isinstance(state, dict) else state.metric
 
             human_msg = HumanMessage(
-                content=f"""Competition: {state.competition_name}
-Type: {state.competition_type}
-Metric: {state.metric}
+                content=f"""Competition: {competition_name}
+Type: {competition_type}
+Metric: {metric}
 
 Data Characteristics:
 {characteristics_str}
@@ -190,7 +196,9 @@ Based on this information, provide a comprehensive strategy including:
                 "data_characteristics": data_chars,
             }
 
-            state.messages.append(
+            # Handle messages state access
+            messages = state.get("messages", []) if isinstance(state, dict) else state.messages
+            messages.append(
                 HumanMessage(
                     content=f"""Strategy formulated:
 - Recommended models: {', '.join(strategy.recommended_models)}

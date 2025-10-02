@@ -84,11 +84,14 @@ class SubmissionAgent:
                         submission_message
                     )
 
-                    state["messages"].append(
+                    # Handle messages state access
+                    messages = state.get("messages", []) if isinstance(state, dict) else state.messages
+                    messages.append(
                         HumanMessage(
                             content=f"Submission uploaded to Kaggle: {submission_message}"
                         )
                     )
+                    state["messages"] = messages
 
                     print(f"Submission Agent: Submitted to Kaggle")
 

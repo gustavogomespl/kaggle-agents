@@ -115,13 +115,17 @@ Provide 5-7 key insights about this data and what we should focus on."""
 
             state["data_insights"] = insights
 
-            state["messages"].append(
+            # Handle messages state access
+            messages = state.get("messages", []) if isinstance(state, dict) else state.messages
+            messages.append(
                 HumanMessage(
                     content=f"EDA completed. Key insights: {response.content}"
                 )
             )
 
             print(f"EDA Agent: Analysis complete. Found {len(insights)} key insights")
+
+            state["messages"] = messages
 
         except Exception as e:
             error_msg = f"EDA failed: {str(e)}"
