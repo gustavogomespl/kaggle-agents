@@ -1,5 +1,15 @@
 """Model training agent with multiple algorithms."""
 
+import os
+import sys
+
+# Fix matplotlib backend for Google Colab compatibility
+# Must be set before importing lightgbm
+if 'MPLBACKEND' in os.environ:
+    if os.environ['MPLBACKEND'] == 'module://matplotlib_inline.backend_inline':
+        # Colab sets this inline backend which causes issues with some versions
+        os.environ['MPLBACKEND'] = 'Agg'
+
 import pandas as pd
 import numpy as np
 import joblib

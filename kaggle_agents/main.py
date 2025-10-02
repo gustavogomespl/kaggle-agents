@@ -1,5 +1,17 @@
 """Main entry point for Kaggle Agents."""
 
+import os
+import sys
+
+# Fix matplotlib backend for Google Colab and other environments
+# This must be set before any imports that use matplotlib (e.g., LightGBM)
+if 'MPLBACKEND' in os.environ:
+    if os.environ['MPLBACKEND'] == 'module://matplotlib_inline.backend_inline':
+        os.environ['MPLBACKEND'] = 'Agg'
+else:
+    # Set a safe default backend for headless environments
+    os.environ.setdefault('MPLBACKEND', 'Agg')
+
 import argparse
 from pathlib import Path
 from langchain_core.messages import HumanMessage
