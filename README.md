@@ -252,7 +252,3 @@ This system achieves competitive performance through:
 ## References
 
 Based on the AutoKaggle paper: "AutoKaggle: A Multi-Agent Framework for Autonomous Data Science Competitions"
-
-## License
-
-MIT
