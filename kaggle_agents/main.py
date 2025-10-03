@@ -16,12 +16,15 @@ import argparse
 from pathlib import Path
 from langchain_core.messages import HumanMessage
 from .workflows.kaggle_workflow import create_kaggle_workflow
+from .workflows.enhanced_workflow import create_enhanced_workflow
 from .utils.config import Config
 from .utils.state import KaggleState
+from .core.state import EnhancedKaggleState
+from .core.config_manager import get_config
 
 
 def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:
-    """Initialize the workflow state.
+    """Initialize the workflow state (simple mode).
 
     Args:
         competition: Kaggle competition name
@@ -52,6 +55,51 @@ def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:
         "iteration": 0,
         "max_iterations": max_iterations,
         "errors": [],
+    }
+
+
+def initialize_enhanced_state(competition: str, data_dir: str, max_iterations: int = 5) -> dict:
+    """Initialize the enhanced workflow state.
+
+    Args:
+        competition: Kaggle competition name
+        data_dir: Directory containing competition data
+        max_iterations: Maximum number of improvement iterations
+
+    Returns:
+        Initial enhanced state dictionary
+    """
+    competition_dir = Path(data_dir) / competition
+    competition_dir.mkdir(parents=True, exist_ok=True)
+
+    return {
+        "messages": [HumanMessage(content=f"Starting Kaggle competition: {competition}")],
+        "competition_name": competition,
+        "competition_type": "",
+        "metric": "",
+        "competition_dir": str(competition_dir),
+        "train_data_path": "",
+        "test_data_path": "",
+        "sample_submission_path": "",
+        "eda_summary": {},
+        "data_insights": [],
+        "features_engineered": [],
+        "feature_importance": {},
+        "models_trained": [],
+        "best_model": {},
+        "cv_scores": [],
+        "submission_path": "",
+        "submission_score": 0.0,
+        "leaderboard_rank": 0,
+        "iteration": 0,
+        "max_iterations": max_iterations,
+        "errors": [],
+        "phase": "Understand Background",
+        "memory": [],
+        "background_info": "",
+        "rules": {},
+        "retry_count": 0,
+        "max_phase_retries": 3,
     }
 
 
@@ -106,6 +154,19 @@ def main():
         action="store_true",
         help="Visualize the workflow graph",
     )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["simple", "enhanced"],
+        default="enhanced",
+        help="Workflow mode: 'simple' (basic LangGraph) or 'enhanced' (multi-agent with feedback) (default: enhanced)",
+    )
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gpt-4o",
+        help="LLM model to use (default: gpt-4o)",
+    )
 
     args = parser.parse_args()
 
@@ -133,12 +194,28 @@ def main():
     print(f"Competition: {competition_slug}")
     if args.competition != competition_slug:
         print(f"  (from URL: {args.competition})")
+    print(f"Mode: {args.mode.upper()}")
+    print(f"Model: {args.model}")
     print(f"Max Iterations: {args.max_iterations}")
     print("=" * 80)
     print()
 
-    # Create workflow
-    workflow = create_kaggle_workflow()
+    # Create workflow based on mode
+    if args.mode == "enhanced":
+        print("🚀 Using ENHANCED mode with multi-agent system and feedback loops")
+        workflow = create_enhanced_workflow(
+            competition_name=competition_slug,
+            model=args.model
+        )
+        initial_state = initialize_enhanced_state(
+            competition_slug,
+            Config.DATA_DIR,
+            args.max_iterations
+        )
+    else:
+        print("📊 Using SIMPLE mode with basic LangGraph workflow")
+        workflow = create_kaggle_workflow()
+        initial_state = initialize_state(competition_slug, args.max_iterations)
 
     # Visualize if requested
     if args.visualize:
@@ -147,9 +224,6 @@ def main():
             display(Image(workflow.get_graph().draw_mermaid_png()))
         except ImportError:
             print("⚠️  Visualization requires IPython. Install with: uv add ipython")
-
-    # Initialize state
-    initial_state = initialize_state(competition_slug, args.max_iterations)
 
     # Run workflow
     try:
