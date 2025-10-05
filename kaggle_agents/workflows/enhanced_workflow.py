@@ -1,8 +1,10 @@
 """Enhanced LangGraph workflow integrating multi-agent system with feedback loops."""
 
-from typing import Literal, Optional
+from typing import Literal, Optional, TypedDict, Annotated, List, Dict, Any
+from operator import add
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import MessagesState
 
 from ..core.state import EnhancedKaggleState
 from ..core.sop import SOP
@@ -11,6 +13,66 @@ from ..core.config_manager import get_config
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def merge_dict(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge two dictionaries, with right values taking precedence."""
+    if not left:
+        return right
+    if not right:
+        return left
+    return {**left, **right}
+
+
+class EnhancedWorkflowState(MessagesState):
+    """State schema for Enhanced Workflow compatible with LangGraph."""
+
+    # Competition Metadata
+    competition_name: str
+    competition_type: str
+    metric: str
+    competition_dir: str
+
+    # Data Paths
+    train_data_path: str
+    test_data_path: str
+    sample_submission_path: str
+
+    # EDA Results
+    eda_summary: Annotated[Dict[str, Any], merge_dict]
+    data_insights: Annotated[List[str], add]
+
+    # Feature Engineering
+    features_engineered: Annotated[List[str], add]
+    feature_importance: Annotated[Dict[str, float], merge_dict]
+
+    # Model Training
+    models_trained: Annotated[List[Dict[str, Any]], add]
+    best_model: Annotated[Dict[str, Any], merge_dict]
+    cv_scores: Annotated[List[float], add]
+
+    # Submission
+    submission_path: str
+    submission_score: float
+    leaderboard_rank: int
+
+    # Workflow Control
+    iteration: int
+    max_iterations: int
+
+    # Error Tracking
+    errors: Annotated[List[str], add]
+
+    # Enhanced Fields
+    phase: str
+    memory: Annotated[List[Dict[str, Any]], add]
+    background_info: str
+    rules: Dict[str, Any]
+    retry_count: int
+    max_phase_retries: int
+
+    # Status for routing
+    status: str
 
 
 def create_enhanced_workflow(
@@ -37,77 +99,188 @@ def create_enhanced_workflow(
     sop = SOP(competition_name=competition_name, model=model)
 
     # Define phase nodes
-    def execute_understand_background(state: EnhancedKaggleState) -> EnhancedKaggleState:
+    def execute_understand_background(state: EnhancedWorkflowState) -> dict:
         """Execute Understand Background phase."""
         logger.info("📖 Executing: Understand Background")
-        state.phase = "Understand Background"
-        status, updated_state = sop.step(state)
-        updated_state.status = status
-        return updated_state
 
-    def execute_preliminary_eda(state: EnhancedKaggleState) -> EnhancedKaggleState:
+        # Convert dict to EnhancedKaggleState for SOP
+        state_obj = EnhancedKaggleState(
+            competition_name=state["competition_name"],
+            competition_dir=state["competition_dir"],
+            phase="Understand Background",
+            memory=state.get("memory", []),
+            retry_count=state.get("retry_count", 0),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", 5)
+        )
+
+        # Execute SOP step
+        status, updated_state = sop.step(state_obj)
+
+        # Return dict update
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "background_info": updated_state.background_info,
+            "competition_type": updated_state.competition_type,
+            "metric": updated_state.metric
+        }
+
+    def execute_preliminary_eda(state: EnhancedWorkflowState) -> dict:
         """Execute Preliminary EDA phase."""
-        logger.info("Executing: Preliminary Exploratory Data Analysis")
-        state.phase = "Preliminary Exploratory Data Analysis"
-        status, updated_state = sop.step(state)
-        updated_state.status = status
-        return updated_state
+        logger.info("🔍 Executing: Preliminary Exploratory Data Analysis")
 
-    def execute_data_cleaning(state: EnhancedKaggleState) -> EnhancedKaggleState:
+        state_obj = EnhancedKaggleState(
+            competition_name=state["competition_name"],
+            competition_dir=state["competition_dir"],
+            phase="Preliminary Exploratory Data Analysis",
+            memory=state.get("memory", []),
+            retry_count=state.get("retry_count", 0),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", 5),
+            background_info=state.get("background_info", ""),
+            competition_type=state.get("competition_type", ""),
+            metric=state.get("metric", "")
+        )
+
+        status, updated_state = sop.step(state_obj)
+
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "eda_summary": updated_state.eda_summary
+        }
+
+    def execute_data_cleaning(state: EnhancedWorkflowState) -> dict:
         """Execute Data Cleaning phase."""
         logger.info("🧹 Executing: Data Cleaning")
-        state.phase = "Data Cleaning"
-        status, updated_state = sop.step(state)
-        updated_state.status = status
-        return updated_state
 
-    def execute_deep_eda(state: EnhancedKaggleState) -> EnhancedKaggleState:
+        state_obj = EnhancedKaggleState(
+            competition_name=state["competition_name"],
+            competition_dir=state["competition_dir"],
+            phase="Data Cleaning",
+            memory=state.get("memory", []),
+            retry_count=state.get("retry_count", 0),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", 5),
+            background_info=state.get("background_info", ""),
+            competition_type=state.get("competition_type", ""),
+            metric=state.get("metric", "")
+        )
+
+        status, updated_state = sop.step(state_obj)
+
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory
+        }
+
+    def execute_deep_eda(state: EnhancedWorkflowState) -> dict:
         """Execute Deep EDA phase."""
-        logger.info("Executing: In-depth Exploratory Data Analysis")
-        state.phase = "In-depth Exploratory Data Analysis"
-        status, updated_state = sop.step(state)
-        updated_state.status = status
-        return updated_state
+        logger.info("🔬 Executing: In-depth Exploratory Data Analysis")
 
-    def execute_feature_engineering(state: EnhancedKaggleState) -> EnhancedKaggleState:
+        state_obj = EnhancedKaggleState(
+            competition_name=state["competition_name"],
+            competition_dir=state["competition_dir"],
+            phase="In-depth Exploratory Data Analysis",
+            memory=state.get("memory", []),
+            retry_count=state.get("retry_count", 0),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", 5),
+            background_info=state.get("background_info", ""),
+            competition_type=state.get("competition_type", ""),
+            metric=state.get("metric", "")
+        )
+
+        status, updated_state = sop.step(state_obj)
+
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "data_insights": updated_state.data_insights
+        }
+
+    def execute_feature_engineering(state: EnhancedWorkflowState) -> dict:
         """Execute Feature Engineering phase."""
-        logger.info("Executing: Feature Engineering")
-        state.phase = "Feature Engineering"
-        status, updated_state = sop.step(state)
-        updated_state.status = status
-        return updated_state
+        logger.info("⚙️ Executing: Feature Engineering")
 
-    def execute_model_building(state: EnhancedKaggleState) -> EnhancedKaggleState:
+        state_obj = EnhancedKaggleState(
+            competition_name=state["competition_name"],
+            competition_dir=state["competition_dir"],
+            phase="Feature Engineering",
+            memory=state.get("memory", []),
+            retry_count=state.get("retry_count", 0),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", 5),
+            background_info=state.get("background_info", ""),
+            competition_type=state.get("competition_type", ""),
+            metric=state.get("metric", "")
+        )
+
+        status, updated_state = sop.step(state_obj)
+
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "features_engineered": updated_state.features_engineered
+        }
+
+    def execute_model_building(state: EnhancedWorkflowState) -> dict:
         """Execute Model Building phase."""
-        logger.info("Executing: Model Building, Validation, and Prediction")
-        state.phase = "Model Building, Validation, and Prediction"
-        status, updated_state = sop.step(state)
-        updated_state.status = status
-        return updated_state
+        logger.info("🎯 Executing: Model Building, Validation, and Prediction")
+
+        state_obj = EnhancedKaggleState(
+            competition_name=state["competition_name"],
+            competition_dir=state["competition_dir"],
+            phase="Model Building, Validation, and Prediction",
+            memory=state.get("memory", []),
+            retry_count=state.get("retry_count", 0),
+            iteration=state.get("iteration", 0),
+            max_iterations=state.get("max_iterations", 5),
+            background_info=state.get("background_info", ""),
+            competition_type=state.get("competition_type", ""),
+            metric=state.get("metric", "")
+        )
+
+        status, updated_state = sop.step(state_obj)
+
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "models_trained": updated_state.models_trained,
+            "best_model": updated_state.best_model,
+            "submission_path": updated_state.submission_path
+        }
 
     # Routing function
-    def route_after_phase(state: EnhancedKaggleState) -> str:
+    def route_after_phase(state: EnhancedWorkflowState) -> str:
         """Route to next phase or handle retry/failure.
 
         Args:
-            state: Current state
+            state: Current state (dict)
 
         Returns:
             Next node name
         """
-        status = getattr(state, 'status', 'Continue')
+        status = state.get('status', 'Continue')
+        current_phase = state.get('phase', '')
 
         if status == "Complete":
-            logger.info("Workflow complete!")
+            logger.info("✅ Workflow complete!")
             return END
 
         elif status == "Fail":
-            logger.error("Workflow failed!")
+            logger.error("❌ Workflow failed!")
             return END
 
         elif status == "Retry":
             # Retry current phase
-            current_phase = state.phase
             phase_to_node = {
                 "Understand Background": "understand_background",
                 "Preliminary Exploratory Data Analysis": "preliminary_eda",
@@ -116,12 +289,11 @@ def create_enhanced_workflow(
                 "Feature Engineering": "feature_engineering",
                 "Model Building, Validation, and Prediction": "model_building"
             }
+            logger.info(f"🔄 Retrying phase: {current_phase}")
             return phase_to_node.get(current_phase, END)
 
         elif status == "Continue":
             # Move to next phase
-            current_phase = state.phase
-
             if current_phase == "Understand Background":
                 return "preliminary_eda"
             elif current_phase == "Preliminary Exploratory Data Analysis":
@@ -137,15 +309,15 @@ def create_enhanced_workflow(
             elif current_phase == "Complete":
                 return END
             else:
-                logger.warning(f"Unknown phase: {current_phase}")
+                logger.warning(f"⚠️ Unknown phase: {current_phase}")
                 return END
 
         else:
-            logger.error(f"Unknown status: {status}")
+            logger.error(f"❌ Unknown status: {status}")
             return END
 
     # Build workflow graph
-    workflow = StateGraph(EnhancedKaggleState)
+    workflow = StateGraph(EnhancedWorkflowState)
 
     # Add nodes
     workflow.add_node("understand_background", execute_understand_background)

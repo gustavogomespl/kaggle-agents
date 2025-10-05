@@ -100,6 +100,7 @@ def initialize_enhanced_state(competition: str, data_dir: str, max_iterations: i
         "rules": {},
         "retry_count": 0,
         "max_phase_retries": 3,
+        "status": "Continue",  # Add status field for routing
     }
 
 
