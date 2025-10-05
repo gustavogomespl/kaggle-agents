@@ -98,6 +98,9 @@ class EnhancedKaggleState(MessagesState):
         "Model Building, Validation, and Prediction"
     ])
 
+    # Workflow status for routing
+    status: str = "Continue"
+
     @property
     def restore_dir(self) -> Path:
         """Get the directory for storing phase-specific files."""
