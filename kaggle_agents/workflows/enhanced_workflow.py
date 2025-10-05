@@ -37,7 +37,7 @@ def create_enhanced_workflow(
     sop = SOP(competition_name=competition_name, model=model)
 
     # Define phase nodes
-    def execute_understand_background(state: dict) -> EnhancedKaggleState:
+    def execute_understand_background(state: dict) -> dict:
         """Execute Understand Background phase."""
         logger.info("📖 Executing: Understand Background")
 
@@ -48,11 +48,17 @@ def create_enhanced_workflow(
         state_obj.phase = "Understand Background"
         status, updated_state = sop.step(state_obj)
 
-        # Store status in state object and return it
-        updated_state.status = status
-        return updated_state
+        # Return dict with updates
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "background_info": updated_state.background_info,
+            "competition_type": updated_state.competition_type,
+            "metric": updated_state.metric,
+        }
 
-    def execute_preliminary_eda(state: dict) -> EnhancedKaggleState:
+    def execute_preliminary_eda(state: dict) -> dict:
         """Execute Preliminary EDA phase."""
         logger.info("🔍 Executing: Preliminary Exploratory Data Analysis")
 
@@ -63,11 +69,15 @@ def create_enhanced_workflow(
         state_obj.phase = "Preliminary Exploratory Data Analysis"
         status, updated_state = sop.step(state_obj)
 
-        # Store status in state object and return it
-        updated_state.status = status
-        return updated_state
+        # Return dict with updates
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "eda_summary": updated_state.eda_summary,
+        }
 
-    def execute_data_cleaning(state: dict) -> EnhancedKaggleState:
+    def execute_data_cleaning(state: dict) -> dict:
         """Execute Data Cleaning phase."""
         logger.info("🧹 Executing: Data Cleaning")
 
@@ -78,11 +88,14 @@ def create_enhanced_workflow(
         state_obj.phase = "Data Cleaning"
         status, updated_state = sop.step(state_obj)
 
-        # Store status in state object and return it
-        updated_state.status = status
-        return updated_state
+        # Return dict with updates
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+        }
 
-    def execute_deep_eda(state: dict) -> EnhancedKaggleState:
+    def execute_deep_eda(state: dict) -> dict:
         """Execute Deep EDA phase."""
         logger.info("🔬 Executing: In-depth Exploratory Data Analysis")
 
@@ -93,11 +106,15 @@ def create_enhanced_workflow(
         state_obj.phase = "In-depth Exploratory Data Analysis"
         status, updated_state = sop.step(state_obj)
 
-        # Store status in state object and return it
-        updated_state.status = status
-        return updated_state
+        # Return dict with updates
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "data_insights": updated_state.data_insights,
+        }
 
-    def execute_feature_engineering(state: dict) -> EnhancedKaggleState:
+    def execute_feature_engineering(state: dict) -> dict:
         """Execute Feature Engineering phase."""
         logger.info("⚙️ Executing: Feature Engineering")
 
@@ -108,11 +125,15 @@ def create_enhanced_workflow(
         state_obj.phase = "Feature Engineering"
         status, updated_state = sop.step(state_obj)
 
-        # Store status in state object and return it
-        updated_state.status = status
-        return updated_state
+        # Return dict with updates
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "features_engineered": updated_state.features_engineered,
+        }
 
-    def execute_model_building(state: dict) -> EnhancedKaggleState:
+    def execute_model_building(state: dict) -> dict:
         """Execute Model Building phase."""
         logger.info("🎯 Executing: Model Building, Validation, and Prediction")
 
@@ -123,22 +144,28 @@ def create_enhanced_workflow(
         state_obj.phase = "Model Building, Validation, and Prediction"
         status, updated_state = sop.step(state_obj)
 
-        # Store status in state object and return it
-        updated_state.status = status
-        return updated_state
+        # Return dict with updates
+        return {
+            "phase": updated_state.phase,
+            "status": status,
+            "memory": updated_state.memory,
+            "models_trained": updated_state.models_trained,
+            "best_model": updated_state.best_model,
+            "submission_path": updated_state.submission_path,
+        }
 
     # Routing function
-    def route_after_phase(state: EnhancedKaggleState) -> str:
+    def route_after_phase(state: dict) -> str:
         """Route to next phase or handle retry/failure.
 
         Args:
-            state: Current state (EnhancedKaggleState object)
+            state: Current state (dict)
 
         Returns:
             Next node name
         """
-        status = state.status
-        current_phase = state.phase
+        status = state.get("status", "Continue")
+        current_phase = state.get("phase", "")
 
         if status == "Complete":
             logger.info("✅ Workflow complete!")
@@ -185,8 +212,51 @@ def create_enhanced_workflow(
             logger.error(f"❌ Unknown status: {status}")
             return END
 
-    # Build workflow graph
-    workflow = StateGraph(EnhancedKaggleState)
+    # Build workflow graph using dict-based state
+    from typing_extensions import TypedDict
+    from typing import Annotated, List, Dict, Any
+    from operator import add
+    from langgraph.graph import MessagesState
+
+    def merge_dict(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge two dictionaries, with right values taking precedence."""
+        if not left:
+            return right
+        if not right:
+            return left
+        return {**left, **right}
+
+    class WorkflowState(MessagesState):
+        """State schema for workflow - uses dict representation."""
+        competition_name: str
+        competition_type: str
+        metric: str
+        competition_dir: str
+        train_data_path: str
+        test_data_path: str
+        sample_submission_path: str
+        eda_summary: Annotated[Dict[str, Any], merge_dict]
+        data_insights: Annotated[List[str], add]
+        features_engineered: Annotated[List[str], add]
+        feature_importance: Annotated[Dict[str, float], merge_dict]
+        models_trained: Annotated[List[Dict[str, Any]], add]
+        best_model: Annotated[Dict[str, Any], merge_dict]
+        cv_scores: Annotated[List[float], add]
+        submission_path: str
+        submission_score: float
+        leaderboard_rank: int
+        iteration: int
+        max_iterations: int
+        errors: Annotated[List[str], add]
+        phase: str
+        memory: Annotated[List[Dict[str, Any]], add]
+        background_info: str
+        rules: Dict[str, Any]
+        retry_count: int
+        max_phase_retries: int
+        status: str
+
+    workflow = StateGraph(WorkflowState)
 
     # Add nodes
     workflow.add_node("understand_background", execute_understand_background)
