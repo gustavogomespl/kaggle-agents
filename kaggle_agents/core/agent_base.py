@@ -43,7 +43,7 @@ class Agent:
         prompt: str,
         history: Optional[List[Dict[str, str]]] = None,
         max_completion_tokens: int = 4096,
-        temperature: float = 0.7
+        temperature: Optional[float] = None
     ) -> Tuple[str, List[Dict[str, str]]]:
         """Generate response from LLM.
 
@@ -51,7 +51,7 @@ class Agent:
             prompt: User prompt
             history: Conversation history
             max_completion_tokens: Maximum tokens to generate
-            temperature: Sampling temperature
+            temperature: Sampling temperature (if None, uses config default)
 
         Returns:
             Tuple of (response, updated_history)
@@ -60,6 +60,12 @@ class Agent:
             history = []
 
         messages = history + [{'role': 'user', 'content': prompt}]
+
+        # Use temperature from config if not specified
+        if temperature is None:
+            from .config_manager import get_config
+            config = get_config()
+            temperature = config.get_temperature()
 
         settings = APISettings(
             max_completion_tokens=max_completion_tokens,

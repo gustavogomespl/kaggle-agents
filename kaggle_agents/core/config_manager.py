@@ -149,6 +149,12 @@ class ConfigManager:
 
     def get_temperature(self) -> float:
         """Get LLM temperature setting."""
+        model = self.get('model_settings.default_model', 'gpt-5-mini')
+        
+        # gpt-5-mini only supports default temperature (1.0)
+        if model == 'gpt-5-mini':
+            return 1.0
+        
         return self.get('model_settings.temperature', 0.7)
 
     def get_max_tokens(self) -> int:
@@ -235,7 +241,7 @@ class ConfigManager:
             },
             "model_settings": {
                 "default_model": "gpt-5-mini",
-                "temperature": 0.7,
+                "temperature": 1.0,  # gpt-5-mini only supports default temperature
                 "max_tokens": 4096
             },
             "workflow_mode": {

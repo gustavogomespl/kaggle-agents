@@ -96,8 +96,8 @@ def generate_response(
     logger.info(f"Generating response for model: {model}")
     start_time = time.time()
 
-    # Special handling for o1-mini
-    if model == 'o1-mini':
+    # Special handling for models that only support default temperature
+    if model in ['o1-mini', 'gpt-5-mini']:
         settings.temperature = 1.0
 
     try:
