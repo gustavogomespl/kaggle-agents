@@ -5,7 +5,7 @@ import logging
 from typing import Dict, Any, List, Tuple
 
 from ..core.agent_base import Agent
-from ..core.state import EnhancedKaggleState
+from ..core.state import EnhancedKaggleState, get_restore_dir
 from ..prompts.prompt_reviewer import (
     PROMPT_REVIEWER,
     PROMPT_REVIEWER_TASK,
@@ -56,12 +56,14 @@ class ReviewerAgent(Agent):
         agent_result = agent_output.get('result', 'No output specified')
 
         # Get background
-        background = state.background_info[:1000] if state.background_info else "No background available"
+        background_info = state.get("background_info", "")
+        background = background_info[:1000] if background_info else "No background available"
 
         # Create review prompt
+        phase = state.get("phase", "")
         input_prompt = PROMPT_REVIEWER.format(
             agent_role=agent_role,
-            phase_name=state.phase,
+            phase_name=phase,
             task=agent_task,
             input=agent_input,
             output=agent_result,
@@ -101,7 +103,8 @@ class ReviewerAgent(Agent):
         Returns:
             Dictionary with reviewer results
         """
-        logger.info(f"Reviewer Agent executing for phase: {state.phase}")
+        phase = state.get("phase", "")
+        logger.info(f"Reviewer Agent executing for phase: {phase}")
 
         history = []
 
@@ -112,7 +115,8 @@ class ReviewerAgent(Agent):
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})
 
         # Get agents to review from last memory entry
-        if not state.memory or len(state.memory) == 0:
+        memory = state.get("memory", [])
+        if not memory or len(memory) == 0:
             logger.warning("No memory entries to review")
             return {
                 self.role: {
@@ -122,11 +126,11 @@ class ReviewerAgent(Agent):
                 }
             }
 
-        last_memory = state.memory[-1]
+        last_memory = memory[-1]
 
         # Determine which agents to review based on phase
         agents_to_review = []
-        if state.phase == "Understand Background":
+        if phase == "Understand Background":
             agents_to_review = ["reader"]
         else:
             agents_to_review = ["planner", "developer"]
@@ -162,12 +166,13 @@ class ReviewerAgent(Agent):
             should_proceed = False
 
         # Save history
-        history_file = state.restore_dir / f"{self.role}_history.json"
+        restore_dir = get_restore_dir(state)
+        history_file = restore_dir / f"{self.role}_history.json"
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2)
 
         # Save reviews
-        reviews_file = state.restore_dir / "reviews.json"
+        reviews_file = restore_dir / "reviews.json"
         with open(reviews_file, 'w') as f:
             json.dump(reviews, f, indent=2)
 

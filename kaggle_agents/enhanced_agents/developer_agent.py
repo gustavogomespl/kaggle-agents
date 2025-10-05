@@ -6,7 +6,7 @@ from typing import Dict, Any, Tuple
 from pathlib import Path
 
 from ..core.agent_base import Agent
-from ..core.state import EnhancedKaggleState
+from ..core.state import EnhancedKaggleState, get_restore_dir, get_dir_name, get_state_info
 from ..core.executor import CodeExecutor
 from ..core.config_manager import get_config
 from ..prompts.prompt_developer import (
@@ -45,7 +45,8 @@ class DeveloperAgent(Agent):
         Returns:
             Plan markdown
         """
-        plan_file = state.restore_dir / "markdown_plan.txt"
+        restore_dir = get_restore_dir(state)
+        plan_file = restore_dir / "markdown_plan.txt"
 
         if plan_file.exists():
             with open(plan_file, 'r') as f:
@@ -81,18 +82,20 @@ class DeveloperAgent(Agent):
         if past_errors:
             experience += f"\n\n# PREVIOUS ERRORS #\n{past_errors}\n"
 
-        task = PROMPT_DEVELOPER_TASK.format(phase_name=state.phase)
-        state_info = state.get_state_info()
+        phase = state.get("phase", "")
+        task = PROMPT_DEVELOPER_TASK.format(phase_name=phase)
+        state_info = get_state_info(state)
+        restore_dir = get_restore_dir(state)
 
         input_prompt = PROMPT_DEVELOPER.format(
-            phase_name=state.phase,
+            phase_name=phase,
             state_info=state_info,
             plan=plan,
             tools=tools,
             data_info=data_info,
             experience=experience,
             task=task,
-            restore_dir=state.restore_dir
+            restore_dir=restore_dir
         )
 
         # Generate code
@@ -118,14 +121,16 @@ class DeveloperAgent(Agent):
             Tuple of (success, stdout, stderr)
         """
         # Save code to file
-        code_file = state.restore_dir / f"{state.dir_name}_code.py"
+        restore_dir = get_restore_dir(state)
+        dir_name = get_dir_name(state)
+        code_file = restore_dir / f"{dir_name}_code.py"
         with open(code_file, 'w') as f:
             f.write(code)
 
         logger.info(f"Executing code: {code_file}")
 
         # Set working directory to competition directory
-        self.executor.working_dir = Path(state.competition_dir)
+        self.executor.working_dir = Path(state.get("competition_dir", "."))
 
         # Execute code
         timeout = self.config.get_code_timeout()
@@ -137,12 +142,12 @@ class DeveloperAgent(Agent):
 
         # Save execution results
         if stdout:
-            stdout_file = state.restore_dir / f"{state.dir_name}_stdout.txt"
+            stdout_file = restore_dir / f"{dir_name}_stdout.txt"
             with open(stdout_file, 'w') as f:
                 f.write(stdout)
 
         if stderr:
-            stderr_file = state.restore_dir / f"{state.dir_name}_error.txt"
+            stderr_file = restore_dir / f"{dir_name}_error.txt"
             with open(stderr_file, 'w') as f:
                 f.write(stderr)
 
@@ -190,7 +195,8 @@ class DeveloperAgent(Agent):
         Returns:
             Dictionary with developer results
         """
-        logger.info(f"Developer Agent executing for phase: {state.phase}")
+        phase = state.get("phase", "")
+        logger.info(f"Developer Agent executing for phase: {phase}")
 
         history = []
 
@@ -206,7 +212,7 @@ class DeveloperAgent(Agent):
         # Get tools
         tools, tool_names = self._get_tools(state)
 
-        task = PROMPT_DEVELOPER_TASK.format(phase_name=state.phase)
+        task = PROMPT_DEVELOPER_TASK.format(phase_name=phase)
 
         # Code generation with retry loop
         max_retries = self.config.get_max_code_retries()
@@ -227,7 +233,9 @@ class DeveloperAgent(Agent):
                 )
 
                 # Save generated code
-                code_file = state.restore_dir / f"{state.dir_name}_code.py"
+                restore_dir = get_restore_dir(state)
+                dir_name = get_dir_name(state)
+                code_file = restore_dir / f"{dir_name}_code.py"
                 with open(code_file, 'w') as f:
                     f.write(code)
 
@@ -273,7 +281,8 @@ class DeveloperAgent(Agent):
                     break
 
         # Save final history
-        history_file = state.restore_dir / f"{self.role}_history.json"
+        restore_dir = get_restore_dir(state)
+        history_file = restore_dir / f"{self.role}_history.json"
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2)
 
@@ -283,7 +292,7 @@ class DeveloperAgent(Agent):
             result = f"Code implementation completed successfully.\n\nCode saved to: {code_file}"
         else:
             result_status = "partial" if code else "failed"
-            result = f"Code implementation completed with issues. Review errors in: {state.restore_dir}"
+            result = f"Code implementation completed with issues. Review errors in: {restore_dir}"
 
         input_used_in_review = f"Plan:\n{plan[:1000]}..."
 
@@ -313,7 +322,9 @@ class DeveloperAgent(Agent):
             Tuple of (tools_description, tool_names)
         """
         # This uses the tool retrieval from planner
-        tools_file = state.restore_dir / f"tools_used_in_{state.dir_name}.md"
+        restore_dir = get_restore_dir(state)
+        dir_name = get_dir_name(state)
+        tools_file = restore_dir / f"tools_used_in_{dir_name}.md"
 
         if tools_file.exists():
             with open(tools_file, 'r') as f:

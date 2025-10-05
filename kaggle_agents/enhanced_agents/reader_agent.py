@@ -6,7 +6,7 @@ from typing import Dict, Any
 from pathlib import Path
 
 from ..core.agent_base import Agent
-from ..core.state import EnhancedKaggleState
+from ..core.state import EnhancedKaggleState, get_restore_dir, set_background_info
 from ..prompts.prompt_reader import PROMPT_READER, PROMPT_READER_TASK, PROMPT_EXTRACT_METRIC
 
 logger = logging.getLogger(__name__)
@@ -37,7 +37,7 @@ class ReaderAgent(Agent):
         Returns:
             Dictionary with reader results
         """
-        logger.info(f"Reader Agent executing for phase: {state.phase}")
+        logger.info(f"Reader Agent executing for phase: {state.get('phase', '')}")
 
         history = []
 
@@ -48,7 +48,7 @@ class ReaderAgent(Agent):
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})
 
         # Read competition information
-        competition_dir = Path(state.competition_dir)
+        competition_dir = Path(state.get("competition_dir", "."))
         overview_file = competition_dir / "competition_info.txt"
         data_desc_file = competition_dir / "data_description.txt"
 
@@ -90,7 +90,8 @@ class ReaderAgent(Agent):
         background_summary = self._parse_markdown(raw_reply)
 
         # Save background to file
-        background_file = state.restore_dir / "background_summary.md"
+        restore_dir = get_restore_dir(state)
+        background_file = restore_dir / "background_summary.md"
         with open(background_file, 'w', encoding='utf-8') as f:
             f.write(background_summary)
 
@@ -99,12 +100,12 @@ class ReaderAgent(Agent):
         metric = self._extract_metric(overview, history)
 
         # Update state
-        state.competition_type = competition_type
-        state.metric = metric
-        state.set_background_info(background_summary)
+        state["competition_type"] = competition_type
+        state["metric"] = metric
+        set_background_info(state, background_summary)
 
         # Save history
-        history_file = state.restore_dir / f"{self.role}_history.json"
+        history_file = restore_dir / f"{self.role}_history.json"
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2)
 

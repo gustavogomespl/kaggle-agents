@@ -6,7 +6,7 @@ from typing import Dict, Any
 from pathlib import Path
 
 from ..core.agent_base import Agent
-from ..core.state import EnhancedKaggleState
+from ..core.state import EnhancedKaggleState, get_restore_dir
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +36,26 @@ class SummarizerAgent(Agent):
         Returns:
             Summary prompt
         """
+        phase = state.get("phase", "")
+        competition_name = state.get("competition_name", "")
+        competition_type = state.get("competition_type", "")
+        metric = state.get("metric", "")
+        iteration = state.get("iteration", 0)
+        retry_count = state.get("retry_count", 0)
+
         prompt = f"""# PHASE SUMMARY TASK #
 
-You need to create a comprehensive summary report for the "{state.phase}" phase of the Kaggle competition workflow.
+You need to create a comprehensive summary report for the "{phase}" phase of the Kaggle competition workflow.
 
 ## Competition Context ##
-- Name: {state.competition_name}
-- Type: {state.competition_type}
-- Metric: {state.metric}
+- Name: {competition_name}
+- Type: {competition_type}
+- Metric: {metric}
 
 ## Phase Information ##
-Phase: {state.phase}
-Iteration: {state.iteration}
-Retry Count: {state.retry_count}
+Phase: {phase}
+Iteration: {iteration}
+Retry Count: {retry_count}
 
 """
 
@@ -141,7 +148,8 @@ Create a comprehensive summary report in markdown format that includes:
         Returns:
             Dictionary with summarizer results
         """
-        logger.info(f"Summarizer Agent executing for phase: {state.phase}")
+        phase = state.get("phase", "")
+        logger.info(f"Summarizer Agent executing for phase: {phase}")
 
         history = []
 
@@ -152,7 +160,8 @@ Create a comprehensive summary report in markdown format that includes:
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})
 
         # Get phase results from last memory entry
-        if not state.memory or len(state.memory) == 0:
+        memory = state.get("memory", [])
+        if not memory or len(memory) == 0:
             logger.warning("No memory entries to summarize")
             return {
                 self.role: {
@@ -161,7 +170,7 @@ Create a comprehensive summary report in markdown format that includes:
                 }
             }
 
-        phase_results = state.memory[-1]
+        phase_results = memory[-1]
 
         # Create summary prompt
         summary_prompt = self._create_summary_prompt(state, phase_results)
@@ -173,17 +182,18 @@ Create a comprehensive summary report in markdown format that includes:
         summary = self._parse_markdown(raw_reply)
 
         # Save summary
-        summary_file = state.restore_dir / "report.txt"
+        restore_dir = get_restore_dir(state)
+        summary_file = restore_dir / "report.txt"
         with open(summary_file, 'w') as f:
             f.write(summary)
 
         # Also save as markdown
-        summary_md_file = state.restore_dir / "report.md"
+        summary_md_file = restore_dir / "report.md"
         with open(summary_md_file, 'w') as f:
             f.write(summary)
 
         # Save history
-        history_file = state.restore_dir / f"{self.role}_history.json"
+        history_file = restore_dir / f"{self.role}_history.json"
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2)
 

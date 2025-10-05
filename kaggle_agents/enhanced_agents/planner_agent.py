@@ -6,7 +6,7 @@ from typing import Dict, Any, Tuple, List
 from pathlib import Path
 
 from ..core.agent_base import Agent
-from ..core.state import EnhancedKaggleState
+from ..core.state import EnhancedKaggleState, get_restore_dir, get_dir_name, get_previous_phase, get_state_info, generate_rules, set_background_info, PHASE_TO_DIRECTORY
 from ..core.config_manager import get_config
 from ..core.tools import OpenaiEmbeddings, RetrieveTool
 from ..core.api_handler import load_api_config
@@ -48,13 +48,13 @@ class PlannerAgent(Agent):
             Tuple of (previous_plan, previous_report)
         """
         previous_plan = ""
-        previous_phases = state.get_previous_phase(type="plan")
+        previous_phases = get_previous_phase(state, type="plan")
 
         for previous_phase in previous_phases:
-            previous_dir_name = state.phase_to_directory[previous_phase]
+            previous_dir_name = PHASE_TO_DIRECTORY[previous_phase]
             previous_plan += f"## {previous_phase.upper()} ##\n"
 
-            plan_file = Path(state.competition_dir) / previous_dir_name / "plan.json"
+            plan_file = Path(state.get("competition_dir", ".")) / previous_dir_name / "plan.json"
             if plan_file.exists():
                 with open(plan_file, 'r') as f:
                     previous_plan += f.read()
@@ -65,8 +65,8 @@ class PlannerAgent(Agent):
         # Get report from most recent previous phase
         if previous_phases:
             last_phase = previous_phases[-1]
-            last_dir_name = state.phase_to_directory[last_phase]
-            report_file = Path(state.competition_dir) / last_dir_name / "report.txt"
+            last_dir_name = PHASE_TO_DIRECTORY[last_phase]
+            report_file = Path(state.get("competition_dir", ".")) / last_dir_name / "report.txt"
 
             if report_file.exists():
                 with open(report_file, 'r') as f:
@@ -88,13 +88,14 @@ class PlannerAgent(Agent):
             Tuple of (tools_description, tool_names)
         """
         # Get tool names for this phase from config
-        all_tool_names = self.config.get_phase_tools(state.phase)
+        phase = state.get("phase", "")
+        all_tool_names = self.config.get_phase_tools(phase)
 
         if not all_tool_names:
             return "There are no pre-defined tools used in this phase.", []
 
         # Only retrieve tools for phases that need them
-        if state.phase not in ['Data Cleaning', 'Feature Engineering', 'Model Building, Validation, and Prediction']:
+        if phase not in ['Data Cleaning', 'Feature Engineering', 'Model Building, Validation, and Prediction']:
             return "There are no pre-defined tools used in this phase.", []
 
         try:
@@ -112,7 +113,8 @@ class PlannerAgent(Agent):
             tool_retriever.create_db_tools()
 
             # If we have a plan, extract relevant tools
-            plan_file = state.restore_dir / "markdown_plan.txt"
+            restore_dir = get_restore_dir(state)
+            plan_file = restore_dir / "markdown_plan.txt"
             if plan_file.exists() and self.role == 'developer':
                 with open(plan_file, 'r') as f:
                     markdown_plan = f.read()
@@ -135,7 +137,8 @@ class PlannerAgent(Agent):
             tools_description = tool_retriever.get_tools_by_names(tool_names)
 
             # Save tools used
-            tools_file = state.restore_dir / f"tools_used_in_{state.dir_name}.md"
+            dir_name = get_dir_name(state)
+            tools_file = restore_dir / f"tools_used_in_{dir_name}.md"
             with open(tools_file, 'w') as f:
                 f.write(tools_description)
 
@@ -155,14 +158,16 @@ class PlannerAgent(Agent):
         Returns:
             Dictionary with planner results
         """
-        logger.info(f"Planner Agent executing for phase: {state.phase}")
+        phase = state.get("phase", "")
+        logger.info(f"Planner Agent executing for phase: {phase}")
 
         # Check if this is a retry and previous plan was acceptable
-        if len(state.memory) > 1:
-            last_planner_score = state.memory[-2].get("reviewer", {}).get("score", {}).get("agent planner", 0)
+        memory = state.get("memory", [])
+        if len(memory) > 1:
+            last_planner_score = memory[-2].get("reviewer", {}).get("score", {}).get("agent planner", 0)
             if last_planner_score >= 3:
                 logger.info("Previous plan was acceptable (score >= 3), reusing it")
-                return {"planner": state.memory[-2]["planner"]}
+                return {"planner": memory[-2]["planner"]}
 
         history = []
 
@@ -175,18 +180,19 @@ class PlannerAgent(Agent):
         # Get data preview
         data_preview = self._data_preview(state, num_lines=11)
         background_info = f"Data preview:\n{data_preview}"
-        state.set_background_info(background_info)
-        state_info = state.get_state_info()
+        set_background_info(state, background_info)
+        state_info = get_state_info(state)
 
         # Define task
-        task = PROMPT_PLANNER_TASK.format(phase_name=state.phase)
+        task = PROMPT_PLANNER_TASK.format(phase_name=phase)
 
         # Round 1: Initial planning
         logger.info("Round 1: Initial planning")
-        user_rules = state.generate_rules()
+        user_rules = generate_rules(state)
+        context = state.get("context", [])
         input_prompt = PROMPT_PLANNER.format(
-            phases_in_context=', '.join(state.context),
-            phase_name=state.phase,
+            phases_in_context=', '.join(context),
+            phase_name=phase,
             state_info=state_info,
             user_rules=user_rules,
             background_info=background_info,
@@ -210,7 +216,8 @@ class PlannerAgent(Agent):
         raw_plan_reply, history = self.generate(input_prompt, history, max_completion_tokens=4096)
 
         # Save raw plan
-        raw_plan_file = state.restore_dir / "raw_plan_reply.txt"
+        restore_dir = get_restore_dir(state)
+        raw_plan_file = restore_dir / "raw_plan_reply.txt"
         with open(raw_plan_file, 'w') as f:
             f.write(raw_plan_reply)
 
@@ -221,7 +228,7 @@ class PlannerAgent(Agent):
         markdown_plan = self._parse_markdown(organized_markdown_plan)
 
         # Save markdown plan
-        markdown_plan_file = state.restore_dir / "markdown_plan.txt"
+        markdown_plan_file = restore_dir / "markdown_plan.txt"
         with open(markdown_plan_file, 'w') as f:
             f.write(markdown_plan)
 
@@ -237,7 +244,7 @@ class PlannerAgent(Agent):
             json_plan = self._parse_json(raw_json_plan)
 
         # Save JSON plan
-        json_plan_file = state.restore_dir / "json_plan.json"
+        json_plan_file = restore_dir / "json_plan.json"
         with open(json_plan_file, 'w') as f:
             json.dump(json_plan, f, indent=2)
 
@@ -246,7 +253,7 @@ class PlannerAgent(Agent):
             self._user_interaction(state, markdown_plan_file)
 
         # Save history
-        history_file = state.restore_dir / f"{self.role}_history.json"
+        history_file = restore_dir / f"{self.role}_history.json"
         with open(history_file, 'w') as f:
             json.dump(history, f, indent=2)
 
@@ -296,7 +303,9 @@ class PlannerAgent(Agent):
             print("Continuing with modified plan...")
 
         elif user_input == 'suggest':
-            tools_file = state.restore_dir / f"tools_used_in_{state.dir_name}.md"
+            restore_dir = get_restore_dir(state)
+            dir_name = get_dir_name(state)
+            tools_file = restore_dir / f"tools_used_in_{dir_name}.md"
             print(f"\nPlease refer to the tool documentation in: {tools_file}")
             print("Review the 'Notes' section for each tool for important considerations.")
             input("Press Enter to continue...")
