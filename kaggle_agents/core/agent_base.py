@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 
 from .api_handler import APIHandler, APISettings
-from .state import EnhancedKaggleState
+from .state import EnhancedKaggleState, get_restore_dir, get_dir_name
 from ..prompts.prompt_base import (
     AGENT_ROLE_TEMPLATE,
     PROMPT_DATA_PREVIEW,
@@ -104,9 +104,10 @@ class Agent:
 
             # For developer: include error messages if available
             if self.role == 'developer':
-                restore_dir = state.restore_dir
-                error_file = restore_dir / f"{state.dir_name}_error.txt"
-                not_pass_file = restore_dir / f"{state.dir_name}_not_pass_information.txt"
+                restore_dir = get_restore_dir(state)
+                dir_name = get_dir_name(state)
+                error_file = restore_dir / f"{dir_name}_error.txt"
+                not_pass_file = restore_dir / f"{dir_name}_not_pass_information.txt"
 
                 if error_file.exists():
                     with open(error_file, 'r') as f:
@@ -139,7 +140,7 @@ class Agent:
                     sample_lines.append(line)
             return "".join(sample_lines)
 
-        competition_dir = Path(state.competition_dir)
+        competition_dir = Path(state.get("competition_dir", "."))
 
         # Get target columns
         submission_df = pd.read_csv(competition_dir / "sample_submission.csv")
@@ -149,12 +150,13 @@ class Agent:
         result = f"\n#############\n# TARGET VARIABLE #\n{target_columns}"
 
         # Phase-specific data reading
-        if state.phase in ["Understand Background", "Preliminary Exploratory Data Analysis", "Data Cleaning"]:
+        phase = state.get("phase", "")
+        if phase in ["Understand Background", "Preliminary Exploratory Data Analysis", "Data Cleaning"]:
             train_sample = read_sample(competition_dir / "train.csv", num_lines)
             test_sample = read_sample(competition_dir / "test.csv", num_lines)
             result += f"\n#############\n# TRAIN DATA #\n{train_sample}\n#############\n# TEST DATA #\n{test_sample}"
 
-        elif state.phase in ["In-depth Exploratory Data Analysis", "Feature Engineering"]:
+        elif phase in ["In-depth Exploratory Data Analysis", "Feature Engineering"]:
             cleaned_train = competition_dir / "cleaned_train.csv"
             cleaned_test = competition_dir / "cleaned_test.csv"
 
@@ -163,7 +165,7 @@ class Agent:
                 test_sample = read_sample(cleaned_test, num_lines)
                 result += f"\n#############\n# CLEANED TRAIN DATA #\n{train_sample}\n#############\n# CLEANED TEST DATA #\n{test_sample}"
 
-        elif state.phase in ["Model Building, Validation, and Prediction"]:
+        elif phase in ["Model Building, Validation, and Prediction"]:
             processed_train = competition_dir / "processed_train.csv"
             processed_test = competition_dir / "processed_test.csv"
 
@@ -174,8 +176,9 @@ class Agent:
                 result += f"\n#############\n# PROCESSED TRAIN DATA #\n{train_sample}\n#############\n# PROCESSED TEST DATA #\n{test_sample}\n#############\n# SUBMISSION FORMAT #\n{submission_sample}"
 
                 # Extract evaluation metric
-                if state.metric:
-                    result += f"\n#############\n# EVALUATION METRIC #\n{state.metric}"
+                metric = state.get("metric", "")
+                if metric:
+                    result += f"\n#############\n# EVALUATION METRIC #\n{metric}"
 
         return result
 
@@ -196,7 +199,8 @@ class Agent:
         data_preview = self._parse_markdown(raw_reply)
 
         # Save preview to disk
-        preview_file = state.restore_dir / "data_preview.txt"
+        restore_dir = get_restore_dir(state)
+        preview_file = restore_dir / "data_preview.txt"
         with open(preview_file, 'w') as f:
             f.write(data_preview)
 
@@ -308,12 +312,13 @@ class Agent:
             "Model Building, Validation, and Prediction": ("processed_train.csv", "processed_test.csv", "processed_train.csv", "processed_test.csv")
         }
 
-        file_tuple = phase_files.get(state.phase)
+        phase = state.get("phase", "")
+        file_tuple = phase_files.get(phase)
         if file_tuple is None:
             return "Feature information not available for this phase."
 
         before_train, before_test, after_train, after_test = file_tuple
-        competition_dir = Path(state.competition_dir)
+        competition_dir = Path(state.get("competition_dir", "."))
 
         # Read datasets
         before_train_df = pd.read_csv(competition_dir / before_train)
@@ -351,7 +356,7 @@ class Agent:
         Returns:
             Dictionary with agent results
         """
-        logger.info(f"State {state.phase} - Agent {self.role} is executing.")
+        logger.info(f"State {state.get('phase', '')} - Agent {self.role} is executing.")
         role_prompt = AGENT_ROLE_TEMPLATE.format(agent_role=self.role)
         return self._execute(state, role_prompt)
 
