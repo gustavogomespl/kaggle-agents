@@ -43,7 +43,7 @@ def run_with_sop(competition_name: str, competition_dir: str):
     )
 
     # Create and run SOP
-    sop = SOP(competition_name=competition_name, model="gpt-4o")
+    sop = SOP(competition_name=competition_name, model="gpt-5-mini")
     final_state = sop.run(initial_state, max_steps=50)
 
     print("\n" + "="*80)
@@ -89,7 +89,7 @@ def run_with_langgraph(competition_name: str, competition_dir: str):
     # Create workflow
     workflow = create_enhanced_workflow(
         competition_name=competition_name,
-        model="gpt-4o"
+        model="gpt-5-mini"
     )
 
     # Run workflow

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 class Agent:
     """Base class for all agents with common patterns and utilities."""
 
-    def __init__(self, role: str, description: str, model: str = "gpt-4o"):
+    def __init__(self, role: str, description: str, model: str = "gpt-5-mini"):
         """Initialize agent.
 
         Args:

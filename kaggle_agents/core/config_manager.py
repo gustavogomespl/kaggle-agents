@@ -142,10 +142,10 @@ class ConfigManager:
             agent_role: Agent role (e.g., 'planner', 'developer')
 
         Returns:
-            Model name (e.g., 'gpt-4o')
+            Model name (e.g., 'gpt-5-mini')
         """
         key = f'model_settings.{agent_role}_model'
-        return self.get(key, self.get('model_settings.default_model', 'gpt-4o'))
+        return self.get(key, self.get('model_settings.default_model', 'gpt-5-mini'))
 
     def get_temperature(self) -> float:
         """Get LLM temperature setting."""
@@ -234,7 +234,7 @@ class ConfigManager:
                 "max_debug_iterations": 10
             },
             "model_settings": {
-                "default_model": "gpt-4o",
+                "default_model": "gpt-5-mini",
                 "temperature": 0.7,
                 "max_tokens": 4096
             },

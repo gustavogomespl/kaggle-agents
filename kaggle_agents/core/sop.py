@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class SOP:
     """Standard Operating Procedure for orchestrating the multi-agent workflow."""
 
-    def __init__(self, competition_name: str, model: str = "gpt-4o"):
+    def __init__(self, competition_name: str, model: str = "gpt-5-mini"):
         """Initialize SOP orchestrator.
 
         Args:
@@ -244,7 +244,7 @@ if __name__ == '__main__':
     )
 
     # Create and run SOP
-    sop = SOP(competition_name="titanic", model="gpt-4o")
+    sop = SOP(competition_name="titanic", model="gpt-5-mini")
 
     print("Starting SOP test run...")
     print("This will execute the complete workflow for the Titanic competition")

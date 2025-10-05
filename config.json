@@ -59,11 +59,11 @@
     "retry_delay_seconds": 30
   },
   "model_settings": {
-    "default_model": "gpt-4o",
-    "planner_model": "gpt-4o",
-    "developer_model": "gpt-4o",
-    "reviewer_model": "gpt-4o",
-    "reader_model": "gpt-4o",
+    "default_model": "gpt-5-mini",
+    "planner_model": "gpt-5-mini",
+    "developer_model": "gpt-5-mini",
+    "reviewer_model": "gpt-5-mini",
+    "reader_model": "gpt-5-mini",
     "temperature": 0.7,
     "max_tokens": 4096
   },

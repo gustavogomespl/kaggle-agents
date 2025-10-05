@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 def create_enhanced_workflow(
     competition_name: str,
-    model: str = "gpt-4o",
+    model: str = "gpt-5-mini",
     checkpointer: Optional[MemorySaver] = None
 ) -> StateGraph:
     """Create enhanced Kaggle workflow with multi-agent system.
@@ -255,7 +255,7 @@ if __name__ == '__main__':
     # Create workflow
     workflow = create_enhanced_workflow(
         competition_name="titanic",
-        model="gpt-4o"
+        model="gpt-5-mini"
     )
 
     print("Enhanced Workflow Created")

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ReviewerAgent(Agent):
     """Agent responsible for reviewing and scoring other agents' work."""
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-5-mini"):
         """Initialize Reviewer agent.
 
         Args:
@@ -106,7 +106,7 @@ class ReviewerAgent(Agent):
         history = []
 
         # Initialize system message
-        if self.model == 'gpt-4o':
+        if self.model == 'gpt-5-mini':
             history.append({"role": "system", "content": f"{role_prompt}{self.description}"})
         elif self.model == 'o1-mini':
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})

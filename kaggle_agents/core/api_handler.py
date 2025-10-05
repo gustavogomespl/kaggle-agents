@@ -82,7 +82,7 @@ def generate_response(
 
     Args:
         client: OpenAI client instance
-        model: Model name (e.g., 'gpt-4o', 'o1-mini')
+        model: Model name (e.g., 'gpt-5-mini', 'o1-mini')
         messages: List of message dictionaries
         settings: API settings
         response_type: 'text' or 'image'
@@ -296,7 +296,7 @@ class APIHandler:
 
 if __name__ == '__main__':
     # Test the API handler
-    handler = APIHandler('gpt-4o')
+    handler = APIHandler('gpt-5-mini')
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "How are you today?"}

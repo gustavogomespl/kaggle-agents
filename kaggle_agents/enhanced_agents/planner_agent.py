@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 class PlannerAgent(Agent):
     """Agent responsible for multi-round planning with tool retrieval."""
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-5-mini"):
         """Initialize Planner agent.
 
         Args:
@@ -167,7 +167,7 @@ class PlannerAgent(Agent):
         history = []
 
         # Initialize system message
-        if self.model == 'gpt-4o':
+        if self.model == 'gpt-5-mini':
             history.append({"role": "system", "content": f"{role_prompt}{self.description}"})
         elif self.model == 'o1-mini':
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})

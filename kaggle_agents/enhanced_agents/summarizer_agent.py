@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 class SummarizerAgent(Agent):
     """Agent responsible for generating comprehensive phase reports."""
 
-    def __init__(self, model: str = "gpt-4o"):
+    def __init__(self, model: str = "gpt-5-mini"):
         """Initialize Summarizer agent.
 
         Args:
@@ -146,7 +146,7 @@ Create a comprehensive summary report in markdown format that includes:
         history = []
 
         # Initialize system message
-        if self.model == 'gpt-4o':
+        if self.model == 'gpt-5-mini':
             history.append({"role": "system", "content": f"{role_prompt}{self.description}"})
         elif self.model == 'o1-mini':
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})
