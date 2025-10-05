@@ -41,117 +41,93 @@ def create_enhanced_workflow(
         """Execute Understand Background phase."""
         logger.info("📖 Executing: Understand Background")
 
-        # Convert dict to EnhancedKaggleState object
-        state_obj = EnhancedKaggleState(**state)
+        # Execute SOP step with dict
+        status, updated_state = sop.step(state)
 
-        # Set the phase and execute SOP step
-        state_obj.phase = "Understand Background"
-        status, updated_state = sop.step(state_obj)
-
-        # Return dict with updates
+        # Return dict with updates (using .get() for safe access)
         return {
-            "phase": updated_state.phase,
+            "phase": "Understand Background",
             "status": status,
-            "memory": updated_state.memory,
-            "background_info": updated_state.background_info,
-            "competition_type": updated_state.competition_type,
-            "metric": updated_state.metric,
+            "memory": updated_state.get("memory", []),
+            "background_info": updated_state.get("background_info", ""),
+            "competition_type": updated_state.get("competition_type", ""),
+            "metric": updated_state.get("metric", ""),
         }
 
     def execute_preliminary_eda(state: dict) -> dict:
         """Execute Preliminary EDA phase."""
         logger.info("🔍 Executing: Preliminary Exploratory Data Analysis")
 
-        # Convert dict to EnhancedKaggleState object
-        state_obj = EnhancedKaggleState(**state)
-
-        # Set the phase and execute SOP step
-        state_obj.phase = "Preliminary Exploratory Data Analysis"
-        status, updated_state = sop.step(state_obj)
+        # Execute SOP step with dict
+        status, updated_state = sop.step(state)
 
         # Return dict with updates
         return {
-            "phase": updated_state.phase,
+            "phase": "Preliminary Exploratory Data Analysis",
             "status": status,
-            "memory": updated_state.memory,
-            "eda_summary": updated_state.eda_summary,
+            "memory": updated_state.get("memory", []),
+            "eda_summary": updated_state.get("eda_summary", {}),
         }
 
     def execute_data_cleaning(state: dict) -> dict:
         """Execute Data Cleaning phase."""
         logger.info("🧹 Executing: Data Cleaning")
 
-        # Convert dict to EnhancedKaggleState object
-        state_obj = EnhancedKaggleState(**state)
-
-        # Set the phase and execute SOP step
-        state_obj.phase = "Data Cleaning"
-        status, updated_state = sop.step(state_obj)
+        # Execute SOP step with dict
+        status, updated_state = sop.step(state)
 
         # Return dict with updates
         return {
-            "phase": updated_state.phase,
+            "phase": "Data Cleaning",
             "status": status,
-            "memory": updated_state.memory,
+            "memory": updated_state.get("memory", []),
         }
 
     def execute_deep_eda(state: dict) -> dict:
         """Execute Deep EDA phase."""
         logger.info("🔬 Executing: In-depth Exploratory Data Analysis")
 
-        # Convert dict to EnhancedKaggleState object
-        state_obj = EnhancedKaggleState(**state)
-
-        # Set the phase and execute SOP step
-        state_obj.phase = "In-depth Exploratory Data Analysis"
-        status, updated_state = sop.step(state_obj)
+        # Execute SOP step with dict
+        status, updated_state = sop.step(state)
 
         # Return dict with updates
         return {
-            "phase": updated_state.phase,
+            "phase": "In-depth Exploratory Data Analysis",
             "status": status,
-            "memory": updated_state.memory,
-            "data_insights": updated_state.data_insights,
+            "memory": updated_state.get("memory", []),
+            "data_insights": updated_state.get("data_insights", []),
         }
 
     def execute_feature_engineering(state: dict) -> dict:
         """Execute Feature Engineering phase."""
         logger.info("⚙️ Executing: Feature Engineering")
 
-        # Convert dict to EnhancedKaggleState object
-        state_obj = EnhancedKaggleState(**state)
-
-        # Set the phase and execute SOP step
-        state_obj.phase = "Feature Engineering"
-        status, updated_state = sop.step(state_obj)
+        # Execute SOP step with dict
+        status, updated_state = sop.step(state)
 
         # Return dict with updates
         return {
-            "phase": updated_state.phase,
+            "phase": "Feature Engineering",
             "status": status,
-            "memory": updated_state.memory,
-            "features_engineered": updated_state.features_engineered,
+            "memory": updated_state.get("memory", []),
+            "features_engineered": updated_state.get("features_engineered", []),
         }
 
     def execute_model_building(state: dict) -> dict:
         """Execute Model Building phase."""
         logger.info("🎯 Executing: Model Building, Validation, and Prediction")
 
-        # Convert dict to EnhancedKaggleState object
-        state_obj = EnhancedKaggleState(**state)
-
-        # Set the phase and execute SOP step
-        state_obj.phase = "Model Building, Validation, and Prediction"
-        status, updated_state = sop.step(state_obj)
+        # Execute SOP step with dict
+        status, updated_state = sop.step(state)
 
         # Return dict with updates
         return {
-            "phase": updated_state.phase,
+            "phase": "Model Building, Validation, and Prediction",
             "status": status,
-            "memory": updated_state.memory,
-            "models_trained": updated_state.models_trained,
-            "best_model": updated_state.best_model,
-            "submission_path": updated_state.submission_path,
+            "memory": updated_state.get("memory", []),
+            "models_trained": updated_state.get("models_trained", []),
+            "best_model": updated_state.get("best_model", {}),
+            "submission_path": updated_state.get("submission_path", ""),
         }
 
     # Routing function

@@ -44,30 +44,75 @@ class SOP:
 
         logger.info(f"SOP initialized for competition: {competition_name}")
 
-    def step(self, state: EnhancedKaggleState) -> Tuple[str, EnhancedKaggleState]:
+    def _state_to_dict(self, state_obj: EnhancedKaggleState) -> dict:
+        """Convert EnhancedKaggleState object to dict for LangGraph.
+
+        Args:
+            state_obj: EnhancedKaggleState object
+
+        Returns:
+            Dictionary representation of state
+        """
+        # Create dict with all state fields
+        return {
+            "messages": state_obj.messages if hasattr(state_obj, 'messages') else [],
+            "competition_name": state_obj.competition_name,
+            "competition_type": state_obj.competition_type,
+            "metric": state_obj.metric,
+            "competition_dir": state_obj.competition_dir,
+            "train_data_path": state_obj.train_data_path,
+            "test_data_path": state_obj.test_data_path,
+            "sample_submission_path": state_obj.sample_submission_path,
+            "eda_summary": state_obj.eda_summary,
+            "data_insights": state_obj.data_insights,
+            "features_engineered": state_obj.features_engineered,
+            "feature_importance": state_obj.feature_importance,
+            "models_trained": state_obj.models_trained,
+            "best_model": state_obj.best_model,
+            "cv_scores": state_obj.cv_scores,
+            "submission_path": state_obj.submission_path,
+            "submission_score": state_obj.submission_score,
+            "leaderboard_rank": state_obj.leaderboard_rank,
+            "iteration": state_obj.iteration,
+            "max_iterations": state_obj.max_iterations,
+            "errors": state_obj.errors,
+            "phase": state_obj.phase,
+            "memory": state_obj.memory,
+            "background_info": state_obj.background_info,
+            "rules": state_obj.rules,
+            "retry_count": state_obj.retry_count,
+            "max_phase_retries": state_obj.max_phase_retries,
+            "status": state_obj.status,
+        }
+
+    def step(self, state: dict) -> Tuple[str, dict]:
         """Execute one step of the workflow.
 
         Args:
-            state: Current state
+            state: Current state (dict from LangGraph)
 
         Returns:
-            Tuple of (status, updated_state) where status is:
+            Tuple of (status, updated_state_dict) where status is:
                 - "Continue": Phase executed successfully
                 - "Retry": Phase needs retry
                 - "Complete": Workflow completed
                 - "Fail": Workflow failed
         """
+        # Convert dict to EnhancedKaggleState object for processing
+        state_obj = EnhancedKaggleState(**state)
+
         logger.info(f"="*80)
-        logger.info(f"Executing phase: {state.phase}")
-        logger.info(f"Retry count: {state.retry_count}/{state.max_phase_retries}")
+        logger.info(f"Executing phase: {state_obj.phase}")
+        logger.info(f"Retry count: {state_obj.retry_count}/{state_obj.max_phase_retries}")
         logger.info(f"="*80)
 
         # Get agents for this phase
-        agent_roles = self.config.get_phase_agents(state.phase)
+        agent_roles = self.config.get_phase_agents(state_obj.phase)
 
         if not agent_roles:
-            logger.warning(f"No agents configured for phase: {state.phase}")
-            return "Fail", state
+            logger.warning(f"No agents configured for phase: {state_obj.phase}")
+            # Convert back to dict before returning
+            return "Fail", self._state_to_dict(state_obj)
 
         # Execute agents in sequence
         phase_results = {}
@@ -81,7 +126,7 @@ class SOP:
 
             try:
                 agent = self.agents[agent_role]
-                result = agent.action(state)
+                result = agent.action(state_obj)
 
                 # Store result
                 phase_results.update(result)
@@ -98,14 +143,15 @@ class SOP:
                 }
 
         # Add phase results to memory
-        state.add_memory(phase_results)
+        state_obj.add_memory(phase_results)
 
         # Check if phase was successful
-        status = self._evaluate_phase_results(state, phase_results)
+        status = self._evaluate_phase_results(state_obj, phase_results)
 
         logger.info(f"Phase evaluation result: {status}")
 
-        return status, state
+        # Convert state object back to dict before returning
+        return status, self._state_to_dict(state_obj)
 
     def _evaluate_phase_results(
         self,
