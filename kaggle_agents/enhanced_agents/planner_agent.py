@@ -17,7 +17,7 @@ from ..prompts.prompt_planner import (
     PROMPT_PLANNER_REORGANIZE_IN_MARKDOWN,
     PROMPT_PLANNER_REORGANIZE_IN_JSON
 )
-from ..prompts.prompt_base import PROMPT_EXTRACT_TOOLS
+from ..prompts.prompt_developer import PROMPT_EXTRACT_TOOLS
 
 logger = logging.getLogger(__name__)
 
