@@ -220,6 +220,14 @@ class ConfigManager:
                 "Feature Engineering": "feature_engineering",
                 "Model Building, Validation, and Prediction": "model_build_predict"
             },
+            "phase_to_agents": {
+                "Understand Background": ["planner"],
+                "Preliminary Exploratory Data Analysis": ["eda"],
+                "Data Cleaning": ["cleaner"],
+                "In-depth Exploratory Data Analysis": ["eda"],
+                "Feature Engineering": ["feature_engineer"],
+                "Model Building, Validation, and Prediction": ["modeler"]
+            },
             "retry_settings": {
                 "max_phase_retries": 3,
                 "max_code_retries": 5,
