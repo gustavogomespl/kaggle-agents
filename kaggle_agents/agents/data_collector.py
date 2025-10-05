@@ -29,7 +29,7 @@ class DataCollectorAgent:
         """
         competition = state["competition_name"]
 
-        print(f"🔍 Data Collector: Fetching data for '{competition}'...")
+        print(f"Data Collector: Fetching data for '{competition}'...")
 
         try:
             # Get competition info

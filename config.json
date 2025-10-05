@@ -1,0 +1,82 @@
+{
+  "phases": [
+    "Understand Background",
+    "Preliminary Exploratory Data Analysis",
+    "Data Cleaning",
+    "In-depth Exploratory Data Analysis",
+    "Feature Engineering",
+    "Model Building, Validation, and Prediction"
+  ],
+  "phase_to_directory": {
+    "Understand Background": "background",
+    "Preliminary Exploratory Data Analysis": "pre_eda",
+    "Data Cleaning": "data_cleaning",
+    "In-depth Exploratory Data Analysis": "deep_eda",
+    "Feature Engineering": "feature_engineering",
+    "Model Building, Validation, and Prediction": "model_build_predict"
+  },
+  "phase_to_agents": {
+    "Understand Background": ["reader", "summarizer"],
+    "Preliminary Exploratory Data Analysis": ["planner", "developer", "reviewer", "summarizer"],
+    "Data Cleaning": ["planner", "developer", "reviewer", "summarizer"],
+    "In-depth Exploratory Data Analysis": ["planner", "developer", "reviewer", "summarizer"],
+    "Feature Engineering": ["planner", "developer", "reviewer", "summarizer"],
+    "Model Building, Validation, and Prediction": ["planner", "developer", "reviewer", "summarizer"]
+  },
+  "phase_to_ml_tools": {
+    "Understand Background": [],
+    "Preliminary Exploratory Data Analysis": [],
+    "Data Cleaning": [
+      "fill_missing_values",
+      "remove_outliers",
+      "encode_categorical",
+      "scale_features"
+    ],
+    "In-depth Exploratory Data Analysis": [],
+    "Feature Engineering": [
+      "create_features",
+      "create_polynomial_features",
+      "create_interaction_features",
+      "feature_selection"
+    ],
+    "Model Building, Validation, and Prediction": [
+      "train_model",
+      "cross_validate",
+      "hyperparameter_tune",
+      "ensemble_models",
+      "make_predictions"
+    ]
+  },
+  "user_interaction": {
+    "plan": false,
+    "code": false,
+    "review": false
+  },
+  "retry_settings": {
+    "max_phase_retries": 3,
+    "max_code_retries": 5,
+    "max_debug_iterations": 10,
+    "retry_delay_seconds": 30
+  },
+  "model_settings": {
+    "default_model": "gpt-5-mini",
+    "planner_model": "gpt-5-mini",
+    "developer_model": "gpt-5-mini",
+    "reviewer_model": "gpt-5-mini",
+    "reader_model": "gpt-5-mini",
+    "temperature": 0.7,
+    "max_tokens": 4096
+  },
+  "execution_settings": {
+    "code_timeout_seconds": 300,
+    "enable_sandboxing": true,
+    "save_intermediate_results": true,
+    "verbose_logging": true
+  },
+  "workflow_mode": {
+    "mode": "enhanced",
+    "enable_feedback_loops": true,
+    "enable_tool_retrieval": true,
+    "enable_memory": true
+  }
+}

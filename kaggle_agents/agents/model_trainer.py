@@ -172,7 +172,7 @@ class ModelTrainingAgent:
         Returns:
             Updated state with trained models
         """
-        print("🤖 Model Training Agent: Training models...")
+        print("Model Training Agent: Training models...")
 
         try:
             # Load processed data

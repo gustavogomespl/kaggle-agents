@@ -64,7 +64,7 @@ class EDAAgent:
         Returns:
             Updated state with EDA results
         """
-        print("📊 EDA Agent: Analyzing data...")
+        print("EDA Agent: Analyzing data...")
 
         try:
             # Load data
