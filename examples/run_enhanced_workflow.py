@@ -160,14 +160,14 @@ def main():
         else:
             final_state = run_with_langgraph(args.competition, str(competition_dir))
 
-        print("✅ Workflow completed successfully!")
+        print("Workflow completed successfully!")
 
     except KeyboardInterrupt:
-        print("\n❌ Workflow interrupted by user")
+        print("\nWorkflow interrupted by user")
         sys.exit(1)
 
     except Exception as e:
-        print(f"\n❌ Workflow failed: {e}")
+        print(f"\nWorkflow failed: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

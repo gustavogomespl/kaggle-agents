@@ -47,7 +47,7 @@ def create_enhanced_workflow(
 
     def execute_preliminary_eda(state: EnhancedKaggleState) -> EnhancedKaggleState:
         """Execute Preliminary EDA phase."""
-        logger.info("📊 Executing: Preliminary Exploratory Data Analysis")
+        logger.info("Executing: Preliminary Exploratory Data Analysis")
         state.phase = "Preliminary Exploratory Data Analysis"
         status, updated_state = sop.step(state)
         updated_state.status = status
@@ -63,7 +63,7 @@ def create_enhanced_workflow(
 
     def execute_deep_eda(state: EnhancedKaggleState) -> EnhancedKaggleState:
         """Execute Deep EDA phase."""
-        logger.info("🔍 Executing: In-depth Exploratory Data Analysis")
+        logger.info("Executing: In-depth Exploratory Data Analysis")
         state.phase = "In-depth Exploratory Data Analysis"
         status, updated_state = sop.step(state)
         updated_state.status = status
@@ -71,7 +71,7 @@ def create_enhanced_workflow(
 
     def execute_feature_engineering(state: EnhancedKaggleState) -> EnhancedKaggleState:
         """Execute Feature Engineering phase."""
-        logger.info("⚙️ Executing: Feature Engineering")
+        logger.info("Executing: Feature Engineering")
         state.phase = "Feature Engineering"
         status, updated_state = sop.step(state)
         updated_state.status = status
@@ -79,7 +79,7 @@ def create_enhanced_workflow(
 
     def execute_model_building(state: EnhancedKaggleState) -> EnhancedKaggleState:
         """Execute Model Building phase."""
-        logger.info("🤖 Executing: Model Building, Validation, and Prediction")
+        logger.info("Executing: Model Building, Validation, and Prediction")
         state.phase = "Model Building, Validation, and Prediction"
         status, updated_state = sop.step(state)
         updated_state.status = status
@@ -98,11 +98,11 @@ def create_enhanced_workflow(
         status = getattr(state, 'status', 'Continue')
 
         if status == "Complete":
-            logger.info("✅ Workflow complete!")
+            logger.info("Workflow complete!")
             return END
 
         elif status == "Fail":
-            logger.error("❌ Workflow failed!")
+            logger.error("Workflow failed!")
             return END
 
         elif status == "Retry":

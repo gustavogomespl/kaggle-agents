@@ -202,7 +202,7 @@ def main():
 
     # Create workflow based on mode
     if args.mode == "enhanced":
-        print("🚀 Using ENHANCED mode with multi-agent system and feedback loops")
+        print("Using ENHANCED mode with multi-agent system and feedback loops")
         workflow = create_enhanced_workflow(
             competition_name=competition_slug,
             model=args.model
@@ -213,7 +213,7 @@ def main():
             args.max_iterations
         )
     else:
-        print("📊 Using SIMPLE mode with basic LangGraph workflow")
+        print("Using SIMPLE mode with basic LangGraph workflow")
         workflow = create_kaggle_workflow()
         initial_state = initialize_state(competition_slug, args.max_iterations)
 
@@ -223,7 +223,7 @@ def main():
             from IPython.display import Image, display
             display(Image(workflow.get_graph().draw_mermaid_png()))
         except ImportError:
-            print("⚠️  Visualization requires IPython. Install with: uv add ipython")
+            print("Warning: Visualization requires IPython. Install with: uv add ipython")
 
     # Run workflow
     try:
