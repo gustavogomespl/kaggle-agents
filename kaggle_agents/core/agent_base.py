@@ -91,7 +91,11 @@ class Agent:
         experience_with_suggestion = ""
 
         # Skip the current (last) memory entry
-        for i, each_state_memory in enumerate(state.memory[:-1]):
+        memory = state.get("memory", [])
+        if not memory:
+            return ""
+
+        for i, each_state_memory in enumerate(memory[:-1]):
             # Get this agent's memory from the past state
             act_agent_memory = each_state_memory.get(self.role, {})
             result = act_agent_memory.get("result", "")
