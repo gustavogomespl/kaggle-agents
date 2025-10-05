@@ -8,6 +8,7 @@ from pathlib import Path
 from ..core.agent_base import Agent
 from ..core.state import EnhancedKaggleState, get_restore_dir, set_background_info
 from ..prompts.prompt_reader import PROMPT_READER, PROMPT_READER_TASK, PROMPT_EXTRACT_METRIC
+from ..tools.kaggle_api import KaggleAPIClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,11 @@ class ReaderAgent(Agent):
             description="You are excellent at reading and extracting key information from competition descriptions.",
             model=model
         )
+        # Initialize Kaggle API client for downloading competition data
+        try:
+            self.kaggle_client = KaggleAPIClient()
+        except Exception as e:
+            logger.warning(f"Kaggle API not available: {e}. Will work with existing files only.")
 
     def _execute(self, state: EnhancedKaggleState, role_prompt: str) -> Dict[str, Any]:
         """Execute reader agent logic.
@@ -47,28 +53,81 @@ class ReaderAgent(Agent):
         elif self.model == 'o1-mini':
             history.append({"role": "user", "content": f"{role_prompt}{self.description}"})
 
-        # Read competition information
+        # Get competition information
+        competition_name = state.get("competition_name", "")
         competition_dir = Path(state.get("competition_dir", "."))
         overview_file = competition_dir / "competition_info.txt"
         data_desc_file = competition_dir / "data_description.txt"
 
-        # Load files if they exist
-        overview = ""
-        data_description = ""
+        # Download competition data and create info files if they don't exist
+        if not overview_file.exists() and hasattr(self, 'kaggle_client'):
+            logger.info(f"Downloading competition data for: {competition_name}")
+            try:
+                # Get competition metadata from Kaggle API
+                comp_info = self.kaggle_client.get_competition_info(competition_name)
 
-        if overview_file.exists():
-            with open(overview_file, 'r', encoding='utf-8') as f:
-                overview = f.read()
-        else:
-            logger.warning(f"Competition info file not found: {overview_file}")
-            overview = "No competition overview available."
+                # Download data files
+                data_paths = self.kaggle_client.download_competition_data(
+                    competition_name,
+                    path=str(competition_dir)
+                )
 
-        if data_desc_file.exists():
-            with open(data_desc_file, 'r', encoding='utf-8') as f:
-                data_description = f.read()
+                # Update state with data paths
+                state["train_data_path"] = data_paths.get("train", "")
+                state["test_data_path"] = data_paths.get("test", "")
+                state["sample_submission_path"] = data_paths.get("sample_submission", "")
+
+                # Create competition_info.txt
+                overview = f"""Title: {comp_info['title']}
+
+Description:
+{comp_info['description']}
+
+Evaluation Metric: {comp_info['evaluation']}
+Category: {comp_info['category']}
+Deadline: {comp_info['deadline']}
+Reward: {comp_info['reward']}
+Teams: {comp_info['team_count']}
+"""
+                with open(overview_file, 'w', encoding='utf-8') as f:
+                    f.write(overview)
+
+                # Create data_description.txt (basic description from metadata)
+                data_description = f"""Data files downloaded for {competition_name}:
+
+Train: {data_paths.get('train', 'Not found')}
+Test: {data_paths.get('test', 'Not found')}
+Sample Submission: {data_paths.get('sample_submission', 'Not found')}
+
+Please refer to the competition page for detailed data descriptions.
+"""
+                with open(data_desc_file, 'w', encoding='utf-8') as f:
+                    f.write(data_description)
+
+                logger.info(f"Competition data downloaded and info files created")
+
+            except Exception as e:
+                logger.error(f"Failed to download competition data: {e}")
+                overview = f"Error downloading competition info: {str(e)}"
+                data_description = "Data files not available"
         else:
-            logger.warning(f"Data description file not found: {data_desc_file}")
-            data_description = "No data description available."
+            # Load existing files
+            overview = ""
+            data_description = ""
+
+            if overview_file.exists():
+                with open(overview_file, 'r', encoding='utf-8') as f:
+                    overview = f.read()
+            else:
+                logger.warning(f"Competition info file not found: {overview_file}")
+                overview = "No competition overview available."
+
+            if data_desc_file.exists():
+                with open(data_desc_file, 'r', encoding='utf-8') as f:
+                    data_description = f.read()
+            else:
+                logger.warning(f"Data description file not found: {data_desc_file}")
+                data_description = "No data description available."
 
         # Task for reader
         task = PROMPT_READER_TASK
