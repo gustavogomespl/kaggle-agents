@@ -63,8 +63,9 @@ class CodeExecutor:
 
         try:
             # Execute code in subprocess for isolation
+            # Use just the filename since cwd is already set to working_dir
             result = subprocess.run(
-                [sys.executable, str(code_file)],
+                [sys.executable, code_file.name],
                 cwd=str(self.working_dir),
                 capture_output=capture_output,
                 text=True,

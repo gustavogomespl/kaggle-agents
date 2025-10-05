@@ -281,12 +281,24 @@ class Agent:
         Returns:
             Extracted markdown content
         """
+        # Try to match ```markdown first
         markdown_match = re.search(r'```markdown\s*(.+?)\s*```', raw_reply, re.DOTALL)
         if markdown_match:
+            logger.debug("Found ```markdown block")
             return markdown_match.group(1).strip()
-        else:
-            logger.warning("Failed to parse markdown from raw reply, returning as-is.")
-            return raw_reply
+
+        # Try to match any ``` code block
+        generic_match = re.search(r'```\s*(.+?)\s*```', raw_reply, re.DOTALL)
+        if generic_match:
+            logger.debug("Found generic ``` block")
+            content = generic_match.group(1).strip()
+            # Remove language identifier if present at the start
+            content = re.sub(r'^[a-z]+\n', '', content)
+            return content
+
+        # If no code blocks, return as-is (LLM might have returned plain text)
+        logger.debug(f"No markdown code blocks found. Reply preview: {raw_reply[:200]}...")
+        return raw_reply.strip()
 
     def _parse_code(self, raw_reply: str) -> str:
         """Parse Python code from LLM response.
@@ -297,12 +309,30 @@ class Agent:
         Returns:
             Extracted Python code
         """
+        # Try to match ```python first
         code_match = re.search(r'```python\s*(.+?)\s*```', raw_reply, re.DOTALL)
         if code_match:
+            logger.debug("Found ```python block")
             return code_match.group(1).strip()
-        else:
-            logger.warning("Failed to parse code from raw reply, returning as-is.")
-            return raw_reply
+
+        # Try to match ```py
+        py_match = re.search(r'```py\s*(.+?)\s*```', raw_reply, re.DOTALL)
+        if py_match:
+            logger.debug("Found ```py block")
+            return py_match.group(1).strip()
+
+        # Try to match any ``` code block (might be unlabeled Python code)
+        generic_match = re.search(r'```\s*(.+?)\s*```', raw_reply, re.DOTALL)
+        if generic_match:
+            logger.debug("Found generic ``` block, assuming Python code")
+            content = generic_match.group(1).strip()
+            # Remove language identifier if present at the start
+            content = re.sub(r'^(python|py)\n', '', content)
+            return content
+
+        # If no code blocks found, return as-is (might be plain code)
+        logger.debug(f"No code blocks found. Reply preview: {raw_reply[:200]}...")
+        return raw_reply.strip()
 
     def _get_feature_info(self, state: EnhancedKaggleState) -> str:
         """Get feature information before and after the current phase.
