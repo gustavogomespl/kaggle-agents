@@ -102,38 +102,19 @@ def generate_response(
     is_gpt5 = model.startswith("gpt-5")
     logger.info(f"Usando {'Responses' if is_gpt5 else 'Chat Completions'} API")
 
-    # Monta kwargs de geração (evitando params possivelmente não suportados)
-    # Sempre use max_output_tokens na Responses API
-    base_kwargs: Dict[str, Any] = {}
-
-    # Alguns modelos gpt-5 podem rejeitar temperature/top_p/etc. Passamos só se não None.
-    # Se vier 400, faremos retry removendo-os.
-    gen_params: Dict[str, Any] = {}
-    if settings.temperature is not None:
-        gen_params["temperature"] = settings.temperature
-    if settings.top_p is not None:
-        gen_params["top_p"] = settings.top_p
-    if settings.frequency_penalty is not None:
-        gen_params["frequency_penalty"] = settings.frequency_penalty
-    if settings.presence_penalty is not None:
-        gen_params["presence_penalty"] = settings.presence_penalty
-    if settings.stop:
-        gen_params["stop"] = settings.stop
-
     try:
         if response_type != "text":
             raise ValueError(f"Unsupported response type: {response_type}")
 
         if is_gpt5:
-            # Responses API
+            # Responses API - não aceita parâmetros de sampling
             resp = client.responses.create(
                 model=model,
                 input=_to_responses_messages(messages),
                 max_output_tokens=settings.max_completion_tokens,
-                **gen_params,
             )
         else:
-            # Chat Completions (legado)
+            # Chat Completions (legado) - aceita todos os parâmetros
             resp = client.chat.completions.create(
                 model=model,
                 messages=messages,
@@ -146,16 +127,8 @@ def generate_response(
                 timeout=settings.timeout,
             )
     except openai.BadRequestError as e:
-        # Re-tenta sem parâmetros opcionais que podem não ser suportados pelo gpt-5
-        if is_gpt5 and any(k in str(e).lower() for k in ["temperature", "top_p", "penalty"]):
-            logger.warning("Parâmetros de amostragem não suportados. Re-tentando sem eles.")
-            resp = client.responses.create(
-                model=model,
-                input=_to_responses_messages(messages),
-                max_output_tokens=settings.max_completion_tokens,
-            )
-        else:
-            raise
+        # Trata erros específicos
+        raise
 
     elapsed = time.time() - start
 
