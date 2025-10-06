@@ -50,10 +50,27 @@ class DeveloperAgent(Agent):
 
         if plan_file.exists():
             with open(plan_file, 'r') as f:
-                return f.read()
+                plan_content = f.read()
+            logger.info(f"Plan loaded from: {plan_file}")
+            return plan_content
         else:
-            logger.warning(f"Plan file not found: {plan_file}")
-            return "No plan available. Please create a general implementation."
+            logger.warning(f"Plan file not found: {plan_file}. Using default plan.")
+            # Provide a basic template when plan is missing
+            phase = state.get("phase", "")
+            return f"""# Default Implementation Plan for {phase}
+
+## Objective
+Implement the necessary code for the {phase} phase.
+
+## Steps
+1. Load and prepare the data
+2. Apply appropriate transformations
+3. Save the results
+4. Ensure code quality and error handling
+
+Note: This is a fallback plan since the planner's output was not found.
+Please implement a reasonable solution based on the phase requirements.
+"""
 
     def _generate_code(
         self,

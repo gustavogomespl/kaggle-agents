@@ -232,21 +232,27 @@ class PlannerAgent(Agent):
         with open(markdown_plan_file, 'w') as f:
             f.write(markdown_plan)
 
-        # Round 4: Reorganize in JSON
+        # Round 4: Reorganize in JSON (optional - don't fail if this doesn't work)
         logger.info("Round 4: Organizing in JSON")
-        input_prompt = PROMPT_PLANNER_REORGANIZE_IN_JSON
-        raw_json_plan, history = self.generate(input_prompt, history, max_completion_tokens=4096)
-
         try:
-            json_plan = self._parse_json(raw_json_plan)['final_answer']
-        except Exception as e:
-            logger.warning(f"Error parsing JSON plan: {e}, using raw dict")
-            json_plan = self._parse_json(raw_json_plan)
+            input_prompt = PROMPT_PLANNER_REORGANIZE_IN_JSON
+            raw_json_plan, history = self.generate(input_prompt, history, max_completion_tokens=4096)
 
-        # Save JSON plan
-        json_plan_file = restore_dir / "json_plan.json"
-        with open(json_plan_file, 'w') as f:
-            json.dump(json_plan, f, indent=2)
+            try:
+                json_plan = self._parse_json(raw_json_plan)['final_answer']
+            except Exception as e:
+                logger.warning(f"Error extracting 'final_answer' from JSON: {e}, using full parsed JSON")
+                json_plan = self._parse_json(raw_json_plan)
+
+            # Save JSON plan
+            json_plan_file = restore_dir / "json_plan.json"
+            with open(json_plan_file, 'w') as f:
+                json.dump(json_plan, f, indent=2)
+            logger.info("JSON plan saved successfully")
+
+        except Exception as e:
+            logger.warning(f"Failed to create JSON plan: {e}. Continuing with markdown plan only.")
+            # JSON plan is optional, so we can continue without it
 
         # User interaction (if enabled)
         if self.config.is_user_interaction_enabled('plan'):
