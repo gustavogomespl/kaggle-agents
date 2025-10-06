@@ -1,4 +1,4 @@
-"""API Handler with robust retry logic and error handling."""
+"""API Handler atualizado para Responses API + gpt-5-mini, com retry robusto."""
 
 import os
 import time
@@ -7,325 +7,309 @@ from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
-import openai
 import httpx
+import openai
+from openai import OpenAI
 
-# LangSmith tracing
+# LangSmith tracing (opcional)
 try:
     from langsmith import traceable
 except ImportError:
-    # Fallback if langsmith not installed
     def traceable(*args, **kwargs):
         def decorator(func):
             return func
         return decorator
 
-# Constants
+# Constantes
 MAX_ATTEMPTS = 5
 RETRY_DELAY = 30
-DEFAULT_MAX_LENGTH = 100000
+DEFAULT_MAX_LENGTH = 100_000
 
-# Setup logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.WARNING)
-
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 @dataclass
 class APISettings:
-    """Settings for API calls with sensible defaults."""
-
+    """Configurações padrão para geração."""
     max_completion_tokens: int
-    temperature: float = 0.7
-    top_p: float = 1.0
-    frequency_penalty: float = 0.0
-    presence_penalty: float = 0.0
+    temperature: Optional[float] = 0.7  # pode ser ignorado por alguns modelos
+    top_p: Optional[float] = 1.0
+    frequency_penalty: Optional[float] = 0.0
+    presence_penalty: Optional[float] = 0.0
     stop: Optional[List[str]] = None
 
     @property
     def timeout(self) -> int:
-        """Calculate timeout based on expected tokens."""
         return (self.max_completion_tokens // 1000 + 1) * 30
 
 
 def load_api_config() -> Tuple[str, Optional[str]]:
-    """Load API configuration from environment or file.
-
-    Returns:
-        Tuple of (api_key, base_url)
-
-    Raises:
-        ValueError: If API key is not found
-    """
-    # Try environment first
+    """Carrega OPENAI_API_KEY e OPENAI_BASE_URL do ambiente ou de api_key.txt."""
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL")
 
     if api_key:
         return api_key, base_url
 
-    # Fallback to api_key.txt for backward compatibility
     api_key_file = Path(__file__).parent.parent.parent / "api_key.txt"
-
     if api_key_file.exists():
-        with open(api_key_file, 'r') as f:
-            api_config = f.readlines()
-        api_key = api_config[0].strip()
-        base_url = api_config[1].strip() if len(api_config) > 1 else None
-        return api_key, base_url
+        with open(api_key_file, "r", encoding="utf-8") as f:
+            lines = [ln.strip() for ln in f.readlines() if ln.strip()]
+        api_key = lines[0] if lines else None
+        base_url = lines[1] if len(lines) > 1 else None
+        if api_key:
+            return api_key, base_url
 
     raise ValueError(
-        "API key not found. Set OPENAI_API_KEY environment variable "
-        "or create api_key.txt file."
+        "API key não encontrada. Defina OPENAI_API_KEY ou crie api_key.txt."
     )
+
+
+def _to_responses_messages(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    """
+    Converte mensagens no formato chat clássico para o formato da Responses API:
+    [{"role": "user"|"system"|"assistant", "content": [{"type":"text","text":"..."}]}]
+    """
+    converted = []
+    for m in messages:
+        content = m.get("content", "")
+        # já aceita lista? mantém; senão, empacota como text
+        if isinstance(content, list):
+            converted.append({"role": m["role"], "content": content})
+        else:
+            converted.append(
+                {"role": m["role"], "content": [{"type": "text", "text": str(content)}]}
+            )
+    return converted
 
 
 @traceable(name="OpenAI_API_Call", run_type="llm")
 def generate_response(
-    client: openai.OpenAI,
+    client: OpenAI,
     model: str,
     messages: List[Dict[str, str]],
     settings: APISettings,
-    response_type: str = 'text'
+    response_type: str = "text",
 ) -> Any:
-    """Generate response from OpenAI API.
-
-    Args:
-        client: OpenAI client instance
-        model: Model name (e.g., 'gpt-5-mini', 'o1-mini')
-        messages: List of message dictionaries
-        settings: API settings
-        response_type: 'text' or 'image'
-
-    Returns:
-        API response object
-
-    Raises:
-        Exception: If API call fails
     """
-    logger.info(f"Generating response for model: {model}")
-    start_time = time.time()
+    Gera resposta usando Responses API para gpt-5 e cai para Chat Completions para legados.
+    """
+    logger.info(f"Gerando com modelo: {model}")
+    start = time.time()
 
-    # Special handling for models that only support default temperature
-    if model in ['o1-mini', 'gpt-5-mini']:
-        settings.temperature = 1.0
+    is_gpt5 = model.startswith("gpt-5")
+    logger.info(f"Usando {'Responses' if is_gpt5 else 'Chat Completions'} API")
+
+    # Monta kwargs de geração (evitando params possivelmente não suportados)
+    # Sempre use max_output_tokens na Responses API
+    base_kwargs: Dict[str, Any] = {}
+
+    # Alguns modelos gpt-5 podem rejeitar temperature/top_p/etc. Passamos só se não None.
+    # Se vier 400, faremos retry removendo-os.
+    gen_params: Dict[str, Any] = {}
+    if settings.temperature is not None:
+        gen_params["temperature"] = settings.temperature
+    if settings.top_p is not None:
+        gen_params["top_p"] = settings.top_p
+    if settings.frequency_penalty is not None:
+        gen_params["frequency_penalty"] = settings.frequency_penalty
+    if settings.presence_penalty is not None:
+        gen_params["presence_penalty"] = settings.presence_penalty
+    if settings.stop:
+        gen_params["stop"] = settings.stop
 
     try:
-        if response_type == 'text':
-            response = client.chat.completions.create(
-                messages=messages,
+        if response_type != "text":
+            raise ValueError(f"Unsupported response type: {response_type}")
+
+        if is_gpt5:
+            # Responses API
+            resp = client.responses.create(
                 model=model,
-                temperature=settings.temperature,
+                input=_to_responses_messages(messages),
+                max_output_tokens=settings.max_completion_tokens,
+                **gen_params,
+            )
+        else:
+            # Chat Completions (legado)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
                 max_completion_tokens=settings.max_completion_tokens,
-                top_p=settings.top_p,
-                frequency_penalty=settings.frequency_penalty,
-                presence_penalty=settings.presence_penalty,
+                temperature=settings.temperature if settings.temperature is not None else 0.7,
+                top_p=settings.top_p if settings.top_p is not None else 1.0,
+                frequency_penalty=settings.frequency_penalty or 0.0,
+                presence_penalty=settings.presence_penalty or 0.0,
                 stop=settings.stop,
                 timeout=settings.timeout,
             )
-        elif response_type == 'image':
-            response = client.chat.completions.create(
-                messages=messages,
+    except openai.BadRequestError as e:
+        # Re-tenta sem parâmetros opcionais que podem não ser suportados pelo gpt-5
+        if is_gpt5 and any(k in str(e).lower() for k in ["temperature", "top_p", "penalty"]):
+            logger.warning("Parâmetros de amostragem não suportados. Re-tentando sem eles.")
+            resp = client.responses.create(
                 model=model,
-                temperature=settings.temperature,
-                timeout=settings.timeout,
+                input=_to_responses_messages(messages),
+                max_output_tokens=settings.max_completion_tokens,
             )
         else:
-            raise ValueError(f"Unsupported response type: {response_type}")
-    except Exception as e:
-        logging.error(f"Error during API call: {e}")
-        raise
+            raise
 
-    elapsed_time = time.time() - start_time
+    elapsed = time.time() - start
 
-    # Log metrics
-    if hasattr(response, 'usage'):
-        usage = response.usage
-        logger.info(
-            f"API Call Metrics - Model: {model}, "
-            f"Time: {elapsed_time:.2f}s, "
-            f"Prompt Tokens: {getattr(usage, 'prompt_tokens', 0)}, "
-            f"Completion Tokens: {getattr(usage, 'completion_tokens', 0)}, "
-            f"Total Tokens: {getattr(usage, 'total_tokens', 0)}"
-        )
-    else:
-        logger.info(f"Response generated in {elapsed_time:.2f} seconds")
+    # Métricas de uso (Responses e Chat)
+    try:
+        usage = getattr(resp, "usage", None)
+        if usage:
+            # Responses API costuma expor input_tokens/output_tokens/total_tokens
+            pt = getattr(usage, "input_tokens", getattr(usage, "prompt_tokens", 0))
+            ct = getattr(usage, "output_tokens", getattr(usage, "completion_tokens", 0))
+            tt = getattr(usage, "total_tokens", 0) or (pt or 0) + (ct or 0)
+            logger.info(
+                f"Metrics - Model: {model} | {elapsed:.2f}s | "
+                f"Input: {pt} | Output: {ct} | Total: {tt}"
+            )
+        else:
+            logger.info(f"Resposta em {elapsed:.2f}s (sem métricas de uso).")
+    except Exception:
+        logger.debug("Não foi possível ler métricas de uso.", exc_info=True)
 
-    return response
+    return resp
 
 
 class APIHandler:
-    """Handle OpenAI API calls with retry logic and error handling."""
+    """Handler com retry + truncamento para Responses API."""
 
     def __init__(self, model: str, verify_ssl: bool = True):
-        """Initialize API handler.
-
-        Args:
-            model: OpenAI model name
-            verify_ssl: Whether to verify SSL certificates
-        """
         self.model = model
         self.api_key, self.base_url = load_api_config()
 
-        # Configure HTTP client
-        http_client = httpx.Client(verify=verify_ssl) if not verify_ssl else None
+        http_client = None
+        if not verify_ssl:
+            http_client = httpx.Client(verify=False)
 
-        self.client = openai.OpenAI(
+        self.client = OpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
-            http_client=http_client
+            http_client=http_client,
         )
 
-    def _save_long_message(
-        self,
-        messages: List[Dict[str, str]],
-        save_dir: Optional[Path] = None
-    ):
-        """Save long messages to file for debugging.
-
-        Args:
-            messages: List of messages
-            save_dir: Directory to save to (default: current directory)
-        """
-        if save_dir is None:
-            save_dir = Path.cwd()
-        else:
-            save_dir = Path(save_dir)
-
+    def _save_long_message(self, messages: List[Dict[str, str]], save_dir: Optional[Path] = None):
+        save_dir = Path(save_dir) if save_dir else Path.cwd()
         save_dir.mkdir(parents=True, exist_ok=True)
-
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         filename = save_dir / f"long_message_{timestamp}.txt"
+        with open(filename, "w", encoding="utf-8") as f:
+            for m in messages:
+                f.write(f"Role: {m.get('role')}\nContent: {m.get('content')}\n\n")
+        logger.info(f"Mensagem longa salva em {filename}")
 
-        with open(filename, 'w', encoding='utf-8') as f:
-            for message in messages:
-                f.write(f"Role: {message['role']}\n")
-                f.write(f"Content: {message['content']}\n\n")
-
-        logger.info(f"Long message saved to {filename}")
-
-    def _truncate_messages(
-        self,
-        messages: List[Dict[str, str]],
-        max_length: int = DEFAULT_MAX_LENGTH
-    ) -> List[Dict[str, str]]:
-        """Truncate messages to fit within maximum length.
-
-        Strategy: Keep all messages except the last one, then truncate
-        the last message to fit within the remaining space.
-
-        Args:
-            messages: List of messages
-            max_length: Maximum total character length
-
-        Returns:
-            Truncated messages
-        """
-        total_length = sum(len(message['content']) for message in messages)
-
-        if total_length <= max_length:
+    def _truncate_messages(self, messages: List[Dict[str, str]], max_length: int = DEFAULT_MAX_LENGTH) -> List[Dict[str, str]]:
+        total_len = sum(len(str(m.get("content", ""))) for m in messages)
+        if total_len <= max_length:
             return messages
 
-        # Keep all messages except the last one
         truncated = messages[:-1]
-        last_message = messages[-1]
+        last = messages[-1]
+        rem = max_length - sum(len(str(m.get("content", ""))) for m in truncated)
 
-        # Calculate available space for last message
-        available_length = max_length - sum(
-            len(message['content']) for message in truncated
-        )
-
-        if available_length > 100:  # Ensure meaningful truncation
-            truncated_content = last_message['content'][:available_length-3] + "..."
-            truncated.append({
-                "role": last_message['role'],
-                "content": truncated_content
-            })
-            logger.warning(
-                f"Truncated last message from {len(last_message['content'])} "
-                f"to {len(truncated_content)} characters"
-            )
+        if rem > 100:
+            content = str(last.get("content", ""))
+            newc = content[: rem - 3] + "..."
+            truncated.append({"role": last.get("role", "user"), "content": newc})
+            logger.warning(f"Truncado último conteúdo de {len(content)} para {len(newc)} chars.")
         else:
-            logger.warning("Not enough space to include truncated message")
-
+            logger.warning("Sem espaço útil para incluir a última mensagem truncada.")
         return truncated
+
+    def _extract_text(self, response: Any) -> Optional[str]:
+        """
+        Extrai texto do objeto de resposta:
+        - Responses API: response.output_text (preferido)
+        - Fallback: navegar em response.output / content
+        - Chat Completions: response.choices[0].message.content
+        """
+        # Responses API
+        text = getattr(response, "output_text", None)
+        if text:
+            return text
+
+        # Fallback Responses (output -> content[])
+        try:
+            output = getattr(response, "output", None)
+            if output and isinstance(output, list):
+                # procura primeiro bloco de texto
+                for item in output:
+                    parts = item.get("content") if isinstance(item, dict) else None
+                    if isinstance(parts, list):
+                        for p in parts:
+                            if isinstance(p, dict) and p.get("type") == "output_text":
+                                txt = p.get("text") or p.get("content") or ""
+                                if txt:
+                                    return txt
+        except Exception:
+            pass
+
+        # Chat Completions
+        try:
+            if response.choices and response.choices[0].message:
+                return response.choices[0].message.content
+        except Exception:
+            pass
+        return None
 
     def get_output(
         self,
         messages: List[Dict[str, str]],
         settings: APISettings,
-        response_type: str = 'text',
-        save_dir: Optional[Path] = None
+        response_type: str = "text",
+        save_dir: Optional[Path] = None,
     ) -> str:
-        """Get output from OpenAI API with retry logic.
-
-        Args:
-            messages: List of message dictionaries
-            settings: API settings
-            response_type: 'text' or 'image'
-            save_dir: Directory to save long messages
-
-        Returns:
-            Generated text response
-        """
-        for attempt in range(MAX_ATTEMPTS):
+        last_error = None
+        for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
-                response = generate_response(
-                    self.client,
-                    self.model,
-                    messages,
-                    settings,
-                    response_type
+                resp = generate_response(
+                    self.client, self.model, messages, settings, response_type
                 )
+                content = self._extract_text(resp)
+                if not content:
+                    logger.error(f"Conteúdo vazio. Response: {resp}")
+                    # tenta identificar motivo (Responses tem status/reason às vezes)
+                    reason = getattr(resp, "status", "") or getattr(resp, "reason", "")
+                    return f"Error: resposta vazia. {('Motivo: ' + str(reason)) if reason else ''}".strip()
+                return content
 
-                if (response.choices and
-                    response.choices[0].message and
-                    hasattr(response.choices[0].message, 'content')):
-                    return response.choices[0].message.content
-                else:
-                    return "Error: Wrong response format."
-
-            except openai.BadRequestError as error:
-                error_message = str(error)
-
-                if "string too long" in error_message or \
-                   "maximum context length" in error_message:
-                    logging.error("Message too long. Attempting to truncate.")
+            except openai.BadRequestError as e:
+                msg = str(e).lower()
+                last_error = e
+                if any(x in msg for x in ["string too long", "maximum context length", "context_length_exceeded"]):
+                    logger.error("Mensagem muito longa. Tentando truncar…")
                     self._save_long_message(messages, save_dir)
                     messages = self._truncate_messages(messages)
                     continue
-                else:
-                    logging.error(
-                        f'Attempt {attempt + 1} of {MAX_ATTEMPTS} '
-                        f'failed with error: {error}'
-                    )
+                logger.error(f"Tentativa {attempt}/{MAX_ATTEMPTS} falhou (400): {e}")
 
-            except (TimeoutError,
-                    openai.APIError,
-                    openai.APIConnectionError,
-                    openai.RateLimitError) as error:
-                logging.error(
-                    f'Attempt {attempt + 1} of {MAX_ATTEMPTS} '
-                    f'failed with error: {error}'
-                )
+            except (TimeoutError, openai.APIError, openai.APIConnectionError, openai.RateLimitError) as e:
+                last_error = e
+                logger.error(f"Tentativa {attempt}/{MAX_ATTEMPTS} falhou: {e}")
 
-            if attempt < MAX_ATTEMPTS - 1:
-                logger.info(f"Retrying in {RETRY_DELAY} seconds...")
+            if attempt < MAX_ATTEMPTS:
+                logger.info(f"Retry em {RETRY_DELAY}s…")
                 time.sleep(RETRY_DELAY)
             else:
-                return f"Error: Max attempts reached. Last error: {error}"
+                return f"Error: Máximo de tentativas atingido. Último erro: {last_error}"
 
-        return "Error: All retry attempts failed"
+        return "Error: todas as tentativas falharam."
 
 
-if __name__ == '__main__':
-    # Test the API handler
-    handler = APIHandler('gpt-5-mini')
-    messages = [
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "How are you today?"}
+if __name__ == "__main__":
+    # Exemplo rápido
+    handler = APIHandler("gpt-5-mini")
+    msgs = [
+        {"role": "system", "content": "Você é um assistente útil."},
+        {"role": "user", "content": "Resuma em 1 frase por que a Responses API é útil."},
     ]
-    settings = APISettings(max_completion_tokens=50)
-    output_text = handler.get_output(messages=messages, settings=settings)
-    print(output_text)
+    settings = APISettings(max_completion_tokens=64, temperature=0.7)
+    print(handler.get_output(messages=msgs, settings=settings))
