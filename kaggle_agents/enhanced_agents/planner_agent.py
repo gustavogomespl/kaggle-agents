@@ -124,7 +124,7 @@ class PlannerAgent(Agent):
                     document=markdown_plan,
                     all_tool_names=all_tool_names
                 )
-                raw_reply, _ = self.generate(input_prompt, history=[], max_completion_tokens=4096)
+                raw_reply, _ = self.generate(input_prompt, history=[])
 
                 try:
                     tool_names = self._parse_json(raw_reply)['tool_names']
@@ -198,7 +198,7 @@ class PlannerAgent(Agent):
             background_info=background_info,
             task=task
         )
-        _, history = self.generate(input_prompt, history, max_completion_tokens=4096)
+        _, history = self.generate(input_prompt, history)
 
         # Round 2: Incorporate previous results and tools
         logger.info("Round 2: Incorporating tools and history")
@@ -213,7 +213,7 @@ class PlannerAgent(Agent):
         else:
             input_prompt += "# AVAILABLE TOOLS #\nThere are no pre-defined tools in this phase. You can use functions from public libraries such as Pandas, NumPy, Scikit-learn, etc.\n"
 
-        raw_plan_reply, history = self.generate(input_prompt, history, max_completion_tokens=4096)
+        raw_plan_reply, history = self.generate(input_prompt, history)
 
         # Save raw plan
         restore_dir = get_restore_dir(state)
@@ -224,7 +224,7 @@ class PlannerAgent(Agent):
         # Round 3: Reorganize in Markdown
         logger.info("Round 3: Organizing in Markdown")
         input_prompt = PROMPT_PLANNER_REORGANIZE_IN_MARKDOWN
-        organized_markdown_plan, history = self.generate(input_prompt, history, max_completion_tokens=4096)
+        organized_markdown_plan, history = self.generate(input_prompt, history)
         markdown_plan = self._parse_markdown(organized_markdown_plan)
 
         # Save markdown plan
@@ -236,7 +236,7 @@ class PlannerAgent(Agent):
         logger.info("Round 4: Organizing in JSON")
         try:
             input_prompt = PROMPT_PLANNER_REORGANIZE_IN_JSON
-            raw_json_plan, history = self.generate(input_prompt, history, max_completion_tokens=4096)
+            raw_json_plan, history = self.generate(input_prompt, history)
 
             try:
                 json_plan = self._parse_json(raw_json_plan)['final_answer']

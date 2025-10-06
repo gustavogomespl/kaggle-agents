@@ -115,8 +115,8 @@ Please implement a reasonable solution based on the phase requirements.
             restore_dir=restore_dir
         )
 
-        # Generate code
-        raw_reply, history = self.generate(input_prompt, history, max_completion_tokens=4096)
+        # Generate code (let model use default max_completion_tokens)
+        raw_reply, history = self.generate(input_prompt, history)
 
         # Parse code
         code = self._parse_code(raw_reply)
@@ -197,7 +197,7 @@ Please implement a reasonable solution based on the phase requirements.
         )
 
         # Get fixed code
-        raw_reply, history = self.generate(debug_prompt, history, max_completion_tokens=4096)
+        raw_reply, history = self.generate(debug_prompt, history)
         fixed_code = self._parse_code(raw_reply)
 
         return fixed_code, history

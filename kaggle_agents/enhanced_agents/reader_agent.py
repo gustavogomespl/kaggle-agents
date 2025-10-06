@@ -139,11 +139,7 @@ Please refer to the competition page for detailed data descriptions.
         )
 
         # Generate response
-        raw_reply, history = self.generate(
-            input_prompt,
-            history,
-            max_completion_tokens=4096
-        )
+        raw_reply, history = self.generate(input_prompt, history)
 
         # Parse markdown response
         background_summary = self._parse_markdown(raw_reply)

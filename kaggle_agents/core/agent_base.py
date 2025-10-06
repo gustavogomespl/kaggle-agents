@@ -215,7 +215,7 @@ class Agent:
         data_used_in_preview = self._read_data(state, num_lines=num_lines)
         input_prompt = PROMPT_DATA_PREVIEW.format(data=data_used_in_preview)
 
-        raw_reply, _ = self.generate(input_prompt, [], max_completion_tokens=4096)
+        raw_reply, _ = self.generate(input_prompt, [])
         data_preview = self._parse_markdown(raw_reply)
 
         # Save preview to disk
@@ -270,7 +270,7 @@ class Agent:
         else:
             prompt = PROMPT_REORGANIZE_JSON.format(information=raw_reply)
 
-        json_reply, _ = self.generate(prompt, history=[], max_completion_tokens=4096)
+        json_reply, _ = self.generate(prompt, history=[])
 
         json_match = re.search(r'```json\s*(.+?)\s*```', json_reply, re.DOTALL)
         if json_match:

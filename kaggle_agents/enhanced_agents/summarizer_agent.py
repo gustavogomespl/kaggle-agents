@@ -176,7 +176,7 @@ Create a comprehensive summary report in markdown format that includes:
         summary_prompt = self._create_summary_prompt(state, phase_results)
 
         # Generate summary
-        raw_reply, history = self.generate(summary_prompt, history, max_completion_tokens=4096)
+        raw_reply, history = self.generate(summary_prompt, history)
 
         # Parse markdown summary
         summary = self._parse_markdown(raw_reply)

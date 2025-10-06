@@ -71,7 +71,7 @@ class ReviewerAgent(Agent):
         )
 
         # Generate review
-        raw_reply, history = self.generate(input_prompt, history, max_completion_tokens=4096)
+        raw_reply, history = self.generate(input_prompt, history)
 
         # Parse JSON review
         try:
