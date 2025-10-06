@@ -296,7 +296,16 @@ class DeveloperAgent(Agent):
 
         input_used_in_review = f"Plan:\n{plan[:1000]}..."
 
-        logger.info(f"Developer Agent completed with status: {result_status}")
+        # Log detailed metrics
+        phase = state.get("phase", "")
+        logger.info(f"=" * 60)
+        logger.info(f"DEVELOPER METRICS - Phase: {phase}")
+        logger.info(f"=" * 60)
+        logger.info(f"  Status: {result_status.upper()}")
+        logger.info(f"  Success: {success}")
+        logger.info(f"  Code Length: {len(code) if code else 0} chars")
+        logger.info(f"  Max Retries: {max_retries}")
+        logger.info(f"=" * 60)
 
         return {
             self.role: {

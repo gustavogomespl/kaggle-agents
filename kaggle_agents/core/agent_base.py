@@ -18,6 +18,15 @@ from ..prompts.prompt_base import (
     PROMPT_REORGANIZE_EXTRACT_TOOLS,
 )
 
+# LangSmith tracing
+try:
+    from langsmith import traceable
+except ImportError:
+    def traceable(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +47,7 @@ class Agent:
         self.api_handler = APIHandler(model)
         logger.info(f'Agent {self.role} created with model {model}.')
 
+    @traceable(name="Agent_Generate", run_type="chain")
     def generate(
         self,
         prompt: str,
@@ -387,6 +397,7 @@ class Agent:
             features_after=features_after
         )
 
+    @traceable(name="Agent_Action", run_type="chain")
     def action(self, state: EnhancedKaggleState) -> Dict[str, Any]:
         """Execute agent action (to be implemented by subclasses).
 

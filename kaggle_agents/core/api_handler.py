@@ -10,6 +10,16 @@ from pathlib import Path
 import openai
 import httpx
 
+# LangSmith tracing
+try:
+    from langsmith import traceable
+except ImportError:
+    # Fallback if langsmith not installed
+    def traceable(*args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
 # Constants
 MAX_ATTEMPTS = 5
 RETRY_DELAY = 30
@@ -71,6 +81,7 @@ def load_api_config() -> Tuple[str, Optional[str]]:
     )
 
 
+@traceable(name="OpenAI_API_Call", run_type="llm")
 def generate_response(
     client: openai.OpenAI,
     model: str,
@@ -126,7 +137,21 @@ def generate_response(
         logging.error(f"Error during API call: {e}")
         raise
 
-    logger.info(f"Response generated in {time.time() - start_time:.2f} seconds")
+    elapsed_time = time.time() - start_time
+
+    # Log metrics
+    if hasattr(response, 'usage'):
+        usage = response.usage
+        logger.info(
+            f"API Call Metrics - Model: {model}, "
+            f"Time: {elapsed_time:.2f}s, "
+            f"Prompt Tokens: {getattr(usage, 'prompt_tokens', 0)}, "
+            f"Completion Tokens: {getattr(usage, 'completion_tokens', 0)}, "
+            f"Total Tokens: {getattr(usage, 'total_tokens', 0)}"
+        )
+    else:
+        logger.info(f"Response generated in {elapsed_time:.2f} seconds")
+
     return response
 
 

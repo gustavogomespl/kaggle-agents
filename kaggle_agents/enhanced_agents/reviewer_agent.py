@@ -176,7 +176,18 @@ class ReviewerAgent(Agent):
         with open(reviews_file, 'w') as f:
             json.dump(reviews, f, indent=2)
 
-        logger.info(f"Reviewer completed. Average score: {average_score:.2f}, Proceed: {should_proceed}")
+        # Log detailed metrics for each agent reviewed
+        logger.info(f"=" * 60)
+        logger.info(f"REVIEWER METRICS - Phase: {phase}")
+        logger.info(f"=" * 60)
+        for agent_key, review in reviews.items():
+            score = review.get('score', 0)
+            logger.info(f"  {agent_key}: Score {score}/5.0")
+            if 'suggestion' in review:
+                logger.info(f"    Suggestion: {review['suggestion'][:100]}...")
+        logger.info(f"  Average Score: {average_score:.2f}/5.0")
+        logger.info(f"  Decision: {'PROCEED' if should_proceed else 'RETRY'}")
+        logger.info(f"=" * 60)
 
         # Format scores and suggestions for memory
         score_dict = {}

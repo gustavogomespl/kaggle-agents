@@ -79,6 +79,16 @@ class SOP:
         # Execute agents in sequence
         phase_results = {}
 
+        # Add initial empty entry to memory so reviewer can access current phase results
+        memory = state.get("memory", [])
+        current_phase_index = len(memory)
+        memory.append({
+            "phase": state.get("phase", ""),
+            "iteration": state.get("iteration", 0),
+            "retry_count": state.get("retry_count", 0),
+        })
+        state["memory"] = memory
+
         for agent_role in agent_roles:
             if agent_role not in self.agents:
                 logger.error(f"Agent not found: {agent_role}")
@@ -93,6 +103,9 @@ class SOP:
                 # Store result
                 phase_results.update(result)
 
+                # Update current memory entry incrementally so reviewer can see results
+                state["memory"][current_phase_index].update(result)
+
                 logger.info(f"Agent {agent_role} completed successfully")
 
             except Exception as e:
@@ -103,9 +116,10 @@ class SOP:
                     "error": str(e),
                     "result": f"Agent failed with error: {str(e)}"
                 }
+                # Update memory entry with error
+                state["memory"][current_phase_index][agent_role] = phase_results[agent_role]
 
-        # Add phase results to memory using helper function
-        add_memory(state, phase_results)
+        # Memory already updated incrementally above, no need to add again
 
         # Check if phase was successful
         status = self._evaluate_phase_results(state, phase_results)
