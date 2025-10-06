@@ -13,7 +13,9 @@ from ..prompts.prompt_developer import (
     PROMPT_DEVELOPER,
     PROMPT_DEVELOPER_TASK,
     PROMPT_FIX_CODE,
-    PROMPT_DEBUG_CODE
+    PROMPT_DEBUG_CODE,
+    PROMPT_MODEL_BUILDING_TEMPLATE,
+    PROMPT_FEATURE_ENGINEERING_TEMPLATE
 )
 
 logger = logging.getLogger(__name__)
@@ -104,6 +106,13 @@ Please implement a reasonable solution based on the phase requirements.
         state_info = get_state_info(state)
         restore_dir = get_restore_dir(state)
 
+        # Add phase-specific templates
+        additional_instructions = ""
+        if "Model Building" in phase or "model" in phase.lower():
+            additional_instructions = PROMPT_MODEL_BUILDING_TEMPLATE
+        elif "Feature Engineering" in phase or "feature" in phase.lower():
+            additional_instructions = PROMPT_FEATURE_ENGINEERING_TEMPLATE
+        
         input_prompt = PROMPT_DEVELOPER.format(
             phase_name=phase,
             state_info=state_info,
@@ -114,6 +123,10 @@ Please implement a reasonable solution based on the phase requirements.
             task=task,
             restore_dir=restore_dir
         )
+        
+        # Append model building template if applicable
+        if additional_instructions:
+            input_prompt += "\n\n" + additional_instructions
 
         # Generate code (let model use default max_completion_tokens)
         raw_reply, history = self.generate(input_prompt, history)
@@ -261,7 +274,55 @@ Please implement a reasonable solution based on the phase requirements.
 
                 if success:
                     logger.info("Code execution successful!")
-                    break
+                    
+                    # Validate critical outputs based on phase
+                    comp_dir = Path(state.get("competition_dir", "."))
+                    
+                    # Model Building phase validation
+                    if "Model Building" in phase or "model" in phase.lower():
+                        models_dir = comp_dir / "models"
+                        submissions_dir = comp_dir / "submissions"
+                        
+                        # Check for model files
+                        model_files = list(models_dir.glob("*.pkl")) + list(models_dir.glob("*.joblib"))
+                        if not model_files:
+                            logger.warning("⚠️ No model files found in models/ directory!")
+                            stderr += "\nWarning: Model Building phase should save model files (.pkl or .joblib) in models/ directory"
+                            success = False
+                        
+                        # Check for submission file
+                        submission_files = list(submissions_dir.glob("*.csv"))
+                        if not submission_files:
+                            logger.warning("⚠️ No submission file found in submissions/ directory!")
+                            stderr += "\nWarning: Model Building phase should create submission.csv in submissions/ directory"
+                            success = False
+                        
+                        if success:
+                            logger.info(f"✓ Model files: {[f.name for f in model_files]}")
+                            logger.info(f"✓ Submission files: {[f.name for f in submission_files]}")
+                    
+                    # Feature Engineering phase validation
+                    elif "Feature Engineering" in phase or "feature" in phase.lower():
+                        data_dir = comp_dir / "data"
+                        processed_train = data_dir / "processed_train.csv"
+                        processed_test = data_dir / "processed_test.csv"
+                        
+                        if not processed_train.exists():
+                            logger.warning("⚠️ processed_train.csv not found!")
+                            stderr += "\nWarning: Feature Engineering phase should create processed_train.csv"
+                            success = False
+                        
+                        if not processed_test.exists():
+                            logger.warning("⚠️ processed_test.csv not found!")
+                            stderr += "\nWarning: Feature Engineering phase should create processed_test.csv"
+                            success = False
+                        
+                        if success:
+                            logger.info(f"✓ Processed train: {processed_train.name}")
+                            logger.info(f"✓ Processed test: {processed_test.name}")
+                    
+                    if success:
+                        break
                 else:
                     logger.warning(f"Code execution failed on attempt {attempt + 1}")
                     past_errors += f"\n\n## Attempt {attempt + 1} Error ##\n{stderr}\n"
@@ -269,7 +330,21 @@ Please implement a reasonable solution based on the phase requirements.
                     if attempt < max_retries - 1:
                         # Try to debug and fix
                         logger.info("Attempting to debug code...")
-                        code, history = self._debug_code(code, stderr, history)
+                        
+                        # Add specific guidance based on phase
+                        debug_stderr = stderr
+                        
+                        if "Model Building" in phase and ("model files" in stderr.lower() or "submission" in stderr.lower()):
+                            debug_stderr += "\n\nREMINDER: You MUST:\n"
+                            debug_stderr += "1. Save trained model using: joblib.dump(model, MODELS_DIR / 'model.pkl')\n"
+                            debug_stderr += "2. Create submission.csv: submission.to_csv(SUBMISSIONS_DIR / 'submission.csv', index=False)\n"
+                        
+                        elif "Feature Engineering" in phase and "processed" in stderr.lower():
+                            debug_stderr += "\n\nREMINDER: You MUST save:\n"
+                            debug_stderr += "1. train.to_csv(COMP_DIR / 'data' / 'processed_train.csv', index=False)\n"
+                            debug_stderr += "2. test.to_csv(COMP_DIR / 'data' / 'processed_test.csv', index=False)\n"
+                        
+                        code, history = self._debug_code(code, debug_stderr, history)
 
             except Exception as e:
                 logger.error(f"Error during code generation/execution: {e}")

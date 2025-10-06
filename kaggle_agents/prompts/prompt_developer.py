@@ -43,12 +43,24 @@ You are implementing code for the "{phase_name}" phase.
 - ✓ Test your syntax mentally before returning the code
 
 **FUNCTIONALITY:**
-1. Import libraries at top (use only: pandas, numpy, matplotlib, sklearn, pathlib)
+1. Import libraries at top (use only: pandas, numpy, matplotlib, sklearn, pathlib, pickle, joblib)
 2. Load data from specified paths
 3. Implement each plan step DIRECTLY and CONCISELY
 4. Save outputs to: {restore_dir}
 5. Print brief progress messages
 6. Use simple try/except for error handling
+
+**PHASE-SPECIFIC REQUIREMENTS:**
+- For "Model Building" phase: MUST create and save:
+  * Trained model file(s) in models/ directory (use pickle or joblib)
+  * Submission CSV file in submissions/ directory (matching sample_submission.csv format)
+  * Predictions on test data
+- For "Feature Engineering" phase: MUST save:
+  * processed_train.csv with engineered features
+  * processed_test.csv with same features applied
+- For "EDA" phases: MUST save:
+  * Analysis results as JSON or TXT
+  * Plots/visualizations as PNG files
 
 **CODE STYLE:**
 - CONCISE: comment only what's essential
@@ -70,6 +82,12 @@ COMP_DIR = Path("{restore_dir}").parent
 OUTPUT_DIR = Path("{restore_dir}")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# For Model Building phase, also ensure these directories exist
+MODELS_DIR = COMP_DIR / "models"
+SUBMISSIONS_DIR = COMP_DIR / "submissions"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+SUBMISSIONS_DIR.mkdir(parents=True, exist_ok=True)
+
 # Your implementation here - DIRECT AND FUNCTIONAL
 
 if __name__ == "__main__":
@@ -79,7 +97,8 @@ if __name__ == "__main__":
 ```
 
 ⚠️ CRITICAL: Verify syntax before returning. Code with syntax errors is UNACCEPTABLE.
-⚠️ KEEP IT CONCISE: If you're running out of space, prioritize correct, working code over comments.
+⚠️ KEEP IT CONCISE: If running out of space, prioritize correct, working code over comments.
+⚠️ FOR MODEL BUILDING: You MUST save model files and create submission.csv - this is mandatory!
 """
 
 PROMPT_EXTRACT_TOOLS = """# TASK #
@@ -131,6 +150,84 @@ Fix the code based on the error messages and test results.
 
 # EXPLANATION #
 Briefly explain what was wrong and how you fixed it.
+"""
+
+PROMPT_MODEL_BUILDING_TEMPLATE = """
+# CRITICAL: For Model Building phase, your code MUST include these steps:
+
+## 1. Load Data
+```python
+train = pd.read_csv(COMP_DIR / "data" / "processed_train.csv")
+test = pd.read_csv(COMP_DIR / "data" / "processed_test.csv")
+sample_sub = pd.read_csv(COMP_DIR / "data" / "sample_submission.csv")
+```
+
+## 2. Prepare Features and Target
+```python
+target_col = sample_sub.columns[1]  # Usually second column
+X = train.drop(columns=[target_col, 'id'] if 'id' in train.columns else [target_col])
+y = train[target_col]
+X_test = test.drop(columns=['id'] if 'id' in test.columns else [])
+```
+
+## 3. Train Model
+```python
+from sklearn.ensemble import RandomForestRegressor  # or appropriate model
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X, y)
+```
+
+## 4. MANDATORY: Save Model
+```python
+import joblib
+model_path = MODELS_DIR / "model.pkl"
+joblib.dump(model, model_path)
+print(f"Model saved to: {{model_path}}")
+```
+
+## 5. MANDATORY: Create Submission
+```python
+predictions = model.predict(X_test)
+submission = sample_sub.copy()
+submission[target_col] = predictions
+submission_path = SUBMISSIONS_DIR / "submission.csv"
+submission.to_csv(submission_path, index=False)
+print(f"Submission saved to: {{submission_path}}")
+print(f"Submission shape: {{submission.shape}}")
+```
+
+⚠️ CRITICAL: Steps 4 and 5 are MANDATORY for Model Building phase!
+"""
+
+PROMPT_FEATURE_ENGINEERING_TEMPLATE = """
+# CRITICAL: For Feature Engineering phase, your code MUST save processed data:
+
+## Load Original Data
+```python
+train = pd.read_csv(COMP_DIR / "data" / "train.csv")
+test = pd.read_csv(COMP_DIR / "data" / "test.csv")
+```
+
+## Apply Feature Engineering
+```python
+# Your feature engineering code here
+# Create new features, transform existing ones, etc.
+```
+
+## MANDATORY: Save Processed Data
+```python
+processed_train_path = COMP_DIR / "data" / "processed_train.csv"
+processed_test_path = COMP_DIR / "data" / "processed_test.csv"
+
+train.to_csv(processed_train_path, index=False)
+test.to_csv(processed_test_path, index=False)
+
+print(f"Processed train saved to: {{processed_train_path}}")
+print(f"Processed test saved to: {{processed_test_path}}")
+print(f"Train shape: {{train.shape}}, Test shape: {{test.shape}}")
+```
+
+⚠️ CRITICAL: Model Building phase needs processed_train.csv and processed_test.csv!
 """
 
 PROMPT_DEBUG_CODE = """# DEBUGGING TASK #
