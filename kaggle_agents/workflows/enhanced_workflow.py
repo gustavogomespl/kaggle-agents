@@ -48,9 +48,9 @@ def create_enhanced_workflow(
         status, updated_state = sop.step(state)
 
         # Return dict with updates (using .get() for safe access)
-        # DON'T hardcode phase - use what SOP set
+        # Keep current phase - routing will change it
         return {
-            "phase": updated_state.get("phase", "Understand Background"),
+            "phase": "Understand Background",  # Keep current, router will change
             "status": status,
             "memory": updated_state.get("memory", []),
             "background_info": updated_state.get("background_info", ""),
@@ -68,9 +68,9 @@ def create_enhanced_workflow(
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates - use phase from SOP
+        # Return dict with updates - keep current phase
         return {
-            "phase": updated_state.get("phase", "Preliminary Exploratory Data Analysis"),
+            "phase": "Preliminary Exploratory Data Analysis",
             "status": status,
             "memory": updated_state.get("memory", []),
             "eda_summary": updated_state.get("eda_summary", {}),
@@ -86,9 +86,9 @@ def create_enhanced_workflow(
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates - use phase from SOP
+        # Return dict with updates - keep current phase
         return {
-            "phase": updated_state.get("phase", "Data Cleaning"),
+            "phase": "Data Cleaning",
             "status": status,
             "memory": updated_state.get("memory", []),
         }
@@ -103,9 +103,9 @@ def create_enhanced_workflow(
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates - use phase from SOP
+        # Return dict with updates - keep current phase
         return {
-            "phase": updated_state.get("phase", "In-depth Exploratory Data Analysis"),
+            "phase": "In-depth Exploratory Data Analysis",
             "status": status,
             "memory": updated_state.get("memory", []),
             "data_insights": updated_state.get("data_insights", []),
@@ -121,9 +121,9 @@ def create_enhanced_workflow(
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates - use phase from SOP
+        # Return dict with updates - keep current phase
         return {
-            "phase": updated_state.get("phase", "Feature Engineering"),
+            "phase": "Feature Engineering",
             "status": status,
             "memory": updated_state.get("memory", []),
             "features_engineered": updated_state.get("features_engineered", []),
@@ -139,9 +139,14 @@ def create_enhanced_workflow(
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates - use phase from SOP
+        # If this is the last phase and it succeeded, mark as Complete
+        if status == "Continue":
+            status = "Complete"
+            logger.info("🎉 Model Building complete - marking workflow as Complete")
+
+        # Return dict with updates - keep current phase
         return {
-            "phase": updated_state.get("phase", "Model Building, Validation, and Prediction"),
+            "phase": "Model Building, Validation, and Prediction",
             "status": status,
             "memory": updated_state.get("memory", []),
             "models_trained": updated_state.get("models_trained", []),

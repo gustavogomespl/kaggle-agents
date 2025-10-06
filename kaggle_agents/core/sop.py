@@ -135,8 +135,7 @@ class SOP:
         # Check if phase was successful
         status = self._evaluate_phase_results(state, phase_results)
 
-        logger.info(f"📊 SOP STEP - Phase evaluation result: {status}")
-        logger.info(f"📊 SOP STEP - Next phase will be: {state.get('phase', 'UNKNOWN')}")
+        logger.info(f"📊 SOP STEP - Phase '{state.get('phase', 'UNKNOWN')}' evaluation result: {status}")
         logger.info(f"="*80)
 
         return status, state
@@ -164,18 +163,12 @@ class SOP:
             logger.info(f"📈 EVALUATION - Reviewer score: {average_score:.2f}/5.0, Proceed: {should_proceed}")
 
             if should_proceed:
-                # Phase successful, move to next phase
-                logger.info("✅ EVALUATION - Phase completed successfully, moving to next phase")
-                current_phase = state.get("phase", "")
-                next_phase(state)
+                # Phase successful - workflow will handle phase transition
+                logger.info("✅ EVALUATION - Phase completed successfully")
                 reset_retry_count(state)
-                logger.info(f"   └─ Transitioned from '{current_phase}' to '{state.get('phase', 'UNKNOWN')}'")
 
-                # Check if workflow is complete
-                if state.get("phase") == "Complete":
-                    logger.info("🎉 EVALUATION - Workflow complete!")
-                    return "Complete"
-
+                # Don't change phase here - let workflow routing handle it
+                # Just return "Continue" to signal success
                 return "Continue"
             else:
                 # Phase needs retry
@@ -190,15 +183,9 @@ class SOP:
         else:
             # No reviewer (e.g., first phase), assume success
             logger.info("✅ EVALUATION - No reviewer in phase, assuming success")
-            current_phase = state.get("phase", "")
-            next_phase(state)
             reset_retry_count(state)
-            logger.info(f"   └─ Transitioned from '{current_phase}' to '{state.get('phase', 'UNKNOWN')}'")
 
-            if state.get("phase") == "Complete":
-                logger.info("🎉 EVALUATION - Workflow complete!")
-                return "Complete"
-
+            # Don't change phase - let workflow handle it
             return "Continue"
 
     def run(self, initial_state: EnhancedKaggleState, max_steps: int = 100) -> EnhancedKaggleState:
