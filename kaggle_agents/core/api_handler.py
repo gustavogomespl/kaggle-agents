@@ -70,17 +70,21 @@ def load_api_config() -> Tuple[str, Optional[str]]:
 def _to_responses_messages(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
     """
     Converte mensagens no formato chat clássico para o formato da Responses API:
-    [{"role": "user"|"system"|"assistant", "content": [{"type":"text","text":"..."}]}]
+    [{"role": "user"|"system"|"assistant", "content": [{"type":"input_text"|"output_text","text":"..."}]}]
     """
     converted = []
     for m in messages:
         content = m.get("content", "")
-        # já aceita lista? mantém; senão, empacota como text
+        role = m.get("role", "user")
+
+        # já aceita lista? mantém; senão, empacota como input_text ou output_text
         if isinstance(content, list):
-            converted.append({"role": m["role"], "content": content})
+            converted.append({"role": role, "content": content})
         else:
+            # Responses API usa "input_text" para user/system e "output_text" para assistant
+            content_type = "output_text" if role == "assistant" else "input_text"
             converted.append(
-                {"role": m["role"], "content": [{"type": "text", "text": str(content)}]}
+                {"role": role, "content": [{"type": content_type, "text": str(content)}]}
             )
     return converted
 
