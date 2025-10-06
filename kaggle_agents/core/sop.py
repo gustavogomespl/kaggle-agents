@@ -65,16 +65,19 @@ class SOP:
                 - "Fail": Workflow failed
         """
         logger.info(f"="*80)
-        logger.info(f"Executing phase: {state.get('phase', '')}")
-        logger.info(f"Retry count: {state.get('retry_count', 0)}/{state.get('max_phase_retries', 3)}")
+        logger.info(f"SOP STEP - Executing phase: {state.get('phase', 'UNKNOWN')}")
+        logger.info(f"SOP STEP - Retry count: {state.get('retry_count', 0)}/{state.get('max_phase_retries', 3)}")
+        logger.info(f"SOP STEP - Iteration: {state.get('iteration', 0)}/{state.get('max_iterations', 1)}")
         logger.info(f"="*80)
 
         # Get agents for this phase
         agent_roles = self.config.get_phase_agents(state.get('phase', ''))
 
         if not agent_roles:
-            logger.warning(f"No agents configured for phase: {state.get('phase', '')}")
+            logger.error(f"❌ SOP STEP - No agents configured for phase: {state.get('phase', '')}")
             return "Fail", state
+
+        logger.info(f"✓ SOP STEP - Agent roles for this phase: {agent_roles}")
 
         # Execute agents in sequence
         phase_results = {}
@@ -91,10 +94,10 @@ class SOP:
 
         for agent_role in agent_roles:
             if agent_role not in self.agents:
-                logger.error(f"Agent not found: {agent_role}")
+                logger.error(f"❌ SOP STEP - Agent not found: {agent_role}")
                 continue
 
-            logger.info(f"Executing agent: {agent_role}")
+            logger.info(f"🤖 SOP STEP - Executing agent: {agent_role}")
 
             try:
                 agent = self.agents[agent_role]
@@ -106,10 +109,18 @@ class SOP:
                 # Update current memory entry incrementally so reviewer can see results
                 state["memory"][current_phase_index].update(result)
 
-                logger.info(f"Agent {agent_role} completed successfully")
+                logger.info(f"✅ SOP STEP - Agent {agent_role} completed successfully")
+
+                # Log key result details
+                if agent_role in result:
+                    agent_result = result[agent_role]
+                    if "status" in agent_result:
+                        logger.info(f"   └─ Status: {agent_result['status']}")
+                    if "success" in agent_result:
+                        logger.info(f"   └─ Success: {agent_result['success']}")
 
             except Exception as e:
-                logger.error(f"Agent {agent_role} failed: {e}", exc_info=True)
+                logger.error(f"❌ SOP STEP - Agent {agent_role} failed: {e}", exc_info=True)
                 # Continue with other agents even if one fails
                 phase_results[agent_role] = {
                     "role": agent_role,
@@ -124,7 +135,9 @@ class SOP:
         # Check if phase was successful
         status = self._evaluate_phase_results(state, phase_results)
 
-        logger.info(f"Phase evaluation result: {status}")
+        logger.info(f"📊 SOP STEP - Phase evaluation result: {status}")
+        logger.info(f"📊 SOP STEP - Next phase will be: {state.get('phase', 'UNKNOWN')}")
+        logger.info(f"="*80)
 
         return status, state
 
@@ -148,36 +161,42 @@ class SOP:
             should_proceed = reviewer_result.get("should_proceed", False)
             average_score = reviewer_result.get("average_score", 0)
 
-            logger.info(f"Reviewer score: {average_score:.2f}/5.0, Proceed: {should_proceed}")
+            logger.info(f"📈 EVALUATION - Reviewer score: {average_score:.2f}/5.0, Proceed: {should_proceed}")
 
             if should_proceed:
                 # Phase successful, move to next phase
-                logger.info("Phase completed successfully")
+                logger.info("✅ EVALUATION - Phase completed successfully, moving to next phase")
+                current_phase = state.get("phase", "")
                 next_phase(state)
                 reset_retry_count(state)
+                logger.info(f"   └─ Transitioned from '{current_phase}' to '{state.get('phase', 'UNKNOWN')}'")
 
                 # Check if workflow is complete
                 if state.get("phase") == "Complete":
+                    logger.info("🎉 EVALUATION - Workflow complete!")
                     return "Complete"
 
                 return "Continue"
             else:
                 # Phase needs retry
                 if should_retry_phase(state):
-                    logger.warning(f"Phase needs retry. Retry count: {state.get('retry_count', 0) + 1}/{state.get('max_phase_retries', 3)}")
+                    logger.warning(f"🔄 EVALUATION - Phase needs retry. Retry count: {state.get('retry_count', 0) + 1}/{state.get('max_phase_retries', 3)}")
                     increment_retry_count(state)
                     return "Retry"
                 else:
-                    logger.error("Max retries reached for phase")
+                    logger.error("❌ EVALUATION - Max retries reached for phase")
                     return "Fail"
 
         else:
             # No reviewer (e.g., first phase), assume success
-            logger.info("No reviewer in phase, assuming success")
+            logger.info("✅ EVALUATION - No reviewer in phase, assuming success")
+            current_phase = state.get("phase", "")
             next_phase(state)
             reset_retry_count(state)
+            logger.info(f"   └─ Transitioned from '{current_phase}' to '{state.get('phase', 'UNKNOWN')}'")
 
             if state.get("phase") == "Complete":
+                logger.info("🎉 EVALUATION - Workflow complete!")
                 return "Complete"
 
             return "Continue"

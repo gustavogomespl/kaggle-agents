@@ -41,12 +41,16 @@ def create_enhanced_workflow(
         """Execute Understand Background phase."""
         logger.info("📖 Executing: Understand Background")
 
+        # Set phase before execution
+        state["phase"] = "Understand Background"
+
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
         # Return dict with updates (using .get() for safe access)
+        # DON'T hardcode phase - use what SOP set
         return {
-            "phase": "Understand Background",
+            "phase": updated_state.get("phase", "Understand Background"),
             "status": status,
             "memory": updated_state.get("memory", []),
             "background_info": updated_state.get("background_info", ""),
@@ -58,12 +62,15 @@ def create_enhanced_workflow(
         """Execute Preliminary EDA phase."""
         logger.info("🔍 Executing: Preliminary Exploratory Data Analysis")
 
+        # Set phase before execution
+        state["phase"] = "Preliminary Exploratory Data Analysis"
+
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates
+        # Return dict with updates - use phase from SOP
         return {
-            "phase": "Preliminary Exploratory Data Analysis",
+            "phase": updated_state.get("phase", "Preliminary Exploratory Data Analysis"),
             "status": status,
             "memory": updated_state.get("memory", []),
             "eda_summary": updated_state.get("eda_summary", {}),
@@ -73,12 +80,15 @@ def create_enhanced_workflow(
         """Execute Data Cleaning phase."""
         logger.info("🧹 Executing: Data Cleaning")
 
+        # Set phase before execution
+        state["phase"] = "Data Cleaning"
+
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates
+        # Return dict with updates - use phase from SOP
         return {
-            "phase": "Data Cleaning",
+            "phase": updated_state.get("phase", "Data Cleaning"),
             "status": status,
             "memory": updated_state.get("memory", []),
         }
@@ -87,12 +97,15 @@ def create_enhanced_workflow(
         """Execute Deep EDA phase."""
         logger.info("🔬 Executing: In-depth Exploratory Data Analysis")
 
+        # Set phase before execution
+        state["phase"] = "In-depth Exploratory Data Analysis"
+
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates
+        # Return dict with updates - use phase from SOP
         return {
-            "phase": "In-depth Exploratory Data Analysis",
+            "phase": updated_state.get("phase", "In-depth Exploratory Data Analysis"),
             "status": status,
             "memory": updated_state.get("memory", []),
             "data_insights": updated_state.get("data_insights", []),
@@ -102,12 +115,15 @@ def create_enhanced_workflow(
         """Execute Feature Engineering phase."""
         logger.info("⚙️ Executing: Feature Engineering")
 
+        # Set phase before execution
+        state["phase"] = "Feature Engineering"
+
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates
+        # Return dict with updates - use phase from SOP
         return {
-            "phase": "Feature Engineering",
+            "phase": updated_state.get("phase", "Feature Engineering"),
             "status": status,
             "memory": updated_state.get("memory", []),
             "features_engineered": updated_state.get("features_engineered", []),
@@ -117,12 +133,15 @@ def create_enhanced_workflow(
         """Execute Model Building phase."""
         logger.info("🎯 Executing: Model Building, Validation, and Prediction")
 
+        # Set phase before execution
+        state["phase"] = "Model Building, Validation, and Prediction"
+
         # Execute SOP step with dict
         status, updated_state = sop.step(state)
 
-        # Return dict with updates
+        # Return dict with updates - use phase from SOP
         return {
-            "phase": "Model Building, Validation, and Prediction",
+            "phase": updated_state.get("phase", "Model Building, Validation, and Prediction"),
             "status": status,
             "memory": updated_state.get("memory", []),
             "models_trained": updated_state.get("models_trained", []),
@@ -143,12 +162,14 @@ def create_enhanced_workflow(
         status = state.get("status", "Continue")
         current_phase = state.get("phase", "")
 
+        logger.info(f"🔀 ROUTING - Status: {status}, Current Phase: {current_phase}")
+
         if status == "Complete":
-            logger.info("✅ Workflow complete!")
+            logger.info("✅ ROUTING - Workflow complete! Going to END")
             return END
 
         elif status == "Fail":
-            logger.error("❌ Workflow failed!")
+            logger.error("❌ ROUTING - Workflow failed! Going to END")
             return END
 
         elif status == "Retry":
@@ -161,31 +182,36 @@ def create_enhanced_workflow(
                 "Feature Engineering": "feature_engineering",
                 "Model Building, Validation, and Prediction": "model_building"
             }
-            logger.info(f"🔄 Retrying phase: {current_phase}")
-            return phase_to_node.get(current_phase, END)
+            next_node = phase_to_node.get(current_phase, END)
+            logger.info(f"🔄 ROUTING - Retrying phase: {current_phase} -> {next_node}")
+            return next_node
 
         elif status == "Continue":
             # Move to next phase
+            next_node = None
             if current_phase == "Understand Background":
-                return "preliminary_eda"
+                next_node = "preliminary_eda"
             elif current_phase == "Preliminary Exploratory Data Analysis":
-                return "data_cleaning"
+                next_node = "data_cleaning"
             elif current_phase == "Data Cleaning":
-                return "deep_eda"
+                next_node = "deep_eda"
             elif current_phase == "In-depth Exploratory Data Analysis":
-                return "feature_engineering"
+                next_node = "feature_engineering"
             elif current_phase == "Feature Engineering":
-                return "model_building"
+                next_node = "model_building"
             elif current_phase == "Model Building, Validation, and Prediction":
-                return END
+                next_node = END
             elif current_phase == "Complete":
-                return END
+                next_node = END
             else:
-                logger.warning(f"⚠️ Unknown phase: {current_phase}")
-                return END
+                logger.warning(f"⚠️ ROUTING - Unknown phase: {current_phase}, going to END")
+                next_node = END
+
+            logger.info(f"➡️ ROUTING - Continue from '{current_phase}' to '{next_node}'")
+            return next_node
 
         else:
-            logger.error(f"❌ Unknown status: {status}")
+            logger.error(f"❌ ROUTING - Unknown status: {status}, going to END")
             return END
 
     # Build workflow graph using dict-based state
