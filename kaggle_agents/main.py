@@ -13,6 +13,7 @@ else:
     os.environ.setdefault('MPLBACKEND', 'Agg')
 
 import argparse
+import logging
 from pathlib import Path
 from langchain_core.messages import HumanMessage
 from .workflows.kaggle_workflow import create_kaggle_workflow
@@ -136,6 +137,13 @@ def extract_competition_slug(competition_input: str) -> str:
 
 def main():
     """Main function to run Kaggle agents."""
+    # Configure logging to show INFO level messages
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[logging.StreamHandler(sys.stdout)]
+    )
+
     parser = argparse.ArgumentParser(
         description="AutoKaggle - Multi-agent framework for autonomous Kaggle competitions"
     )

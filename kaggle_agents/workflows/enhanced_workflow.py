@@ -39,13 +39,17 @@ def create_enhanced_workflow(
     # Define phase nodes
     def execute_understand_background(state: dict) -> dict:
         """Execute Understand Background phase."""
-        logger.info("📖 Executing: Understand Background")
+        logger.info("📖 WORKFLOW - Executing: Understand Background")
+        logger.info(f"📖 WORKFLOW - State keys: {list(state.keys())}")
+        logger.info(f"📖 WORKFLOW - Current iteration: {state.get('iteration', 'UNKNOWN')}/{state.get('max_iterations', 'UNKNOWN')}")
 
         # Set phase before execution
         state["phase"] = "Understand Background"
 
         # Execute SOP step with dict
+        logger.info("📖 WORKFLOW - Calling sop.step()")
         status, updated_state = sop.step(state)
+        logger.info(f"📖 WORKFLOW - SOP returned status: {status}")
 
         # Return dict with updates (using .get() for safe access)
         # Keep current phase - routing will change it
