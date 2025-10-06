@@ -1,15 +1,14 @@
 """Prompts for the Developer agent."""
 
 PROMPT_DEVELOPER_TASK = """# YOUR TASK #
-Implement the plan for the "{phase_name}" phase by writing production-quality Python code.
+Write executable, syntactically correct Python code for the "{phase_name}" phase.
 
-Your code should:
-1. Follow the plan's specifications exactly
-2. Use the recommended tools and libraries
-3. Include proper error handling
-4. Be well-documented with comments
-5. Save results to appropriate files
-6. Be runnable as a standalone script
+PRIORITIES (in order):
+1. SYNTACTICALLY VALID - zero syntax errors
+2. CONCISE - avoid long comments, get straight to implementation
+3. FUNCTIONAL - code must run successfully
+4. FOLLOWS PLAN - implement the specified steps
+5. SAVES RESULTS - write outputs to appropriate files
 """
 
 PROMPT_DEVELOPER = """# CONTEXT #
@@ -32,29 +31,55 @@ You are implementing code for the "{phase_name}" phase.
 
 {task}
 
-# CODE REQUIREMENTS #
-1. Import all necessary libraries at the top
-2. Load data from the specified paths
-3. Implement each step from the plan
-4. Save outputs to files in the restore directory: {restore_dir}
-5. Print progress messages for debugging
-6. Handle errors gracefully
+# CRITICAL CODE REQUIREMENTS #
+
+**SYNTAX (HIGHEST PRIORITY):**
+- ✓ ALWAYS close strings (single, double, and triple quotes)
+- ✓ ALWAYS close parentheses (), brackets [], braces {{}}
+- ✓ ALWAYS complete try blocks with except or finally
+- ✓ ALWAYS finish loops and conditionals properly
+- ✓ Use multiline strings CAREFULLY - prefer single-line strings when possible
+- ✓ Avoid breaking strings across lines without proper escaping
+- ✓ Test your syntax mentally before returning the code
+
+**FUNCTIONALITY:**
+1. Import libraries at top (use only: pandas, numpy, matplotlib, sklearn, pathlib)
+2. Load data from specified paths
+3. Implement each plan step DIRECTLY and CONCISELY
+4. Save outputs to: {restore_dir}
+5. Print brief progress messages
+6. Use simple try/except for error handling
+
+**CODE STYLE:**
+- CONCISE: comment only what's essential
+- DIRECT: get to the point, no fluff
+- FUNCTIONAL: prioritize code that RUNS over "pretty" code
+- PRACTICAL: use simple solutions, avoid over-engineering
 
 # RESPONSE FORMAT #
-```python
-# {phase_name} Implementation
-# Generated code following the plan
+Return ONLY the executable Python code block:
 
+```python
+# {phase_name} - Concise Implementation
 import pandas as pd
 import numpy as np
-# ... other imports
+from pathlib import Path
 
-# [Your implementation here]
+# Configuration
+COMP_DIR = Path("{restore_dir}").parent
+OUTPUT_DIR = Path("{restore_dir}")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Your implementation here - DIRECT AND FUNCTIONAL
 
 if __name__ == "__main__":
-    # Main execution
-    pass
+    print("[START] {phase_name}")
+    # Main implementation
+    print("[DONE] {phase_name}")
 ```
+
+⚠️ CRITICAL: Verify syntax before returning. Code with syntax errors is UNACCEPTABLE.
+⚠️ KEEP IT CONCISE: If you're running out of space, prioritize correct, working code over comments.
 """
 
 PROMPT_EXTRACT_TOOLS = """# TASK #
@@ -109,7 +134,7 @@ Briefly explain what was wrong and how you fixed it.
 """
 
 PROMPT_DEBUG_CODE = """# DEBUGGING TASK #
-The code execution failed. Analyze the error and provide a fix.
+The code execution failed. Fix it quickly and efficiently.
 
 ## Code ##
 ```python
@@ -124,19 +149,31 @@ The code execution failed. Analyze the error and provide a fix.
 ## Error Type ##
 {error_type}
 
-# DEBUGGING STEPS #
-1. Identify the exact line and cause of the error
-2. Check for common issues:
-   - Missing imports
-   - Incorrect variable names
+# FIX STRATEGY #
+1. Identify exact line causing error
+2. Check common issues:
+   - Unclosed strings/quotes (triple quotes, double quotes, single quotes)
+   - Unclosed brackets/parentheses/braces
+   - Incomplete try/except blocks
+   - Missing imports (especially seaborn - DO NOT USE IT)
    - Type mismatches
    - File path issues
-   - Logic errors
-3. Provide corrected code
+3. Return ONLY the corrected code
+
+# CRITICAL RULES #
+- If error mentions seaborn or ModuleNotFoundError, REMOVE all seaborn imports
+- Use matplotlib.pyplot instead of seaborn
+- Verify ALL strings are properly closed
+- Verify ALL brackets/parentheses are balanced
+- Keep the fix MINIMAL - only change what's broken
 
 # RESPONSE FORMAT #
+Return ONLY the fixed code block:
+
 ```python
-# Corrected code
-[Your fixed code here]
+# Fixed code - syntax verified
+[Your corrected code here]
 ```
+
+⚠️ Do NOT add explanations. Return ONLY executable code.
 """

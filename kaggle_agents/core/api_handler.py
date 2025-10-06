@@ -252,10 +252,15 @@ class APIHandler:
                 )
                 content = self._extract_text(resp)
                 if not content:
-                    logger.error(f"Conteúdo vazio. Response: {resp}")
-                    # tenta identificar motivo (Responses tem status/reason às vezes)
-                    reason = getattr(resp, "status", "") or getattr(resp, "reason", "")
-                    return f"Error: resposta vazia. {('Motivo: ' + str(reason)) if reason else ''}".strip()
+                    logger.error(f"Empty content. Response: {resp}")
+                    # Try to identify reason (Responses API sometimes has status/reason)
+                    status = getattr(resp, "status", "")
+                    reason = getattr(getattr(resp, "incomplete_details", None), "reason", "")
+                    error_msg = "Error: Empty response."
+                    if status == "incomplete":
+                        error_msg += f" Status: incomplete. Reason: {reason or 'unknown'}"
+                        logger.warning("Response was incomplete - consider increasing max_output_tokens")
+                    return error_msg
                 return content
 
             except openai.BadRequestError as e:

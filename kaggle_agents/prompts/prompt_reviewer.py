@@ -4,11 +4,11 @@ PROMPT_REVIEWER_TASK = """# YOUR TASK #
 Review and score the output from the {agent_role} agent.
 
 Provide:
-1. A score from 0-5 (where 5 is excellent, 3 is acceptable, 0 is poor)
-2. Detailed analysis of strengths and weaknesses
-3. Specific, actionable suggestions for improvement
+1. Score from 0-5 (5=excellent, 3=acceptable, 0=poor)
+2. Brief analysis (2-3 bullet points)
+3. Specific, actionable suggestion (1-2 sentences)
 
-Be constructive but rigorous in your evaluation.
+Be constructive and CONCISE.
 """
 
 PROMPT_REVIEWER = """# REVIEW TASK #
@@ -28,42 +28,43 @@ You are reviewing the work of the "{agent_role}" agent for the "{phase_name}" ph
 
 # EVALUATION CRITERIA #
 
-For Planner:
-- Clarity and completeness of steps
-- Alignment with competition goals
-- Feasibility of implementation
-- Appropriate tool selection
-- Logical flow
+**For Planner:**
+- Clear, actionable steps
+- Aligned with competition goals
+- Implementable with available tools
 
-For Developer:
-- Code correctness and functionality
-- Follows the plan specifications
-- Proper error handling
-- Code quality and documentation
-- Efficiency and best practices
+**For Developer:**
+- Code runs without errors
+- Follows plan specifications
+- Handles errors appropriately
+- Produces required outputs
 
 # SCORING SCALE #
-5 - Excellent: Exceeds expectations, production-ready
-4 - Good: Meets expectations with minor issues
-3 - Acceptable: Meets minimum requirements, needs refinement
-2 - Needs Work: Significant issues, requires revision
-1 - Poor: Major problems, fundamental issues
-0 - Unacceptable: Completely fails to meet requirements
+5 - Excellent: Production-ready, exceeds expectations
+4 - Good: Meets expectations, minor issues
+3 - Acceptable: Minimum requirements met
+2 - Needs Work: Significant issues
+1 - Poor: Major problems
+0 - Unacceptable: Fails completely
 
 # RESPONSE FORMAT #
+Return CONCISE JSON evaluation:
+
 ```json
 {{
   "agent": "{agent_role}",
   "score": 4,
   "analysis": {{
-    "strengths": ["strength1", "strength2"],
-    "weaknesses": ["weakness1", "weakness2"],
-    "specific_issues": ["issue1", "issue2"]
+    "strengths": ["Concise strength 1", "Concise strength 2"],
+    "weaknesses": ["Concise weakness 1", "Concise weakness 2"],
+    "specific_issues": ["Issue 1", "Issue 2"]
   }},
-  "suggestion": "Detailed suggestion for improvement. Be specific about what needs to change and how to improve it.",
+  "suggestion": "One concrete, actionable suggestion (1-2 sentences max).",
   "requires_revision": false
 }}
 ```
+
+⚠️ Keep analysis brief - focus on actionable insights, not lengthy explanations.
 """
 
 PROMPT_MULTI_AGENT_REVIEW = """# MULTI-AGENT REVIEW TASK #

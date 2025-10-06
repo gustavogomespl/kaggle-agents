@@ -159,7 +159,7 @@ class ConfigManager:
 
     def get_max_tokens(self) -> int:
         """Get maximum tokens for generation."""
-        return self.get('model_settings.max_tokens', 4096)
+        return self.get('model_settings.max_tokens', 16000)
 
     # Execution settings
     def get_code_timeout(self) -> int:
@@ -242,7 +242,7 @@ class ConfigManager:
             "model_settings": {
                 "default_model": "gpt-5-mini",
                 "temperature": 1.0,  # gpt-5-mini only supports default temperature
-                "max_tokens": 4096
+                "max_tokens": 16000
             },
             "workflow_mode": {
                 "mode": "enhanced"

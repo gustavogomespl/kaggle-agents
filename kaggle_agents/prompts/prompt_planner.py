@@ -1,16 +1,16 @@
 """Prompts for the Planner agent."""
 
 PROMPT_PLANNER_TASK = """# YOUR TASK #
-Create a comprehensive plan for the "{phase_name}" phase of the Kaggle competition workflow.
+Create a clear, actionable plan for the "{phase_name}" phase.
 
 Your plan should:
-1. Break down the phase into clear, actionable steps
-2. Consider the competition type and evaluation metric
+1. Break down into 3-5 concrete, implementable steps
+2. Consider competition type and evaluation metric
 3. Leverage previous phase results
-4. Utilize available tools and libraries
-5. Be specific and implementable
+4. Be SPECIFIC - avoid vague statements
+5. Be CODE-READY - steps should translate directly to code
 
-Focus on practical steps that can be directly translated into code.
+Focus on PRACTICAL steps, not theoretical explanations.
 """
 
 PROMPT_PLANNER = """# CONTEXT #
@@ -30,11 +30,14 @@ You are planning the "{phase_name}" phase in a Kaggle competition workflow.
 
 {task}
 
-Please provide an initial plan considering:
-- The competition objective and metric
+# PLANNING GUIDELINES #
+- Competition objective and metric
 - Data characteristics from background
 - Best practices for this phase
 - Logical progression of steps
+- KEEP IT CONCISE - 3-5 clear steps maximum
+
+⚠️ Focus on WHAT to do, not lengthy explanations of WHY.
 """
 
 PROMPT_PLANNER_TOOLS = """# AVAILABLE TOOLS #
@@ -49,45 +52,42 @@ Tool Names: {tool_names}
 Refine your plan to incorporate these tools where appropriate.
 
 For each tool you plan to use:
-1. Explain why it's suitable for the task
-2. Specify the parameters you'll use
-3. Describe expected outputs
+1. State which tool to use
+2. Specify key parameters
+3. Note expected output
 
-Update your plan with these tool specifications.
+Keep tool specifications BRIEF and ACTIONABLE.
 """
 
 PROMPT_PLANNER_REORGANIZE_IN_MARKDOWN = """# TASK #
-Please reorganize your plan into a clean, structured Markdown format.
-
-Use this structure:
+Reorganize your plan into a clean, structured Markdown format.
 
 # RESPONSE FORMAT #
 ```markdown
 # {Phase Name} Plan
 
 ## Objective
-[Clear statement of what this phase aims to achieve]
+[Clear, one-sentence objective]
 
 ## Approach
-[High-level strategy]
+[2-3 sentences on strategy]
 
-## Detailed Steps
+## Steps
 
-### Step 1: [Step Name]
-- **Description**: [What this step does]
-- **Method**: [How it will be done]
-- **Tools/Libraries**: [What will be used]
-- **Expected Output**: [What this step produces]
+### 1. [Step Name]
+- **Action**: [What to do]
+- **Tools**: [What to use]
+- **Output**: [What is produced]
 
-### Step 2: [Step Name]
-[Continue for all steps]
+### 2. [Step Name]
+[Continue for 3-5 steps total]
 
 ## Success Criteria
-[How to know the phase was successful]
-
-## Notes
-[Any important considerations or warnings]
+- [Criterion 1]
+- [Criterion 2]
 ```
+
+⚠️ Keep it CONCISE - avoid lengthy explanations.
 """
 
 PROMPT_PLANNER_REORGANIZE_IN_JSON = """# TASK #
