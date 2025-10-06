@@ -319,26 +319,38 @@ class Agent:
         Returns:
             Extracted Python code
         """
-        # Try to match ```python first
-        code_match = re.search(r'```python\s*(.+?)\s*```', raw_reply, re.DOTALL)
+        # Remove any leading/trailing whitespace
+        raw_reply = raw_reply.strip()
+
+        # Try to match ```python first (most specific)
+        code_match = re.search(r'```python\s*\n?(.*?)\n?```', raw_reply, re.DOTALL)
         if code_match:
             logger.debug("Found ```python block")
             return code_match.group(1).strip()
 
         # Try to match ```py
-        py_match = re.search(r'```py\s*(.+?)\s*```', raw_reply, re.DOTALL)
+        py_match = re.search(r'```py\s*\n?(.*?)\n?```', raw_reply, re.DOTALL)
         if py_match:
             logger.debug("Found ```py block")
             return py_match.group(1).strip()
 
         # Try to match any ``` code block (might be unlabeled Python code)
-        generic_match = re.search(r'```\s*(.+?)\s*```', raw_reply, re.DOTALL)
+        generic_match = re.search(r'```\s*\n?(.*?)\n?```', raw_reply, re.DOTALL)
         if generic_match:
             logger.debug("Found generic ``` block, assuming Python code")
             content = generic_match.group(1).strip()
             # Remove language identifier if present at the start
-            content = re.sub(r'^(python|py)\n', '', content)
+            content = re.sub(r'^(python|py)\s*\n', '', content)
             return content
+
+        # Check if raw_reply starts with ``` (malformed markdown)
+        if raw_reply.startswith('```'):
+            logger.warning("Malformed code block detected, attempting to extract...")
+            # Remove opening ```python or ```
+            content = re.sub(r'^```(?:python|py)?\s*\n?', '', raw_reply)
+            # Remove trailing ```
+            content = re.sub(r'\n?```\s*$', '', content)
+            return content.strip()
 
         # If no code blocks found, return as-is (might be plain code)
         logger.debug(f"No code blocks found. Reply preview: {raw_reply[:200]}...")
