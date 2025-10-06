@@ -52,7 +52,7 @@ class Agent:
         self,
         prompt: str,
         history: Optional[List[Dict[str, str]]] = None,
-        max_completion_tokens: int = 4096,
+        max_completion_tokens: int = 16384,
         temperature: Optional[float] = None
     ) -> Tuple[str, List[Dict[str, str]]]:
         """Generate response from LLM.
@@ -60,7 +60,7 @@ class Agent:
         Args:
             prompt: User prompt
             history: Conversation history
-            max_completion_tokens: Maximum tokens to generate
+            max_completion_tokens: Maximum tokens to generate (default 16384 for GPT-5 reasoning models)
             temperature: Sampling temperature (if None, uses config default)
 
         Returns:
