@@ -1,237 +1,275 @@
-"""Enhanced state management with memory and phase tracking."""
+"""
+Unified State Management for Kaggle Agents.
 
-import json
-from typing import Annotated, List, Dict, Any, Optional
-from typing_extensions import TypedDict
+This module defines the central state structure that flows through
+the LangGraph workflow, containing all data needed for autonomous
+Kaggle competition solving.
+"""
+
+from typing import TypedDict, Annotated, Literal, Any
 from operator import add
-from pathlib import Path
-from langgraph.graph import MessagesState
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
-def merge_dict(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge two dictionaries, with right values taking precedence."""
-    if not left:
-        return right
-    if not right:
-        return left
-    return {**left, **right}
+# ==================== Domain Types ====================
+
+DomainType = Literal["tabular", "computer_vision", "nlp", "time_series", "multi_modal"]
 
 
-class EnhancedKaggleState(MessagesState):
-    """Enhanced state with memory management and phase tracking.
+@dataclass
+class CompetitionInfo:
+    """Competition metadata and configuration."""
 
-    This is a TypedDict for compatibility with LangGraph's state management.
-    All access should be via dict operations: state["field"] or state.get("field", default)
+    name: str
+    description: str
+    evaluation_metric: str
+    problem_type: str  # classification, regression, ranking, etc.
+    domain: DomainType | None = None
+    data_files: list[str] = field(default_factory=list)
+    submission_format: dict[str, Any] = field(default_factory=dict)
+    deadline: datetime | None = None
+
+
+@dataclass
+class SOTASolution:
+    """State-of-the-art solution retrieved from search."""
+
+    source: str  # notebook_id or discussion_url
+    title: str
+    score: float
+    votes: int
+    code_snippets: list[str] = field(default_factory=list)
+    strategies: list[str] = field(default_factory=list)
+    models_used: list[str] = field(default_factory=list)
+    feature_engineering: list[str] = field(default_factory=list)
+    ensemble_approach: str | None = None
+
+
+@dataclass
+class AblationComponent:
+    """A code component identified for ablation testing."""
+
+    name: str
+    component_type: str  # feature_engineering, model, preprocessing, ensemble
+    code: str
+    estimated_impact: float = 0.0
+    tested: bool = False
+    actual_impact: float | None = None
+
+
+@dataclass
+class DevelopmentResult:
+    """Result from code development and execution."""
+
+    code: str
+    success: bool
+    stdout: str = ""
+    stderr: str = ""
+    execution_time: float = 0.0
+    artifacts_created: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ValidationResult:
+    """Result from robustness validation."""
+
+    module: str  # debugging, leakage, data_usage, format
+    passed: bool
+    score: float
+    issues: list[str] = field(default_factory=list)
+    suggestions: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SubmissionResult:
+    """Result from Kaggle submission."""
+
+    submission_id: str | None
+    public_score: float | None
+    private_score: float | None = None
+    percentile: float | None = None
+    cv_score: float | None = None
+    submitted_at: datetime = field(default_factory=datetime.now)
+
+
+@dataclass
+class IterationMemory:
+    """Memory of a single iteration for learning."""
+
+    iteration: int
+    phase: str
+    actions_taken: list[str] = field(default_factory=list)
+    results: dict[str, Any] = field(default_factory=dict)
+    score_improvement: float = 0.0
+    what_worked: list[str] = field(default_factory=list)
+    what_failed: list[str] = field(default_factory=list)
+
+
+# ==================== Main State ====================
+
+class KaggleState(TypedDict):
+    """
+    Unified state for the entire Kaggle agent workflow.
+
+    This state flows through all nodes in the LangGraph workflow,
+    accumulating data and enabling agents to make informed decisions.
     """
 
-    # ========== Competition Metadata ==========
-    competition_name: str
-    competition_type: str
-    metric: str
-    competition_dir: str
+    # Competition Context
+    competition_info: CompetitionInfo
+    working_directory: str
 
-    # ========== Data Paths ==========
-    train_data_path: str
-    test_data_path: str
-    sample_submission_path: str
+    # Domain Detection
+    domain_detected: DomainType | None
+    domain_confidence: float
 
-    # ========== EDA Results ==========
-    eda_summary: Annotated[Dict[str, Any], merge_dict]
-    data_insights: Annotated[List[str], add]
+    # Search Phase
+    sota_solutions: Annotated[list[SOTASolution], add]
+    search_queries_used: Annotated[list[str], add]
 
-    # ========== Feature Engineering ==========
-    features_engineered: Annotated[List[str], add]
-    feature_importance: Annotated[Dict[str, float], merge_dict]
+    # Planning Phase
+    ablation_plan: list[AblationComponent]
+    current_component_index: int
+    optimization_strategy: str
 
-    # ========== Model Training ==========
-    models_trained: Annotated[List[Dict[str, Any]], add]
-    best_model: Annotated[Dict[str, Any], merge_dict]
-    cv_scores: Annotated[List[float], add]
+    # Development Phase
+    development_results: Annotated[list[DevelopmentResult], add]
+    current_code: str
+    code_retry_count: int
 
-    # ========== Submission ==========
-    submission_path: str
-    submission_score: float
-    leaderboard_rank: int
+    # Validation Phase
+    validation_results: Annotated[list[ValidationResult], add]
+    overall_validation_score: float
+    critical_issues: Annotated[list[str], add]
 
-    # ========== Workflow Control ==========
-    iteration: int
+    # Ensemble Phase
+    ensemble_strategy: str | None
+    ensemble_weights: dict[str, float]
+
+    # Submission Phase
+    submissions: Annotated[list[SubmissionResult], add]
+    best_score: float
+    target_percentile: float  # goal: 20th percentile (top 20%)
+
+    # Iteration Control
+    current_iteration: int
     max_iterations: int
+    should_continue: bool
+    termination_reason: str | None
 
-    # ========== Error Tracking ==========
-    errors: Annotated[List[str], add]
+    # Memory & Learning
+    iteration_memory: Annotated[list[IterationMemory], add]
+    learned_patterns: dict[str, Any]
 
-    # ========== Enhanced Fields ==========
-    phase: str
-    memory: Annotated[List[Dict[str, Any]], add]
-    background_info: str
-    rules: Dict[str, Any]
-    retry_count: int
-    max_phase_retries: int
-    status: str
+    # Prompt Optimization (DSPy)
+    optimized_prompts: dict[str, str]  # agent_name -> optimized_prompt
+    prompt_performance: dict[str, float]  # agent_name -> performance_score
 
-
-# Phase to directory mapping (module-level constant)
-PHASE_TO_DIRECTORY = {
-    "Understand Background": "background",
-    "Preliminary Exploratory Data Analysis": "pre_eda",
-    "Data Cleaning": "data_cleaning",
-    "In-depth Exploratory Data Analysis": "deep_eda",
-    "Feature Engineering": "feature_engineering",
-    "Model Building, Validation, and Prediction": "model_build_predict"
-}
-
-# Context phases (module-level constant)
-CONTEXT_PHASES = [
-    "Understand Background",
-    "Preliminary Exploratory Data Analysis",
-    "Data Cleaning",
-    "In-depth Exploratory Data Analysis",
-    "Feature Engineering",
-    "Model Building, Validation, and Prediction"
-]
+    # Metadata
+    workflow_start_time: datetime
+    last_updated: datetime
 
 
-# Helper functions that work with state dict
-def get_restore_dir(state: EnhancedKaggleState) -> Path:
-    """Get the directory for storing phase-specific files."""
-    phase = state.get("phase", "")
-    competition_dir = state.get("competition_dir", ".")
-    dir_name = PHASE_TO_DIRECTORY.get(phase, "unknown")
-    path = Path(competition_dir) / dir_name
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+# ==================== State Reducers ====================
+
+def merge_dict(existing: dict, new: dict) -> dict:
+    """Merge dictionaries, with new values overwriting existing ones."""
+    return {**existing, **new}
 
 
-def get_dir_name(state: EnhancedKaggleState) -> str:
-    """Get the directory name for current phase."""
-    phase = state.get("phase", "")
-    return PHASE_TO_DIRECTORY.get(phase, "unknown")
+def merge_competition_info(existing: CompetitionInfo | None, new: CompetitionInfo) -> CompetitionInfo:
+    """Merge competition info, preferring new values when provided."""
+    if existing is None:
+        return new
+
+    # Update existing with new non-None values
+    updated = CompetitionInfo(
+        name=new.name if new.name else existing.name,
+        description=new.description if new.description else existing.description,
+        evaluation_metric=new.evaluation_metric if new.evaluation_metric else existing.evaluation_metric,
+        problem_type=new.problem_type if new.problem_type else existing.problem_type,
+        domain=new.domain if new.domain is not None else existing.domain,
+        data_files=new.data_files if new.data_files else existing.data_files,
+        submission_format=new.submission_format if new.submission_format else existing.submission_format,
+        deadline=new.deadline if new.deadline is not None else existing.deadline,
+    )
+    return updated
 
 
-def get_state_info(state: EnhancedKaggleState) -> str:
-    """Generate formatted state information."""
-    info = f"""# STATE INFORMATION #
-Phase: {state.get('phase', '')}
-Directory: {get_dir_name(state)}
-Competition: {state.get('competition_name', '')}
-Competition Type: {state.get('competition_type', '')}
-Metric: {state.get('metric', '')}
-Retry Count: {state.get('retry_count', 0)}/{state.get('max_phase_retries', 3)}
-Iteration: {state.get('iteration', 0)}/{state.get('max_iterations', 5)}
-"""
-    background = state.get("background_info", "")
-    if background:
-        info += f"\nBackground:\n{background[:500]}..."
+# ==================== State Initialization ====================
 
-    return info
+def create_initial_state(competition_name: str, working_dir: str) -> KaggleState:
+    """
+    Create initial state for a new competition.
 
+    Args:
+        competition_name: Name of the Kaggle competition
+        working_dir: Working directory for artifacts
 
-def get_previous_phase(state: EnhancedKaggleState, type: str = "all") -> List[str]:
-    """Get list of previous phases."""
-    current_phase = state.get("phase", "")
-    current_idx = CONTEXT_PHASES.index(current_phase) if current_phase in CONTEXT_PHASES else -1
+    Returns:
+        Initialized KaggleState
+    """
+    now = datetime.now()
 
-    if current_idx <= 0:
-        return []
+    return KaggleState(
+        # Competition Context
+        competition_info=CompetitionInfo(
+            name=competition_name,
+            description="",
+            evaluation_metric="",
+            problem_type="",
+        ),
+        working_directory=working_dir,
 
-    previous_phases = CONTEXT_PHASES[:current_idx]
+        # Domain Detection
+        domain_detected=None,
+        domain_confidence=0.0,
 
-    if type == "plan":
-        plan_phases = [
-            "Preliminary Exploratory Data Analysis",
-            "Data Cleaning",
-            "In-depth Exploratory Data Analysis",
-            "Feature Engineering",
-            "Model Building, Validation, and Prediction"
-        ]
-        return [p for p in previous_phases if p in plan_phases]
-    elif type == "code":
-        code_phases = [
-            "Data Cleaning",
-            "Feature Engineering",
-            "Model Building, Validation, and Prediction"
-        ]
-        return [p for p in previous_phases if p in code_phases]
+        # Search Phase
+        sota_solutions=[],
+        search_queries_used=[],
 
-    return previous_phases
+        # Planning Phase
+        ablation_plan=[],
+        current_component_index=0,
+        optimization_strategy="",
 
+        # Development Phase
+        development_results=[],
+        current_code="",
+        code_retry_count=0,
 
-def set_background_info(state: EnhancedKaggleState, info: str) -> None:
-    """Set background information for the competition."""
-    state["background_info"] = info
+        # Validation Phase
+        validation_results=[],
+        overall_validation_score=0.0,
+        critical_issues=[],
 
+        # Ensemble Phase
+        ensemble_strategy=None,
+        ensemble_weights={},
 
-def generate_rules(state: EnhancedKaggleState) -> str:
-    """Generate formatted rules for agents."""
-    rules = state.get("rules", {})
-    if not rules:
-        return "No specific rules configured."
+        # Submission Phase
+        submissions=[],
+        best_score=0.0,
+        target_percentile=20.0,  # top 20%
 
-    rules_str = "# RULES #\n"
-    for key, value in rules.items():
-        rules_str += f"- {key}: {value}\n"
+        # Iteration Control
+        current_iteration=0,
+        max_iterations=10,
+        should_continue=True,
+        termination_reason=None,
 
-    return rules_str
+        # Memory & Learning
+        iteration_memory=[],
+        learned_patterns={},
 
+        # Prompt Optimization
+        optimized_prompts={},
+        prompt_performance={},
 
-def add_memory(state: EnhancedKaggleState, phase_results: Dict[str, Any]) -> None:
-    """Add results from a phase execution to memory."""
-    memory_entry = {
-        "phase": state.get("phase", ""),
-        "iteration": state.get("iteration", 0),
-        "retry_count": state.get("retry_count", 0),
-        **phase_results
-    }
-
-    memory = state.get("memory", [])
-    memory.append(memory_entry)
-    state["memory"] = memory
-
-
-def reset_retry_count(state: EnhancedKaggleState) -> None:
-    """Reset retry count when moving to new phase."""
-    state["retry_count"] = 0
-
-
-def increment_retry_count(state: EnhancedKaggleState) -> None:
-    """Increment retry count."""
-    state["retry_count"] = state.get("retry_count", 0) + 1
-
-
-def should_retry_phase(state: EnhancedKaggleState) -> bool:
-    """Check if current phase should be retried."""
-    retry_count = state.get("retry_count", 0)
-    max_retries = state.get("max_phase_retries", 3)
-    return retry_count < max_retries
-
-
-def next_phase(state: EnhancedKaggleState) -> None:
-    """Move to the next phase in the workflow."""
-    current_phase = state.get("phase", "")
-    current_idx = CONTEXT_PHASES.index(current_phase) if current_phase in CONTEXT_PHASES else -1
-
-    if current_idx < len(CONTEXT_PHASES) - 1:
-        state["phase"] = CONTEXT_PHASES[current_idx + 1]
-        reset_retry_count(state)
-    else:
-        # Workflow complete
-        state["phase"] = "Complete"
-
-
-def save_to_disk(state: EnhancedKaggleState) -> None:
-    """Save state to disk for debugging and recovery."""
-    restore_dir = get_restore_dir(state)
-    state_file = restore_dir / "state.json"
-
-    # Create a serializable copy
-    state_copy = dict(state)
-    # Remove non-serializable items
-    if "messages" in state_copy:
-        state_copy["messages"] = []  # Messages are too complex to serialize
-
-    with open(state_file, 'w') as f:
-        json.dump(state_copy, f, indent=2)
-
-
-# Backward compatibility
-KaggleState = EnhancedKaggleState
+        # Metadata
+        workflow_start_time=now,
+        last_updated=now,
+    )

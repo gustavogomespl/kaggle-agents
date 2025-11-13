@@ -1,25 +1,79 @@
-"""Core modules for enhanced Kaggle agents."""
+"""
+Core modules for the unified Kaggle agents architecture.
 
-from .api_handler import APIHandler, APISettings, load_api_config
-from .state import EnhancedKaggleState, KaggleState
-from .executor import CodeExecutor, ExecutionError
-from .agent_base import Agent
-from .memory import Memory
-from .config_manager import ConfigManager, get_config
-from .tools import OpenaiEmbeddings, RetrieveTool
+This package contains the fundamental components that power
+the autonomous Kaggle competition solving workflow.
+"""
+
+from .state import (
+    KaggleState,
+    CompetitionInfo,
+    SOTASolution,
+    AblationComponent,
+    DevelopmentResult,
+    ValidationResult,
+    SubmissionResult,
+    IterationMemory,
+    DomainType,
+    create_initial_state,
+    merge_dict,
+)
+
+from .config import (
+    AgentConfig,
+    LLMConfig,
+    SearchConfig,
+    AblationConfig,
+    ValidationConfig,
+    DSPyConfig,
+    IterationConfig,
+    PathConfig,
+    KaggleConfig,
+    get_config,
+    set_config,
+    reset_config,
+    get_competition_dir,
+    get_model_save_path,
+    get_submission_path,
+)
+
+from .orchestrator import (
+    KaggleOrchestrator,
+    WorkflowResults,
+    solve_competition,
+)
 
 __all__ = [
-    "APIHandler",
-    "APISettings",
-    "load_api_config",
-    "EnhancedKaggleState",
+    # State
     "KaggleState",
-    "CodeExecutor",
-    "ExecutionError",
-    "Agent",
-    "Memory",
-    "ConfigManager",
+    "CompetitionInfo",
+    "SOTASolution",
+    "AblationComponent",
+    "DevelopmentResult",
+    "ValidationResult",
+    "SubmissionResult",
+    "IterationMemory",
+    "DomainType",
+    "create_initial_state",
+    "merge_dict",
+    # Config
+    "AgentConfig",
+    "LLMConfig",
+    "SearchConfig",
+    "AblationConfig",
+    "ValidationConfig",
+    "DSPyConfig",
+    "IterationConfig",
+    "PathConfig",
+    "KaggleConfig",
     "get_config",
-    "OpenaiEmbeddings",
-    "RetrieveTool",
+    "set_config",
+    "reset_config",
+    "get_competition_dir",
+    "get_model_save_path",
+    "get_submission_path",
+    # Orchestrator
+    "KaggleOrchestrator",
+    "WorkflowResults",
+    "solve_competition",
 ]
