@@ -37,8 +37,8 @@ class PromptOptimizer:
         """Configure DSPy with the appropriate language model."""
         # Configure LM based on provider
         if self.config.llm.provider == "openai":
-            lm = dspy.OpenAI(
-                model=self.config.llm.model,
+            lm = dspy.LM(
+                model=f"openai/{self.config.llm.model}",
                 api_key=os.getenv("OPENAI_API_KEY"),
                 max_tokens=self.config.llm.max_tokens,
                 temperature=self.config.llm.temperature,

@@ -227,7 +227,7 @@ def get_config() -> AgentConfig:
         # Validate and raise if critical issues
         issues = _global_config.validate()
         if issues:
-            print("�  Configuration Issues:")
+            print("  Configuration Issues:")
             for issue in issues:
                 print(f"  - {issue}")
 

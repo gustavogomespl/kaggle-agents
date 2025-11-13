@@ -76,7 +76,7 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
     # Increment iteration
     new_iteration = current_iteration + 1
 
-    print(f"\n=� Iteration: {new_iteration}/{max_iterations}")
+    print(f"\nIteration: {new_iteration}/{max_iterations}")
     print(f"   Best Score: {best_score:.4f}")
     print(f"   Target: Top {target_percentile}%")
 
@@ -292,7 +292,7 @@ def run_workflow(
         Final state
     """
     print("="*70)
-    print(f"=� KAGGLE AGENTS WORKFLOW: {competition_name}")
+    print(f"KAGGLE AGENTS WORKFLOW: {competition_name}")
     print("="*70)
 
     # Create initial state
@@ -318,7 +318,7 @@ def run_workflow(
         final_state = workflow.invoke(state)
 
     print("\n" + "="*70)
-    print("<� WORKFLOW COMPLETE")
+    print("WORKFLOW COMPLETE")
     print("="*70)
 
     # Print summary
@@ -397,7 +397,7 @@ def run_simple_workflow(
         Final state
     """
     print("="*70)
-    print(f"=� SIMPLE WORKFLOW: {competition_name}")
+    print(f"SIMPLE WORKFLOW: {competition_name}")
     print("="*70)
 
     # Create initial state
