@@ -1,7 +1,0 @@
-{
-  "dependencies": ["."],
-  "graphs": {
-    "kaggle_workflow": "./kaggle_agents/workflows/kaggle_workflow.py:create_kaggle_workflow"
-  },
-  "env": ".env"
-}
