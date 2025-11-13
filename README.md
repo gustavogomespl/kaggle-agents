@@ -117,13 +117,34 @@ Manages the workflow loop:
 
 ## Installation
 
-### Requirements
+### Option 1: Docker (Recommended)
 
+The easiest way to get started:
+
+```bash
+# Clone repository
+git clone https://github.com/yourusername/kaggle-agents.git
+cd kaggle-agents
+
+# Set up environment
+cp .env.example .env
+# Edit .env with your API keys
+
+# Build and run
+docker-compose build
+docker-compose run --rm kaggle-agents kaggle-agents start titanic
+```
+
+See [DOCKER.md](DOCKER.md) for complete Docker documentation.
+
+### Option 2: Local Installation
+
+Requirements:
 - Python 3.11+
 - OpenAI API key
 - Kaggle API credentials (optional, for submissions)
 
-### Setup
+Setup:
 
 ```bash
 git clone https://github.com/yourusername/kaggle-agents.git
@@ -174,6 +195,24 @@ set_config(config)
 ```
 
 ## Usage
+
+### CLI (Command Line)
+
+After installation, use the `kaggle-agents` command:
+
+```bash
+# Start a competition
+kaggle-agents start titanic \
+  --problem-type binary_classification \
+  --metric accuracy \
+  --max-iterations 3
+
+# Show configuration
+kaggle-agents config
+
+# Get help
+kaggle-agents --help
+```
 
 ### Level 1: Simple API (Recommended)
 

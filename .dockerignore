@@ -1,0 +1,64 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation (optional, uncomment if not needed in container)
+# *.md
+# docs/
+
+# Data directories (mounted as volumes)
+data/
+models/
+logs/
+submissions/
+.cache/
+
+# Temporary files
+*.log
+*.tmp
+temp/
+tmp/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Project specific
+OPTION_*.md
+PROGRESS.md
+ARCHITECTURE.md
+REFACTORING_SUMMARY.md
+tests/
+examples/

@@ -1,0 +1,52 @@
+version: '3.8'
+
+services:
+  kaggle-agents:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kaggle-agents
+
+    # Environment variables
+    env_file:
+      - .env
+
+    environment:
+      - KAGGLE_WORK_DIR=/app/data
+      - PYTHONUNBUFFERED=1
+
+    # Volume mounts for data persistence
+    volumes:
+      - ./data:/app/data              # Competition data
+      - ./models:/app/models          # Trained models
+      - ./logs:/app/logs              # Execution logs
+      - ./submissions:/app/submissions # Generated submissions
+      - ./.cache:/app/.cache          # Cache (embeddings, etc)
+
+    # Resource limits (adjust based on your system)
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 8G
+        reservations:
+          cpus: '2'
+          memory: 4G
+
+    # Keep container running
+    stdin_open: true
+    tty: true
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Command - run interactive shell by default
+    command: /bin/bash
+
+# Create named volumes for better management (optional)
+volumes:
+  data:
+  models:
+  logs:
+  submissions:
+  cache:
