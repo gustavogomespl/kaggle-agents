@@ -783,12 +783,10 @@ For questions, issues, or suggestions:
 
 ## 🎓 Citation
 
-If you use this work in your research, please cite:
-
 ```bibtex
 @software{kaggle_agents_2025,
   title={Kaggle Agents: Autonomous Competition Solving},
-  author={Your Name},
+  author={Gustavo Paulino Gomes},
   year={2025},
   url={https://github.com/yourusername/kaggle-agents}
 }
