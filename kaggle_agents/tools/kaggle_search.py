@@ -379,8 +379,7 @@ def search_competition_notebooks(
     searcher = KaggleSearcher()
 
     # Search notebooks
-    print(f"=
- Searching notebooks for {competition}...")
+    print(f"Searching notebooks for {competition}...")
     notebooks = searcher.search_notebooks(competition, page_size=max_notebooks * 2)
 
     # Filter by votes

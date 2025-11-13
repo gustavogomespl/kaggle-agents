@@ -36,7 +36,7 @@ def domain_detection_node(state: KaggleState) -> Dict[str, Any]:
         State updates with domain detection
     """
     print("\n" + "="*60)
-    print("= DOMAIN DETECTION")
+    print("= DOMAIN DETECTION")
     print("="*60)
 
     competition_info = state["competition_info"]
