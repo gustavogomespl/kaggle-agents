@@ -194,6 +194,28 @@ config.iteration.max_iterations = 10
 set_config(config)
 ```
 
+## Logging
+
+The system includes a centralized logging system for tracking execution:
+
+```python
+from kaggle_agents.core import get_logger, setup_logging
+
+# Setup logging
+setup_logging(
+    log_dir="./logs",
+    log_level="INFO",
+    enable_console=True,
+    enable_file=True,
+)
+
+# Use in your code
+logger = get_logger("my_module")
+logger.info("Processing started")
+```
+
+Logs are saved to `./logs/` with automatic rotation. See [LOGGING.md](LOGGING.md) for complete documentation.
+
 ## Usage
 
 ### CLI (Command Line)

@@ -156,14 +156,14 @@ class DeveloperAgent:
             State updates with development results
         """
         print("\n" + "="*60)
-        print("=» DEVELOPER AGENT: Implementing Components")
+        print("= DEVELOPER AGENT: Implementing Components")
         print("="*60)
 
         ablation_plan = state.get("ablation_plan", [])
         current_index = state.get("current_component_index", 0)
 
         if not ablation_plan:
-            print("   No ablation plan found. Run Planner Agent first.")
+            print("  No ablation plan found. Run Planner Agent first.")
             return {}
 
         if current_index >= len(ablation_plan):
@@ -172,7 +172,7 @@ class DeveloperAgent:
 
         # Implement current component
         component = ablation_plan[current_index]
-        print(f"\n=æ Implementing: {component.name} ({component.component_type})")
+        print(f"\n= Implementing: {component.name} ({component.component_type})")
         print(f"   Estimated Impact: {component.estimated_impact:.1%}")
 
         # Generate and execute code
@@ -213,11 +213,11 @@ class DeveloperAgent:
         # Validate syntax
         is_valid, syntax_error = self.executor.validate_syntax(code)
         if not is_valid:
-            print(f"      Syntax error detected: {syntax_error}")
+            print(f"     Syntax error detected: {syntax_error}")
             code = self._fix_syntax_error(code, syntax_error)
 
         # Execute with retry
-        print("\n   ¶  Executing code...")
+        print("\n     Executing code...")
         max_retries = 5
         for attempt in range(max_retries):
             print(f"\n   Attempt {attempt + 1}/{max_retries}")

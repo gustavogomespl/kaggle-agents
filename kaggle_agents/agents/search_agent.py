@@ -56,7 +56,7 @@ class SearchAgent:
             State updates with SOTA solutions
         """
         print("\n" + "="*60)
-        print("= SEARCH AGENT: Retrieving SOTA Solutions")
+        print("SEARCH AGENT: Retrieving SOTA Solutions")
         print("="*60)
 
         competition_name = state["competition_info"].name
@@ -64,7 +64,7 @@ class SearchAgent:
 
         # 1. Generate search queries
         search_queries = self._generate_search_queries(state)
-        print(f"\n=Ý Generated {len(search_queries)} search queries:")
+        print(f"\n= Generated {len(search_queries)} search queries:")
         for i, query in enumerate(search_queries, 1):
             print(f"  {i}. {query}")
 
@@ -217,7 +217,7 @@ class SearchAgent:
         Args:
             solutions: List of SOTA solutions
         """
-        print(f"\n=Ê Found {len(solutions)} SOTA Solutions:")
+        print(f"\n= Found {len(solutions)} SOTA Solutions:")
         print("-" * 60)
 
         for i, sol in enumerate(solutions[:5], 1):  # Show top 5

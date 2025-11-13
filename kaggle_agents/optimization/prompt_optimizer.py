@@ -139,7 +139,7 @@ class PromptOptimizer:
             load_path = self.config.paths.base_dir / "prompts" / "optimized" / f"{agent_name}.pkl"
 
         if not load_path.exists():
-            print(f"   No optimized prompts found for {agent_name}")
+            print(f"  No optimized prompts found for {agent_name}")
             return None
 
         try:
@@ -175,7 +175,7 @@ class PromptOptimizer:
                 score = metric(example, prediction)
                 scores.append(score)
             except Exception as e:
-                print(f"   Evaluation error: {e}")
+                print(f"  Evaluation error: {e}")
                 scores.append(0.0)
 
         avg_score = sum(scores) / len(scores) if scores else 0.0

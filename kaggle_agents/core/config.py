@@ -8,7 +8,7 @@ best practices with environment variable support and validation.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -111,6 +111,18 @@ class PathConfig:
 
 
 @dataclass
+class LoggingConfig:
+    """Logging configuration."""
+
+    log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
+    log_dir: str = field(default_factory=lambda: os.getenv("LOG_DIR", "./logs"))
+    enable_console: bool = field(default_factory=lambda: os.getenv("LOG_CONSOLE", "true").lower() == "true")
+    enable_file: bool = field(default_factory=lambda: os.getenv("LOG_FILE", "true").lower() == "true")
+    max_file_size_mb: int = 10  # Max size per log file
+    backup_count: int = 5  # Number of backup files to keep
+
+
+@dataclass
 class KaggleConfig:
     """Kaggle API configuration."""
 
@@ -136,6 +148,7 @@ class AgentConfig:
     iteration: IterationConfig = field(default_factory=IterationConfig)
     paths: PathConfig = field(default_factory=PathConfig)
     kaggle: KaggleConfig = field(default_factory=KaggleConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     # Global settings
     debug_mode: bool = field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")
@@ -174,7 +187,7 @@ class AgentConfig:
         return issues
 
     @classmethod
-    def from_env(cls, overrides: dict | None = None) -> "AgentConfig":
+    def from_env(cls, overrides: Optional[dict] = None) -> "AgentConfig":
         """
         Create configuration from environment variables with optional overrides.
 
@@ -196,7 +209,7 @@ class AgentConfig:
 
 # ==================== Global Config Instance ====================
 
-_global_config: AgentConfig | None = None
+_global_config: Optional[AgentConfig] = None
 
 
 def get_config() -> AgentConfig:
@@ -214,7 +227,7 @@ def get_config() -> AgentConfig:
         # Validate and raise if critical issues
         issues = _global_config.validate()
         if issues:
-            print("   Configuration Issues:")
+            print("ï¿½  Configuration Issues:")
             for issue in issues:
                 print(f"  - {issue}")
 

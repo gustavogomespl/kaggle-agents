@@ -29,6 +29,7 @@ from .config import (
     IterationConfig,
     PathConfig,
     KaggleConfig,
+    LoggingConfig,
     get_config,
     set_config,
     reset_config,
@@ -41,6 +42,16 @@ from .orchestrator import (
     KaggleOrchestrator,
     WorkflowResults,
     solve_competition,
+)
+
+from .logger import (
+    get_logger,
+    setup_logging,
+    LogContext,
+    log_agent_start,
+    log_agent_end,
+    log_metric,
+    log_error_with_context,
 )
 
 __all__ = [
@@ -66,6 +77,7 @@ __all__ = [
     "IterationConfig",
     "PathConfig",
     "KaggleConfig",
+    "LoggingConfig",
     "get_config",
     "set_config",
     "reset_config",
@@ -76,4 +88,12 @@ __all__ = [
     "KaggleOrchestrator",
     "WorkflowResults",
     "solve_competition",
+    # Logging
+    "get_logger",
+    "setup_logging",
+    "LogContext",
+    "log_agent_start",
+    "log_agent_end",
+    "log_metric",
+    "log_error_with_context",
 ]

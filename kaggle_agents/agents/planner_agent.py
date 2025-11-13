@@ -143,15 +143,15 @@ class PlannerAgent:
             State updates with ablation plan
         """
         print("\n" + "="*60)
-        print("=Ë PLANNER AGENT: Creating Ablation Plan")
+        print("= PLANNER AGENT: Creating Ablation Plan")
         print("="*60)
 
         # 1. Analyze SOTA solutions
-        print("\n= Analyzing SOTA patterns...")
+        print("\nAnalyzing SOTA patterns...")
         sota_analysis = self._analyze_sota_solutions(state)
 
         # 2. Generate ablation plan
-        print("\n<¯ Generating ablation plan...")
+        print("\n< Generating ablation plan...")
         ablation_plan = self._generate_ablation_plan(state, sota_analysis)
 
         # 3. Validate and enhance plan
@@ -273,7 +273,7 @@ Domain: {domain}
             try:
                 plan_data = json.loads(result.ablation_plan)
             except json.JSONDecodeError:
-                print("   Failed to parse DSPy plan, using fallback")
+                print("  Failed to parse DSPy plan, using fallback")
                 plan_data = self._create_fallback_plan(domain, sota_analysis)
 
         else:
@@ -302,7 +302,7 @@ Domain: {domain}
 
                 plan_data = json.loads(content.strip())
             except (json.JSONDecodeError, IndexError):
-                print("   Failed to parse LLM plan, using fallback")
+                print("  Failed to parse LLM plan, using fallback")
                 plan_data = self._create_fallback_plan(domain, sota_analysis)
 
         # Convert to AblationComponent objects
@@ -342,7 +342,7 @@ Domain: {domain}
 
         # Ensure at least 3 components
         if len(valid_plan) < 3:
-            print("   Plan has fewer than 3 components, consider expanding")
+            print("  Plan has fewer than 3 components, consider expanding")
 
         return valid_plan
 
@@ -410,7 +410,7 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
 
     def _print_summary(self, plan: List[AblationComponent]) -> None:
         """Print plan summary."""
-        print(f"\n=Ê Ablation Plan Created: {len(plan)} components")
+        print(f"\n= Ablation Plan Created: {len(plan)} components")
         print("-" * 60)
 
         for i, comp in enumerate(plan, 1):

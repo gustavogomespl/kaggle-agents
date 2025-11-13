@@ -153,7 +153,7 @@ class KaggleOrchestrator:
     def _display_header(self, competition: str, problem_type: str, metric: str):
         """Display workflow header."""
         header = f"""
-[bold cyan]<Æ KAGGLE AGENTS - Autonomous Competition Solving[/bold cyan]
+[bold cyan]< KAGGLE AGENTS - Autonomous Competition Solving[/bold cyan]
 
 [bold]Competition:[/bold] {competition}
 [bold]Problem Type:[/bold] {problem_type}
@@ -185,7 +185,7 @@ class KaggleOrchestrator:
         if results.success:
             console.print("\n[bold green] Workflow completed successfully![/bold green]")
         else:
-            console.print("\n[bold yellow]   Workflow incomplete[/bold yellow]")
+            console.print("\n[bold yellow]  Workflow incomplete[/bold yellow]")
 
     def get_workflow_status(self, competition_name: str) -> Optional[Dict[str, Any]]:
         """

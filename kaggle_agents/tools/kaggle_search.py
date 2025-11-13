@@ -110,7 +110,7 @@ class KaggleSearcher:
             return notebooks[:page_size]
 
         except Exception as e:
-            print(f"   Error searching notebooks: {e}")
+            print(f"  Error searching notebooks: {e}")
             return []
 
     def download_notebook(
@@ -146,7 +146,7 @@ class KaggleSearcher:
             return None
 
         except Exception as e:
-            print(f"   Error downloading notebook {notebook_ref}: {e}")
+            print(f"  Error downloading notebook {notebook_ref}: {e}")
             return None
 
     def extract_code_from_notebook(self, notebook_path: Path) -> List[str]:
@@ -179,7 +179,7 @@ class KaggleSearcher:
             return code_snippets
 
         except Exception as e:
-            print(f"   Error extracting code from {notebook_path}: {e}")
+            print(f"  Error extracting code from {notebook_path}: {e}")
             return []
 
     def extract_code_from_script(self, script_path: Path) -> List[str]:
@@ -205,7 +205,7 @@ class KaggleSearcher:
             return code_snippets
 
         except Exception as e:
-            print(f"   Error extracting code from {script_path}: {e}")
+            print(f"  Error extracting code from {script_path}: {e}")
             return []
 
     def analyze_notebook_strategies(self, code_snippets: List[str]) -> Dict[str, Any]:
@@ -320,11 +320,11 @@ class KaggleSearcher:
                         discussions.append(discussion)
 
                 except Exception as e:
-                    print(f"   Error parsing discussion item: {e}")
+                    print(f"  Error parsing discussion item: {e}")
                     continue
 
         except Exception as e:
-            print(f"   Error searching discussions: {e}")
+            print(f"  Error searching discussions: {e}")
 
         return discussions
 
@@ -379,13 +379,14 @@ def search_competition_notebooks(
     searcher = KaggleSearcher()
 
     # Search notebooks
-    print(f"= Searching notebooks for {competition}...")
+    print(f"=
+ Searching notebooks for {competition}...")
     notebooks = searcher.search_notebooks(competition, page_size=max_notebooks * 2)
 
     # Filter by votes
     notebooks = [nb for nb in notebooks if nb.total_votes >= min_votes][:max_notebooks]
 
-    print(f"=Ê Found {len(notebooks)} high-quality notebooks")
+    print(f"= Found {len(notebooks)} high-quality notebooks")
 
     # Download and analyze
     solutions = []
@@ -393,7 +394,7 @@ def search_competition_notebooks(
     download_dir = config.paths.cache_dir / "notebooks" / competition
 
     for nb in notebooks:
-        print(f"  =å Analyzing: {nb.title} ({nb.total_votes} votes)")
+        print(f"  = Analyzing: {nb.title} ({nb.total_votes} votes)")
 
         # Download notebook
         nb_path = searcher.download_notebook(nb.ref, download_dir)

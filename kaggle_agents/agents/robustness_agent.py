@@ -42,14 +42,14 @@ class RobustnessAgent:
             State updates with validation results
         """
         print("\n" + "="*60)
-        print("=á  ROBUSTNESS AGENT: Validating Code")
+        print("=  ROBUSTNESS AGENT: Validating Code")
         print("="*60)
 
         # Get development results
         dev_results = state.get("development_results", [])
 
         if not dev_results:
-            print("   No development results to validate")
+            print("  No development results to validate")
             return {}
 
         # Get latest result
@@ -57,7 +57,7 @@ class RobustnessAgent:
         working_dir = Path(state["working_directory"])
 
         # Run 4 validation modules
-        print("\n= Running validation modules...")
+        print("\nRunning validation modules...")
 
         validation_results = []
 
@@ -84,7 +84,7 @@ class RobustnessAgent:
         # Calculate overall score
         overall_score = sum(r.score for r in validation_results) / len(validation_results)
 
-        print(f"\n=Ê Overall Validation Score: {overall_score:.1%}")
+        print(f"\n= Overall Validation Score: {overall_score:.1%}")
 
         # Determine if passed
         min_score = self.config.validation.min_validation_score
