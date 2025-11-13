@@ -5,6 +5,8 @@ These templates guide code generation for implementing
 ablation components with retry and debug capabilities.
 """
 
+from typing import Dict
+
 # Base system prompt for the developer
 DEVELOPER_SYSTEM_PROMPT = """You are an expert Python developer specializing in Machine Learning and Kaggle competitions.
 
