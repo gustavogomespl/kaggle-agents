@@ -1,36 +1,26 @@
-# 🏆 Kaggle Agents - Autonomous Competition Solving
+# Kaggle Agents
 
-**State-of-the-art autonomous agent system for Kaggle competitions**
+Autonomous agent system for Kaggle competitions using LangGraph, DSPy, and concepts from Google's Automated Data Science and Knowledge (ADK) framework.
 
-Built with LangGraph, DSPy, and inspired by Google's Automated Data science and Knowledge (ADK) framework.
+## Overview
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![LangGraph](https://img.shields.io/badge/LangGraph-StateGraph-green.svg)](https://langchain-ai.github.io/langgraph/)
-[![DSPy](https://img.shields.io/badge/DSPy-Optimization-orange.svg)](https://github.com/stanfordnlp/dspy)
+Kaggle Agents is a multi-agent system that autonomously participates in Kaggle competitions. The system implements a search-first strategy combined with ablation-driven optimization to achieve competitive results with minimal human intervention.
 
----
+### Core Capabilities
 
-## 🎯 Overview
+- Autonomous competition solving from problem analysis to submission
+- Search-first strategy leveraging SOTA solutions from Kaggle notebooks
+- Ablation-driven planning and systematic component testing
+- Code quality validation using Google ADK robustness modules
+- Iterative improvement with automatic leaderboard monitoring
+- Multi-domain support: tabular, computer vision, NLP, time series
+- Self-improving prompts via DSPy optimization
 
-Kaggle Agents is a **fully autonomous system** that can compete in Kaggle competitions with minimal human intervention. It implements cutting-edge concepts from Google's ADK research and uses advanced prompt optimization techniques to achieve competitive results.
-
-### Key Features
-
-- 🤖 **Fully Autonomous**: From problem analysis to submission upload
-- 🔍 **Search-First Strategy**: Leverages SOTA solutions from Kaggle notebooks
-- 📊 **Ablation-Driven Planning**: Systematic component testing and iteration
-- 🛡️ **Robustness Validation**: 4-module validation system (Google ADK)
-- 🔄 **Iterative Improvement**: Automatically iterates until goal achieved
-- 🎓 **Multi-Domain Support**: Tabular, Computer Vision, NLP, Time Series
-- ⚡ **DSPy Optimization**: Self-improving prompts via reinforcement learning
-- 📈 **Leaderboard Monitoring**: Automatic score tracking and percentile calculation
-
-### What It Does
+### Basic Usage
 
 ```python
 from kaggle_agents.core import solve_competition
 
-# That's it! One function call to solve a competition
 results = solve_competition(
     competition_name="titanic",
     competition_description="Predict survival on the Titanic",
@@ -38,184 +28,184 @@ results = solve_competition(
     evaluation_metric="accuracy",
     max_iterations=5,
 )
-
-# Automatically:
-# ✅ Detects domain (tabular, CV, NLP, etc.)
-# ✅ Searches for SOTA solutions
-# ✅ Creates ablation plan
-# ✅ Implements and tests components
-# ✅ Validates code quality
-# ✅ Submits to Kaggle
-# ✅ Monitors leaderboard
-# ✅ Iterates until top 20% achieved
 ```
 
----
+The system automatically:
+1. Detects the competition domain
+2. Searches for SOTA solutions
+3. Creates an ablation plan
+4. Implements and tests components
+5. Validates code quality
+6. Submits to Kaggle
+7. Monitors leaderboard
+8. Iterates until target percentile is achieved
 
-## 🏗️ Architecture
+## Architecture
 
-### Agent Pipeline
+### Pipeline
 
 ```
-╔════════════════════════════════════════════════════════╗
-║                                                        ║
-║        🚀 AUTONOMOUS PIPELINE WORKFLOW 🚀              ║
-║                                                        ║
-║  1. Domain Detection     → Identify problem type      ║
-║         ↓                                              ║
-║  2. Search Agent         → Find SOTA solutions        ║
-║         ↓                                              ║
-║  3. Planner Agent        → Create ablation plan       ║
-║         ↓                                              ║
-║  4. Developer Agent      → Implement components       ║
-║         ↓                                              ║
-║  5. Robustness Agent     → Validate code quality      ║
-║         ↓                                              ║
-║  6. Submission Agent     → Upload & monitor score     ║
-║         ↓                                              ║
-║  7. Iteration Control    → Check goal & repeat        ║
-║         ↓                                              ║
-║  [Top 20% achieved?] ─No→ Repeat from step 2          ║
-║         ↓ Yes                                          ║
-║  🎉 SUCCESS!                                           ║
-║                                                        ║
-╚════════════════════════════════════════════════════════╝
+Domain Detection -> Search Agent -> Planner Agent -> Developer Agent ->
+Robustness Agent -> Submission Agent -> Iteration Control
+                         ^                                      |
+                         |______________________________________|
 ```
 
-### Core Components
+The workflow uses LangGraph's StateGraph with conditional routing:
+- Components are implemented sequentially
+- After all components, code is validated
+- Submission is uploaded to Kaggle
+- If target percentile not achieved, the cycle repeats with new SOTA search
 
-- **LangGraph StateGraph**: Orchestrates workflow with conditional routing
-- **7 Specialized Agents**: Each with specific responsibilities
-- **Type-Safe State Management**: Using TypedDict and dataclasses
-- **DSPy Optimization**: Self-improving prompts with MIPROv2
-- **Sandbox Execution**: Safe code execution with subprocess isolation
+### Agents
 
----
+**1. Domain Detection**
 
-## 📦 Installation
+Identifies the competition type based on description and available data. Supports tabular, computer vision, NLP, and time series domains.
 
-### Prerequisites
+**2. Search Agent**
 
-- Python 3.11 or higher
-- OpenAI API key (or other LLM provider)
+Implements search-first strategy (Google ADK):
+- Generates diverse search queries
+- Retrieves top Kaggle notebooks via API
+- Analyzes SOTA solutions
+- Extracts common patterns and techniques
+
+**3. Planner Agent**
+
+Creates systematic ablation plan:
+- Analyzes SOTA patterns
+- Identifies reusable components
+- Estimates component impact
+- Prioritizes implementation order
+
+**4. Developer Agent**
+
+Generates and executes code:
+- LLM-based code generation
+- Sandbox execution with subprocess isolation
+- Automatic debugging (10 iterations)
+- Retry mechanism (5 attempts)
+- Timeout protection (10 minutes)
+
+**5. Robustness Agent**
+
+Validates code quality using 4 modules (Google ADK):
+
+1. Debugging: Checks for exceptions and warnings
+2. Data Leakage: Detects target leakage and improper splits
+3. Data Usage: Ensures proper data utilization
+4. Format Compliance: Validates submission format
+
+Threshold: 70% overall score to pass
+
+**6. Submission Agent**
+
+Handles Kaggle integration:
+- Uploads submission via Kaggle API
+- Fetches public score
+- Calculates leaderboard percentile
+- Detects goal achievement (default: top 20%)
+
+**7. Iteration Control**
+
+Manages the workflow loop:
+- Checks termination conditions
+- Tracks iteration count
+- Maintains iteration memory
+- Decides whether to continue or end
+
+## Installation
+
+### Requirements
+
+- Python 3.11+
+- OpenAI API key
 - Kaggle API credentials (optional, for submissions)
 
-### Quick Install
+### Setup
 
 ```bash
-# Clone the repository
 git clone https://github.com/yourusername/kaggle-agents.git
 cd kaggle-agents
-
-# Install dependencies
 pip install -e .
-
-# Or with pip install requirements
-pip install -r requirements.txt
 ```
 
 ### Dependencies
 
-Core dependencies:
-- `langgraph>=0.2.0` - Workflow orchestration
-- `dspy-ai>=2.5.0` - Prompt optimization
-- `openai>=1.0.0` - LLM provider
-- `kaggle>=1.6.0` - Kaggle API integration
-- `pandas>=2.0.0` - Data manipulation
-- `rich>=13.0.0` - Beautiful terminal output
+- langgraph >= 0.2.0 (workflow orchestration)
+- dspy-ai >= 2.5.0 (prompt optimization)
+- openai >= 1.0.0 (LLM provider)
+- kaggle >= 1.6.0 (Kaggle API)
+- pandas >= 2.0.0 (data manipulation)
+- rich >= 13.0.0 (terminal output)
 
----
+## Configuration
 
-## 🚀 Quick Start
-
-### 1. Set Up Credentials
+### Environment Variables
 
 ```bash
-# Required: OpenAI API key
+# Required
 export OPENAI_API_KEY="sk-..."
 
-# Optional: Kaggle credentials (for submissions)
+# Optional (Kaggle integration)
 export KAGGLE_USERNAME="your_username"
 export KAGGLE_KEY="your_api_key"
+export KAGGLE_AUTO_SUBMIT="true"  # default: false
 
-# Optional: Enable auto-submit (disabled by default for safety)
-export KAGGLE_AUTO_SUBMIT="true"
+# Optional (agent configuration)
+export LLM_MODEL="gpt-4o-minio-mini"           # default: gpt-4o-minio-mini
+export LLM_TEMPERATURE="0.1"       # default: 0.1
+export MAX_ITERATIONS="5"          # default: 10
+export TARGET_PERCENTILE="20.0"    # default: 20.0
+export MIN_VALIDATION_SCORE="0.7"  # default: 0.7
 ```
 
-### 2. Run Your First Competition
+### Python API
 
 ```python
-from kaggle_agents.core import solve_competition
+from kaggle_agents.core import get_config, set_config
 
-# Solve the Titanic competition
-results = solve_competition(
-    competition_name="titanic",
-    competition_description="Predict survival on the Titanic using passenger data",
-    problem_type="binary_classification",
-    evaluation_metric="accuracy",
-    max_iterations=3,
-)
-
-# Check results
-print(f"Success: {results.success}")
-print(f"Iterations: {results.iterations}")
-print(f"Success Rate: {results.success_rate:.1%}")
-print(f"Validation Score: {results.final_state.get('overall_validation_score', 0):.1%}")
+config = get_config()
+config.llm.model = "gpt-4o-mini"
+config.kaggle.auto_submit = True
+config.iteration.max_iterations = 10
+set_config(config)
 ```
 
-### 3. See What It Created
+## Usage
 
-```bash
-# Check the working directory
-ls -la ./kaggle_competitions/titanic/
-
-# You'll find:
-# - solution.py        (generated code)
-# - submission.csv     (predictions)
-# - models/           (trained models)
-# - notebooks/        (downloaded SOTA solutions)
-```
-
----
-
-## 📖 Detailed Usage
-
-### API Levels
-
-Kaggle Agents provides 4 levels of API for different use cases:
-
-#### Level 1: Super Simple (Recommended)
+### Level 1: Simple API (Recommended)
 
 ```python
 from kaggle_agents.core import solve_competition
 
 results = solve_competition(
     competition_name="house-prices-advanced-regression-techniques",
-    competition_description="Predict house prices using advanced regression",
+    competition_description="Predict house prices",
     problem_type="regression",
     evaluation_metric="rmse",
     max_iterations=5,
 )
 ```
 
-#### Level 2: Orchestrator API
+### Level 2: Orchestrator API
 
 ```python
 from kaggle_agents.core import KaggleOrchestrator
 
 orchestrator = KaggleOrchestrator()
-
 results = orchestrator.solve_competition(
     competition_name="digit-recognizer",
     competition_description="MNIST digit recognition",
     problem_type="multiclass_classification",
     evaluation_metric="accuracy",
     max_iterations=3,
-    simple_mode=False,  # Full workflow with iterations
+    simple_mode=False,  # enables full workflow with iterations
 )
 ```
 
-#### Level 3: Workflow API
+### Level 3: Workflow API
 
 ```python
 from kaggle_agents.workflow import run_workflow
@@ -225,7 +215,7 @@ final_state = run_workflow(
     working_dir="./work",
     competition_info={
         "name": "nlp-getting-started",
-        "description": "Natural Language Processing with Disaster Tweets",
+        "description": "NLP with Disaster Tweets",
         "problem_type": "binary_classification",
         "evaluation_metric": "f1_score",
         "domain": "nlp",
@@ -234,285 +224,20 @@ final_state = run_workflow(
 )
 ```
 
-#### Level 4: LangGraph Raw (Advanced)
+### Level 4: LangGraph Raw
 
 ```python
 from kaggle_agents.workflow import create_workflow
 from kaggle_agents.core import create_initial_state
 
-# Create custom workflow
 workflow = create_workflow()
 compiled = workflow.compile()
 
-# Create initial state
 state = create_initial_state("competition-name", "./work")
-
-# Run workflow
 final_state = compiled.invoke(state)
 ```
 
----
-
-## 🤖 Agent Details
-
-### 1. Domain Detection Agent
-
-**Purpose**: Automatically identify the competition type
-
-**Domains Supported**:
-- Tabular (regression, classification)
-- Computer Vision (image classification, object detection)
-- Natural Language Processing (text classification, NER)
-- Time Series (forecasting)
-
-**How it works**:
-```python
-# Analyzes competition description and available data
-domain, confidence = detect_competition_domain(competition_info, working_dir)
-
-# Returns: ("tabular", 0.95)
-```
-
----
-
-### 2. Search Agent
-
-**Purpose**: Find SOTA solutions from Kaggle notebooks
-
-**Strategy**: Search-first approach (Google ADK)
-
-**Process**:
-1. Generate diverse search queries
-2. Search Kaggle notebooks via API
-3. Download and analyze top solutions
-4. Extract patterns and techniques
-
-**Example Output**:
-```python
-{
-    "title": "Titanic - XGBoost Baseline [0.78]",
-    "score": 0.78,
-    "votes": 1234,
-    "techniques": ["XGBoost", "Feature Engineering", "Ensemble"],
-    "code_snippets": [...],
-}
-```
-
----
-
-### 3. Planner Agent
-
-**Purpose**: Create systematic ablation plan
-
-**Strategy**: Ablation-driven optimization (Google ADK)
-
-**Process**:
-1. Analyze SOTA patterns
-2. Identify common components
-3. Estimate component impact
-4. Create prioritized plan
-
-**Example Plan**:
-```python
-[
-    {
-        "name": "xgboost_baseline",
-        "type": "model",
-        "description": "XGBoost baseline model",
-        "estimated_impact": 15.0,
-        "priority": 1,
-    },
-    {
-        "name": "feature_engineering",
-        "type": "preprocessing",
-        "description": "Advanced feature engineering",
-        "estimated_impact": 10.0,
-        "priority": 2,
-    },
-    ...
-]
-```
-
----
-
-### 4. Developer Agent
-
-**Purpose**: Implement components with code generation
-
-**Features**:
-- LLM-based code generation
-- Sandbox execution
-- Automatic debugging (10 iterations)
-- Retry mechanism (5 attempts)
-
-**Process**:
-```
-Generate Code → Execute → Check Errors → Debug → Retry → Success
-```
-
-**Safety**:
-- Subprocess isolation
-- Timeout protection (10 minutes)
-- Resource limits
-
----
-
-### 5. Robustness Agent
-
-**Purpose**: Validate code quality (Google ADK)
-
-**4 Validation Modules**:
-
-1. **Debugging** (30% weight)
-   - No uncaught exceptions
-   - Proper error handling
-   - No warnings
-
-2. **Data Leakage** (30% weight)
-   - No target leakage
-   - Proper train/test split
-   - No test data in training
-
-3. **Data Usage** (20% weight)
-   - All data used
-   - No unnecessary sampling
-   - Proper missing value handling
-
-4. **Format Compliance** (20% weight)
-   - Submission file exists
-   - Correct CSV format
-   - No missing values
-   - Correct number of rows
-
-**Threshold**: 70% overall score to pass
-
----
-
-### 6. Submission Agent
-
-**Purpose**: Upload to Kaggle and monitor leaderboard
-
-**Features**:
-- Automatic submission upload
-- Score fetching (waits 30s)
-- Percentile calculation
-- Goal achievement detection
-
-**Goal Detection**:
-```python
-if percentile <= target_percentile:  # Default: top 20%
-    print("🎉 GOAL ACHIEVED!")
-    state["should_continue"] = False
-    state["termination_reason"] = "goal_achieved"
-```
-
-**Safety**:
-- Disabled by default (set `KAGGLE_AUTO_SUBMIT=true`)
-- Authentication validation
-- Submission file validation
-
----
-
-### 7. Iteration Control
-
-**Purpose**: Manage iteration loop and termination
-
-**Termination Conditions**:
-1. Goal achieved (top 20%)
-2. Max iterations reached
-3. Validation failure
-4. Manual stop
-
-**Iteration Strategy**:
-- Each iteration: New SOTA search → Re-plan → Implement → Validate → Submit
-- Incremental improvement
-- Memory of previous iterations
-
----
-
-## ⚙️ Configuration
-
-### Environment Variables
-
-```bash
-# LLM Configuration
-export OPENAI_API_KEY="sk-..."
-export LLM_MODEL="gpt-4"              # Default: gpt-4o-mini
-export LLM_TEMPERATURE="0.1"          # Default: 0.1
-
-# Kaggle Configuration
-export KAGGLE_USERNAME="your_username"
-export KAGGLE_KEY="your_api_key"
-export KAGGLE_AUTO_SUBMIT="false"     # Default: false (safety)
-
-# Agent Configuration
-export MAX_ITERATIONS="5"             # Default: 10
-export TARGET_PERCENTILE="20.0"       # Default: 20.0 (top 20%)
-export MIN_VALIDATION_SCORE="0.7"     # Default: 0.7 (70%)
-
-# Path Configuration
-export KAGGLE_WORK_DIR="./kaggle_competitions"  # Default
-```
-
-### Python Configuration
-
-```python
-from kaggle_agents.core import get_config, set_config
-
-# Get current config
-config = get_config()
-
-# Modify config
-config.llm.model = "gpt-4"
-config.kaggle.auto_submit = True
-config.iteration.max_iterations = 10
-
-# Set config
-set_config(config)
-```
-
----
-
-## 🎓 DSPy Optimization
-
-### What is DSPy Optimization?
-
-DSPy allows the system to **self-improve** by optimizing prompts based on feedback.
-
-### How It Works
-
-1. **Collect Training Data**: Each agent execution creates training examples
-2. **Define Reward Models**: 5 specialized models for different agents
-3. **Optimize Prompts**: MIPROv2 optimizer improves prompts
-4. **Apply Updates**: Better prompts → better performance
-
-### Running Optimization
-
-```python
-from kaggle_agents.optimization import optimize_all_agents
-
-# Collect training data first (run competitions)
-results = solve_competition(...)
-
-# Then optimize
-optimize_all_agents(
-    num_candidates=10,
-    max_bootstrapped_demos=5,
-    max_labeled_demos=10,
-)
-```
-
-### Reward Models
-
-1. **Planner Reward**: Quality of ablation plans
-2. **Developer Reward**: Code quality and success rate
-3. **Validation Reward**: Validation scores
-4. **Kaggle Reward**: Leaderboard performance
-5. **Combined Reward**: Weighted combination
-
----
-
-## 📊 Results and Tracking
+## Results and Tracking
 
 ### Workflow Results
 
@@ -521,11 +246,10 @@ from kaggle_agents.core import WorkflowResults
 
 results: WorkflowResults = solve_competition(...)
 
-# Access results
 print(f"Competition: {results.competition_name}")
 print(f"Success: {results.success}")
 print(f"Iterations: {results.iterations}")
-print(f"SOTA Solutions Found: {results.sota_solutions_found}")
+print(f"SOTA Solutions: {results.sota_solutions_found}")
 print(f"Components Planned: {results.components_planned}")
 print(f"Components Implemented: {results.components_implemented}")
 print(f"Success Rate: {results.success_rate:.1%}")
@@ -533,10 +257,9 @@ print(f"Total Time: {results.total_time:.1f}s")
 print(f"Termination: {results.termination_reason}")
 ```
 
-### Detailed State
+### Detailed State Access
 
 ```python
-# Access final state for detailed info
 state = results.final_state
 
 # SOTA solutions
@@ -560,97 +283,75 @@ for submission in state["submissions"]:
     print(f"Score: {submission.public_score}, Percentile: {submission.percentile}%")
 ```
 
----
+## DSPy Optimization
 
-## 🧪 Testing
+The system can self-improve by optimizing prompts based on execution feedback.
 
-### Run Example
+### How It Works
 
-```bash
-# Run the Titanic example
-python examples/run_titanic_competition.py
+1. Each agent execution creates training examples
+2. Specialized reward models evaluate performance
+3. MIPROv2 optimizer improves prompts
+4. Updated prompts lead to better performance
 
-# Run with custom config
-MAX_ITERATIONS=3 python examples/run_titanic_competition.py
+### Running Optimization
+
+```python
+from kaggle_agents.optimization import optimize_all_agents
+
+# Run competitions to collect training data
+results = solve_competition(...)
+
+# Optimize prompts
+optimize_all_agents(
+    num_candidates=10,
+    max_bootstrapped_demos=5,
+    max_labeled_demos=10,
+)
 ```
 
-### Run Tests
+### Reward Models
 
-```bash
-# Run all tests
-pytest tests/
+- Planner Reward: Evaluates ablation plan quality
+- Developer Reward: Measures code quality and success rate
+- Validation Reward: Assesses validation scores
+- Kaggle Reward: Tracks leaderboard performance
+- Combined Reward: Weighted combination of all metrics
 
-# Run specific test
-pytest tests/test_agents.py -v
-
-# Run with coverage
-pytest --cov=kaggle_agents tests/
-```
-
----
-
-## 🛠️ Development
-
-### Project Structure
+## Project Structure
 
 ```
 kaggle-agents/
 ├── kaggle_agents/
-│   ├── core/                    # Core infrastructure
-│   │   ├── state.py            # State management
-│   │   ├── config.py           # Configuration
-│   │   └── orchestrator.py     # High-level API
-│   ├── agents/                  # Specialized agents
+│   ├── core/
+│   │   ├── state.py           # State management
+│   │   ├── config.py          # Configuration
+│   │   └── orchestrator.py    # High-level API
+│   ├── agents/
 │   │   ├── search_agent.py
 │   │   ├── planner_agent.py
 │   │   ├── developer_agent.py
 │   │   ├── robustness_agent.py
 │   │   └── submission_agent.py
-│   ├── tools/                   # Utility tools
+│   ├── tools/
 │   │   ├── kaggle_search.py
 │   │   ├── code_executor.py
 │   │   └── llm_client.py
-│   ├── optimization/            # DSPy optimization
+│   ├── optimization/
 │   │   ├── prompt_optimizer.py
 │   │   └── reward_model.py
-│   ├── domain.py               # Domain detection
-│   └── workflow.py             # LangGraph workflow
+│   ├── domain.py              # Domain detection
+│   └── workflow.py            # LangGraph workflow
 ├── examples/
 │   └── run_titanic_competition.py
 ├── tests/
 │   └── test_*.py
-├── README.md
-└── requirements.txt
+└── README.md
 ```
 
-### Adding a New Agent
+## Examples
 
-```python
-from kaggle_agents.core import KaggleState
-from typing import Dict, Any
-
-class MyCustomAgent:
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
-        # Your agent logic here
-        return {
-            "my_field": "value",
-            "last_updated": datetime.now(),
-        }
-
-# Create node function for LangGraph
-def my_custom_agent_node(state: KaggleState) -> Dict[str, Any]:
-    agent = MyCustomAgent()
-    return agent(state)
-
-# Add to workflow
-workflow.add_node("my_custom_agent", my_custom_agent_node)
-```
-
----
-
-## 📚 Examples
-
-### Example 1: Tabular Competition
+### Tabular Competition
 
 ```python
 results = solve_competition(
@@ -661,7 +362,7 @@ results = solve_competition(
 )
 ```
 
-### Example 2: Computer Vision
+### Computer Vision
 
 ```python
 results = solve_competition(
@@ -672,7 +373,7 @@ results = solve_competition(
 )
 ```
 
-### Example 3: NLP
+### Natural Language Processing
 
 ```python
 results = solve_competition(
@@ -683,105 +384,61 @@ results = solve_competition(
 )
 ```
 
-### Example 4: Custom Workflow
+## Testing
 
-```python
-from kaggle_agents.core import KaggleOrchestrator
+```bash
+# Run example
+python examples/run_titanic_competition.py
 
-orchestrator = KaggleOrchestrator()
+# Run with custom configuration
+MAX_ITERATIONS=3 python examples/run_titanic_competition.py
 
-# Customize settings
-results = orchestrator.solve_competition(
-    competition_name="my-competition",
-    competition_description="...",
-    problem_type="regression",
-    evaluation_metric="mae",
-    max_iterations=10,
-    simple_mode=False,
-    target_percentile=10.0,  # Top 10%!
-)
+# Run tests
+pytest tests/
+
+# Run with coverage
+pytest --cov=kaggle_agents tests/
 ```
 
----
-
-## 🔬 Research and Inspiration
+## Research Foundation
 
 This project implements concepts from:
 
-1. **Google's ADK (Automated Data science and Knowledge)**
-   - Search-first strategy
-   - Ablation-driven optimization
-   - Robustness validation modules
+**Google's ADK (Automated Data Science and Knowledge)**
+- Search-first strategy
+- Ablation-driven optimization
+- Robustness validation modules
 
-2. **DSPy (Declarative Self-improving Language Programs)**
-   - Prompt optimization
-   - Reward-based learning
-   - MIPROv2 optimizer
+**DSPy (Declarative Self-improving Language Programs)**
+- Prompt optimization
+- Reward-based learning
+- MIPROv2 optimizer
 
-3. **LangGraph (LangChain)**
-   - StateGraph for workflow orchestration
-   - Conditional routing
-   - Checkpointing
+**LangGraph**
+- StateGraph workflow orchestration
+- Conditional routing
+- Checkpointing support
 
----
+## Contributing
 
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome. Please submit pull requests or open issues for bugs and feature requests.
 
 ### Development Setup
 
 ```bash
-# Clone the repo
 git clone https://github.com/yourusername/kaggle-agents.git
 cd kaggle-agents
-
-# Create virtual environment
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install in development mode
+source venv/bin/activate
 pip install -e ".[dev]"
-
-# Run tests
 pytest
 ```
 
-### Areas for Contribution
+## License
 
-- 🔧 New agent implementations
-- 📊 Better evaluation metrics
-- 🎯 Domain-specific optimizations
-- 📝 Documentation improvements
-- 🧪 Test coverage
-- 🚀 Performance optimizations
+MIT License - see LICENSE file for details.
 
----
-
-## 📄 License
-
-MIT License - see LICENSE file for details
-
----
-
-## 🙏 Acknowledgments
-
-- **Google Research**: ADK framework and concepts
-- **Stanford NLP**: DSPy library
-- **LangChain**: LangGraph orchestration
-- **Kaggle Community**: SOTA solutions and inspiration
-
----
-
-## 📞 Contact
-
-For questions, issues, or suggestions:
-- Open an issue on GitHub
-- Email: your.email@example.com
-
----
-
-## 🎓 Citation
+## Citation
 
 ```bibtex
 @software{kaggle_agents_2025,
@@ -792,28 +449,17 @@ For questions, issues, or suggestions:
 }
 ```
 
----
+## Status
 
-## 🎉 Status
+Version: 1.0.0
 
-**Current Version**: 1.0.0
+Pipeline Status: Production Ready
 
-**Pipeline Status**:
-```
-✅ Domain Detection     100%
-✅ Search Agent         100%
-✅ Planner Agent        100%
-✅ Developer Agent      100%
-✅ Robustness Agent     100%
-✅ Submission Agent     100%
-✅ LangGraph Workflow   100%
-✅ DSPy Optimization    100%
-
-🎉 COMPLETE AUTONOMOUS SYSTEM!
-```
-
-**Production Ready**: YES 🚀
-
----
-
-Made with ❤️ for the Kaggle community
+- Domain Detection: Complete
+- Search Agent: Complete
+- Planner Agent: Complete
+- Developer Agent: Complete
+- Robustness Agent: Complete
+- Submission Agent: Complete
+- LangGraph Workflow: Complete
+- DSPy Optimization: Complete
