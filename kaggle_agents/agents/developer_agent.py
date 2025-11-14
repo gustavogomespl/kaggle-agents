@@ -117,6 +117,20 @@ class DeveloperAgent:
         self.executor = CodeExecutor(timeout=600)  # 10 minutes
         self.validator = ArtifactValidator()
 
+        # Always create LLM client (used for debugging even with DSPy)
+        if self.config.llm.provider == "openai":
+            self.llm = ChatOpenAI(
+                model=self.config.llm.model,
+                temperature=self.config.llm.temperature,
+                max_tokens=self.config.llm.max_tokens,
+            )
+        else:
+            self.llm = ChatAnthropic(
+                model=self.config.llm.model,
+                temperature=self.config.llm.temperature,
+                max_tokens=self.config.llm.max_tokens,
+            )
+
         if self.use_dspy:
             # Try to load optimized modules
             optimizer = create_optimizer()
@@ -130,20 +144,6 @@ class DeveloperAgent:
             if self.fixer_module is None:
                 print("   Using base (unoptimized) fixer module")
                 self.fixer_module = CodeFixerModule()
-        else:
-            # Use direct LLM calls
-            if self.config.llm.provider == "openai":
-                self.llm = ChatOpenAI(
-                    model=self.config.llm.model,
-                    temperature=self.config.llm.temperature,
-                    max_tokens=self.config.llm.max_tokens,
-                )
-            else:
-                self.llm = ChatAnthropic(
-                    model=self.config.llm.model,
-                    temperature=self.config.llm.temperature,
-                    max_tokens=self.config.llm.max_tokens,
-                )
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
         """
@@ -304,7 +304,8 @@ Submission: {working_dir / 'submission.csv'}
                 data_paths=data_paths,
                 requirements=requirements,
             )
-            code = result.code
+            # Extract code from markdown if present
+            code = self._extract_code_from_response(result.code)
         else:
             # Use direct LLM call
             prompt = GENERATE_CODE_PROMPT.format(
@@ -344,7 +345,8 @@ Submission: {working_dir / 'submission.csv'}
                 error=error_info["error"],
                 error_type=error_info["error_type"],
             )
-            fixed_code = result.fixed_code
+            # Extract code from markdown if present
+            fixed_code = self._extract_code_from_response(result.fixed_code)
         else:
             prompt = FIX_CODE_PROMPT.format(
                 code=code,
