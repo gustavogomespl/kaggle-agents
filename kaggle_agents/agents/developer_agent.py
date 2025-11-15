@@ -113,9 +113,12 @@ class DeveloperAgent:
         self.config = get_config()
         self.use_dspy = use_dspy and self.config.dspy.enabled
 
-        # Code executor
-        self.executor = CodeExecutor(timeout=600)  # 10 minutes
+        # Code executor (use configured timeout)
+        timeout = self.config.ablation.testing_timeout
+        self.executor = CodeExecutor(timeout=timeout)
         self.validator = ArtifactValidator()
+
+        print(f"   ⏱️  Component timeout set to: {timeout}s ({timeout/60:.1f} min)")
 
         # Always create LLM client (used for debugging even with DSPy)
         if self.config.llm.provider == "openai":
@@ -247,6 +250,26 @@ class DeveloperAgent:
         # Generate initial code
         print("\n   =' Generating code...")
         code = self._generate_code(component, competition_info, working_dir, domain)
+
+        # Preview generated code
+        if self.config.ablation.enable_code_preview if hasattr(self.config.ablation, 'enable_code_preview') else True:
+            print("\n   📝 Generated code preview:")
+            code_lines = code.split('\n')
+            preview_lines = min(30, len(code_lines))  # Show first 30 lines
+            for i, line in enumerate(code_lines[:preview_lines], 1):
+                print(f"      {i:3d} | {line}")
+            if len(code_lines) > preview_lines:
+                print(f"      ... ({len(code_lines) - preview_lines} more lines)")
+            print()
+
+        # Save code to file for inspection
+        if self.config.ablation.save_generated_code if hasattr(self.config.ablation, 'save_generated_code') else True:
+            code_file = working_dir / f"generated_code_{component.name}.py"
+            try:
+                code_file.write_text(code)
+                print(f"   💾 Code saved to: {code_file.name}")
+            except Exception as e:
+                print(f"   ⚠️ Could not save code: {e}")
 
         # Validate syntax
         is_valid, syntax_error = self.executor.validate_syntax(code)

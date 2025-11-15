@@ -15,6 +15,7 @@ import subprocess
 import time
 import tempfile
 import shutil
+import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
@@ -90,18 +91,57 @@ class CodeExecutor:
             with open(script_file, 'w', encoding='utf-8') as f:
                 f.write(code)
 
-            # Execute in subprocess
+            # Execute in subprocess with progress monitoring
             start_time = time.time()
 
-            result = subprocess.run(
+            # Start process
+            process = subprocess.Popen(
                 [sys.executable, str(script_file)],
                 cwd=str(working_path),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
             )
 
+            # Monitor progress with timeout
+            progress_interval = 30  # Print progress every 30s
+            last_progress_time = start_time
+
+            while True:
+                # Check if process completed
+                poll_result = process.poll()
+                if poll_result is not None:
+                    # Process finished
+                    break
+
+                # Check timeout
+                elapsed = time.time() - start_time
+                if elapsed >= self.timeout:
+                    process.kill()
+                    process.wait()
+                    raise subprocess.TimeoutExpired(process.args, self.timeout)
+
+                # Print progress update
+                if elapsed - (last_progress_time - start_time) >= progress_interval:
+                    remaining = self.timeout - elapsed
+                    print(f"      ⏳ Execution in progress... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)")
+                    last_progress_time = time.time()
+
+                # Sleep briefly before next check
+                time.sleep(1)
+
+            # Get output
+            stdout, stderr = process.communicate()
             execution_time = time.time() - start_time
+
+            # Create result object compatible with subprocess.run
+            class Result:
+                def __init__(self, returncode, stdout, stderr):
+                    self.returncode = returncode
+                    self.stdout = stdout
+                    self.stderr = stderr
+
+            result = Result(process.returncode, stdout, stderr)
 
             # Track artifacts after execution
             artifacts_after = self._get_artifacts(working_path)
