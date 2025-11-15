@@ -206,6 +206,38 @@ class DeveloperAgent:
         working_dir = Path(state["working_directory"])
         domain = state.get("domain_detected", "tabular")
 
+        # Verify data files exist before proceeding
+        train_path = working_dir / 'train.csv'
+        test_path = working_dir / 'test.csv'
+
+        if not train_path.exists() or not test_path.exists():
+            error_msg = f"Data files not found in {working_dir}\n"
+            error_msg += f"  Expected: {train_path.name}, {test_path.name}\n"
+
+            # Check what files are actually present
+            if working_dir.exists():
+                existing_files = [f.name for f in working_dir.iterdir() if f.is_file()]
+                error_msg += f"  Found: {existing_files if existing_files else 'No files'}\n"
+            else:
+                error_msg += f"  Working directory doesn't exist\n"
+
+            error_msg += "\n💡 Possible causes:\n"
+            error_msg += "  - Data download failed (check Kaggle credentials)\n"
+            error_msg += "  - Competition data not downloaded yet\n"
+            error_msg += "  - Wrong working directory path\n"
+
+            print(f"\n❌ {error_msg}")
+
+            return DevelopmentResult(
+                code="",
+                success=False,
+                stdout="",
+                stderr=error_msg,
+                execution_time=0.0,
+                artifacts_created=[],
+                errors=[error_msg],
+            )
+
         # Generate initial code
         print("\n   =' Generating code...")
         code = self._generate_code(component, competition_info, working_dir, domain)

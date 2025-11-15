@@ -93,6 +93,13 @@ class PathConfig:
 
     def __post_init__(self):
         """Initialize derived paths."""
+        # Detect Colab environment and adjust base_dir
+        base_dir = self._detect_environment()
+
+        # Override base_dir if in special environment
+        if base_dir != self.base_dir:
+            self.base_dir = base_dir
+
         self.competitions_dir = self.base_dir / "competitions"
         self.models_dir = self.base_dir / "models"
         self.submissions_dir = self.base_dir / "submissions"
@@ -108,6 +115,33 @@ class PathConfig:
             self.cache_dir,
         ]:
             dir_path.mkdir(parents=True, exist_ok=True)
+
+    def _detect_environment(self) -> Path:
+        """
+        Detect execution environment and return appropriate base directory.
+
+        Returns:
+            Path: Best base directory for the environment
+        """
+        # Check if running in Google Colab
+        try:
+            import google.colab
+            # In Colab, use /content/kaggle_competitions
+            colab_base = Path("/content/kaggle_competitions")
+            print(f"📍 Colab environment detected, using: {colab_base}")
+            return colab_base
+        except ImportError:
+            pass
+
+        # Check if in Kaggle Kernels
+        if os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
+            # In Kaggle, use /kaggle/working
+            kaggle_base = Path("/kaggle/working")
+            print(f"📍 Kaggle Kernel detected, using: {kaggle_base}")
+            return kaggle_base
+
+        # Default: use current working directory
+        return Path.cwd()
 
 
 @dataclass

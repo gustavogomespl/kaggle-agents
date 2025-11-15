@@ -14,6 +14,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from .core.state import KaggleState, create_initial_state
 from .core.config import get_config
 from .domain import detect_competition_domain
+from .tools.kaggle_api import KaggleAPIClient
 from .agents import (
     search_agent_node,
     planner_agent_node,
@@ -24,6 +25,82 @@ from .agents import (
 
 
 # ==================== Agent Nodes ====================
+
+def data_download_node(state: KaggleState) -> Dict[str, Any]:
+    """
+    Download competition data from Kaggle.
+
+    Args:
+        state: Current state
+
+    Returns:
+        State updates with data file paths
+    """
+    print("\n" + "="*60)
+    print("= DATA DOWNLOAD")
+    print("="*60)
+
+    competition_info = state["competition_info"]
+    working_dir = state["working_directory"]
+
+    print(f"\n📥 Downloading data for: {competition_info.name}")
+    print(f"   Destination: {working_dir}")
+
+    try:
+        # Initialize Kaggle API client
+        kaggle_client = KaggleAPIClient()
+
+        # Download competition data
+        data_files = kaggle_client.download_competition_data(
+            competition=competition_info.name,
+            path=str(working_dir),
+            quiet=False
+        )
+
+        print(f"\n✓ Download complete!")
+        print(f"   Train: {data_files.get('train', 'N/A')}")
+        print(f"   Test: {data_files.get('test', 'N/A')}")
+        if data_files.get('sample_submission'):
+            print(f"   Sample Submission: {data_files['sample_submission']}")
+
+        return {
+            "data_files": data_files,
+            "train_data_path": data_files.get("train", ""),
+            "test_data_path": data_files.get("test", ""),
+            "sample_submission_path": data_files.get("sample_submission", ""),
+            "last_updated": datetime.now(),
+        }
+
+    except RuntimeError as e:
+        # Authentication error
+        error_msg = str(e)
+        print(f"\n❌ Kaggle API Authentication Failed")
+        print(f"   {error_msg}")
+        print(f"\n💡 To fix:")
+        print(f"   1. Set KAGGLE_USERNAME and KAGGLE_KEY environment variables")
+        print(f"   2. Or create ~/.kaggle/kaggle.json with your credentials")
+        print(f"   3. Get credentials from: https://www.kaggle.com/settings/account")
+
+        return {
+            "errors": [f"Kaggle authentication failed: {error_msg}"],
+            "last_updated": datetime.now(),
+        }
+
+    except Exception as e:
+        # Download error
+        error_msg = str(e)
+        print(f"\n❌ Data Download Failed")
+        print(f"   {error_msg}")
+        print(f"\n💡 Possible causes:")
+        print(f"   - Competition '{competition_info.name}' doesn't exist")
+        print(f"   - You haven't accepted the competition rules")
+        print(f"   - Network connectivity issues")
+
+        return {
+            "errors": [f"Data download failed: {error_msg}"],
+            "last_updated": datetime.now(),
+        }
+
 
 def domain_detection_node(state: KaggleState) -> Dict[str, Any]:
     """
@@ -199,6 +276,7 @@ def create_workflow() -> StateGraph:
     workflow = StateGraph(KaggleState)
 
     # Add nodes
+    workflow.add_node("data_download", data_download_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
@@ -208,8 +286,11 @@ def create_workflow() -> StateGraph:
     workflow.add_node("iteration_control", iteration_control_node)
 
     # Define edges
-    # Start → Domain Detection
-    workflow.set_entry_point("domain_detection")
+    # Start → Data Download
+    workflow.set_entry_point("data_download")
+
+    # Data Download → Domain Detection
+    workflow.add_edge("data_download", "domain_detection")
 
     # Domain Detection → Search
     workflow.add_edge("domain_detection", "search")
@@ -365,13 +446,15 @@ def create_simple_workflow() -> StateGraph:
     workflow = StateGraph(KaggleState)
 
     # Add nodes
+    workflow.add_node("data_download", data_download_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
 
     # Linear flow
-    workflow.set_entry_point("domain_detection")
+    workflow.set_entry_point("data_download")
+    workflow.add_edge("data_download", "domain_detection")
     workflow.add_edge("domain_detection", "search")
     workflow.add_edge("search", "planner")
     workflow.add_edge("planner", "developer")

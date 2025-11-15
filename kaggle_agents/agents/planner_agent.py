@@ -307,9 +307,24 @@ Domain: {domain}
 
         # Convert to AblationComponent objects
         components = []
-        for item in plan_data:
+        for i, item in enumerate(plan_data):
+            # Generate name if not provided by LLM
+            name = item.get("name")
+            if not name or name == "unnamed":
+                comp_type = item.get("component_type", "component")
+                # Create descriptive name from type and index
+                name = f"{comp_type}_{i+1}"
+                # If there's a description, try to extract key words
+                if item.get("description"):
+                    desc = item["description"].lower()
+                    # Extract first meaningful word
+                    for word in desc.split():
+                        if len(word) > 4 and word not in ["using", "apply", "create", "implement"]:
+                            name = f"{word}_{comp_type}"
+                            break
+
             component = AblationComponent(
-                name=item.get("name", "unnamed"),
+                name=name,
                 component_type=item.get("component_type", "preprocessing"),
                 code=item.get("code_outline", ""),
                 estimated_impact=float(item.get("estimated_impact", 0.05)),
