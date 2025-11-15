@@ -17,6 +17,11 @@ from .code_executor import (
     validate_code_syntax,
 )
 
+from .competition_analyzer import (
+    CompetitionAnalyzer,
+    auto_detect_competition_config,
+)
+
 __all__ = [
     "KaggleSearcher",
     "NotebookMetadata",
@@ -27,4 +32,6 @@ __all__ = [
     "ExecutionResult",
     "execute_code",
     "validate_code_syntax",
+    "CompetitionAnalyzer",
+    "auto_detect_competition_config",
 ]

@@ -46,13 +46,31 @@ Test Data: {test_data_path}
 Models Directory: {models_dir}
 Submission Path: {submission_path}
 
-## Requirements
+## CRITICAL TYPE-SPECIFIC REQUIREMENTS
+
+### If component_type == "preprocessing" or "feature_engineering":
+- **DO NOT train any models** (no fit(), no GridSearch, no model training)
+- ONLY clean data, handle missing values, scale features, or create new features
+- Must execute in **under 10 seconds** (keep it simple and fast)
+- Can save processed data to models directory for later use
+
+### If component_type == "model":
+- **MUST train a simple, fast model** (LightGBM, XGBoost, or RandomForest recommended)
+- **MUST make predictions** on test data
+- **MUST create submission.csv** at {submission_path} with predictions
+- Keep model simple (max_depth=5, n_estimators=100-200) to avoid timeout
+- Target execution time: 30-60 seconds maximum
+- Print CV score or validation metrics
+
+### If component_type == "ensemble":
+- Combine predictions from multiple models
+- Must create submission.csv with ensemble predictions
+
+## General Requirements
 1. Load data from the provided paths
-2. Implement the component exactly as specified
-3. Save any models to the models directory
-4. If this is a submission component, save to submission_path
-5. Print progress and key metrics
-6. Handle errors gracefully
+2. Implement the component exactly as specified above
+3. Print progress and key metrics
+4. Handle errors gracefully
 
 ## Code Structure
 ```python

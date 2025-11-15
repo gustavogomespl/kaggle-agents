@@ -35,14 +35,41 @@ CREATE_ABLATION_PLAN_PROMPT = """Given the following competition information and
 ## SOTA Solutions Summary
 {sota_summary}
 
-## Your Task
-Create a list of 5-10 ablation components. For each component:
+## CRITICAL COMPONENT TYPE RULES
 
-1. **Name**: Short descriptive name
+### preprocessing
+- Data cleaning, missing value handling, basic scaling/encoding
+- **NO MODEL TRAINING** - only prepare data
+- Examples: StandardScaler, SimpleImputer, basic feature selection
+
+### feature_engineering
+- Create NEW features from existing ones
+- **NO MODEL TRAINING** - only create features
+- Examples: polynomial features, interaction terms, domain-specific features
+
+### model
+- **MUST TRAIN A MODEL and GENERATE PREDICTIONS**
+- **MUST CREATE submission.csv**
+- Use simple, fast models (LightGBM, XGBoost, RandomForest)
+- Examples: LGBMClassifier with simple hyperparameters
+
+### ensemble
+- Combine predictions from multiple models
+- Create weighted average or stacking ensemble
+
+## Your Task
+Create a list of 5-10 ablation components. **REQUIREMENTS:**
+- **AT LEAST ONE component MUST be type "model"** (to generate predictions)
+- Include mix of preprocessing, feature_engineering, and model types
+- Prioritize high-impact components (>0.05)
+
+For each component provide:
+
+1. **Name**: Short descriptive name (e.g., "xgboost_baseline", "missing_value_imputation")
 2. **Type**: One of [feature_engineering, model, preprocessing, ensemble]
-3. **Description**: What this component does
+3. **Description**: What this component does (be specific)
 4. **Estimated Impact**: Float 0-1 (e.g., 0.15 = 15% expected improvement)
-5. **Rationale**: Why you think this will help
+5. **Rationale**: Why you think this will help based on SOTA
 6. **Code Outline**: Brief pseudocode or description
 
 ## Output Format
