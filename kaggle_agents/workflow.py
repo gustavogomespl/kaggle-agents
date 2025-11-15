@@ -252,11 +252,32 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     Returns:
         "iterate" to continue implementing components, or "end" if done
     """
+    # Check for critical errors (e.g., data download failed)
+    errors = state.get("errors", [])
+    if errors:
+        # Check if error is about missing data files
+        for error in errors:
+            if "Data download failed" in error or "authentication failed" in error.lower():
+                print("\n⚠️ Critical error detected, stopping workflow")
+                return "end"
+
     ablation_plan = state.get("ablation_plan", [])
     current_component_index = state.get("current_component_index", 0)
 
     # Check if more components to implement
     if current_component_index < len(ablation_plan):
+        # Check if we're stuck on the same component (prevent infinite loop)
+        dev_results = state.get("development_results", [])
+        if len(dev_results) >= 3:
+            # Check if last 3 results all failed on same component
+            recent_failures = [r for r in dev_results[-3:] if not r.success]
+            if len(recent_failures) == 3:
+                # Check if all have same error about data files
+                data_errors = [r for r in recent_failures if "Data files not found" in (r.stderr or "")]
+                if len(data_errors) == 3:
+                    print("\n⚠️ Repeated data file errors, stopping workflow")
+                    return "end"
+
         return "iterate"
 
     # All components done

@@ -178,12 +178,18 @@ class DeveloperAgent:
         # Generate and execute code
         result = self._implement_component(component, state)
 
+        # Determine if we should move to next component
+        # Always move forward if it's a critical error (data files missing)
+        should_advance = result.success or (
+            not result.success and "Data files not found" in (result.stderr or "")
+        )
+
         # Update state
         return {
             "development_results": [result],
             "current_code": result.code,
             "code_retry_count": 0,
-            "current_component_index": current_index + 1 if result.success else current_index,
+            "current_component_index": current_index + 1 if should_advance else current_index,
             "last_updated": datetime.now(),
         }
 
