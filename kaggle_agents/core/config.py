@@ -20,9 +20,9 @@ class LLMConfig:
     """LLM provider and model configuration."""
 
     provider: Literal["openai", "anthropic"] = "openai"
-    model: str = "gpt-4o"
-    temperature: float = 0.7
-    max_tokens: int = 4096
+    model: str = "gpt-5.1-codex"
+    temperature: float = 0
+    max_tokens: int = 30000
     timeout: int = 120  # seconds
 
 
