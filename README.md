@@ -1,6 +1,6 @@
 # Kaggle Agents
 
-Autonomous agent system for Kaggle competitions using LangGraph, DSPy, and concepts from Google's Automated Data Science and Knowledge (ADK) framework.
+Autonomous agent system for Kaggle competitions using LangGraph, DSPy, and concepts from Google's MLE Star framework (https://www.arxiv.org/abs/2506.15692).
 
 ## Overview
 
