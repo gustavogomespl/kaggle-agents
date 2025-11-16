@@ -21,7 +21,7 @@ class LLMConfig:
 
     provider: Literal["openai", "anthropic"] = "openai"
     model: str = "gpt-5.1-codex"
-    temperature: float = 0
+    temperature: float = 1
     max_tokens: int = 30000
     timeout: int = 120  # seconds
 
