@@ -20,7 +20,7 @@ class LLMConfig:
     """LLM provider and model configuration."""
 
     provider: Literal["openai", "anthropic"] = "openai"
-    model: str = "gpt-5.1-mini"
+    model: str = "gpt-5-mini"
     temperature: float = 1
     max_tokens: int = 30000
     timeout: int = 120  # seconds
