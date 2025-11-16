@@ -199,14 +199,35 @@ class SubmissionAgent:
             print(f"   Competition: {competition_name}")
             print(f"   Message: {message}")
 
-            # Submit
-            result = self.kaggle_api.competition_submit(
-                file_name=str(submission_path),
-                message=message,
-                competition=competition_name,
-            )
+            # Try using Kaggle CLI first (more reliable in some environments)
+            try:
+                import subprocess
+                cmd = [
+                    "kaggle", "competitions", "submit",
+                    "-c", competition_name,
+                    "-f", str(submission_path),
+                    "-m", message
+                ]
+                result_cli = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
-            print(f"✅ Uploaded successfully!")
+                if result_cli.returncode == 0:
+                    print(f"✅ Uploaded successfully via CLI!")
+                    print(f"   {result_cli.stdout}")
+                    submission_id = None  # CLI doesn't return ID easily
+                else:
+                    # Fall back to API
+                    raise Exception("CLI failed, using API")
+
+            except Exception as cli_error:
+                # Fall back to Python API
+                print(f"   ℹ️  CLI upload failed, using Python API...")
+                result = self.kaggle_api.competition_submit(
+                    file_name=str(submission_path),
+                    message=message,
+                    competition=competition_name,
+                )
+                submission_id = result.get("id")
+                print(f"✅ Uploaded successfully via API!")
 
             # Wait a bit for processing
             print(f"\n⏳ Waiting for score (30s)...")
@@ -222,7 +243,7 @@ class SubmissionAgent:
                 print(f"\n⏳ Score not yet available (check leaderboard later)")
 
             return SubmissionResult(
-                submission_id=result.get("id"),
+                submission_id=submission_id,
                 public_score=public_score,
                 private_score=None,
                 percentile=percentile,

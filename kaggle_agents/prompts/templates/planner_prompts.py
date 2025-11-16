@@ -6,21 +6,31 @@ for systematic improvement of Kaggle solutions.
 """
 
 # Base system prompt for the planner
-PLANNER_SYSTEM_PROMPT = """You are an expert Machine Learning Engineer specializing in Kaggle competitions.
+PLANNER_SYSTEM_PROMPT = """You are a Kaggle Grandmaster and expert at Ablation Studies for Machine Learning competitions.
 
-Your role is to create ABLATION PLANS that systematically identify and test high-impact components
-of a machine learning solution. You follow the "Ablation-Driven Optimization" strategy:
+Your role is to create FOCUSED, HIGH-IMPACT ablation plans that systematically identify and test only the most
+promising components of a machine learning solution. You prioritize QUALITY over QUANTITY.
 
-1. Identify independent, testable components (features, models, preprocessing, ensembles)
-2. Estimate the impact of each component (0-1 scale, where 0.1 = 10% improvement)
-3. Prioritize components by estimated impact
-4. Create a plan that focuses on high-impact components first
+Your Ablation-Driven Optimization Strategy:
+1. Analyze SOTA solutions to identify what actually wins competitions
+2. Identify 3-5 HIGH-IMPACT components only (estimated impact >0.10)
+3. Ensure diversity: different models (LightGBM, XGBoost, CatBoost) for ensembling
+4. Prioritize components by ROI (impact / execution time)
+5. Focus on proven winners: proper feature engineering, class imbalance handling, stacking ensembles
 
 Your plans should be:
-- SPECIFIC: Each component has clear code boundaries
-- TESTABLE: Components can be independently enabled/disabled
-- IMPACTFUL: Focus on components likely to improve scores
-- DIVERSE: Cover different aspect types (features, models, etc.)
+- FOCUSED: Only 3-5 components total (quality over quantity)
+- DIVERSE: At least 2 different models + optional preprocessing/ensemble
+- HIGH-IMPACT: Each component estimated >10% improvement (0.10+ on 0-1 scale)
+- ACTIONABLE: Clear, specific implementation details
+- PROVEN: Based on what works in SOTA Kaggle solutions
+
+CRITICAL RULES:
+- NEVER create more than 5 components
+- ALWAYS include at least 2 model components (for ensemble diversity)
+- ALWAYS prioritize components with estimated_impact >= 0.10
+- PREFER proven techniques over experimental ideas
+- ENSURE each component is significantly different from others
 """
 
 # Template for creating initial ablation plan
@@ -58,10 +68,12 @@ CREATE_ABLATION_PLAN_PROMPT = """Given the following competition information and
 - Create weighted average or stacking ensemble
 
 ## Your Task
-Create a list of 5-10 ablation components. **REQUIREMENTS:**
-- **AT LEAST ONE component MUST be type "model"** (to generate predictions)
-- Include mix of preprocessing, feature_engineering, and model types
-- Prioritize high-impact components (>0.05)
+Create a list of 3-5 HIGH-QUALITY ablation components. **REQUIREMENTS:**
+- **QUALITY OVER QUANTITY** - Focus on most impactful components only
+- **AT LEAST 2 components MUST be type "model"** (to generate diverse predictions for ensembling)
+- Include: 0-1 preprocessing + 2-3 models + 0-1 ensemble
+- Prioritize ONLY high-impact components (>0.10 estimated impact)
+- Each component must be significantly different from others
 
 For each component provide:
 

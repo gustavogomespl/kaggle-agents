@@ -8,24 +8,37 @@ ablation components with retry and debug capabilities.
 from typing import Dict
 
 # Base system prompt for the developer
-DEVELOPER_SYSTEM_PROMPT = """You are an expert Python developer specializing in Machine Learning and Kaggle competitions.
+DEVELOPER_SYSTEM_PROMPT = """You are a Kaggle Grandmaster and expert Python developer specializing in winning Machine Learning competitions.
 
-Your role is to write PRODUCTION-READY code that implements machine learning components.
+Your role is to write PRODUCTION-READY, HIGH-PERFORMANCE code that implements machine learning components that achieve top leaderboard scores.
 
-You follow these principles:
-1. **Clean Code**: Well-structured, readable, documented
-2. **Error Handling**: Proper try-except blocks, informative errors
-3. **Reproducibility**: Set random seeds, save artifacts
-4. **Best Practices**: Follow scikit-learn/pandas conventions
-5. **Efficiency**: Vectorized operations, memory-conscious
+You are known for:
+1. **Kaggle Best Practices**: Class imbalance handling, proper CV, probability predictions, no data leakage
+2. **Clean Code**: Well-structured, readable, minimal comments (code should be self-explanatory)
+3. **Reproducibility**: Always set random_state=42, use StratifiedKFold for CV
+4. **Feature Engineering Excellence**: Create impactful features (polynomial, interactions, target encoding)
+5. **Model Selection**: Use proven winners (LightGBM, XGBoost, CatBoost) with proper hyperparameters
+6. **Efficiency**: Vectorized operations, fast execution (<60s for models, <10s for preprocessing)
+
+CRITICAL RULES (Never Break):
+- ALWAYS use predict_proba() for probability predictions (NOT predict())
+- ALWAYS check class distribution and apply class weights if imbalanced (ratio > 2:1)
+- ALWAYS use StratifiedKFold(n_splits=5) for cross-validation
+- ALWAYS print CV scores, class distribution, prediction distribution
+- NEVER use try-except to hide errors (let them surface for debugging)
+- NEVER subsample training data (use all available data)
+- NEVER use sys.exit() or similar termination commands
+- ALWAYS save submission.csv with probabilities (0.0-1.0), NOT binary predictions (0/1)
 
 Your code should:
 - Import all necessary libraries
 - Load data from correct paths
-- Implement the specified component
+- Check for class imbalance and handle appropriately
+- Implement the specified component with best practices
+- Use cross-validation to estimate performance
+- Make probability predictions (not hard predictions)
 - Save outputs/models to correct locations
-- Handle edge cases and errors gracefully
-- Print progress and results
+- Print execution time and key metrics
 """
 
 # Template for generating code from ablation component
@@ -55,12 +68,27 @@ Submission Path: {submission_path}
 - Can save processed data to models directory for later use
 
 ### If component_type == "model":
-- **MUST train a simple, fast model** (LightGBM, XGBoost, or RandomForest recommended)
-- **MUST make predictions** on test data
-- **MUST create submission.csv** at {submission_path} with predictions
+- **MUST train a simple, fast model** (LightGBM, XGBoost, CatBoost, or RandomForest recommended)
+- **MUST make predictions** on test data using **predict_proba()** (NOT predict())
+- **MUST create submission.csv** at {submission_path} with **probability predictions** (column should be probabilities 0.0-1.0, NOT binary 0/1)
 - Keep model simple (max_depth=5, n_estimators=100-200) to avoid timeout
 - Target execution time: 30-60 seconds maximum
 - Print CV score or validation metrics
+
+#### CRITICAL: Class Imbalance Handling
+- **ALWAYS check class distribution** in training data
+- **Calculate class weights** if imbalanced (ratio > 2:1)
+- For XGBoost: use `scale_pos_weight = negative_count / positive_count`
+- For LightGBM: use `is_unbalance=True` or `class_weight='balanced'`
+- For sklearn models: use `class_weight='balanced'`
+- **ALWAYS use StratifiedKFold** for cross-validation (5 folds)
+- **Print class distribution** before and after predictions
+
+#### CRITICAL: Probability Predictions
+- Use `model.predict_proba(X_test)[:, 1]` for binary classification
+- For multiclass: use `model.predict_proba(X_test)` (all class probabilities)
+- Submission must contain probabilities (0.0-1.0), NOT hard predictions (0/1)
+- Example: `submission['prediction'] = model.predict_proba(X_test)[:, 1]`
 
 ### If component_type == "ensemble":
 - Combine predictions from multiple models
@@ -72,30 +100,77 @@ Submission Path: {submission_path}
 3. Print progress and key metrics
 4. Handle errors gracefully
 
+## CRITICAL GUARDRAILS (You are a Kaggle Grandmaster - follow best practices)
+- **NO try-except blocks that hide errors** - let errors surface for debugging
+- **NO subsampling of training data** - use all available data
+- **NO sys.exit()** or similar termination commands
+- **ALWAYS print intermediate validation scores** during training
+- **ALWAYS use all provided features** - don't drop columns arbitrarily
+- **ALWAYS set random_state/random_seed** for reproducibility (use 42)
+- **Print execution time** at the end
+
 ## Code Structure
 ```python
 # Imports
 import pandas as pd
 import numpy as np
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+import time
 # ... other imports
 
 # Configuration
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
+start_time = time.time()
+
 # Load data
 print("Loading data...")
 train_df = pd.read_csv('{train_data_path}')
 test_df = pd.read_csv('{test_data_path}')
 
+# Check class distribution (for model components)
+print(f"Class distribution: {{train_df[target_col].value_counts().to_dict()}}")
+
 # Implement component
 print("Implementing {component_name}...")
 # ... your code here
 
+# For model components: Calculate class weights if needed
+positive_count = (y_train == 1).sum()
+negative_count = (y_train == 0).sum()
+imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
+print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
+
+if imbalance_ratio > 2.0:
+    print("⚠️  Class imbalance detected - applying weights")
+    # For XGBoost:
+    scale_pos_weight = negative_count / positive_count
+    # model = XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42)
+
+    # For LightGBM:
+    # model = LGBMClassifier(is_unbalance=True, random_state=42)
+
+    # For sklearn:
+    # model = RandomForestClassifier(class_weight='balanced', random_state=42)
+
+# Cross-validation with StratifiedKFold
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+cv_scores = cross_val_score(model, X_train, y_train, cv=skf, scoring='roc_auc')
+print(f"CV Score: {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
+
+# Make predictions (MUST use predict_proba for probabilities)
+predictions = model.predict_proba(X_test)[:, 1]  # Binary classification
+print(f"Prediction distribution: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
+
 # Save outputs
 print("Saving outputs...")
-# ... save models, predictions, etc.
+submission = pd.DataFrame({{'id': test_df['id'], 'prediction': predictions}})
+submission.to_csv('{submission_path}', index=False)
+print(f"Submission saved: {{len(submission)}} rows")
 
+elapsed_time = time.time() - start_time
+print(f"⏱️  Execution time: {{elapsed_time:.2f}}s")
 print("✅ Complete!")
 ```
 
@@ -328,6 +403,335 @@ forecast = model.predict(future)
 # Save
 import joblib
 joblib.dump(model, '{model_path}')
+""",
+}
+
+# Advanced ML code templates
+ADVANCED_ML_TEMPLATES = {
+    "stacking_ensemble": """
+# Stacking Ensemble Template (for ensemble component_type)
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import StratifiedKFold
+from sklearn.ensemble import StackingClassifier
+from sklearn.linear_model import LogisticRegression
+import xgboost as xgb
+import lightgbm as lgb
+from catboost import CatBoostClassifier
+import time
+
+RANDOM_SEED = 42
+start_time = time.time()
+
+# Load data
+print("Loading data...")
+train_df = pd.read_csv('{train_data_path}')
+test_df = pd.read_csv('{test_data_path}')
+
+# Prepare features and target
+# TODO: Identify target column and separate features
+X = train_df.drop('{target_col}', axis=1)
+y = train_df['{target_col}']
+X_test = test_df.drop('{target_col}', axis=1, errors='ignore')
+
+# Handle missing values
+from sklearn.impute import SimpleImputer
+imputer = SimpleImputer(strategy='median')
+X_imputed = imputer.fit_transform(X.select_dtypes(include=[np.number]))
+X_test_imputed = imputer.transform(X_test.select_dtypes(include=[np.number]))
+
+# Check class imbalance
+positive_count = (y == 1).sum()
+negative_count = (y == 0).sum()
+imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
+print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
+
+scale_pos_weight = negative_count / positive_count if imbalance_ratio > 2.0 else 1.0
+
+# Define base learners (diverse models)
+base_learners = [
+    ('xgb', xgb.XGBClassifier(
+        n_estimators=200,
+        max_depth=5,
+        learning_rate=0.05,
+        scale_pos_weight=scale_pos_weight,
+        random_state=RANDOM_SEED,
+        n_jobs=-1
+    )),
+    ('lgb', lgb.LGBMClassifier(
+        n_estimators=200,
+        max_depth=5,
+        learning_rate=0.05,
+        is_unbalance=(imbalance_ratio > 2.0),
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
+        verbose=-1
+    )),
+    ('catboost', CatBoostClassifier(
+        iterations=200,
+        depth=5,
+        learning_rate=0.05,
+        random_state=RANDOM_SEED,
+        verbose=False
+    ))
+]
+
+# Meta-learner (use Logistic Regression or LightGBM)
+meta_learner = LogisticRegression(
+    random_state=RANDOM_SEED,
+    max_iter=1000,
+    class_weight='balanced' if imbalance_ratio > 2.0 else None
+)
+
+print("\\nBuilding stacking ensemble...")
+stacking_clf = StackingClassifier(
+    estimators=base_learners,
+    final_estimator=meta_learner,
+    cv=5,  # Internal cross-validation for meta-features
+    n_jobs=-1
+)
+
+# Train stacking model
+print("Training stacking ensemble (this may take a minute)...")
+stacking_clf.fit(X_imputed, y)
+
+# Cross-validation
+print("\\nEvaluating with cross-validation...")
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+from sklearn.model_selection import cross_val_score
+cv_scores = cross_val_score(stacking_clf, X_imputed, y, cv=skf, scoring='roc_auc', n_jobs=-1)
+print(f"CV Score (ROC-AUC): {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
+
+# Make predictions (use predict_proba for probabilities)
+print("\\nMaking predictions...")
+predictions = stacking_clf.predict_proba(X_test_imputed)[:, 1]
+
+print(f"Prediction distribution:")
+print(f"  Min: {{predictions.min():.4f}}")
+print(f"  Max: {{predictions.max():.4f}}")
+print(f"  Mean: {{predictions.mean():.4f}}")
+print(f"  Median: {{np.median(predictions):.4f}}")
+
+# Save submission
+submission = pd.DataFrame({{'id': test_df['id'], 'prediction': predictions}})
+submission.to_csv('{submission_path}', index=False)
+
+elapsed_time = time.time() - start_time
+print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
+""",
+
+    "catboost_model": """
+# CatBoost Model Template (for model component_type)
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from catboost import CatBoostClassifier, Pool
+import time
+
+RANDOM_SEED = 42
+start_time = time.time()
+
+# Load data
+print("Loading data...")
+train_df = pd.read_csv('{train_data_path}')
+test_df = pd.read_csv('{test_data_path}')
+
+# Separate features and target
+# TODO: Identify target column
+X = train_df.drop('{target_col}', axis=1)
+y = train_df['{target_col}']
+X_test = test_df.drop('{target_col}', axis=1, errors='ignore')
+
+# Identify categorical features
+cat_features = X.select_dtypes(include=['object', 'category']).columns.tolist()
+print(f"Categorical features: {{len(cat_features)}}")
+
+# Check class imbalance
+positive_count = (y == 1).sum()
+negative_count = (y == 0).sum()
+imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
+print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
+
+# CatBoost handles categorical features natively (no encoding needed!)
+# Create Pool objects for efficient training
+train_pool = Pool(
+    data=X,
+    label=y,
+    cat_features=cat_features
+)
+
+test_pool = Pool(
+    data=X_test,
+    cat_features=cat_features
+)
+
+# Configure CatBoost
+model = CatBoostClassifier(
+    iterations=300,
+    depth=6,
+    learning_rate=0.05,
+    loss_function='Logloss',
+    eval_metric='AUC',
+    random_seed=RANDOM_SEED,
+    verbose=50,  # Print every 50 iterations
+    early_stopping_rounds=50,
+    auto_class_weights='Balanced' if imbalance_ratio > 2.0 else None
+)
+
+# Train model
+print("\\nTraining CatBoost...")
+model.fit(train_pool, verbose=True)
+
+# Cross-validation
+print("\\nEvaluating with cross-validation...")
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+cv_scores = []
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+    X_train_fold, X_val_fold = X.iloc[train_idx], X.iloc[val_idx]
+    y_train_fold, y_val_fold = y.iloc[train_idx], y.iloc[val_idx]
+
+    fold_model = CatBoostClassifier(
+        iterations=300,
+        depth=6,
+        learning_rate=0.05,
+        random_seed=RANDOM_SEED,
+        verbose=False
+    )
+    fold_model.fit(X_train_fold, y_train_fold, cat_features=cat_features)
+
+    from sklearn.metrics import roc_auc_score
+    preds = fold_model.predict_proba(X_val_fold)[:, 1]
+    score = roc_auc_score(y_val_fold, preds)
+    cv_scores.append(score)
+    print(f"Fold {{fold}}: {{score:.4f}}")
+
+print(f"\\nCV Score (ROC-AUC): {{np.mean(cv_scores):.4f}} (+/- {{np.std(cv_scores):.4f}})")
+
+# Make predictions (use predict_proba for probabilities)
+print("\\nMaking predictions...")
+predictions = model.predict_proba(test_pool)[:, 1]
+
+print(f"Prediction distribution:")
+print(f"  Min: {{predictions.min():.4f}}")
+print(f"  Max: {{predictions.max():.4f}}")
+print(f"  Mean: {{predictions.mean():.4f}}")
+
+# Save submission
+submission = pd.DataFrame({{'id': test_df['id'], 'prediction': predictions}})
+submission.to_csv('{submission_path}', index=False)
+
+elapsed_time = time.time() - start_time
+print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print(f"✅ CatBoost model complete! Submission saved with {{len(submission)}} rows")
+""",
+
+    "advanced_feature_engineering": """
+# Advanced Feature Engineering Template (for feature_engineering component_type)
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import PolynomialFeatures, StandardScaler
+from category_encoders import TargetEncoder
+import time
+
+RANDOM_SEED = 42
+start_time = time.time()
+
+# Load data
+print("Loading data...")
+train_df = pd.read_csv('{train_data_path}')
+test_df = pd.read_csv('{test_data_path}')
+
+# Identify target column
+# TODO: Set target column name
+target_col = '{target_col}'
+X_train = train_df.drop(target_col, axis=1)
+y_train = train_df[target_col]
+X_test = test_df.copy()
+
+print(f"Original features: {{X_train.shape[1]}}")
+
+# 1. Polynomial Features (degree 2 for numeric columns)
+print("\\n1. Creating polynomial features...")
+numeric_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
+if len(numeric_cols) > 0 and len(numeric_cols) <= 10:  # Only if manageable
+    poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=True)
+    X_train_poly = poly.fit_transform(X_train[numeric_cols])
+    X_test_poly = poly.transform(X_test[numeric_cols])
+
+    poly_feature_names = [f"poly_{{i}}" for i in range(X_train_poly.shape[1])]
+    X_train_poly_df = pd.DataFrame(X_train_poly, columns=poly_feature_names, index=X_train.index)
+    X_test_poly_df = pd.DataFrame(X_test_poly, columns=poly_feature_names, index=X_test.index)
+
+    X_train = pd.concat([X_train, X_train_poly_df], axis=1)
+    X_test = pd.concat([X_test, X_test_poly_df], axis=1)
+    print(f"   Added {{X_train_poly.shape[1]}} polynomial features")
+
+# 2. Feature Interactions (ratio, diff, product)
+print("\\n2. Creating feature interactions...")
+if len(numeric_cols) >= 2:
+    for i, col1 in enumerate(numeric_cols[:5]):  # Limit to avoid explosion
+        for col2 in numeric_cols[i+1:6]:
+            # Ratio (with safety check for division by zero)
+            X_train[f"ratio_{{col1}}_{{col2}}"] = X_train[col1] / (X_train[col2] + 1e-5)
+            X_test[f"ratio_{{col1}}_{{col2}}"] = X_test[col1] / (X_test[col2] + 1e-5)
+
+            # Difference
+            X_train[f"diff_{{col1}}_{{col2}}"] = X_train[col1] - X_train[col2]
+            X_test[f"diff_{{col1}}_{{col2}}"] = X_test[col1] - X_test[col2]
+
+            # Product
+            X_train[f"prod_{{col1}}_{{col2}}"] = X_train[col1] * X_train[col2]
+            X_test[f"prod_{{col1}}_{{col2}}"] = X_test[col1] * X_test[col2]
+
+# 3. Statistical Transformations
+print("\\n3. Creating statistical transformations...")
+for col in numeric_cols[:10]:  # Limit to most important
+    # Log transform (for positive skewed data)
+    if (X_train[col] > 0).all():
+        X_train[f"log_{{col}}"] = np.log1p(X_train[col])
+        X_test[f"log_{{col}}"] = np.log1p(X_test[col])
+
+    # Square root (for positive skewed data)
+    if (X_train[col] >= 0).all():
+        X_train[f"sqrt_{{col}}"] = np.sqrt(X_train[col])
+        X_test[f"sqrt_{{col}}"] = np.sqrt(X_test[col])
+
+    # Z-score
+    mean_val = X_train[col].mean()
+    std_val = X_train[col].std()
+    if std_val > 0:
+        X_train[f"zscore_{{col}}"] = (X_train[col] - mean_val) / std_val
+        X_test[f"zscore_{{col}}"] = (X_test[col] - mean_val) / std_val
+
+# 4. Target Encoding (leakage-safe with out-of-fold)
+print("\\n4. Creating target encoding for categorical features...")
+cat_cols = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+if len(cat_cols) > 0:
+    # Use TargetEncoder with smoothing to prevent overfitting
+    encoder = TargetEncoder(smoothing=1.0, min_samples_leaf=20)
+
+    # Fit on train data only
+    X_train_encoded = encoder.fit_transform(X_train[cat_cols], y_train)
+    X_test_encoded = encoder.transform(X_test[cat_cols])
+
+    # Add encoded features with prefix
+    for i, col in enumerate(cat_cols):
+        X_train[f"target_enc_{{col}}"] = X_train_encoded.iloc[:, i]
+        X_test[f"target_enc_{{col}}"] = X_test_encoded.iloc[:, i]
+
+print(f"\\nFinal features: {{X_train.shape[1]}} (added {{X_train.shape[1] - len(train_df.columns) + 1}} features)")
+
+# Save engineered data for later use by models
+print("\\nSaving engineered features...")
+X_train['{{target_col}}'] = y_train
+X_train.to_csv('{models_dir}/train_engineered.csv', index=False)
+X_test.to_csv('{models_dir}/test_engineered.csv', index=False)
+
+elapsed_time = time.time() - start_time
+print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print("✅ Advanced feature engineering complete!")
 """,
 }
 
