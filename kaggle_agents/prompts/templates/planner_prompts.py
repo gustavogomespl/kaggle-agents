@@ -85,23 +85,54 @@ For each component provide:
 6. **Code Outline**: Brief pseudocode or description
 
 ## Output Format
-Return a JSON list of components:
+Return ONLY a valid JSON list (no markdown, no explanation). Example for a tabular regression competition:
 
 ```json
 [
   {{
-    "name": "target_encoding",
+    "name": "advanced_feature_engineering",
     "component_type": "feature_engineering",
-    "description": "Apply target encoding to high-cardinality categorical features",
-    "estimated_impact": 0.12,
-    "rationale": "SOTA solutions show target encoding improved scores by 8-15%",
-    "code_outline": "Use category_encoders.TargetEncoder on ['col1', 'col2']"
+    "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
+    "estimated_impact": 0.15,
+    "rationale": "SOTA solutions show comprehensive feature engineering improves RMSE by 10-20%. Polynomial features capture non-linear relationships, target encoding handles high-cardinality categoricals effectively.",
+    "code_outline": "Use PolynomialFeatures(degree=2, interaction_only=True), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder with smoothing"
   }},
-  ...
+  {{
+    "name": "lightgbm_tuned",
+    "component_type": "model",
+    "description": "LightGBM regression with tuned hyperparameters: n_estimators=2000, max_depth=8, learning_rate=0.03, num_leaves=63",
+    "estimated_impact": 0.20,
+    "rationale": "LightGBM consistently wins tabular competitions. Deeper trees (depth=8) and more leaves capture complex patterns. Lower learning rate with early stopping prevents overfitting.",
+    "code_outline": "LGBMRegressor with 5-fold CV, early_stopping_rounds=100, eval_metric=rmse"
+  }},
+  {{
+    "name": "xgboost_tuned",
+    "component_type": "model",
+    "description": "XGBoost regression with tuned hyperparameters: n_estimators=2000, max_depth=7, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8",
+    "estimated_impact": 0.18,
+    "rationale": "XGBoost provides different regularization than LightGBM, enabling better ensemble diversity. Mid-depth trees with subsampling prevent overfitting on tabular data.",
+    "code_outline": "XGBRegressor with 5-fold CV, early_stopping_rounds=50, eval_metric=rmse"
+  }},
+  {{
+    "name": "catboost_tuned",
+    "component_type": "model",
+    "description": "CatBoost regression with native categorical handling: iterations=2000, depth=7, learning_rate=0.03",
+    "estimated_impact": 0.17,
+    "rationale": "CatBoost handles categorical features natively without encoding, often outperforms other GBDTs. Adds diversity to ensemble.",
+    "code_outline": "CatBoostRegressor with cat_features parameter, 5-fold CV, early_stopping_rounds=50"
+  }},
+  {{
+    "name": "stacking_ensemble",
+    "component_type": "ensemble",
+    "description": "Stack LightGBM, XGBoost, and CatBoost predictions using Ridge regression as meta-learner with 5-fold out-of-fold predictions",
+    "estimated_impact": 0.12,
+    "rationale": "Stacking combines diverse models and typically improves RMSE by 5-10%. Ridge meta-learner prevents overfitting to base model predictions.",
+    "code_outline": "StackingRegressor with base_estimators=[lgb, xgb, catboost], final_estimator=Ridge(alpha=10), cv=5"
+  }}
 ]
 ```
 
-Focus on components with high estimated impact (>0.05) and diversity across types.
+**IMPORTANT**: Return ONLY the JSON array, nothing else. No markdown code blocks, no explanations.
 """
 
 # Template for refining ablation plan based on results

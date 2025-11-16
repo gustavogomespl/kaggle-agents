@@ -426,38 +426,56 @@ Domain: {domain}
             sota_analysis: SOTA analysis results
 
         Returns:
-            List of component dictionaries
+            List of component dictionaries (always 4-5 components)
         """
         plan = []
 
-        # Add model components based on SOTA
-        common_models = sota_analysis.get("common_models", [])
-        if common_models:
-            for model in common_models[:2]:
-                plan.append({
-                    "name": f"train_{model.lower().replace(' ', '_')}",
-                    "component_type": "model",
-                    "description": f"Train {model} model",
-                    "estimated_impact": 0.10,
-                    "code_outline": f"from sklearn import ...; model = {model}()",
-                })
-
-        # Add feature engineering
+        # ALWAYS add feature engineering first (high impact)
         plan.append({
             "name": "advanced_feature_engineering",
             "component_type": "feature_engineering",
-            "description": "Advanced feature engineering techniques",
+            "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
             "estimated_impact": 0.15,
-            "code_outline": "Create interaction features, polynomial features, etc.",
+            "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
+            "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder"
         })
 
-        # Add ensemble
+        # ALWAYS add 3 diverse models for ensemble diversity
+        plan.extend([
+            {
+                "name": "lightgbm_tuned",
+                "component_type": "model",
+                "description": "LightGBM with tuned hyperparameters: n_estimators=2000, max_depth=8, learning_rate=0.03, num_leaves=63",
+                "estimated_impact": 0.20,
+                "rationale": "LightGBM consistently wins tabular competitions. Deeper trees capture complex patterns.",
+                "code_outline": "LGBMRegressor/Classifier with 5-fold CV, early_stopping_rounds=100"
+            },
+            {
+                "name": "xgboost_tuned",
+                "component_type": "model",
+                "description": "XGBoost with tuned hyperparameters: n_estimators=2000, max_depth=7, learning_rate=0.03, subsample=0.8",
+                "estimated_impact": 0.18,
+                "rationale": "XGBoost provides different regularization than LightGBM, enabling better ensemble diversity",
+                "code_outline": "XGBRegressor/Classifier with 5-fold CV, early_stopping_rounds=50"
+            },
+            {
+                "name": "catboost_tuned",
+                "component_type": "model",
+                "description": "CatBoost with native categorical handling: iterations=2000, depth=7, learning_rate=0.03",
+                "estimated_impact": 0.17,
+                "rationale": "CatBoost handles categorical features natively, often outperforms other GBDTs",
+                "code_outline": "CatBoostRegressor/Classifier with cat_features parameter, 5-fold CV"
+            }
+        ])
+
+        # ALWAYS add stacking ensemble (combines the 3 models above)
         plan.append({
-            "name": "model_ensemble",
+            "name": "stacking_ensemble",
             "component_type": "ensemble",
-            "description": "Ensemble multiple models",
-            "estimated_impact": 0.08,
-            "code_outline": "Combine predictions from multiple models",
+            "description": "Stack LightGBM, XGBoost, and CatBoost predictions using Ridge/Logistic regression as meta-learner",
+            "estimated_impact": 0.12,
+            "rationale": "Stacking combines diverse models and typically improves scores by 5-10%",
+            "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, catboost], final_estimator=Ridge/LogisticRegression, cv=5"
         })
 
         return plan

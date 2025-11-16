@@ -68,11 +68,16 @@ Submission Path: {submission_path}
 - Can save processed data to models directory for later use
 
 ### If component_type == "model":
-- **MUST train a simple, fast model** (LightGBM, XGBoost, CatBoost, or RandomForest recommended)
-- **MUST make predictions** on test data using **predict_proba()** (NOT predict())
-- **MUST create submission.csv** at {submission_path} with **probability predictions** (column should be probabilities 0.0-1.0, NOT binary 0/1)
-- Keep model simple (max_depth=5, n_estimators=100-200) to avoid timeout
-- Target execution time: 30-60 seconds maximum
+- **MUST train a model** (LightGBM, XGBoost, or CatBoost recommended for best performance)
+- **For classification**: use **predict_proba()** to get probabilities (NOT predict() for hard predictions)
+- **For regression**: use **predict()** to get continuous values
+- **MUST create submission.csv** at {submission_path} with predictions
+- Use competitive hyperparameters:
+  - **n_estimators**: 1500-2500 (with early_stopping for efficiency)
+  - **max_depth**: 6-9 (deeper for complex patterns, shallower for overfitting prevention)
+  - **learning_rate**: 0.02-0.05 (lower = more trees, better generalization)
+  - **num_leaves** (LightGBM): 31-127
+- Target execution time: 60-90 seconds per model (use early stopping)
 - Print CV score or validation metrics
 
 #### CRITICAL: Class Imbalance Handling
@@ -408,8 +413,8 @@ joblib.dump(model, '{model_path}')
 
 # Advanced ML code templates
 ADVANCED_ML_TEMPLATES = {
-    "stacking_ensemble": """
-# Stacking Ensemble Template (for ensemble component_type)
+    "stacking_ensemble_classification": """
+# Stacking Ensemble Template for Classification
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
@@ -451,32 +456,33 @@ scale_pos_weight = negative_count / positive_count if imbalance_ratio > 2.0 else
 # Define base learners (diverse models)
 base_learners = [
     ('xgb', xgb.XGBClassifier(
-        n_estimators=200,
-        max_depth=5,
-        learning_rate=0.05,
+        n_estimators=2000,
+        max_depth=7,
+        learning_rate=0.03,
         scale_pos_weight=scale_pos_weight,
         random_state=RANDOM_SEED,
         n_jobs=-1
     )),
     ('lgb', lgb.LGBMClassifier(
-        n_estimators=200,
-        max_depth=5,
-        learning_rate=0.05,
+        n_estimators=2000,
+        max_depth=7,
+        num_leaves=63,
+        learning_rate=0.03,
         is_unbalance=(imbalance_ratio > 2.0),
         random_state=RANDOM_SEED,
         n_jobs=-1,
         verbose=-1
     )),
     ('catboost', CatBoostClassifier(
-        iterations=200,
-        depth=5,
-        learning_rate=0.05,
+        iterations=2000,
+        depth=7,
+        learning_rate=0.03,
         random_state=RANDOM_SEED,
         verbose=False
     ))
 ]
 
-# Meta-learner (use Logistic Regression or LightGBM)
+# Meta-learner
 meta_learner = LogisticRegression(
     random_state=RANDOM_SEED,
     max_iter=1000,
@@ -487,12 +493,12 @@ print("\\nBuilding stacking ensemble...")
 stacking_clf = StackingClassifier(
     estimators=base_learners,
     final_estimator=meta_learner,
-    cv=5,  # Internal cross-validation for meta-features
+    cv=5,
     n_jobs=-1
 )
 
 # Train stacking model
-print("Training stacking ensemble (this may take a minute)...")
+print("Training stacking ensemble...")
 stacking_clf.fit(X_imputed, y)
 
 # Cross-validation
@@ -502,18 +508,183 @@ from sklearn.model_selection import cross_val_score
 cv_scores = cross_val_score(stacking_clf, X_imputed, y, cv=skf, scoring='roc_auc', n_jobs=-1)
 print(f"CV Score (ROC-AUC): {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
 
-# Make predictions (use predict_proba for probabilities)
+# Make predictions
 print("\\nMaking predictions...")
 predictions = stacking_clf.predict_proba(X_test_imputed)[:, 1]
 
-print(f"Prediction distribution:")
-print(f"  Min: {{predictions.min():.4f}}")
-print(f"  Max: {{predictions.max():.4f}}")
-print(f"  Mean: {{predictions.mean():.4f}}")
-print(f"  Median: {{np.median(predictions):.4f}}")
-
 # Save submission
 submission = pd.DataFrame({{'id': test_df['id'], 'prediction': predictions}})
+submission.to_csv('{submission_path}', index=False)
+
+elapsed_time = time.time() - start_time
+print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
+""",
+
+    "stacking_ensemble_regression": """
+# Stacking Ensemble Template for Regression
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import KFold
+from sklearn.ensemble import StackingRegressor
+from sklearn.linear_model import Ridge
+import xgboost as xgb
+import lightgbm as lgb
+from catboost import CatBoostRegressor
+from sklearn.metrics import mean_squared_error
+import time
+
+RANDOM_SEED = 42
+start_time = time.time()
+
+# Load data
+print("Loading data...")
+train_df = pd.read_csv('{train_data_path}')
+test_df = pd.read_csv('{test_data_path}')
+
+# Detect target column
+target_col = None
+for cand in ['target', 'y', 'loss', 'label']:
+    if cand in train_df.columns:
+        target_col = cand
+        break
+if not target_col:
+    # Use last numeric column
+    numeric_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
+    target_col = numeric_cols[-1] if numeric_cols else 'target'
+
+print(f"Target column: {{target_col}}")
+
+# Prepare features and target
+X = train_df.drop(target_col, axis=1, errors='ignore')
+y = train_df[target_col]
+X_test = test_df.copy()
+
+# Remove ID columns
+id_cols = [c for c in X.columns if 'id' in c.lower()]
+if id_cols:
+    test_ids = X_test[id_cols[0]] if id_cols[0] in X_test.columns else np.arange(len(X_test))
+    X = X.drop(columns=id_cols)
+    X_test = X_test.drop(columns=[c for c in id_cols if c in X_test.columns])
+else:
+    test_ids = np.arange(len(X_test))
+
+# Handle missing values
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import LabelEncoder
+
+# Separate numeric and categorical
+numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
+
+# Impute numerics
+num_imputer = SimpleImputer(strategy='median')
+X_num = num_imputer.fit_transform(X[numeric_cols]) if numeric_cols else np.array([]).reshape(len(X), 0)
+X_test_num = num_imputer.transform(X_test[numeric_cols]) if numeric_cols else np.array([]).reshape(len(X_test), 0)
+
+# Encode categoricals
+if cat_cols:
+    X_cat = X[cat_cols].copy()
+    X_test_cat = X_test[cat_cols].copy()
+
+    for col in cat_cols:
+        le = LabelEncoder()
+        # Combine to fit on all categories
+        combined = pd.concat([X_cat[col].astype(str), X_test_cat[col].astype(str)])
+        le.fit(combined.fillna('__MISSING__'))
+        X_cat[col] = le.transform(X_cat[col].astype(str).fillna('__MISSING__'))
+        X_test_cat[col] = le.transform(X_test_cat[col].astype(str).fillna('__MISSING__'))
+
+    X_combined = np.concatenate([X_num, X_cat.values], axis=1)
+    X_test_combined = np.concatenate([X_test_num, X_test_cat.values], axis=1)
+else:
+    X_combined = X_num
+    X_test_combined = X_test_num
+
+print(f"Features: {{X_combined.shape[1]}}")
+
+# Define base learners with competitive hyperparameters
+base_learners = [
+    ('lgb', lgb.LGBMRegressor(
+        n_estimators=2000,
+        max_depth=8,
+        num_leaves=63,
+        learning_rate=0.03,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=RANDOM_SEED,
+        n_jobs=-1,
+        verbose=-1
+    )),
+    ('xgb', xgb.XGBRegressor(
+        n_estimators=2000,
+        max_depth=7,
+        learning_rate=0.03,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        random_state=RANDOM_SEED,
+        n_jobs=-1
+    )),
+    ('catboost', CatBoostRegressor(
+        iterations=2000,
+        depth=7,
+        learning_rate=0.03,
+        random_state=RANDOM_SEED,
+        verbose=False
+    ))
+]
+
+# Meta-learner (Ridge with L2 regularization)
+meta_learner = Ridge(alpha=10.0, random_state=RANDOM_SEED)
+
+print("\\nBuilding stacking ensemble...")
+stacking_reg = StackingRegressor(
+    estimators=base_learners,
+    final_estimator=meta_learner,
+    cv=5,  # 5-fold CV for meta-features
+    n_jobs=-1
+)
+
+# Train stacking model
+print("Training stacking ensemble (this will take 2-3 minutes)...")
+stacking_reg.fit(X_combined, y)
+
+# Cross-validation for evaluation
+print("\\nEvaluating with 5-fold cross-validation...")
+kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+cv_rmses = []
+
+for fold, (train_idx, val_idx) in enumerate(kf.split(X_combined), 1):
+    X_tr, X_val = X_combined[train_idx], X_combined[val_idx]
+    y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+    fold_model = StackingRegressor(
+        estimators=base_learners,
+        final_estimator=Ridge(alpha=10.0, random_state=RANDOM_SEED),
+        cv=3,
+        n_jobs=-1
+    )
+    fold_model.fit(X_tr, y_tr)
+    preds = fold_model.predict(X_val)
+
+    rmse = mean_squared_error(y_val, preds, squared=False)
+    cv_rmses.append(rmse)
+    print(f"Fold {{fold}}: RMSE = {{rmse:.6f}}")
+
+print(f"\\nCV RMSE: {{np.mean(cv_rmses):.6f}} (+/- {{np.std(cv_rmses):.6f}})")
+
+# Make predictions on test
+print("\\nMaking test predictions...")
+predictions = stacking_reg.predict(X_test_combined)
+
+print(f"Prediction distribution:")
+print(f"  Min: {{predictions.min():.6f}}")
+print(f"  Max: {{predictions.max():.6f}}")
+print(f"  Mean: {{predictions.mean():.6f}}")
+print(f"  Median: {{np.median(predictions):.6f}}")
+
+# Save submission
+submission = pd.DataFrame({{'id': test_ids, target_col: predictions}})
 submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
