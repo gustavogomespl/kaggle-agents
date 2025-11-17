@@ -289,21 +289,9 @@ Domain: {domain}
                 HumanMessage(content=prompt),
             ]
 
-            response = self.llm.invoke(messages)
-
-            # Parse JSON
-            try:
-                # Extract JSON from markdown code block if present
-                content = response.content
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0]
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0]
-
-                plan_data = json.loads(content.strip())
-            except (json.JSONDecodeError, IndexError):
-                print("  Failed to parse LLM plan, using fallback")
-                plan_data = self._create_fallback_plan(domain, sota_analysis)
+            # TEMPORARY FIX: Skip LLM call, use fallback directly
+            print("  🔧 Using fallback plan (ensures 5 high-quality components)")
+            plan_data = self._create_fallback_plan(domain, sota_analysis)
 
         # Convert to AblationComponent objects
         components = []
@@ -348,8 +336,8 @@ Domain: {domain}
         Returns:
             Validated plan
         """
-        # Filter out invalid components (keep only high impact)
-        valid_plan = [c for c in plan if c.estimated_impact > 0.05]
+        # Filter out invalid components (keep only high impact >= 10%)
+        valid_plan = [c for c in plan if c.estimated_impact >= 0.10]
 
         # Limit to maximum 5 components (quality over quantity)
         if len(valid_plan) > 5:
@@ -409,6 +397,9 @@ Domain: {domain}
 
         # Reorder: preprocessing first, then models, then ensembles
         valid_plan = preprocessing_components + model_components + other_components
+
+        # Debug log: Show final plan composition
+        print(f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total")
 
         return valid_plan
 
