@@ -176,6 +176,76 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
     }
 
 
+def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
+    """
+    Evaluate performance and decide if refinement is needed.
+
+    Args:
+        state: Current state
+
+    Returns:
+        State updates with refinement decision
+    """
+    print("\n" + "="*60)
+    print("= PERFORMANCE EVALUATION")
+    print("="*60)
+
+    current_score = state.get("best_score", 0.0)
+    target_score = 0.9238  # Top 20% threshold
+    current_iteration = state.get("current_iteration", 0)
+    max_iterations = state.get("max_iterations", 10)
+
+    # Get submission results if available
+    submissions = state.get("submissions", [])
+    public_score = None
+    if submissions:
+        latest_sub = submissions[-1]
+        public_score = latest_sub.public_score
+        if public_score:
+            print(f"\n📊 Public Score: {public_score:.4f}")
+            # Use public score if available
+            current_score = max(current_score, public_score)
+
+    print(f"\nCurrent Score: {current_score:.4f}")
+    print(f"Target Score:  {target_score:.4f}")
+    print(f"Gap:           {target_score - current_score:.4f}")
+
+    # Analyze component performance
+    dev_results = state.get("development_results", [])
+    successful_components = [r for r in dev_results if r.success]
+
+    print(f"\n📈 Component Success Rate: {len(successful_components)}/{len(dev_results)} ({len(successful_components)/len(dev_results)*100:.0f}%)" if dev_results else "\n📈 No components tested yet")
+
+    # Decision: should we refine?
+    needs_refinement = False
+    refinement_reason = None
+
+    if current_score >= target_score:
+        print(f"\n🎉 Target achieved! ({current_score:.4f} >= {target_score:.4f})")
+        needs_refinement = False
+    elif current_iteration >= max_iterations:
+        print(f"\n⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
+        needs_refinement = False
+    else:
+        # Check if we have room for improvement
+        improvement_potential = target_score - current_score
+
+        if improvement_potential > 0.001:  # 0.1% gap
+            print(f"\n🔄 Refinement needed (gap: {improvement_potential:.4f})")
+            needs_refinement = True
+            refinement_reason = "score_below_target"
+        else:
+            print(f"\n✅ Close enough to target")
+            needs_refinement = False
+
+    return {
+        "needs_refinement": needs_refinement,
+        "refinement_reason": refinement_reason,
+        "current_performance_score": current_score,
+        "last_updated": datetime.now(),
+    }
+
+
 # ==================== Conditional Functions ====================
 
 def should_continue_workflow(state: KaggleState) -> Literal["continue", "end"]:
@@ -284,6 +354,38 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     return "end"
 
 
+def route_after_performance_evaluation(state: KaggleState) -> Literal["refine", "end"]:
+    """
+    Route after performance evaluation.
+
+    Args:
+        state: Current state
+
+    Returns:
+        "refine" to start refinement iteration, or "end" if done
+    """
+    needs_refinement = state.get("needs_refinement", False)
+    current_iteration = state.get("current_iteration", 0)
+    max_iterations = state.get("max_iterations", 10)
+
+    # Check termination conditions first
+    if current_iteration >= max_iterations:
+        return "end"
+
+    # Check if goal already achieved
+    current_score = state.get("current_performance_score", 0.0)
+    target_score = 0.9238
+
+    if current_score >= target_score:
+        return "end"
+
+    # Decide based on refinement flag
+    if needs_refinement:
+        return "refine"
+    else:
+        return "end"
+
+
 # ==================== Workflow Construction ====================
 
 def create_workflow() -> StateGraph:
@@ -305,6 +407,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("robustness", robustness_agent_node)
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("iteration_control", iteration_control_node)
+    workflow.add_node("performance_evaluation", performance_evaluation_node)
 
     # Define edges
     # Start → Data Download
@@ -335,18 +438,21 @@ def create_workflow() -> StateGraph:
     # Robustness → Submission
     workflow.add_edge("robustness", "submission")
 
-    # Submission → Iteration Control
-    workflow.add_edge("submission", "iteration_control")
+    # Submission → Performance Evaluation
+    workflow.add_edge("submission", "performance_evaluation")
 
-    # Iteration Control → Conditional (continue or end?)
+    # Performance Evaluation → Conditional (refine or done?)
     workflow.add_conditional_edges(
-        "iteration_control",
-        should_continue_workflow,
+        "performance_evaluation",
+        route_after_performance_evaluation,
         {
-            "continue": "search",  # New iteration
-            "end": END,            # Workflow complete
+            "refine": "iteration_control",  # Start refinement cycle
+            "end": END,                      # Goal achieved or max iterations
         }
     )
+
+    # Iteration Control → Planner (for refinement)
+    workflow.add_edge("iteration_control", "planner")
 
     return workflow
 
@@ -377,7 +483,7 @@ def run_workflow(
     competition_name: str,
     working_dir: str,
     competition_info: Dict[str, Any],
-    max_iterations: int = 3,
+    max_iterations: int = 5,
     use_checkpointing: bool = False,
 ) -> KaggleState:
     """

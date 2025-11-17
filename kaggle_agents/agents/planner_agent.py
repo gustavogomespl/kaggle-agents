@@ -142,17 +142,30 @@ class PlannerAgent:
         Returns:
             State updates with ablation plan
         """
-        print("\n" + "="*60)
-        print("= PLANNER AGENT: Creating Ablation Plan")
-        print("="*60)
+        # Check if this is a refinement iteration
+        current_iteration = state.get("current_iteration", 0)
+        is_refinement = current_iteration > 1
+
+        if is_refinement:
+            print("\n" + "="*60)
+            print("= PLANNER AGENT: Refining Ablation Plan (RL-based)")
+            print("="*60)
+        else:
+            print("\n" + "="*60)
+            print("= PLANNER AGENT: Creating Ablation Plan")
+            print("="*60)
 
         # 1. Analyze SOTA solutions
         print("\nAnalyzing SOTA patterns...")
         sota_analysis = self._analyze_sota_solutions(state)
 
-        # 2. Generate ablation plan
-        print("\n< Generating ablation plan...")
-        ablation_plan = self._generate_ablation_plan(state, sota_analysis)
+        # 2. Generate ablation plan (initial or refinement)
+        if is_refinement:
+            print("\n🔄 Refining plan based on previous results...")
+            ablation_plan = self._refine_ablation_plan(state, sota_analysis)
+        else:
+            print("\n📝 Generating ablation plan...")
+            ablation_plan = self._generate_ablation_plan(state, sota_analysis)
 
         # 3. Validate and enhance plan
         validated_plan = self._validate_plan(ablation_plan)
@@ -261,20 +274,10 @@ Domain: {domain}
         domain_guidance = get_domain_guidance(domain)
 
         if self.use_dspy:
-            # Use DSPy module
-            result = self.planner_module(
-                competition_info=comp_info_str,
-                domain=domain,
-                sota_summary=sota_summary,
-                domain_guidance=domain_guidance,
-            )
-
-            # Parse JSON plan
-            try:
-                plan_data = json.loads(result.ablation_plan)
-            except json.JSONDecodeError:
-                print("  Failed to parse DSPy plan, using fallback")
-                plan_data = self._create_fallback_plan(domain, sota_analysis)
+            # TEMPORARY FIX: Skip DSPy, use fallback directly
+            # DSPy consistently generates only 2 components instead of 5
+            print("  🔧 Using fallback plan (ensures 5 high-quality components)")
+            plan_data = self._create_fallback_plan(domain, sota_analysis)
 
         else:
             # Use direct LLM call
@@ -325,6 +328,190 @@ Domain: {domain}
         components.sort(key=lambda x: x.estimated_impact, reverse=True)
 
         return components
+
+    def _refine_ablation_plan(
+        self, state: KaggleState, sota_analysis: Dict[str, Any]
+    ) -> List[AblationComponent]:
+        """
+        Refine the ablation plan based on previous results using RL prompts.
+
+        Args:
+            state: Current state with previous results
+            sota_analysis: SOTA analysis results
+
+        Returns:
+            Refined ablation plan
+        """
+        from ..prompts.templates.planner_prompts import REFINE_ABLATION_PLAN_PROMPT
+
+        # Gather previous results
+        previous_plan = state.get("ablation_plan", [])
+        dev_results = state.get("development_results", [])
+        best_score = state.get("best_score", 0.0)
+        current_score = state.get("current_performance_score", best_score)
+
+        # Build test results summary
+        test_results_summary = []
+        for i, component in enumerate(previous_plan):
+            if i < len(dev_results):
+                result = dev_results[i]
+                test_results_summary.append({
+                    "component": component.name,
+                    "type": component.component_type,
+                    "success": result.success,
+                    "execution_time": result.execution_time,
+                    "impact": "positive" if result.success else "failed"
+                })
+
+        # Format previous plan for prompt
+        previous_plan_str = json.dumps([
+            {
+                "name": c.name,
+                "type": c.component_type,
+                "description": c.description,
+                "estimated_impact": c.estimated_impact
+            }
+            for c in previous_plan
+        ], indent=2)
+
+        # Format test results
+        test_results_str = json.dumps(test_results_summary, indent=2)
+
+        # Use the refinement prompt
+        prompt = REFINE_ABLATION_PLAN_PROMPT.format(
+            previous_plan=previous_plan_str,
+            test_results=test_results_str,
+            current_score=current_score
+        )
+
+        try:
+            if self.use_dspy:
+                # For now, use fallback in refinement mode too
+                # TODO: Create DSPy refinement module
+                print("  🔧 Using enhanced fallback with refinement logic")
+                plan_data = self._create_refined_fallback_plan(state, sota_analysis, test_results_summary)
+            else:
+                # Use LLM with refinement prompt
+                from langchain.schema import SystemMessage, HumanMessage
+
+                messages = [
+                    SystemMessage(content="You are a Kaggle Grandmaster expert at refining ML solutions based on test results."),
+                    HumanMessage(content=prompt),
+                ]
+
+                response = self.llm.invoke(messages)
+                plan_text = response.content.strip()
+
+                # Parse JSON
+                # Remove markdown code blocks if present
+                if "```json" in plan_text:
+                    plan_text = plan_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in plan_text:
+                    plan_text = plan_text.split("```")[1].split("```")[0].strip()
+
+                plan_data = json.loads(plan_text)
+
+        except Exception as e:
+            print(f"  ⚠️  Refinement failed: {str(e)}")
+            print("  🔧 Using enhanced fallback with refinement logic")
+            plan_data = self._create_refined_fallback_plan(state, sota_analysis, test_results_summary)
+
+        # Convert to AblationComponent objects
+        components = []
+        for i, item in enumerate(plan_data):
+            component = AblationComponent(
+                name=item.get("name", f"refined_component_{i+1}"),
+                component_type=item.get("component_type", "model"),
+                description=item.get("description", ""),
+                estimated_impact=item.get("estimated_impact", 0.15),
+                rationale=item.get("rationale", ""),
+                code_outline=item.get("code_outline", "")
+            )
+            components.append(component)
+
+        # Sort by estimated impact
+        components.sort(key=lambda x: x.estimated_impact, reverse=True)
+
+        return components
+
+    def _create_refined_fallback_plan(
+        self, state: KaggleState, sota_analysis: Dict[str, Any], test_results: List[Dict]
+    ) -> List[Dict[str, Any]]:
+        """
+        Create a refined fallback plan based on what worked in previous iteration.
+
+        Args:
+            state: Current state
+            sota_analysis: SOTA analysis
+            test_results: Previous test results
+
+        Returns:
+            Refined plan as list of dicts
+        """
+        # Analyze what worked
+        successful_types = set()
+        failed_types = set()
+
+        for result in test_results:
+            if result.get("success"):
+                successful_types.add(result.get("type"))
+            else:
+                failed_types.add(result.get("type"))
+
+        # Build refined plan focusing on what worked
+        domain = state.get("domain_detected", "tabular")
+        plan = []
+
+        # If feature engineering worked, add advanced version
+        if "feature_engineering" in successful_types or "feature_engineering" not in failed_types:
+            plan.append({
+                "name": "advanced_feature_engineering_v2",
+                "component_type": "feature_engineering",
+                "description": "Enhanced feature engineering: polynomial degree 3, advanced interactions, PCA, feature selection",
+                "estimated_impact": 0.18,
+                "rationale": "Previous FE showed promise, enhancing with more sophisticated techniques",
+                "code_outline": "PolynomialFeatures(degree=3), PCA(n_components=0.95), SelectKBest, advanced interactions"
+            })
+
+        # Always add diverse models (essential for ensemble)
+        plan.extend([
+            {
+                "name": "lightgbm_optimized_v2",
+                "component_type": "model",
+                "description": "LightGBM with Optuna hyperparameter optimization: 100 trials, pruning",
+                "estimated_impact": 0.22,
+                "rationale": "Refined hyperparameters based on previous run",
+                "code_outline": "OptunaSearchCV with LGBMRegressor/Classifier, 100 trials, early stopping"
+            },
+            {
+                "name": "xgboost_optimized_v2",
+                "component_type": "model",
+                "description": "XGBoost with GPU acceleration and optimized hyperparameters",
+                "estimated_impact": 0.20,
+                "rationale": "Different regularization for ensemble diversity",
+                "code_outline": "XGBRegressor/Classifier with tree_method='gpu_hist', optimized params"
+            },
+            {
+                "name": "catboost_optimized_v2",
+                "component_type": "model",
+                "description": "CatBoost with categorical feature handling and depth tuning",
+                "estimated_impact": 0.19,
+                "rationale": "Native categorical handling adds diversity",
+                "code_outline": "CatBoostRegressor/Classifier with cat_features, depth=8-10"
+            }
+        ])
+
+        # Add stacking ensemble (critical for top performance)
+        plan.append({
+            "name": "stacking_ensemble_v2",
+            "component_type": "ensemble",
+            "description": "2-layer stacking: LGB+XGB+CatBoost → Ridge/LogisticRegression → Final predictions",
+            "estimated_impact": 0.15,
+            "rationale": "Stacking consistently improves scores in competitions",
+            "code_outline": "StackingRegressor/Classifier with 3 base models, Ridge/LogisticRegression meta-learner, 5-fold CV"
+        })
+
+        return plan[:5]  # Limit to 5 components
 
     def _validate_plan(self, plan: List[AblationComponent]) -> List[AblationComponent]:
         """
