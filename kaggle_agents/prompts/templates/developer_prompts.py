@@ -59,6 +59,9 @@ Test Data: {test_data_path}
 Models Directory: {models_dir}
 Submission Path: {submission_path}
 
+## Dataset Information
+{dataset_info}
+
 ## CRITICAL TYPE-SPECIFIC REQUIREMENTS
 
 ### If component_type == "preprocessing" or "feature_engineering":

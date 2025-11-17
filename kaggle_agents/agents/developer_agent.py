@@ -326,6 +326,55 @@ class DeveloperAgent:
             errors=exec_result.errors,
         )
 
+    def _get_dataset_info(self, working_dir: Path) -> str:
+        """
+        Read dataset columns and basic info to provide to LLM.
+
+        Args:
+            working_dir: Working directory containing train.csv
+
+        Returns:
+            Formatted string with dataset information
+        """
+        try:
+            import pandas as pd
+            train_path = working_dir / 'train.csv'
+
+            if not train_path.exists():
+                return "Dataset info not available (file not found)"
+
+            # Read just first few rows to get columns
+            df = pd.read_csv(train_path, nrows=5)
+
+            columns = df.columns.tolist()
+            dtypes = df.dtypes.to_dict()
+
+            # Identify likely target column
+            target_candidates = [c for c in columns if c.lower() in ['target', 'label', 'y', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
+            target_col = target_candidates[0] if target_candidates else "UNKNOWN"
+
+            # Format column info
+            numeric_cols = [c for c, dtype in dtypes.items() if dtype in ['int64', 'float64']]
+            categorical_cols = [c for c, dtype in dtypes.items() if dtype == 'object']
+
+            info = f"""
+**CRITICAL**: Use these EXACT column names from the dataset:
+
+Target Column: {target_col}
+Total Columns: {len(columns)}
+
+Numeric Columns ({len(numeric_cols)}): {', '.join(numeric_cols[:10])}{'...' if len(numeric_cols) > 10 else ''}
+Categorical Columns ({len(categorical_cols)}): {', '.join(categorical_cols[:10])}{'...' if len(categorical_cols) > 10 else ''}
+
+All Columns: {', '.join(columns)}
+
+IMPORTANT: Always use target_col='{target_col}' in your code!
+"""
+            return info
+
+        except Exception as e:
+            return f"Dataset info not available (error: {str(e)})"
+
     def _generate_code(
         self,
         component: AblationComponent,
@@ -335,6 +384,9 @@ class DeveloperAgent:
     ) -> str:
         """Generate code for a component."""
         component_details = format_component_details(component)
+
+        # Get dataset information
+        dataset_info = self._get_dataset_info(working_dir)
 
         competition_context = f"""
 Name: {competition_info.name}
@@ -379,6 +431,7 @@ Submission: {working_dir / 'submission.csv'}
                 test_data_path=str(working_dir / 'test.csv'),
                 models_dir=str(working_dir / 'models'),
                 submission_path=str(working_dir / 'submission.csv'),
+                dataset_info=dataset_info,
                 component_name=component.name,
             )
 
