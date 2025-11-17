@@ -168,12 +168,21 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
     if not should_continue:
         termination_reason = "max_iterations_reached"
 
-    return {
+    # Reset component index for refinement iterations (iteration > 1)
+    # This ensures new components from refined plan are implemented
+    updates = {
         "current_iteration": new_iteration,
         "should_continue": should_continue,
         "termination_reason": termination_reason,
         "last_updated": datetime.now(),
     }
+
+    # If this is a refinement iteration (> 1), reset component index
+    if new_iteration > 1:
+        print(f"   🔄 Starting refinement iteration - resetting component index")
+        updates["current_component_index"] = 0
+
+    return updates
 
 
 def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
@@ -354,9 +363,9 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     return "end"
 
 
-def route_after_performance_evaluation(state: KaggleState) -> Literal["refine", "end"]:
+def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"]:
     """
-    Route after performance evaluation.
+    Route after iteration control - decide if we refine or end.
 
     Args:
         state: Current state
@@ -368,8 +377,14 @@ def route_after_performance_evaluation(state: KaggleState) -> Literal["refine", 
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
+    print(f"\n🔀 Routing decision:")
+    print(f"   Current iteration: {current_iteration}")
+    print(f"   Max iterations: {max_iterations}")
+    print(f"   Needs refinement: {needs_refinement}")
+
     # Check termination conditions first
     if current_iteration >= max_iterations:
+        print(f"   ➡️  Ending (max iterations reached)")
         return "end"
 
     # Check if goal already achieved
@@ -377,12 +392,15 @@ def route_after_performance_evaluation(state: KaggleState) -> Literal["refine", 
     target_score = 0.9238
 
     if current_score >= target_score:
+        print(f"   ➡️  Ending (goal achieved: {current_score:.4f} >= {target_score:.4f})")
         return "end"
 
     # Decide based on refinement flag
-    if needs_refinement:
+    if needs_refinement and current_iteration > 0:
+        print(f"   ➡️  Refining (iteration {current_iteration})")
         return "refine"
     else:
+        print(f"   ➡️  Ending (no refinement needed or first iteration)")
         return "end"
 
 
@@ -441,18 +459,18 @@ def create_workflow() -> StateGraph:
     # Submission → Performance Evaluation
     workflow.add_edge("submission", "performance_evaluation")
 
-    # Performance Evaluation → Conditional (refine or done?)
+    # Performance Evaluation → ALWAYS → Iteration Control
+    workflow.add_edge("performance_evaluation", "iteration_control")
+
+    # Iteration Control → Conditional (refine or done?)
     workflow.add_conditional_edges(
-        "performance_evaluation",
-        route_after_performance_evaluation,
+        "iteration_control",
+        route_after_iteration_control,
         {
-            "refine": "iteration_control",  # Start refinement cycle
-            "end": END,                      # Goal achieved or max iterations
+            "refine": "planner",  # Start refinement cycle
+            "end": END,           # Goal achieved or max iterations
         }
     )
-
-    # Iteration Control → Planner (for refinement)
-    workflow.add_edge("iteration_control", "planner")
 
     return workflow
 
