@@ -11,7 +11,6 @@ Kaggle Agents is a multi-agent system that autonomously participates in Kaggle c
 - Autonomous competition solving from problem analysis to submission
 - Search-first strategy leveraging SOTA solutions from Kaggle notebooks
 - Ablation-driven planning and systematic component testing
-- Code quality validation using Google ADK robustness modules
 - Iterative improvement with automatic leaderboard monitoring
 - Multi-domain support: tabular, computer vision, NLP, time series
 - Self-improving prompts via DSPy optimization
@@ -65,7 +64,7 @@ Identifies the competition type based on description and available data. Support
 
 **2. Search Agent**
 
-Implements search-first strategy (Google ADK):
+Implements search-first strategy:
 - Generates diverse search queries
 - Retrieves top Kaggle notebooks via API
 - Analyzes SOTA solutions
@@ -90,7 +89,7 @@ Generates and executes code:
 
 **5. Robustness Agent**
 
-Validates code quality using 4 modules (Google ADK):
+Validates code quality using 4 modules:
 
 1. Debugging: Checks for exceptions and warnings
 2. Data Leakage: Detects target leakage and improper splits
@@ -117,27 +116,7 @@ Manages the workflow loop:
 
 ## Installation
 
-### Option 1: Docker (Recommended)
-
-The easiest way to get started:
-
-```bash
-# Clone repository
-git clone https://github.com/yourusername/kaggle-agents.git
-cd kaggle-agents
-
-# Set up environment
-cp .env.example .env
-# Edit .env with your API keys
-
-# Build and run
-docker-compose build
-docker-compose run --rm kaggle-agents kaggle-agents start titanic
-```
-
-See [DOCKER.md](DOCKER.md) for complete Docker documentation.
-
-### Option 2: Local Installation
+### Local Installation
 
 Requirements:
 - Python 3.11+
@@ -217,24 +196,6 @@ logger.info("Processing started")
 Logs are saved to `./logs/` with automatic rotation. See [LOGGING.md](LOGGING.md) for complete documentation.
 
 ## Usage
-
-### CLI (Command Line)
-
-After installation, use the `kaggle-agents` command:
-
-```bash
-# Start a competition
-kaggle-agents start titanic \
-  --problem-type binary_classification \
-  --metric accuracy \
-  --max-iterations 3
-
-# Show configuration
-kaggle-agents config
-
-# Get help
-kaggle-agents --help
-```
 
 ### Level 1: Simple API (Recommended)
 
@@ -465,7 +426,7 @@ pytest --cov=kaggle_agents tests/
 
 This project implements concepts from:
 
-**Google's ADK (Automated Data Science and Knowledge)**
+**Google's MLE STAR framework**
 - Search-first strategy
 - Ablation-driven optimization
 - Robustness validation modules
@@ -497,7 +458,7 @@ pytest
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - use as you want.
 
 ## Citation
 
@@ -506,7 +467,7 @@ MIT License - see LICENSE file for details.
   title={Kaggle Agents: Autonomous Competition Solving},
   author={Gustavo Paulino Gomes},
   year={2025},
-  url={https://github.com/yourusername/kaggle-agents}
+  url={https://github.com/gustavogomespl/kaggle-agents}
 }
 ```
 
