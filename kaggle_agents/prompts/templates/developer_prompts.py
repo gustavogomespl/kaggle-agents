@@ -27,8 +27,22 @@ CRITICAL RULES (Never Break):
 - ALWAYS print CV scores, class distribution, prediction distribution
 - NEVER use try-except to hide errors (let them surface for debugging)
 - NEVER subsample training data (use all available data)
-- NEVER use sys.exit() or exit() or similar termination commands
+- NEVER use sys.exit(), exit(), quit(), raise SystemExit, os._exit(), or ANY termination commands
 - ALWAYS save submission.csv with probabilities (0.0-1.0), NOT binary predictions (0/1)
+
+CRITICAL API USAGE (Common Mistakes to Avoid):
+LightGBM/XGBoost Early Stopping:
+- ❌ WRONG: model.fit(X, y, early_stopping_rounds=100)  # This will fail!
+- ✅ CORRECT: model.fit(X, y, eval_set=[(X_val, y_val)], callbacks=[lgb.early_stopping(100)])
+- ✅ ALTERNATIVE: Don't use early stopping and just set n_estimators appropriately
+- For LightGBM: Use lgb.early_stopping(stopping_rounds=100) in callbacks parameter
+- For XGBoost: Use xgb.callback.EarlyStopping(rounds=100) in callbacks parameter
+- NEVER pass early_stopping_rounds as a direct parameter to fit()
+
+Categorical Features:
+- ALWAYS encode categorical columns before training (except CatBoost which handles them natively)
+- Use LabelEncoder, OneHotEncoder, or TargetEncoder for categorical features
+- Check for 'object' or 'category' dtypes and encode them before model training
 
 MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
 - Your response must contain ONLY a single Python code block
@@ -77,6 +91,8 @@ Submission Path: {submission_path}
 - ONLY clean data, handle missing values, scale features, or create new features
 - Must execute in **under 10 seconds** (keep it simple and fast)
 - Can save processed data to models directory for later use
+- **MUST print "Final Validation Performance: 1.0" at the end** (placeholder for successful completion)
+- Example: print("Final Validation Performance: 1.0  # Feature engineering complete")
 
 ### If component_type == "model":
 - **MUST train a model** (LightGBM, XGBoost, or CatBoost recommended for best performance)

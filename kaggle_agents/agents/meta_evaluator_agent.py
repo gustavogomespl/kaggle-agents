@@ -510,7 +510,7 @@ Focus on actionable, specific improvements based on error patterns and performan
                     {
                         "name": c.name,
                         "type": c.component_type,
-                        "description": c.description,
+                        "code_outline": c.code,
                         "estimated_impact": c.estimated_impact,
                     }
                     for c in ablation_plan

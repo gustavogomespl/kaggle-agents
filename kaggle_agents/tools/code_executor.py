@@ -74,11 +74,22 @@ class CodeExecutor:
         if "Final Validation Performance" not in code:
             return False, "Missing required output: 'Final Validation Performance: {score}'"
 
-        # Check 2: No prohibited exit() calls
-        if "exit()" in code or "sys.exit(" in code:
-            return False, "Code contains prohibited exit() calls"
+        # Check 2: No prohibited exit() calls (enhanced check)
+        prohibited_calls = ["exit()", "sys.exit(", "quit()", "raise SystemExit", "os._exit("]
+        for call in prohibited_calls:
+            if call in code:
+                return False, f"Code contains prohibited termination call: {call}"
 
-        # Check 3: Has basic structure for ML code
+        # Check 3: Early stopping rounds misuse (common API error)
+        if "early_stopping_rounds=" in code and ".fit(" in code:
+            # Check if it's being passed as a parameter to fit()
+            if re.search(r'\.fit\([^)]*early_stopping_rounds=', code):
+                return False, (
+                    "API Error: early_stopping_rounds cannot be passed to fit(). "
+                    "Use callbacks=[lgb.early_stopping(100)] or callbacks=[xgb.callback.EarlyStopping(100)] instead."
+                )
+
+        # Check 4: Has basic structure for ML code
         required_patterns = [
             ("import pandas" in code or "import numpy" in code, "Missing required imports (pandas or numpy)"),
         ]
@@ -86,6 +97,20 @@ class CodeExecutor:
         for has_pattern, error_msg in required_patterns:
             if not has_pattern:
                 return False, error_msg
+
+        # Check 5: Warning about categorical features (informational only)
+        # This is a soft check - we warn but don't fail
+        has_categorical_check = (
+            "select_dtypes" in code or
+            "LabelEncoder" in code or
+            "OneHotEncoder" in code or
+            "TargetEncoder" in code or
+            "CatBoost" in code
+        )
+
+        if not has_categorical_check and "LGBMClassifier" in code or "XGBClassifier" in code:
+            # This is just a warning, not a failure
+            print("   ⚠️  Warning: LightGBM/XGBoost code without categorical encoding detected")
 
         return True, "Validation passed"
 
