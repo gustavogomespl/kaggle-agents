@@ -27,8 +27,15 @@ CRITICAL RULES (Never Break):
 - ALWAYS print CV scores, class distribution, prediction distribution
 - NEVER use try-except to hide errors (let them surface for debugging)
 - NEVER subsample training data (use all available data)
-- NEVER use sys.exit() or similar termination commands
+- NEVER use sys.exit() or exit() or similar termination commands
 - ALWAYS save submission.csv with probabilities (0.0-1.0), NOT binary predictions (0/1)
+
+MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
+- Your response must contain ONLY a single Python code block
+- No additional text, explanations, or markdown outside the code block
+- The code MUST print 'Final Validation Performance: {score}' at the end
+- The score must be the cross-validation performance metric
+- Example: print(f"Final Validation Performance: {cv_accuracy:.6f}")
 
 Your code should:
 - Import all necessary libraries
@@ -39,6 +46,7 @@ Your code should:
 - Make probability predictions (not hard predictions)
 - Save outputs/models to correct locations
 - Print execution time and key metrics
+- Be a complete, executable single-file Python program
 """
 
 # Template for generating code from ablation component

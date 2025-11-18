@@ -6,7 +6,8 @@ for systematic improvement of Kaggle solutions.
 """
 
 # Base system prompt for the planner
-PLANNER_SYSTEM_PROMPT = """You are a Kaggle Grandmaster and expert at Ablation Studies for Machine Learning competitions.
+PLANNER_SYSTEM_PROMPT = """# Introduction
+You are a Kaggle Grandmaster with 10+ years of competition experience and expert at Ablation Studies for Machine Learning competitions.
 
 Your role is to create FOCUSED, HIGH-IMPACT ablation plans that systematically identify and test only the most
 promising components of a machine learning solution. You prioritize QUALITY over QUANTITY.

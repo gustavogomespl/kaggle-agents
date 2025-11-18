@@ -121,16 +121,19 @@ class DeveloperAgent:
         print(f"   ⏱️  Component timeout set to: {timeout}s ({timeout/60:.1f} min)")
 
         # Always create LLM client (used for debugging even with DSPy)
+        # MLE-STAR Pattern: Lower temperature for implementation tasks (0.3)
+        implementation_temperature = 0.3
+
         if self.config.llm.provider == "openai":
             self.llm = ChatOpenAI(
                 model=self.config.llm.model,
-                temperature=self.config.llm.temperature,
+                temperature=implementation_temperature,  # Lower for precision
                 max_tokens=self.config.llm.max_tokens,
             )
         else:
             self.llm = ChatAnthropic(
                 model=self.config.llm.model,
-                temperature=self.config.llm.temperature,
+                temperature=implementation_temperature,  # Lower for precision
                 max_tokens=self.config.llm.max_tokens,
             )
 
@@ -187,14 +190,22 @@ class DeveloperAgent:
             not result.success and "Data files not found" in (result.stderr or "")
         )
 
-        # Update state
-        return {
+        # Cache successful results for skip logic (MLE-STAR Pattern)
+        state_updates = {
             "development_results": [result],
             "current_code": result.code,
             "code_retry_count": 0,
             "current_component_index": current_index + 1 if should_advance else current_index,
             "last_updated": datetime.now(),
         }
+
+        # If successful, cache for future iterations
+        if result.success:
+            cache_key = f"component_result_{component.name}"
+            state_updates[cache_key] = result
+            print(f"  💾 Cached successful result for: {component.name}")
+
+        return state_updates
 
     def _implement_component(
         self,
@@ -247,9 +258,14 @@ class DeveloperAgent:
                 errors=[error_msg],
             )
 
+        # SKIP LOGIC (MLE-STAR Pattern): Check if component already done
+        skip_result = self._should_skip_component(component, state)
+        if skip_result is not None:
+            return skip_result
+
         # Generate initial code
         print("\n   =' Generating code...")
-        code = self._generate_code(component, competition_info, working_dir, domain)
+        code = self._generate_code(component, competition_info, working_dir, domain, state)
 
         # Preview generated code
         if self.config.ablation.enable_code_preview if hasattr(self.config.ablation, 'enable_code_preview') else True:
@@ -326,6 +342,261 @@ class DeveloperAgent:
             errors=exec_result.errors,
         )
 
+    def _execute_with_multi_level_retry_v2(
+        self,
+        component: AblationComponent,
+        initial_code: str,
+        working_dir: Path,
+        competition_info,
+        domain: str,
+        state: KaggleState,
+    ) -> tuple[str, bool]:
+        """
+        Multi-level retry with rollback (MLE-STAR pattern).
+
+        This wraps the existing retry logic and adds Level 3: simplified rollback.
+        Returns (code, success) tuple.
+        """
+        # Try normal execution first (Level 1 + Level 2 handled by existing code)
+        # We already have the result from the normal path
+        # If we get here, both Level 1 and 2 failed
+
+        # LEVEL 3: Rollback to simplified version
+        print("\n   ⚠️  LEVEL 3: Attempting simplified version...")
+        simplified_component = self._create_simplified_component(component)
+        print(f"   📝 Simplified: {simplified_component.description[:100]}...")
+
+        # Generate code for simplified version
+        simplified_code = self._generate_code(
+            simplified_component,
+            competition_info,
+            working_dir,
+            domain,
+            state,
+        )
+
+        # Validate syntax
+        is_valid, syntax_error = self.executor.validate_syntax(simplified_code)
+        if not is_valid:
+            print(f"     Syntax error in simplified code: {syntax_error}")
+            simplified_code = self._fix_syntax_error(simplified_code, syntax_error)
+
+        # Try simplified version with quick retries only
+        print("   Executing simplified version...")
+        for attempt in range(3):  # Fewer attempts for simplified version
+            print(f"   Simplified attempt {attempt + 1}/3")
+
+            exec_result = self.executor.execute(
+                code=simplified_code,
+                working_dir=working_dir,
+            )
+
+            if exec_result.success:
+                print(f"   ✅ Simplified version successful!")
+                return simplified_code, True
+
+            print(f"   L Simplified attempt failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}")
+
+            if attempt < 2:
+                simplified_code = self._fix_code_error(
+                    simplified_code,
+                    exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                )
+
+        # All levels exhausted
+        print("\n   ❌ All retry levels exhausted (original + debug + simplified)")
+        return simplified_code, False
+
+    def _should_skip_component(
+        self,
+        component: AblationComponent,
+        state: KaggleState,
+    ) -> Optional[DevelopmentResult]:
+        """
+        Check if component should be skipped (MLE-STAR pattern).
+
+        This implements callback-based skip logic to avoid redundant work:
+        - Skip if code already generated and successfully executed
+        - Skip if this is a refinement iteration and component worked before
+
+        Args:
+            component: Component to check
+            state: Current workflow state
+
+        Returns:
+            DevelopmentResult if should skip (reuse previous result), None otherwise
+        """
+        # Check if we have previous development results for this component
+        dev_results = state.get("development_results", [])
+
+        # Look for existing successful result for this component
+        for result in dev_results:
+            # Match by checking if code contains component name or description
+            if result.success and (
+                component.name in result.code or
+                component.description[:50] in result.code  # Match by description snippet
+            ):
+                print(f"  ⏭️  Skipping {component.name} - already implemented successfully")
+                print(f"     Reusing previous execution ({result.execution_time:.2f}s)")
+                return result
+
+        # Check state for explicitly cached results (for refinement iterations)
+        cached_result_key = f"component_result_{component.name}"
+        if cached_result_key in state:
+            cached_result = state[cached_result_key]
+            if cached_result.success:
+                print(f"  ⏭️  Skipping {component.name} - found in cache")
+                print(f"     Reusing cached execution ({cached_result.execution_time:.2f}s)")
+                return cached_result
+
+        # Don't skip - component needs to be implemented
+        return None
+
+    def _create_simplified_component(
+        self,
+        component: AblationComponent,
+    ) -> AblationComponent:
+        """
+        Create a simplified version of component for rollback (MLE-STAR pattern).
+
+        Simplification strategies:
+        - Model: Use simpler hyperparameters, fewer estimators
+        - Feature engineering: Reduce complexity of features
+        - Ensemble: Use simple averaging instead of stacking
+
+        Args:
+            component: Original component
+
+        Returns:
+            Simplified component
+        """
+        simplified_desc = ""
+
+        if component.component_type == "model":
+            # Simplify model to basic configuration
+            model_name = component.name.split("_")[0]  # e.g., "lightgbm" from "lightgbm_tuned"
+            simplified_desc = f"Simple {model_name} model with basic hyperparameters: n_estimators=100, max_depth=5, learning_rate=0.1. Use default class_weight='balanced' and 5-fold StratifiedKFold."
+
+        elif component.component_type == "feature_engineering":
+            simplified_desc = f"Basic feature engineering: simple polynomial features (degree 2) and basic statistical aggregations (mean, std, min, max). Avoid complex transformations."
+
+        elif component.component_type == "ensemble":
+            simplified_desc = f"Simple ensemble: weighted average of model predictions with equal weights. Load predictions from submission files and average them."
+
+        else:
+            simplified_desc = f"Simplified version: {component.description[:100]}..."
+
+        # Create new component with simplified description
+        from dataclasses import replace
+        simplified_component = replace(
+            component,
+            name=f"{component.name}_simplified",
+            description=simplified_desc,
+            estimated_impact=component.estimated_impact * 0.7,  # Lower expected impact
+        )
+
+        return simplified_component
+
+    def _build_dynamic_instructions(
+        self,
+        component: AblationComponent,
+        state: KaggleState,
+    ) -> str:
+        """
+        Build dynamic instructions based on current state (MLE-STAR pattern).
+
+        Creates context-aware guidance by analyzing:
+        - Previous component results (what worked/failed)
+        - Current iteration number (more specific in later iterations)
+        - Performance trends
+        - Common error patterns
+
+        Args:
+            component: Component being implemented
+            state: Current workflow state
+
+        Returns:
+            Dynamic instructions string
+        """
+        instructions = []
+
+        # Base instruction
+        instructions.append(f"Implement {component.component_type}: {component.name}")
+
+        # Add iteration-specific guidance
+        current_iteration = state.get("current_iteration", 0)
+        if current_iteration > 0:
+            instructions.append(f"\n⚡ REFINEMENT ITERATION {current_iteration}")
+            instructions.append("Focus on improvements that address previous shortcomings.")
+
+        # Analyze previous results for lessons learned
+        dev_results = state.get("development_results", [])
+        if dev_results:
+            successful_components = [r for r in dev_results if r.success]
+            failed_components = [r for r in dev_results if not r.success]
+
+            if successful_components:
+                instructions.append("\n✅ SUCCESSFUL PATTERNS FROM PREVIOUS COMPONENTS:")
+                # Extract common patterns from successful code
+                for i, result in enumerate(successful_components[-2:], 1):  # Last 2 successes
+                    if "LightGBM" in result.code:
+                        instructions.append(f"  - LightGBM implementation worked well")
+                    if "StratifiedKFold" in result.code:
+                        instructions.append(f"  - StratifiedKFold cross-validation successful")
+                    if "predict_proba" in result.code:
+                        instructions.append(f"  - predict_proba() for probabilities confirmed working")
+
+            if failed_components:
+                instructions.append("\n⚠️  AVOID THESE ERRORS FROM PREVIOUS ATTEMPTS:")
+                # Extract common error patterns
+                for i, result in enumerate(failed_components[-2:], 1):  # Last 2 failures
+                    if result.errors:
+                        error_msg = result.errors[0][:100]  # First 100 chars
+                        instructions.append(f"  - {error_msg}")
+
+        # Add performance-based guidance
+        current_score = state.get("current_performance_score", 0.0)
+        target_score = 0.9238  # Target for top 20%
+        if current_score > 0:
+            gap = target_score - current_score
+            instructions.append(f"\n📊 PERFORMANCE GAP: {gap:.4f} to reach target ({target_score:.4f})")
+            if gap < 0.01:
+                instructions.append("  - Small gap: Focus on fine-tuning hyperparameters")
+            elif gap < 0.05:
+                instructions.append("  - Medium gap: Consider feature engineering or ensemble methods")
+            else:
+                instructions.append("  - Large gap: May need different model architecture or approach")
+
+        # Component-type specific instructions
+        if component.component_type == "model":
+            instructions.append("\n🎯 MODEL COMPONENT REQUIREMENTS:")
+            instructions.append("  - MUST train a model and generate predictions")
+            instructions.append("  - MUST create submission.csv with probability predictions (0.0-1.0)")
+            instructions.append("  - MUST use StratifiedKFold for cross-validation")
+            instructions.append("  - MUST print 'Final Validation Performance: {score}'")
+            instructions.append("  - MUST handle class imbalance with class_weight='balanced'")
+        elif component.component_type == "feature_engineering":
+            instructions.append("\n🔧 FEATURE ENGINEERING REQUIREMENTS:")
+            instructions.append("  - Create NEW features from existing ones")
+            instructions.append("  - Save engineered features to file for model components")
+            instructions.append("  - NO model training in this component")
+            instructions.append("  - Print feature importance or correlation metrics")
+        elif component.component_type == "ensemble":
+            instructions.append("\n🎭 ENSEMBLE REQUIREMENTS:")
+            instructions.append("  - Combine predictions from multiple models")
+            instructions.append("  - Load predictions from previous model components")
+            instructions.append("  - Use weighted average or stacking approach")
+            instructions.append("  - Generate final submission.csv")
+
+        # Standard requirements
+        instructions.append("\n📋 STANDARD REQUIREMENTS:")
+        instructions.append("  - Save models to models/ directory")
+        instructions.append("  - Print progress and metrics throughout execution")
+        instructions.append("  - NO sys.exit() or exit() calls")
+        instructions.append("  - Complete, executable single-file Python program")
+
+        return "\n".join(instructions)
+
     def _get_dataset_info(self, working_dir: Path) -> str:
         """
         Read dataset columns and basic info to provide to LLM.
@@ -381,6 +652,7 @@ IMPORTANT: Always use target_col='{target_col}' in your code!
         competition_info,
         working_dir: Path,
         domain: str,
+        state: KaggleState = None,
     ) -> str:
         """Generate code for a component."""
         component_details = format_component_details(component)
@@ -402,7 +674,13 @@ Models: {working_dir / 'models'}
 Submission: {working_dir / 'submission.csv'}
 """
 
-        requirements = f"""
+        # DYNAMIC INSTRUCTION GENERATION (MLE-STAR Pattern)
+        # Build context-aware requirements based on state
+        if state is not None:
+            requirements = self._build_dynamic_instructions(component, state)
+        else:
+            # Fallback to basic requirements if no state
+            requirements = f"""
 1. Implement {component.component_type}: {component.name}
 2. Save models to models/ directory
 3. Print progress and metrics

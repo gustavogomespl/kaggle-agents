@@ -60,6 +60,57 @@ class CodeExecutor:
         self.config = get_config()
         self.timeout = timeout
 
+    def validate_code_before_execution(self, code: str) -> Tuple[bool, str]:
+        """
+        Validates code meets requirements before execution (MLE-STAR pattern).
+
+        Args:
+            code: Python code to validate
+
+        Returns:
+            Tuple of (is_valid, message)
+        """
+        # Check 1: Has required output format
+        if "Final Validation Performance" not in code:
+            return False, "Missing required output: 'Final Validation Performance: {score}'"
+
+        # Check 2: No prohibited exit() calls
+        if "exit()" in code or "sys.exit(" in code:
+            return False, "Code contains prohibited exit() calls"
+
+        # Check 3: Has basic structure for ML code
+        required_patterns = [
+            ("import pandas" in code or "import numpy" in code, "Missing required imports (pandas or numpy)"),
+        ]
+
+        for has_pattern, error_msg in required_patterns:
+            if not has_pattern:
+                return False, error_msg
+
+        return True, "Validation passed"
+
+    def extract_performance_metric(self, stdout: str) -> Optional[float]:
+        """
+        Extracts validation performance score from code output (MLE-STAR pattern).
+
+        Args:
+            stdout: Standard output from code execution
+
+        Returns:
+            Performance score if found, None otherwise
+        """
+        for line in stdout.splitlines():
+            if "Final Validation Performance:" in line:
+                try:
+                    # Extract score after the colon
+                    score_str = line.split(":")[-1].strip()
+                    # Remove any non-numeric characters except decimal point and minus
+                    score_str = re.sub(r'[^\d.\-]', '', score_str)
+                    return float(score_str)
+                except (ValueError, IndexError):
+                    continue
+        return None
+
     def execute(
         self,
         code: str,
@@ -77,6 +128,20 @@ class CodeExecutor:
         Returns:
             ExecutionResult with execution details
         """
+        # PRE-EXECUTION VALIDATION (MLE-STAR Pattern)
+        is_valid, validation_msg = self.validate_code_before_execution(code)
+        if not is_valid:
+            print(f"   ⚠️  Code validation failed: {validation_msg}")
+            return ExecutionResult(
+                success=False,
+                stdout="",
+                stderr=f"Pre-execution validation failed: {validation_msg}",
+                execution_time=0.0,
+                exit_code=-1,
+                artifacts_created=[],
+                errors=[validation_msg],
+            )
+
         working_path = Path(working_dir) if isinstance(working_dir, str) else working_dir
         working_path.mkdir(parents=True, exist_ok=True)
 
@@ -162,6 +227,15 @@ class CodeExecutor:
                 if missing:
                     success = False
                     errors.append(f"Missing expected artifacts: {', '.join(missing)}")
+
+            # EXTRACT PERFORMANCE METRIC (MLE-STAR Pattern)
+            performance_score = None
+            if success:
+                performance_score = self.extract_performance_metric(result.stdout)
+                if performance_score is not None:
+                    print(f"   📊 Validation Performance: {performance_score:.6f}")
+                else:
+                    print(f"   ⚠️  Warning: Could not extract performance metric from output")
 
             return ExecutionResult(
                 success=success,
