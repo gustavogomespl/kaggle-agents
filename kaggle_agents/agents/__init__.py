@@ -7,6 +7,7 @@ from .planner_agent import PlannerAgent, planner_agent_node
 from .developer_agent import DeveloperAgent, developer_agent_node
 from .robustness_agent import RobustnessAgent, robustness_agent_node
 from .submission_agent import SubmissionAgent, submission_agent_node
+from .meta_evaluator_agent import MetaEvaluatorAgent, meta_evaluator_node
 
 __all__ = [
     "SearchAgent",
@@ -19,4 +20,6 @@ __all__ = [
     "robustness_agent_node",
     "SubmissionAgent",
     "submission_agent_node",
+    "MetaEvaluatorAgent",
+    "meta_evaluator_node",
 ]

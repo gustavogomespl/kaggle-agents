@@ -21,6 +21,7 @@ from .agents import (
     developer_agent_node,
     robustness_agent_node,
     submission_agent_node,
+    meta_evaluator_node,  # Meta-Evaluator with RL
 )
 
 
@@ -426,6 +427,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
+    workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
 
     # Define edges
     # Start → Data Download
@@ -459,8 +461,11 @@ def create_workflow() -> StateGraph:
     # Submission → Performance Evaluation
     workflow.add_edge("submission", "performance_evaluation")
 
-    # Performance Evaluation → ALWAYS → Iteration Control
-    workflow.add_edge("performance_evaluation", "iteration_control")
+    # Performance Evaluation → Meta-Evaluator (RL analysis)
+    workflow.add_edge("performance_evaluation", "meta_evaluator")
+
+    # Meta-Evaluator → Iteration Control
+    workflow.add_edge("meta_evaluator", "iteration_control")
 
     # Iteration Control → Conditional (refine or done?)
     workflow.add_conditional_edges(

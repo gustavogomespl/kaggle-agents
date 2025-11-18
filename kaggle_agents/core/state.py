@@ -167,6 +167,11 @@ class KaggleState(TypedDict):
     optimized_prompts: dict[str, str]  # agent_name -> optimized_prompt
     prompt_performance: dict[str, float]  # agent_name -> performance_score
 
+    # Meta-Evaluator & RL (NEW)
+    failure_analysis: dict[str, Any]  # Error patterns and component analysis
+    refinement_guidance: dict[str, str]  # Guidance for prompt refinement
+    reward_signals: dict[str, float]  # RL reward components
+
     # Metadata
     workflow_start_time: datetime
     last_updated: datetime
@@ -268,6 +273,11 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         # Prompt Optimization
         optimized_prompts={},
         prompt_performance={},
+
+        # Meta-Evaluator & RL
+        failure_analysis={},
+        refinement_guidance={},
+        reward_signals={},
 
         # Metadata
         workflow_start_time=now,

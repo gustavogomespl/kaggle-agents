@@ -364,7 +364,7 @@ class DeveloperAgent:
         # LEVEL 3: Rollback to simplified version
         print("\n   ⚠️  LEVEL 3: Attempting simplified version...")
         simplified_component = self._create_simplified_component(component)
-        print(f"   📝 Simplified: {simplified_component.description[:100]}...")
+        print(f"   📝 Simplified: {simplified_component.name}")
 
         # Generate code for simplified version
         simplified_code = self._generate_code(
@@ -431,11 +431,8 @@ class DeveloperAgent:
 
         # Look for existing successful result for this component
         for result in dev_results:
-            # Match by checking if code contains component name or description
-            if result.success and (
-                component.name in result.code or
-                component.description[:50] in result.code  # Match by description snippet
-            ):
+            # Match by checking if code contains component name
+            if result.success and component.name in result.code:
                 print(f"  ⏭️  Skipping {component.name} - already implemented successfully")
                 print(f"     Reusing previous execution ({result.execution_time:.2f}s)")
                 return result
@@ -484,14 +481,14 @@ class DeveloperAgent:
             simplified_desc = f"Simple ensemble: weighted average of model predictions with equal weights. Load predictions from submission files and average them."
 
         else:
-            simplified_desc = f"Simplified version: {component.description[:100]}..."
+            simplified_desc = f"Simplified version of {component.name}"
 
-        # Create new component with simplified description
+        # Create new component with simplified code outline
         from dataclasses import replace
         simplified_component = replace(
             component,
             name=f"{component.name}_simplified",
-            description=simplified_desc,
+            code=simplified_desc,  # Use code field for description
             estimated_impact=component.estimated_impact * 0.7,  # Lower expected impact
         )
 
@@ -528,6 +525,25 @@ class DeveloperAgent:
         if current_iteration > 0:
             instructions.append(f"\n⚡ REFINEMENT ITERATION {current_iteration}")
             instructions.append("Focus on improvements that address previous shortcomings.")
+
+        # INJECT META-EVALUATOR GUIDANCE (RL Pattern)
+        refinement_guidance = state.get("refinement_guidance", {})
+        if refinement_guidance and refinement_guidance.get("developer_guidance"):
+            instructions.append(f"\n🧠 META-EVALUATOR GUIDANCE:")
+            instructions.append(f"  {refinement_guidance['developer_guidance']}")
+
+        # Component-specific guidance from meta-evaluator
+        if refinement_guidance and "component_type_guidance" in refinement_guidance:
+            comp_guidance = refinement_guidance["component_type_guidance"].get(component.component_type)
+            if comp_guidance:
+                instructions.append(f"\n🎯 {component.component_type.upper()} SPECIFIC GUIDANCE:")
+                instructions.append(f"  {comp_guidance}")
+
+        # Priority fixes from error analysis
+        if refinement_guidance and refinement_guidance.get("priority_fixes"):
+            instructions.append("\n⚠️  AVOID THESE ERROR PATTERNS:")
+            for error in refinement_guidance["priority_fixes"][:3]:  # Top 3
+                instructions.append(f"  - {error}")
 
         # Analyze previous results for lessons learned
         dev_results = state.get("development_results", [])

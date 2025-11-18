@@ -384,6 +384,34 @@ Domain: {domain}
             current_score=current_score
         )
 
+        # INJECT META-EVALUATOR GUIDANCE (RL Pattern)
+        refinement_guidance = state.get("refinement_guidance", {})
+        if refinement_guidance:
+            guidance_text = "\n\n## 🎯 META-EVALUATOR GUIDANCE (from RL analysis)\n\n"
+
+            if "planner_guidance" in refinement_guidance:
+                guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
+
+            if "priority_fixes" in refinement_guidance and refinement_guidance["priority_fixes"]:
+                guidance_text += f"**Priority Error Fixes:**\n"
+                for error in refinement_guidance["priority_fixes"]:
+                    guidance_text += f"- Avoid components that cause: {error}\n"
+                guidance_text += "\n"
+
+            if "success_amplification" in refinement_guidance and refinement_guidance["success_amplification"]:
+                guidance_text += f"**Amplify These Successes:**\n"
+                for success in refinement_guidance["success_amplification"]:
+                    guidance_text += f"- {success}\n"
+                guidance_text += "\n"
+
+            if "component_type_guidance" in refinement_guidance:
+                guidance_text += f"**Component-Specific Guidance:**\n"
+                for comp_type, guide in refinement_guidance["component_type_guidance"].items():
+                    guidance_text += f"- {comp_type}: {guide}\n"
+
+            prompt += guidance_text
+            print("  🧠 Injected Meta-Evaluator guidance into prompt")
+
         try:
             if self.use_dspy:
                 # For now, use fallback in refinement mode too
