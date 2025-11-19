@@ -430,7 +430,6 @@ def create_workflow() -> StateGraph:
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
-    workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("explainability", explainability_agent_node)
