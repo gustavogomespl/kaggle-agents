@@ -225,6 +225,10 @@ class MetaEvaluatorAgent:
         elif "keyerror" in error_lower:
             return "key_error"
         elif "valueerror" in error_lower:
+            if "shape" in error_lower or "dimension" in error_lower:
+                return "dimension_mismatch"
+            if "nan" in error_lower or "infinity" in error_lower:
+                return "data_contains_nans"
             return "value_error"
         elif "typeerror" in error_lower:
             return "type_error"
@@ -278,7 +282,8 @@ class MetaEvaluatorAgent:
         r_functional = successful_components / total_components if total_components > 0 else 0.0
 
         # Reward 2: Performance (continuous, normalized 0-1)
-        target_score = 0.9238  # Top 20%
+        # Try to get dynamic target from state (e.g. from leaderboard), else default
+        target_score = state.get("target_score", 0.9238)  # Default to 0.9238 if not set
         r_performance = min(current_score / target_score, 1.0) if target_score > 0 else 0.0
 
         # Reward 3: Improvement (delta from previous best)
@@ -289,19 +294,39 @@ class MetaEvaluatorAgent:
         avg_execution_time = sum(r.execution_time for r in dev_results) / total_components if total_components > 0 else 0.0
         r_semantics = 1.0 - min(avg_execution_time / 300.0, 1.0)  # Normalize by 5min timeout
 
+        # Reward 5: Diversity 
+        # Encourages trying different types of components (e.g. not just 5 XGBoosts)
+        unique_types = len(set(c.get("type", "unknown") for c in failure_analysis["success_components"]))
+        r_diversity = min(unique_types / 3.0, 1.0)  # Target: at least 3 different types working
+
+        # Reward 6: Robustness/Overfitting Penalty
+        # Penalize if Public LB score is much lower than Validation score
+        validation_score = state.get("overall_validation_score", 0.0)
+        public_score = 0.0
+        if submissions:
+            public_score = submissions[-1].public_score or 0.0
+        
+        # If we have both scores, check gap. If gap > 0.1, heavy penalty.
+        gap = abs(validation_score - public_score)
+        r_robustness = 1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
+
         # Combined reward (weighted)
         weights = {
-            "functional": 0.3,
-            "performance": 0.5,
+            "functional": 0.25,
+            "performance": 0.40,
             "improvement": 0.1,
-            "semantics": 0.1,
+            "semantics": 0.05,
+            "diversity": 0.1,    
+            "robustness": 0.1,   
         }
 
         r_combined = (
             weights["functional"] * r_functional +
             weights["performance"] * r_performance +
             weights["improvement"] * r_improvement +
-            weights["semantics"] * r_semantics
+            weights["semantics"] * r_semantics +
+            weights["diversity"] * r_diversity +
+            weights["robustness"] * r_robustness
         )
 
         rewards = {
@@ -309,11 +334,13 @@ class MetaEvaluatorAgent:
             "r_performance": r_performance,
             "r_improvement": r_improvement,
             "r_semantics": r_semantics,
+            "r_diversity": r_diversity,
+            "r_robustness": r_robustness,
             "r_combined": r_combined,
         }
 
-        print(f"   📊 Rewards: functional={r_functional:.3f}, performance={r_performance:.3f}, "
-              f"improvement={r_improvement:.3f}, combined={r_combined:.3f}")
+        print(f"   📊 Rewards: functional={r_functional:.2f}, performance={r_performance:.2f}, "
+              f"diversity={r_diversity:.2f}, robustness={r_robustness:.2f}, combined={r_combined:.3f}")
 
         return rewards
 

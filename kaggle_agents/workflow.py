@@ -21,7 +21,10 @@ from .agents import (
     developer_agent_node,
     robustness_agent_node,
     submission_agent_node,
+    submission_agent_node,
     meta_evaluator_node,  # Meta-Evaluator with RL
+    ensemble_agent_node,  # Ensemble Strategy
+    explainability_agent_node,  # Didactic Explanation
 )
 
 
@@ -427,7 +430,10 @@ def create_workflow() -> StateGraph:
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
+    workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
+    workflow.add_node("ensemble", ensemble_agent_node)
+    workflow.add_node("explainability", explainability_agent_node)
 
     # Define edges
     # Start → Data Download
@@ -455,8 +461,11 @@ def create_workflow() -> StateGraph:
         }
     )
 
-    # Robustness → Submission
-    workflow.add_edge("robustness", "submission")
+    # Robustness → Ensemble
+    workflow.add_edge("robustness", "ensemble")
+
+    # Ensemble → Submission
+    workflow.add_edge("ensemble", "submission")
 
     # Submission → Performance Evaluation
     workflow.add_edge("submission", "performance_evaluation")
@@ -473,9 +482,12 @@ def create_workflow() -> StateGraph:
         route_after_iteration_control,
         {
             "refine": "planner",  # Start refinement cycle
-            "end": END,           # Goal achieved or max iterations
+            "end": "explainability", # Goal achieved or max iterations -> Explain
         }
     )
+
+    # Explainability → END
+    workflow.add_edge("explainability", END)
 
     return workflow
 

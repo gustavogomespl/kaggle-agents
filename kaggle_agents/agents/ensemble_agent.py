@@ -264,3 +264,18 @@ class EnsembleAgent:
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
             return {"errors": errors + [error_msg]}
+
+
+def ensemble_agent_node(state: KaggleState) -> Dict[str, Any]:
+    """
+    LangGraph node function for ensemble agent.
+
+    Args:
+        state: Current workflow state
+
+    Returns:
+        State updates
+    """
+    agent = EnsembleAgent()
+    return agent(state)
+
