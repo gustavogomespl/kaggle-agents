@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import List, Dict, Any
 from sklearn.model_selection import cross_val_predict
 from sklearn.linear_model import Ridge, LogisticRegression
-from ..utils.config import Config
-from ..utils.state import KaggleState
+from sklearn.model_selection import cross_val_predict
+from sklearn.linear_model import Ridge, LogisticRegression
+from ..core.config import get_config
+from ..core.state import KaggleState
 
 
 class EnsembleAgent:
@@ -221,7 +223,7 @@ class EnsembleAgent:
             # Load top models (top 3)
             top_models = []
             for model_info in sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]:
-                model_path = f"{Config.MODELS_DIR}/{model_info['name']}_{competition_name}.joblib"
+                model_path = f"{get_config().paths.models_dir}/{model_info['name']}_{competition_name}.joblib"
                 if Path(model_path).exists():
                     model = joblib.load(model_path)
                     top_models.append(model)
@@ -241,7 +243,7 @@ class EnsembleAgent:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
 
             # Save ensemble
-            ensemble_path = f"{Config.MODELS_DIR}/ensemble_{competition_name}.joblib"
+            ensemble_path = f"{get_config().paths.models_dir}/ensemble_{competition_name}.joblib"
             joblib.dump({
                 "ensemble": ensemble,
                 "problem_type": problem_type,
