@@ -423,12 +423,39 @@ class MetaEvaluatorAgent:
 ## Error Patterns
 {chr(10).join('- ' + p for p in failure_analysis['error_patterns'])}
 
-## Failed Components
-"""
-        for comp in failure_analysis["failed_components"]:
-            context += f"\n### {comp['name']} ({comp['type']})\n"
-            context += f"Error: {comp['error_type']}\n"
-            context += f"Message: {comp['error'][:150]}...\n"
+        # FULL CODE AND PERFORMANCE ANALYSIS
+        context += "\n## Component Code and Performance Analysis\n"
+        
+        dev_results = state.get("development_results", [])
+        import re
+        
+        for i, res in enumerate(dev_results):
+            # Extract score from stdout if possible
+            score_match = re.search(r"Final Validation Performance: (0\.\d+)", res.stdout)
+            score = float(score_match.group(1)) if score_match else "N/A"
+            
+            # Determine component name (heuristic)
+            comp_name = f"Component_{i+1}"
+            if "class " in res.code:
+                # Try to find class name
+                class_match = re.search(r"class (\w+)", res.code)
+                if class_match:
+                    comp_name = class_match.group(1)
+            
+            status = "✅ Success" if res.success else "❌ Failed"
+            
+            context += f"\n### {comp_name}\n"
+            context += f"**Status**: {status}\n"
+            context += f"**Score**: {score}\n"
+            context += f"**Execution Time**: {res.execution_time:.2f}s\n"
+            
+            if not res.success:
+                context += f"**Error**: {res.stderr[-200:] if res.stderr else 'Unknown Error'}\n"
+            
+            context += "**Full Code**:\n```python\n"
+            context += res.code
+            context += "\n```\n"
+            context += "-" * 40 + "\n"
 
         context += f"\n## Reward Signals\n"
         for key, value in reward_signals.items():

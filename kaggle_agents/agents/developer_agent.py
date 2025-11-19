@@ -591,6 +591,17 @@ class DeveloperAgent:
             instructions.append("  - MUST use StratifiedKFold for cross-validation")
             instructions.append("  - MUST print 'Final Validation Performance: {score}'")
             instructions.append("  - MUST handle class imbalance with class_weight='balanced'")
+
+            # OPTUNA SPECIFIC GUIDANCE
+            if "optuna" in component.name.lower() or "tuned" in component.name.lower() or "optimized" in component.name.lower():
+                instructions.append("\n🔍 HYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:")
+                instructions.append("  - MUST use 'optuna' library for hyperparameter search")
+                instructions.append("  - Run at least 50 trials")
+                instructions.append("  - Use 'TPESampler' for efficient sampling")
+                instructions.append("  - Optimize for the competition metric (minimize RMSE/LogLoss or maximize AUC/Accuracy)")
+                instructions.append("  - Print the best parameters found")
+                instructions.append("  - Train final model with best parameters")
+
         elif component.component_type == "feature_engineering":
             instructions.append("\n🔧 FEATURE ENGINEERING REQUIREMENTS:")
             instructions.append("  - Create NEW features from existing ones")

@@ -157,6 +157,7 @@ class KaggleState(TypedDict):
     current_iteration: int
     max_iterations: int
     should_continue: bool
+    needs_refinement: bool
     termination_reason: Optional[str]
 
     # Memory & Learning
@@ -264,6 +265,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         current_iteration=0,
         max_iterations=10,
         should_continue=True,
+        needs_refinement=False,
         termination_reason=None,
 
         # Memory & Learning

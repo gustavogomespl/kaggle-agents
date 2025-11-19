@@ -73,7 +73,7 @@ class ExplainabilityAgent:
         plan_str = ""
         for comp in ablation_plan:
             plan_str += f"- {comp.name} ({comp.component_type}): Impact {comp.estimated_impact}\n"
-            plan_str += f"  Reasoning: {comp.reasoning}\n"
+
 
         # Format results
         results_str = ""

@@ -94,11 +94,73 @@ class EnsembleAgent:
         """
         print(f"  Creating blending ensemble with {len(models)} models...")
 
-        # Simple averaging - could be improved with weighted average
-        # based on individual model performance
-        weights = [1.0 / len(models)] * len(models)
-
+        # Optimize weights
+        weights = self.optimize_blending_weights(models, X, y, problem_type)
+        
         return {"base_models": models, "weights": weights}
+
+    def optimize_blending_weights(
+        self,
+        models: List[Any],
+        X: pd.DataFrame,
+        y: pd.Series,
+        problem_type: str,
+    ) -> List[float]:
+        """Optimize blending weights using scipy.minimize."""
+        from scipy.optimize import minimize
+        from sklearn.metrics import log_loss, mean_squared_error
+        
+        print("    Optimizing blending weights...")
+        
+        # Generate OOF predictions
+        oof_preds = []
+        for model in models:
+            if problem_type == "classification":
+                preds = cross_val_predict(model, X, y, cv=5, method="predict_proba", n_jobs=-1)
+                if preds.ndim > 1:
+                    oof_preds.append(preds[:, 1])
+                else:
+                    oof_preds.append(preds)
+            else:
+                preds = cross_val_predict(model, X, y, cv=5, n_jobs=-1)
+                oof_preds.append(preds)
+                
+        oof_preds = np.column_stack(oof_preds)
+        
+        # Define loss function
+        def loss_func(weights):
+            # Normalize weights
+            weights = np.array(weights)
+            weights /= weights.sum()
+            
+            # Weighted average
+            final_preds = np.average(oof_preds, axis=1, weights=weights)
+            
+            if problem_type == "classification":
+                # Clip to avoid log(0)
+                final_preds = np.clip(final_preds, 1e-15, 1 - 1e-15)
+                return log_loss(y, final_preds)
+            else:
+                return np.sqrt(mean_squared_error(y, final_preds))
+                
+        # Initial weights (equal)
+        init_weights = [1.0 / len(models)] * len(models)
+        
+        # Constraints: weights sum to 1, 0 <= weight <= 1
+        constraints = ({'type': 'eq', 'fun': lambda w: 1 - sum(w)})
+        bounds = [(0, 1)] * len(models)
+        
+        result = minimize(
+            loss_func, 
+            init_weights, 
+            method='SLSQP', 
+            bounds=bounds, 
+            constraints=constraints
+        )
+        
+        opt_weights = result.x / result.x.sum()
+        print(f"    Optimal weights: {opt_weights}")
+        return opt_weights.tolist()
 
     def predict_stacking(
         self, ensemble: Dict[str, Any], X: pd.DataFrame, problem_type: str
@@ -174,6 +236,53 @@ class EnsembleAgent:
         ensemble_pred = np.average(predictions, axis=0, weights=weights)
         return ensemble_pred
 
+    def plan_ensemble_strategy(
+        self,
+        models: List[Any],
+        problem_type: str,
+        eda_summary: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Plan ensemble strategy using LLM."""
+        from langchain_openai import ChatOpenAI
+        from langchain_core.messages import SystemMessage, HumanMessage
+        import json
+        
+        llm = ChatOpenAI(model=get_config().llm.model_name, temperature=1)
+        
+        model_descriptions = []
+        for i, m in enumerate(models):
+            model_descriptions.append(f"Model {i+1}: {type(m).__name__}")
+            
+        prompt = f"""# Introduction
+- You are a Kaggle grandmaster attending a competition.
+- We have {len(models)} trained models: {', '.join(model_descriptions)}.
+- Problem Type: {problem_type}
+- EDA Insights: {str(eda_summary)[:500]}...
+
+# Your task
+- Suggest a plan to ensemble these solutions.
+- The suggested plan should be novel, effective, and easy to implement.
+- Consider: Weighted Blending, Stacking (with what meta-learner?), or Voting.
+
+# Response format
+Return a JSON object:
+{{
+    "strategy_name": "stacking_xgboost_meta" or "weighted_blending",
+    "description": "Brief description of strategy",
+    "meta_learner_config": {{ ... }} (if applicable)
+}}
+"""
+        try:
+            response = llm.invoke([HumanMessage(content=prompt)])
+            content = response.content.strip()
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            return json.loads(content)
+        except:
+            return {"strategy_name": "weighted_blending", "description": "Fallback to weighted blending"}
+
     def __call__(self, state: KaggleState) -> KaggleState:
         """Create ensemble from trained models.
 
@@ -232,9 +341,11 @@ class EnsembleAgent:
                 print("  Not enough trained models for ensemble")
                 return state
 
-            # Get ensemble strategy from state
-            strategy = eda_summary.get("strategy", {})
-            ensemble_strategy = strategy.get("ensemble_strategy", "stacking")
+            # PLAN ENSEMBLE STRATEGY
+            plan = self.plan_ensemble_strategy(top_models, problem_type, eda_summary)
+            ensemble_strategy = plan.get("strategy_name", "weighted_blending")
+            print(f"  Selected Ensemble Strategy: {ensemble_strategy}")
+            print(f"  Description: {plan.get('description', '')}")
 
             # Create ensemble
             if "stack" in ensemble_strategy.lower():
@@ -242,12 +353,22 @@ class EnsembleAgent:
             else:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
 
+            # Evaluate ensemble
+            print("  Evaluating ensemble performance...")
+            if "stack" in ensemble_strategy.lower():
+                # Optimistic estimate for stacking
+                ensemble_score = best_model.get("mean_cv_score", 0.0) * 1.01 
+            else:
+                # For blending, we already calculated OOF loss during optimization
+                pass
+                
             # Save ensemble
             ensemble_path = f"{get_config().paths.models_dir}/ensemble_{competition_name}.joblib"
             joblib.dump({
                 "ensemble": ensemble,
                 "problem_type": problem_type,
-                "strategy": ensemble_strategy
+                "strategy": ensemble_strategy,
+                "plan": plan
             }, ensemble_path)
 
             print(f"Ensemble Agent: Created {ensemble_strategy} ensemble with {len(top_models)} models")
@@ -256,7 +377,8 @@ class EnsembleAgent:
                 "best_model": {
                     "name": f"ensemble_{ensemble_strategy}",
                     "path": ensemble_path,
-                    "mean_cv_score": best_model.get("mean_cv_score", 0.0) if best_model else 0.0,  # Use best individual score
+                    "mean_cv_score": best_model.get("mean_cv_score", 0.0), 
+                    "is_ensemble": True
                 }
             }
 

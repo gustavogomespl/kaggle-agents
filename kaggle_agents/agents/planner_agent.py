@@ -649,28 +649,28 @@ Domain: {domain}
         # ALWAYS add 3 diverse models for ensemble diversity
         plan.extend([
             {
-                "name": "lightgbm_tuned",
+                "name": "lightgbm_optuna_tuned",
                 "component_type": "model",
-                "description": "LightGBM with tuned hyperparameters: n_estimators=2000, max_depth=8, learning_rate=0.03, num_leaves=63",
+                "description": "LightGBM with Optuna hyperparameter optimization: 50 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
+                "estimated_impact": 0.22,
+                "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
+                "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100"
+            },
+            {
+                "name": "xgboost_optuna_tuned",
+                "component_type": "model",
+                "description": "XGBoost with Optuna hyperparameter optimization: 50 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
                 "estimated_impact": 0.20,
-                "rationale": "LightGBM consistently wins tabular competitions. Deeper trees capture complex patterns.",
-                "code_outline": "LGBMRegressor/Classifier with 5-fold CV, early_stopping_rounds=100"
+                "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
+                "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50"
             },
             {
-                "name": "xgboost_tuned",
+                "name": "catboost_optuna_tuned",
                 "component_type": "model",
-                "description": "XGBoost with tuned hyperparameters: n_estimators=2000, max_depth=7, learning_rate=0.03, subsample=0.8",
-                "estimated_impact": 0.18,
-                "rationale": "XGBoost provides different regularization than LightGBM, enabling better ensemble diversity",
-                "code_outline": "XGBRegressor/Classifier with 5-fold CV, early_stopping_rounds=50"
-            },
-            {
-                "name": "catboost_tuned",
-                "component_type": "model",
-                "description": "CatBoost with native categorical handling: iterations=2000, depth=7, learning_rate=0.03",
-                "estimated_impact": 0.17,
-                "rationale": "CatBoost handles categorical features natively, often outperforms other GBDTs",
-                "code_outline": "CatBoostRegressor/Classifier with cat_features parameter, 5-fold CV"
+                "description": "CatBoost with Optuna hyperparameter optimization: 50 trials, tuning depth, learning_rate, l2_leaf_reg",
+                "estimated_impact": 0.19,
+                "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
+                "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV"
             }
         ])
 

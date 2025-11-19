@@ -51,6 +51,10 @@ class RobustnessAgent:
         if not dev_results:
             print("  No development results to validate")
             return {}
+            
+        # Initialize LLM
+        from langchain_openai import ChatOpenAI
+        self.llm = ChatOpenAI(model=self.config.llm.model_name, temperature=1)
 
         # Get latest result
         latest_result = dev_results[-1]
@@ -160,30 +164,63 @@ class RobustnessAgent:
 
         code = dev_result.code
 
-        # Check for common leakage patterns
-        leakage_patterns = [
-            (r"fit.*train_df.*\+.*test_df", "Fitting on train+test together"),
-            (r"TargetEncoder.*fit.*(?!train)", "Target encoding might use test data"),
-            (r"fit_transform.*(?!train)", "fit_transform might include test data"),
-        ]
+        # LLM-based Leakage Check
+        from langchain_core.messages import SystemMessage, HumanMessage
+        import json
+        
+        prompt = f"""# Python code
+```python
+{code}
+```
 
-        for pattern, description in leakage_patterns:
-            if re.search(pattern, code, re.IGNORECASE):
-                issues.append(description)
-                suggestions.append(f"Ensure {description.lower()} is avoided")
-                score *= 0.8
+# Your task
+- Extract the code block where the validation and test samples are preprocessed using training samples.
+- Check that the model is trained with only training samples.
+- Check that before printing the final validation score, the model is not trained the validation samples.
+- Also check whether the validation and test samples are preprocessed correctly, preventing information from the validation or test samples from influencing the training process (i.e., preventing data leakage).
 
-        # Check for proper train/test split
-        if "train_test_split" not in code and "KFold" not in code:
-            # Might be using pre-split data (OK) or no split (BAD)
-            if "test_df" in code:
-                # Has test data, probably OK
-                pass
+# Requirement
+- If data leakage is present on validation and test samples, answer 'Yes Data Leakage'.
+- If data leakage is not present on validation and test samples, answer 'No Data Leakage'.
+
+Use this JSON schema:
+Answer = {{'leakage_status': str, 'reason': str}}
+Return: Answer
+"""
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            content = response.content.strip()
+            # Handle potential markdown wrapping
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+                
+            result = json.loads(content)
+            
+            if "Yes Data Leakage" in result.get("leakage_status", ""):
+                issues.append(f"Data Leakage Detected: {result.get('reason', 'Unknown reason')}")
+                suggestions.append("Ensure test/validation data is not used for training or fitting scalers")
+                score = 0.0
+                passed = False
             else:
-                issues.append("No train/test split detected")
-                score *= 0.9
+                passed = True
+                
+        except Exception as e:
+            print(f"   Warning: LLM Leakage Check failed: {e}")
+            # Fallback to regex
+            leakage_patterns = [
+                (r"fit.*train_df.*\+.*test_df", "Fitting on train+test together"),
+                (r"TargetEncoder.*fit.*(?!train)", "Target encoding might use test data"),
+                (r"fit_transform.*(?!train)", "fit_transform might include test data"),
+            ]
 
-        passed = score >= 0.7
+            for pattern, description in leakage_patterns:
+                if re.search(pattern, code, re.IGNORECASE):
+                    issues.append(description)
+                    suggestions.append(f"Ensure {description.lower()} is avoided")
+                    score *= 0.8
+            passed = score >= 0.7
 
         return ValidationResult(
             module="leakage",
