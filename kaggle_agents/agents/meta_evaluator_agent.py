@@ -422,6 +422,7 @@ class MetaEvaluatorAgent:
 
 ## Error Patterns
 {chr(10).join('- ' + p for p in failure_analysis['error_patterns'])}
+"""
 
         # FULL CODE AND PERFORMANCE ANALYSIS
         context += "\n## Component Code and Performance Analysis\n"
