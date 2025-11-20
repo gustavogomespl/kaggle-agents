@@ -368,7 +368,7 @@ Domain: {domain}
             {
                 "name": c.name,
                 "type": c.component_type,
-                "description": c.description,
+                "description": c.code[:100] + "...",
                 "estimated_impact": c.estimated_impact
             }
             for c in previous_plan
