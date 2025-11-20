@@ -54,7 +54,7 @@ class RobustnessAgent:
             
         # Initialize LLM
         from langchain_openai import ChatOpenAI
-        self.llm = ChatOpenAI(model=self.config.llm.model_name, temperature=1)
+        self.llm = ChatOpenAI(model=self.config.llm.model, temperature=1)
 
         # Get latest result
         latest_result = dev_results[-1]

@@ -247,7 +247,7 @@ class EnsembleAgent:
         from langchain_core.messages import SystemMessage, HumanMessage
         import json
         
-        llm = ChatOpenAI(model=get_config().llm.model_name, temperature=1)
+        llm = ChatOpenAI(model=get_config().llm.model, temperature=1)
         
         model_descriptions = []
         for i, m in enumerate(models):
