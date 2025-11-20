@@ -447,13 +447,14 @@ Domain: {domain}
         # Convert to AblationComponent objects
         components = []
         for i, item in enumerate(plan_data):
+            # Get code from code_outline or description (fallback for compatibility)
+            code = item.get("code_outline", item.get("description", ""))
+
             component = AblationComponent(
                 name=item.get("name", f"refined_component_{i+1}"),
                 component_type=item.get("component_type", "model"),
-                description=item.get("description", ""),
-                estimated_impact=item.get("estimated_impact", 0.15),
-                rationale=item.get("rationale", ""),
-                code_outline=item.get("code_outline", "")
+                code=code,
+                estimated_impact=item.get("estimated_impact", 0.15)
             )
             components.append(component)
 
