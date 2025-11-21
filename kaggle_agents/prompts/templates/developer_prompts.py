@@ -294,10 +294,12 @@ print(f"Prediction distribution: min={{predictions.min():.4f}}, max={{prediction
 # Save outputs
 print("Saving outputs...")
 submission = sample_sub.copy()
+# Preserve id order exactly as sample_submission
 submission[submission.columns[1]] = predictions
-assert submission.shape == sample_sub.shape
-assert submission.columns.tolist() == sample_sub.columns.tolist()
-assert submission['id'].equals(sample_sub['id'])
+assert submission.shape == sample_sub.shape, "Submission shape mismatch vs sample_submission"
+assert submission.columns.tolist() == sample_sub.columns.tolist(), "Submission columns mismatch vs sample_submission"
+assert submission['id'].equals(sample_sub['id']), "Submission id column does not match sample_submission"
+print("Submission head:\n", submission.head())
 submission.to_csv('{submission_path}', index=False)
 print(f"Submission saved: {{len(submission)}} rows")
 
