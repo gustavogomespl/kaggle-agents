@@ -35,12 +35,16 @@ class PromptOptimizer:
 
     def _setup_dspy(self) -> None:
         """Configure DSPy with the appropriate language model."""
+        # Get safe max_tokens based on model
+        model = self.config.llm.model
+        max_tokens = self.config.llm.max_tokens
+
         # Configure LM based on provider
         if self.config.llm.provider == "openai":
             lm = dspy.LM(
                 model=f"openai/{self.config.llm.model}",
                 api_key=os.getenv("OPENAI_API_KEY"),
-                max_tokens=self.config.llm.max_tokens,
+                max_tokens=max_tokens,
                 temperature=self.config.llm.temperature,
             )
         elif self.config.llm.provider == "anthropic":
@@ -48,7 +52,7 @@ class PromptOptimizer:
             lm = dspy.LM(
                 model=f"anthropic/{self.config.llm.model}",
                 api_key=os.getenv("ANTHROPIC_API_KEY"),
-                max_tokens=self.config.llm.max_tokens,
+                max_tokens=max_tokens,
                 temperature=self.config.llm.temperature,
             )
         else:

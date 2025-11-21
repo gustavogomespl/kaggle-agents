@@ -22,7 +22,7 @@ class LLMConfig:
     provider: Literal["openai", "anthropic"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
-    max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "30000")))
+    max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192")))  # Safe default
     timeout: int = 120  # seconds
 
 
