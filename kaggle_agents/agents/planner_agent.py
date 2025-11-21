@@ -11,11 +11,8 @@ from datetime import datetime
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-
-from ..core.state import KaggleState, AblationComponent, SOTASolution
-from ..core.config import get_config
+from ..core.state import KaggleState, AblationComponent, DevelopmentResult, SOTASolution
+from ..core.config import get_config, get_llm_for_role
 from ..prompts.templates.planner_prompts import (
     PLANNER_SYSTEM_PROMPT,
     CREATE_ABLATION_PLAN_PROMPT,
@@ -121,16 +118,11 @@ class PlannerAgent:
             self.sota_analyzer = SOTAAnalyzerModule()
         else:
             # Use direct LLM calls
-            if self.config.llm.provider == "openai":
-                self.llm = ChatOpenAI(
-                    model=self.config.llm.model,
-                    temperature=self.config.llm.temperature,
-                )
-            else:
-                self.llm = ChatAnthropic(
-                    model=self.config.llm.model,
-                    temperature=self.config.llm.temperature,
-                )
+            self.llm = get_llm_for_role(
+                role="planner",
+                temperature=self.config.llm.temperature,
+                max_tokens=self.config.llm.max_tokens,
+            )
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
         """
@@ -417,7 +409,13 @@ Domain: {domain}
                 # For now, use fallback in refinement mode too
                 # TODO: Create DSPy refinement module
                 print("  🔧 Using enhanced fallback with refinement logic")
-                plan_data = self._create_refined_fallback_plan(state, sota_analysis, test_results_summary)
+                plan_data = self._create_refined_fallback_plan(
+                    state,
+                    sota_analysis,
+                    test_results_summary,
+                    previous_plan,
+                    dev_results,
+                )
             else:
                 # Use LLM with refinement prompt
                 from langchain.schema import SystemMessage, HumanMessage
@@ -442,7 +440,13 @@ Domain: {domain}
         except Exception as e:
             print(f"  ⚠️  Refinement failed: {str(e)}")
             print("  🔧 Using enhanced fallback with refinement logic")
-            plan_data = self._create_refined_fallback_plan(state, sota_analysis, test_results_summary)
+            plan_data = self._create_refined_fallback_plan(
+                state,
+                sota_analysis,
+                test_results_summary,
+                previous_plan,
+                dev_results,
+            )
 
         # Convert to AblationComponent objects
         components = []
@@ -464,7 +468,12 @@ Domain: {domain}
         return components
 
     def _create_refined_fallback_plan(
-        self, state: KaggleState, sota_analysis: Dict[str, Any], test_results: List[Dict]
+        self,
+        state: KaggleState,
+        sota_analysis: Dict[str, Any],
+        test_results: List[Dict],
+        previous_plan: List[AblationComponent],
+        dev_results: List[DevelopmentResult],
     ) -> List[Dict[str, Any]]:
         """
         Create a refined fallback plan based on what worked in previous iteration.
@@ -477,70 +486,101 @@ Domain: {domain}
         Returns:
             Refined plan as list of dicts
         """
-        # Analyze what worked
-        successful_types = set()
-        failed_types = set()
-
-        for result in test_results:
-            if result.get("success"):
-                successful_types.add(result.get("type"))
-            else:
-                failed_types.add(result.get("type"))
-
-        # Build refined plan focusing on what worked
-        domain = state.get("domain_detected", "tabular")
-        plan = []
-
-        # If feature engineering worked, add advanced version
-        if "feature_engineering" in successful_types or "feature_engineering" not in failed_types:
-            plan.append({
-                "name": "advanced_feature_engineering_v2",
-                "component_type": "feature_engineering",
-                "description": "Enhanced feature engineering: polynomial degree 3, advanced interactions, PCA, feature selection",
-                "estimated_impact": 0.18,
-                "rationale": "Previous FE showed promise, enhancing with more sophisticated techniques",
-                "code_outline": "PolynomialFeatures(degree=3), PCA(n_components=0.95), SelectKBest, advanced interactions"
+        # Bandit-lite: keep top-2 successful arms by reward, explore one new arm
+        arms = []
+        for idx, comp in enumerate(previous_plan):
+            score = None
+            if idx < len(dev_results):
+                score = self._extract_validation_score(dev_results[idx].stdout)
+            reward = score if score is not None else comp.estimated_impact
+            success = idx < len(dev_results) and dev_results[idx].success
+            arms.append({
+                "component": comp,
+                "reward": reward if reward is not None else 0.0,
+                "success": success,
             })
 
-        # Always add diverse models (essential for ensemble)
-        plan.extend([
-            {
-                "name": "lightgbm_optimized_v2",
+        # Exploit: keep top-2 successful arms
+        successful_arms = [a for a in arms if a["success"]]
+        successful_arms.sort(key=lambda a: a["reward"], reverse=True)
+        keep = successful_arms[:2]
+
+        plan = []
+
+        # Ensure a strong feature engineering arm is present
+        fe_in_keep = any(a["component"].component_type == "feature_engineering" for a in keep)
+        if not fe_in_keep:
+            plan.append({
+                "name": "advanced_feature_engineering",
+                "component_type": "feature_engineering",
+                "description": "Polynomial + interaction features with leak-safe pipelines (imputer/encoder in CV)",
+                "estimated_impact": 0.15,
+                "rationale": "Consistently strong FE baseline",
+                "code_outline": "Pipeline with ColumnTransformer, SimpleImputer, OneHot/TargetEncoder, interactions",
+            })
+
+        # Add kept winners
+        for arm in keep:
+            comp = arm["component"]
+            plan.append({
+                "name": comp.name,
+                "component_type": comp.component_type,
+                "description": comp.code or comp.component_type,
+                "estimated_impact": float(comp.estimated_impact) if comp.estimated_impact else max(0.12, arm["reward"]),
+                "rationale": "Kept from previous iteration (top reward)",
+                "code_outline": comp.code or comp.component_type,
+            })
+
+        # Ensure at least two model components
+        model_count = sum(1 for p in plan if p["component_type"] == "model")
+        if model_count < 2:
+            plan.append({
+                "name": "lightgbm_fast_cv",
                 "component_type": "model",
-                "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, pruning",
-                "estimated_impact": 0.22,
-                "rationale": "Refined hyperparameters based on previous run",
-                "code_outline": "OptunaSearchCV with LGBMRegressor/Classifier, 15 trials, early stopping"
-            },
-            {
-                "name": "xgboost_optimized_v2",
-                "component_type": "model",
-                "description": "XGBoost with GPU acceleration and optimized hyperparameters",
+                "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
                 "estimated_impact": 0.20,
-                "rationale": "Different regularization for ensemble diversity",
-                "code_outline": "XGBRegressor/Classifier with tree_method='gpu_hist', optimized params"
-            },
-            {
-                "name": "catboost_optimized_v2",
+                "rationale": "High-ROI baseline model",
+                "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
+            })
+            model_count += 1
+
+        if model_count < 2:
+            plan.append({
+                "name": "xgboost_fast_cv",
                 "component_type": "model",
-                "description": "CatBoost with categorical feature handling and depth tuning",
-                "estimated_impact": 0.19,
-                "rationale": "Native categorical handling adds diversity",
-                "code_outline": "CatBoostRegressor/Classifier with cat_features, depth=8-10"
-            }
-        ])
+                "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
+                "estimated_impact": 0.18,
+                "rationale": "Adds diversity for ensemble",
+                "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
+            })
 
-        # Add stacking ensemble (critical for top performance)
-        plan.append({
-            "name": "stacking_ensemble_v2",
-            "component_type": "ensemble",
-            "description": "2-layer stacking: LGB+XGB+CatBoost → Ridge/LogisticRegression → Final predictions",
-            "estimated_impact": 0.15,
-            "rationale": "Stacking consistently improves scores in competitions",
-            "code_outline": "StackingRegressor/Classifier with 3 base models, Ridge/LogisticRegression meta-learner, 5-fold CV"
-        })
+        # Exploration arm if capacity allows
+        if len(plan) < 4:
+            plan.append({
+                "name": "stacking_light",
+                "component_type": "ensemble",
+                "description": "Weighted average of top models using CV rewards as weights; validate submission vs sample",
+                "estimated_impact": 0.12,
+                "rationale": "Cheap ensemble leveraging existing predictions",
+                "code_outline": "Load saved preds, weight by CV reward, validate sample_submission shape/ids",
+            })
 
-        return plan[:5]  # Limit to 5 components
+        return plan[:4]
+
+    def _extract_validation_score(self, stdout: str) -> float | None:
+        """Parse validation score from stdout if present."""
+        import re
+
+        if not stdout:
+            return None
+
+        match = re.search(r"Final Validation Performance:\s*([0-9\\.]+)", stdout)
+        if match:
+            try:
+                return float(match.group(1))
+            except ValueError:
+                return None
+        return None
 
     def _validate_plan(self, plan: List[AblationComponent]) -> List[AblationComponent]:
         """

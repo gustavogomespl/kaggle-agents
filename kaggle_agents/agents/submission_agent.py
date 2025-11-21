@@ -57,6 +57,7 @@ class SubmissionAgent:
 
         working_dir = Path(state["working_directory"])
         competition_name = state["competition_info"].name
+        sample_submission_path = state.get("sample_submission_path") or working_dir / "sample_submission.csv"
 
         # Find submission file
         submission_path = self._find_submission_file(working_dir)
@@ -70,7 +71,18 @@ class SubmissionAgent:
         print(f"\n📄 Submission file: {submission_path.name}")
 
         # Validate submission
-        is_valid, message = self._validate_submission(submission_path)
+        # Determine problem type for validation heuristics
+        problem_type = None
+        try:
+            problem_type = state["competition_info"].problem_type
+        except Exception:
+            problem_type = None
+
+        is_valid, message = self._validate_submission(
+            submission_path,
+            sample_submission_path,
+            problem_type=problem_type,
+        )
 
         if not is_valid:
             print(f"❌ Validation failed: {message}")
@@ -111,7 +123,12 @@ class SubmissionAgent:
 
         return None
 
-    def _validate_submission(self, submission_path: Path) -> tuple[bool, str]:
+    def _validate_submission(
+        self,
+        submission_path: Path,
+        sample_submission_path: Optional[Path],
+        problem_type: Optional[str] = None,
+    ) -> tuple[bool, str]:
         """
         Validate submission file format.
 
@@ -135,6 +152,36 @@ class SubmissionAgent:
             if df.isnull().any().any():
                 null_count = df.isnull().sum().sum()
                 return False, f"Submission contains {null_count} null values"
+
+            # Validate against sample_submission if available
+            if sample_submission_path and Path(sample_submission_path).exists():
+                try:
+                    sample_sub = pd.read_csv(sample_submission_path)
+                    if df.shape != sample_sub.shape:
+                        return False, f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})"
+                    if df.columns.tolist() != sample_sub.columns.tolist():
+                        return False, f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}"
+                    if "id" in df.columns and not df["id"].equals(sample_sub["id"]):
+                        return False, "ID column does not match sample_submission"
+                except Exception as e:
+                    return False, f"Failed to compare with sample_submission: {str(e)}"
+
+            # Prediction sanity checks
+            problem_lower = (problem_type or "").lower()
+            is_classification = "class" in problem_lower  # covers binary_classification, classification, multiclass
+
+            pred_col = df.columns[1]
+            preds = df[pred_col]
+            if not pd.api.types.is_numeric_dtype(preds):
+                return False, f"Prediction column {pred_col} must be numeric"
+
+            # For classification/probabilities, enforce [0,1]; for regression, allow any numeric range
+            if is_classification:
+                if (preds < 0).any() or (preds > 1).any():
+                    return False, f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})"
+
+            if not preds.replace([float("inf"), float("-inf")], pd.NA).notna().all():
+                return False, "Predictions contain inf or NaN values"
 
             return True, "Valid"
 

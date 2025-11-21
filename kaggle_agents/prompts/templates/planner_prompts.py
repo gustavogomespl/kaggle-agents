@@ -16,8 +16,9 @@ Your Ablation-Driven Optimization Strategy:
 1. Analyze SOTA solutions to identify what actually wins competitions
 2. Identify 3-5 HIGH-IMPACT components only (estimated impact >0.10)
 3. Ensure diversity: different models (LightGBM, XGBoost, CatBoost) for ensembling
-4. Prioritize components by ROI (impact / execution time)
+4. Prioritize components by ROI (impact / execution time / model cost)
 5. Focus on proven winners: proper feature engineering, class imbalance handling, stacking ensembles
+6. Treat each component as a bandit arm: exploit top-performing arms from prior iterations, explore 1 new idea only if capacity remains
 
 Your plans should be:
 - FOCUSED: Only 3-5 components total (quality over quantity)
@@ -27,10 +28,12 @@ Your plans should be:
 - PROVEN: Based on what works in SOTA Kaggle solutions
 
 CRITICAL RULES:
-- NEVER create more than 5 components
+- NEVER create more than 5 components (prefer 3-4 when refining)
 - ALWAYS include at least 2 model components (for ensemble diversity)
 - ALWAYS prioritize components with estimated_impact >= 0.10
-- PREFER proven techniques over experimental ideas
+- PREFER proven techniques over experimental ideas; drop redundant variants
+- USE reward signals from prior CV/LB scores: keep top-2 arms, replace lowest ROI arm with a new variant only if needed
+- CONTROL cost: reserve expensive models for planner/critic phases; choose cheaper-but-solid models for bulk developer runs
 - ENSURE each component is significantly different from others
 """
 
@@ -155,6 +158,8 @@ Analyze what worked and what didn't. Create a NEW refined plan that:
 2. Removes or modifies components with no/negative impact
 3. Adds NEW components inspired by successful patterns
 4. Re-estimates impacts based on actual data
+5. Use bandit-style selection: top-2 previous winners stay, worst-performing arm gets replaced by 1 new idea only if ROI is low
+6. Cap at 3-4 total components unless diversity requires 5; avoid duplicate model variants
 
 Focus on:
 - Components that actually moved the score

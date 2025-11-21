@@ -12,11 +12,8 @@ from pathlib import Path
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
-from langchain_anthropic import ChatAnthropic
-
 from ..core.state import KaggleState, AblationComponent, DevelopmentResult
-from ..core.config import get_config
+from ..core.config import get_config, get_llm_for_role
 from ..tools.code_executor import CodeExecutor, ArtifactValidator
 from ..prompts.templates.developer_prompts import (
     DEVELOPER_SYSTEM_PROMPT,
@@ -124,18 +121,11 @@ class DeveloperAgent:
         # MLE-STAR Pattern: Lower temperature for implementation tasks (0.3)
         implementation_temperature = 0.3
 
-        if self.config.llm.provider == "openai":
-            self.llm = ChatOpenAI(
-                model=self.config.llm.model,
-                temperature=implementation_temperature,  # Lower for precision
-                max_tokens=self.config.llm.max_tokens,
-            )
-        else:
-            self.llm = ChatAnthropic(
-                model=self.config.llm.model,
-                temperature=implementation_temperature,  # Lower for precision
-                max_tokens=self.config.llm.max_tokens,
-            )
+        self.llm = get_llm_for_role(
+            role="developer",
+            temperature=implementation_temperature,
+            max_tokens=self.config.llm.max_tokens,
+        )
 
         if self.use_dspy:
             # Try to load optimized modules

@@ -21,6 +21,13 @@ class LLMConfig:
 
     provider: Literal["openai", "anthropic"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    # Optional per-role overrides to balance cost/quality across agents
+    planner_model: Optional[str] = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
+    planner_provider: Optional[Literal["openai", "anthropic"]] = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
+    developer_model: Optional[str] = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
+    developer_provider: Optional[Literal["openai", "anthropic"]] = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
+    evaluator_model: Optional[str] = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
+    evaluator_provider: Optional[Literal["openai", "anthropic"]] = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192")))  # Safe default
     timeout: int = 120  # seconds
@@ -324,6 +331,54 @@ def get_llm(temperature: float = None, max_tokens: int = None):
             temperature=temp,
             max_tokens=tokens,
         )
+
+
+def get_llm_for_role(
+    role: str,
+    temperature: float = None,
+    max_tokens: int = None,
+):
+    """
+    Return an LLM configured for a specific agent role (planner/developer/evaluator).
+
+    Falls back to the global provider/model when a role-specific override is not set.
+    """
+    from langchain_openai import ChatOpenAI
+    from langchain_anthropic import ChatAnthropic
+
+    config = get_config()
+    temp = temperature if temperature is not None else config.llm.temperature
+    tokens = max_tokens if max_tokens is not None else config.llm.max_tokens
+
+    role_lower = role.lower()
+    provider_override = None
+    model_override = None
+
+    if role_lower == "planner":
+        provider_override = config.llm.planner_provider
+        model_override = config.llm.planner_model
+    elif role_lower == "developer":
+        provider_override = config.llm.developer_provider
+        model_override = config.llm.developer_model
+    elif role_lower in {"evaluator", "meta_evaluator", "critic"}:
+        provider_override = config.llm.evaluator_provider
+        model_override = config.llm.evaluator_model
+
+    provider = provider_override or config.llm.provider
+    model = model_override or config.llm.model
+
+    if provider == "anthropic":
+        return ChatAnthropic(
+            model=model,
+            temperature=temp,
+            max_tokens=tokens,
+        )
+
+    return ChatOpenAI(
+        model=model,
+        temperature=temp,
+        max_tokens=tokens,
+    )
 
 
 def get_competition_dir(competition_name: str) -> Path:

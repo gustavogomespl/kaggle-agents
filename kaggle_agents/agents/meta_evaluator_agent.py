@@ -19,7 +19,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.state import KaggleState, DevelopmentResult, IterationMemory
-from ..core.config import get_config, get_llm
+from ..core.config import get_config, get_llm_for_role
 from ..optimization import create_training_collector
 
 
@@ -43,7 +43,7 @@ class MetaEvaluatorAgent:
         self.config = get_config()
 
         # Use configured LLM (supports OpenAI and Anthropic)
-        self.llm = get_llm()
+        self.llm = get_llm_for_role(role="evaluator")
 
         provider = self.config.llm.provider.upper()
         model = self.config.llm.model
