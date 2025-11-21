@@ -20,6 +20,8 @@ You are known for:
 5. **Model Selection**: Use proven winners (LightGBM, XGBoost, CatBoost) with proper hyperparameters
 6. **Efficiency**: Vectorized operations, fast execution (<60s for models, <10s for preprocessing)
 7. **Submission Safety**: Match sample_submission exactly (columns/order/id) and clamp probabilities to [0,1]
+8. **Schema Awareness**: Detect target column reliably (prefer sample_submission second column; fallback to known names or last non-id col) and log schema (shapes, columns, dtypes)
+9. **Leak-Free Pipelines**: Always use Pipeline/ColumnTransformer with SimpleImputer+OneHotEncoder for categoricals and SimpleImputer for numerics; fit inside CV only
 
 CRITICAL RULES (Never Break):
 - ALWAYS use predict_proba() for probability predictions (NOT predict())
@@ -28,6 +30,7 @@ CRITICAL RULES (Never Break):
 - ALWAYS print CV scores, class distribution, prediction distribution
 - ALWAYS fit all preprocessing (imputer/encoder/scaler) INSIDE a Pipeline/ColumnTransformer that is fit per CV fold (no global median/mean before split)
 - ALWAYS validate submission against sample_submission (shape, columns, id order) before saving; clamp probs to [0,1] if needed
+- ALWAYS print informative logs: shapes, column list, dtypes, class distribution, per-fold scores, prediction stats
 - NEVER use try-except to hide errors (let them surface for debugging)
 - NEVER subsample training data (use all available data)
 - NEVER use sys.exit(), exit(), quit(), raise SystemExit, os._exit(), or ANY termination commands
@@ -103,11 +106,12 @@ Submission Path: {submission_path}
 - **For regression**: use **predict()** to get continuous values
 - **MUST create submission.csv** at {submission_path} with predictions
 - **MUST load sample_submission.csv** (if available) and use it as template: same shape/columns/id ordering
-- Use competitive hyperparameters:
-  - **n_estimators**: 1500-2500 (with early_stopping for efficiency)
-  - **max_depth**: 6-9 (deeper for complex patterns, shallower for overfitting prevention)
-  - **learning_rate**: 0.02-0.05 (lower = more trees, better generalization)
-  - **num_leaves** (LightGBM): 31-127
+- **MUST detect target_col** reliably: prefer `target_col = sample_sub.columns[1]` if present; else use common names (`target`, `label`, `loan_paid_back`) or last non-id column; assert existence in train df
+- Use **dataset-adaptive hyperparameters** (automatically calculated):
+  - Variables `n_estimators`, `max_depth`, `learning_rate` are set based on dataset size
+  - Small datasets (<5k): More trees, deeper (n_estimators=1000, max_depth=8)
+  - Large datasets (>100k): Fewer trees, shallower (n_estimators=400, max_depth=5)
+  - **num_leaves** (LightGBM): Use `2^max_depth - 1` for consistency
 - Target execution time: 60-90 seconds per model (use early stopping)
 - Print CV score or validation metrics
 
@@ -131,6 +135,8 @@ Submission Path: {submission_path}
   - `assert submission['id'].equals(sample_sub['id'])`
   - print head/dtypes/range checks
 - Clamp probabilities to [0, 1] with `np.clip` before saving
+- Log: min/max/mean of predictions and per-fold scores
+- For CatBoost: specify `cat_features` by indices; prefer `auto_class_weights='Balanced'` (avoid unsupported `class_weight` in older versions)
 
 ### If component_type == "ensemble":
 - Combine predictions from multiple models
@@ -143,6 +149,7 @@ Submission Path: {submission_path}
 3. Print progress and key metrics
 4. Handle errors gracefully
 5. Use sklearn Pipeline/ColumnTransformer so that imputers/encoders are fit inside CV splits (no leakage)
+6. Default preprocessing: numeric -> SimpleImputer(strategy='median'); categorical (object/category) -> SimpleImputer(strategy='most_frequent') + OneHotEncoder(handle_unknown='ignore'); wrap model in Pipeline
 
 ## CRITICAL GUARDRAILS (You are a Kaggle Grandmaster - follow best practices)
 - **NO try-except blocks that hide errors** - let errors surface for debugging
@@ -173,12 +180,72 @@ print("Loading data...")
 train_df = pd.read_csv('{train_data_path}')
 test_df = pd.read_csv('{test_data_path}')
 sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+print(f"Train shape: {train_df.shape}, Test shape: {test_df.shape}")
+print(f"Train columns: {train_df.columns.tolist()}")
+print("Train dtypes:")
+print(train_df.dtypes)
+
+# Detect target column
+candidate_target = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
+fallback_targets = ['target', 'label', 'loan_paid_back']
+target_col = candidate_target if candidate_target in train_df.columns else None
+if target_col is None:
+    for t in fallback_targets:
+        if t in train_df.columns:
+            target_col = t
+            break
+if target_col is None:
+    non_id_cols = [c for c in train_df.columns if c != 'id']
+    target_col = non_id_cols[-1]
+
+# Validate target column exists
+assert target_col in train_df.columns, f"Target column '{{target_col}}' not found in train data. Available: {{train_df.columns.tolist()}}"
+print(f"✓ Target column detected: {{target_col}}")
+
+# Separate X/y
+y_train = train_df[target_col]
+X_train = train_df.drop(columns=[target_col, 'id'] if 'id' in train_df.columns else [target_col])
+X_test = test_df.drop(columns=['id'], errors='ignore')
+
+# Validate target column
+print(f"  Unique values: {{y_train.nunique()}}")
+print(f"  Null count: {{y_train.isnull().sum()}}")
+print(f"  Data type: {{y_train.dtype}}")
 
 # Check class distribution (for model components)
-print(f"Class distribution: {{train_df[target_col].value_counts().to_dict()}}")
+if y_train.nunique() <= 30:
+    print(f"  Class distribution: {{y_train.value_counts().to_dict()}}")
 
 # Implement component
 print("Implementing {component_name}...")
+
+# Dynamic hyperparameter adjustment based on dataset size
+n_rows = train_df.shape[0]
+n_features = X_train.shape[1]
+
+# Adjust n_estimators based on dataset size
+if n_rows < 5_000:
+    n_estimators = 1000
+    max_depth = 8
+    learning_rate = 0.05
+elif n_rows < 20_000:
+    n_estimators = 800
+    max_depth = 7
+    learning_rate = 0.04
+elif n_rows < 100_000:
+    n_estimators = 600
+    max_depth = 6
+    learning_rate = 0.03
+else:
+    n_estimators = 400
+    max_depth = 5
+    learning_rate = 0.03
+
+print(f"📊 Dataset-adaptive hyperparameters:")
+print(f"  n_estimators: {{n_estimators}} (based on {{n_rows:,}} rows)")
+print(f"  max_depth: {{max_depth}}")
+print(f"  learning_rate: {{learning_rate}}")
+
 # ... your code here
 
 # For model components: Calculate class weights if needed
@@ -189,20 +256,35 @@ print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
 
 if imbalance_ratio > 2.0:
     print("⚠️  Class imbalance detected - applying weights")
-    # For XGBoost:
     scale_pos_weight = negative_count / positive_count
-    # model = XGBClassifier(scale_pos_weight=scale_pos_weight, random_state=42)
-
-    # For LightGBM:
-    # model = LGBMClassifier(is_unbalance=True, random_state=42)
-
-    # For sklearn:
-    # model = RandomForestClassifier(class_weight='balanced', random_state=42)
+    # Example models using dynamic hyperparameters:
+    # model = XGBClassifier(
+    #     n_estimators=n_estimators,
+    #     max_depth=max_depth,
+    #     learning_rate=learning_rate,
+    #     scale_pos_weight=scale_pos_weight,
+    #     random_state=42
+    # )
+    # model = LGBMClassifier(
+    #     n_estimators=n_estimators,
+    #     max_depth=max_depth,
+    #     learning_rate=learning_rate,
+    #     is_unbalance=True,
+    #     random_state=42
+    # )
+else:
+    # Example models for balanced datasets:
+    # model = XGBClassifier(
+    #     n_estimators=n_estimators,
+    #     max_depth=max_depth,
+    #     learning_rate=learning_rate,
+    #     random_state=42
+    # )
 
 # Cross-validation with StratifiedKFold
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-cv_scores = cross_val_score(model, X_train, y_train, cv=skf, scoring='roc_auc')
-print(f"CV Score: {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
+cv_scores = cross_val_score(model, X_train, y_train, cv=skf, scoring='accuracy')
+print(f"CV Score (accuracy): {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
 
 # Make predictions (MUST use predict_proba for probabilities)
 predictions = model.predict_proba(X_test)[:, 1]  # Binary classification

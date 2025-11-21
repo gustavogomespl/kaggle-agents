@@ -107,15 +107,20 @@ class PlannerAgent:
         self.use_dspy = use_dspy and self.config.dspy.enabled
 
         if self.use_dspy:
-            # Try to load optimized module, fallback to base
+            # Try to load optimized module, fallback to base; if none, fall back to direct LLM
             optimizer = create_optimizer()
             self.planner_module = optimizer.load_optimized_prompt("planner")
 
             if self.planner_module is None:
-                print("   Using base (unoptimized) planner module")
-                self.planner_module = AblationPlannerModule()
-
-            self.sota_analyzer = SOTAAnalyzerModule()
+                print("   No optimized planner module found -> using direct LLM path")
+                self.use_dspy = False
+                self.llm = get_llm_for_role(
+                    role="planner",
+                    temperature=self.config.llm.temperature,
+                    max_tokens=self.config.llm.max_tokens,
+                )
+            else:
+                self.sota_analyzer = SOTAAnalyzerModule()
         else:
             # Use direct LLM calls
             self.llm = get_llm_for_role(
@@ -196,7 +201,7 @@ class PlannerAgent:
         # Format SOTA solutions for analysis
         sota_summary = self._format_sota_solutions(sota_solutions)
 
-        if self.use_dspy:
+        if self.use_dspy and hasattr(self, 'sota_analyzer'):
             # Use DSPy module
             result = self.sota_analyzer(sota_solutions=sota_summary)
 

@@ -48,7 +48,7 @@ class SearchConfig:
 class AblationConfig:
     """Configuration for ablation-driven optimization."""
 
-    max_components: int = 10  # max components to test
+    max_components: int = field(default_factory=lambda: int(os.getenv("MAX_COMPONENTS", "3")))  # max components to test
     impact_threshold: float = 0.01  # minimum impact to consider (1%)
     parallel_testing: bool = False  # test components in parallel
     testing_timeout: int = 300  # seconds per component test (5 minutes)
@@ -83,7 +83,7 @@ class DSPyConfig:
 class IterationConfig:
     """Configuration for iteration and convergence."""
 
-    max_iterations: int = 10
+    max_iterations: int = field(default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "2")))
     target_percentile: float = 20.0  # top 20%
     early_stopping: bool = True
     patience: int = 3  # iterations without improvement
