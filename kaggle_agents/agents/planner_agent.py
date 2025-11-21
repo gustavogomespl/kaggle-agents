@@ -507,10 +507,10 @@ Domain: {domain}
             {
                 "name": "lightgbm_optimized_v2",
                 "component_type": "model",
-                "description": "LightGBM with Optuna hyperparameter optimization: 100 trials, pruning",
+                "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, pruning",
                 "estimated_impact": 0.22,
                 "rationale": "Refined hyperparameters based on previous run",
-                "code_outline": "OptunaSearchCV with LGBMRegressor/Classifier, 100 trials, early stopping"
+                "code_outline": "OptunaSearchCV with LGBMRegressor/Classifier, 15 trials, early stopping"
             },
             {
                 "name": "xgboost_optimized_v2",
@@ -652,7 +652,7 @@ Domain: {domain}
             {
                 "name": "lightgbm_optuna_tuned",
                 "component_type": "model",
-                "description": "LightGBM with Optuna hyperparameter optimization: 50 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
+                "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
                 "estimated_impact": 0.22,
                 "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
                 "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100"
@@ -660,7 +660,7 @@ Domain: {domain}
             {
                 "name": "xgboost_optuna_tuned",
                 "component_type": "model",
-                "description": "XGBoost with Optuna hyperparameter optimization: 50 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
+                "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
                 "estimated_impact": 0.20,
                 "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
                 "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50"
@@ -668,7 +668,7 @@ Domain: {domain}
             {
                 "name": "catboost_optuna_tuned",
                 "component_type": "model",
-                "description": "CatBoost with Optuna hyperparameter optimization: 50 trials, tuning depth, learning_rate, l2_leaf_reg",
+                "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
                 "estimated_impact": 0.19,
                 "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
                 "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV"

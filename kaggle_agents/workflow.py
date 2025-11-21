@@ -553,11 +553,25 @@ def run_workflow(
         workflow = compile_workflow(checkpointer=checkpointer)
 
         # Run with config for checkpointing
-        config = {"configurable": {"thread_id": competition_name}}
+        config = {
+            "configurable": {"thread_id": competition_name},
+            "metadata": {
+                "competition": competition_name,
+                "project": "default",
+                "type": "autonomous-run"
+            }
+        }
         final_state = workflow.invoke(state, config)
     else:
         workflow = compile_workflow()
-        final_state = workflow.invoke(state)
+        config = {
+            "metadata": {
+                "competition": competition_name,
+                "project": "default",
+                "type": "autonomous-run"
+            }
+        }
+        final_state = workflow.invoke(state, config)
 
     print("\n" + "="*70)
     print("WORKFLOW COMPLETE")

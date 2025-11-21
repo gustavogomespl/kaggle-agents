@@ -19,10 +19,10 @@ load_dotenv()
 class LLMConfig:
     """LLM provider and model configuration."""
 
-    provider: Literal["openai", "anthropic"] = "openai"
-    model: str = "gpt-5-mini"
-    temperature: float = 1
-    max_tokens: int = 30000
+    provider: Literal["openai", "anthropic"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
+    model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
+    temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
+    max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "30000")))
     timeout: int = 120  # seconds
 
 
@@ -44,7 +44,7 @@ class AblationConfig:
     max_components: int = 10  # max components to test
     impact_threshold: float = 0.01  # minimum impact to consider (1%)
     parallel_testing: bool = False  # test components in parallel
-    testing_timeout: int = 900  # seconds per component test (15 minutes)
+    testing_timeout: int = 300  # seconds per component test (5 minutes)
     enable_code_preview: bool = True  # show code before execution
     save_generated_code: bool = True  # save generated code to files
     code_preview_lines: int = 30  # number of lines to show in preview
@@ -289,6 +289,42 @@ def reset_config() -> None:
 
 
 # ==================== Convenience Functions ====================
+
+def get_llm(temperature: float = None, max_tokens: int = None):
+    """
+    Get the configured LLM instance (OpenAI or Anthropic).
+
+    This centralizes LLM creation to support provider switching.
+
+    Args:
+        temperature: Override default temperature (optional)
+        max_tokens: Override default max_tokens (optional)
+
+    Returns:
+        ChatOpenAI or ChatAnthropic instance
+    """
+    from langchain_openai import ChatOpenAI
+    from langchain_anthropic import ChatAnthropic
+
+    config = get_config()
+
+    temp = temperature if temperature is not None else config.llm.temperature
+    tokens = max_tokens if max_tokens is not None else config.llm.max_tokens
+
+    if config.llm.provider == "anthropic":
+        return ChatAnthropic(
+            model=config.llm.model,
+            temperature=temp,
+            max_tokens=tokens,
+        )
+    else:
+        # Default to OpenAI
+        return ChatOpenAI(
+            model=config.llm.model,
+            temperature=temp,
+            max_tokens=tokens,
+        )
+
 
 def get_competition_dir(competition_name: str) -> Path:
     """

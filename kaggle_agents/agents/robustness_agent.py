@@ -52,9 +52,9 @@ class RobustnessAgent:
             print("  No development results to validate")
             return {}
             
-        # Initialize LLM
-        from langchain_openai import ChatOpenAI
-        self.llm = ChatOpenAI(model=self.config.llm.model, temperature=1)
+        # Initialize LLM (supports OpenAI and Anthropic)
+        from ..core.config import get_llm
+        self.llm = get_llm()
 
         # Get latest result
         latest_result = dev_results[-1]

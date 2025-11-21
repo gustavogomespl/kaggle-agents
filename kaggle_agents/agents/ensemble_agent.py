@@ -243,11 +243,11 @@ class EnsembleAgent:
         eda_summary: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Plan ensemble strategy using LLM."""
-        from langchain_openai import ChatOpenAI
+        from ..core.config import get_llm
         from langchain_core.messages import SystemMessage, HumanMessage
         import json
-        
-        llm = ChatOpenAI(model=get_config().llm.model, temperature=1)
+
+        llm = get_llm()
         
         model_descriptions = []
         for i, m in enumerate(models):

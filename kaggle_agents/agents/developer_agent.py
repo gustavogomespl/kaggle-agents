@@ -295,7 +295,7 @@ class DeveloperAgent:
 
         # Execute with retry
         print("\n     Executing code...")
-        max_retries = 5
+        max_retries = 3
         for attempt in range(max_retries):
             print(f"\n   Attempt {attempt + 1}/{max_retries}")
 
@@ -319,6 +319,13 @@ class DeveloperAgent:
 
             print(f"   L Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}")
 
+            # Get meta-evaluator feedback on first failure (Phase 4: Mini Meta-Evaluator)
+            if attempt == 0:
+                print("\n   🧠 Getting meta-evaluator feedback...")
+                error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                feedback = self._get_meta_feedback(code, error_msg, component.name)
+                print(f"   📋 Meta-Feedback:\n   {feedback}\n")
+
             # Try to fix
             if attempt < max_retries - 1:
                 print("   =' Attempting to fix...")
@@ -326,7 +333,7 @@ class DeveloperAgent:
 
         # If all retries failed, try debug iterations
         print("\n   = Entering debug mode...")
-        code, debug_success = self._debug_code(code, exec_result, working_dir, max_iterations=10)
+        code, debug_success = self._debug_code(code, exec_result, working_dir, max_iterations=5)
 
         if debug_success:
             exec_result = self.executor.execute(code=code, working_dir=working_dir)
@@ -596,8 +603,12 @@ class DeveloperAgent:
             if "optuna" in component.name.lower() or "tuned" in component.name.lower() or "optimized" in component.name.lower():
                 instructions.append("\n🔍 HYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:")
                 instructions.append("  - MUST use 'optuna' library for hyperparameter search")
-                instructions.append("  - Run at least 50 trials")
+                instructions.append("  - Run EXACTLY 15 trials (use n_trials=15 in optuna.create_study().optimize())")
                 instructions.append("  - Use 'TPESampler' for efficient sampling")
+                instructions.append("  - CRITICAL: Do NOT pass 'early_stopping_rounds' to .fit() for XGBoost/LightGBM/CatBoost scikit-learn API.")
+                instructions.append("    - Instead, use callbacks=[early_stopping_callback] or initialize the model with early_stopping_rounds if supported.")
+                instructions.append("    - For XGBoost >= 1.6: use callbacks=[xgb.callback.EarlyStopping(rounds=...)]")
+                instructions.append("    - For LightGBM >= 4.0: use callbacks=[lgb.early_stopping(stopping_rounds=...)]")
                 instructions.append("  - Optimize for the competition metric (minimize RMSE/LogLoss or maximize AUC/Accuracy)")
                 instructions.append("  - Print the best parameters found")
                 instructions.append("  - Train final model with best parameters")
@@ -753,6 +764,50 @@ Submission: {working_dir / 'submission.csv'}
     def _fix_syntax_error(self, code: str, error: str) -> str:
         """Fix syntax error in code."""
         return self._fix_code_error(code, f"SyntaxError: {error}")
+
+    def _get_meta_feedback(self, code: str, error: str, component_name: str) -> str:
+        """
+        Get quick meta-evaluator feedback on failure (Phase 4: Mini Meta-Evaluator).
+
+        Provides immediate strategic guidance to improve code quality.
+
+        Args:
+            code: Failed code
+            error: Error message
+            component_name: Name of component
+
+        Returns:
+            Strategic feedback string
+        """
+        # Quick analysis prompt
+        prompt = f"""You are a Meta-Evaluator analyzing code failure.
+
+Component: {component_name}
+Error: {error[:300]}
+
+Code Summary (first 30 lines):
+```python
+{chr(10).join(code.split(chr(10))[:30])}
+```
+
+Provide 2-3 specific, actionable suggestions to fix this error.
+Focus on:
+1. Root cause of the error
+2. Specific code changes needed
+3. Best practices to avoid similar errors
+
+Keep response under 150 words."""
+
+        try:
+            messages = [
+                SystemMessage(content="You are an expert code reviewer and meta-evaluator."),
+                HumanMessage(content=prompt),
+            ]
+
+            response = self.llm.invoke(messages)
+            return response.content.strip()
+        except Exception as e:
+            return f"Meta-feedback unavailable: {str(e)}"
 
     def _fix_code_error(self, code: str, error: str) -> str:
         """Fix code based on error."""

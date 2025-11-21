@@ -8,11 +8,10 @@ educational purposes and TCC documentation.
 
 from typing import Dict, Any, List
 from datetime import datetime
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.state import KaggleState
-from ..core.config import get_config
+from ..core.config import get_config, get_llm
 
 class ExplainabilityAgent:
     """
@@ -21,12 +20,8 @@ class ExplainabilityAgent:
 
     def __init__(self):
         self.config = get_config()
-        # Using the same advanced model as Meta-Evaluator for high-quality explanations
-        self.llm = ChatOpenAI(
-            model="gpt-5.1",
-            temperature=0.7,
-            max_tokens=4096,
-        )
+        # Using configured LLM for explanations (supports OpenAI and Anthropic)
+        self.llm = get_llm()
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
         """

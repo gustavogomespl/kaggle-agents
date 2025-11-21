@@ -16,11 +16,10 @@ from typing import Dict, Any, List, Optional
 from datetime import datetime
 from pathlib import Path
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.state import KaggleState, DevelopmentResult, IterationMemory
-from ..core.config import get_config
+from ..core.config import get_config, get_llm
 from ..optimization import create_training_collector
 
 
@@ -40,16 +39,15 @@ class MetaEvaluatorAgent:
     """
 
     def __init__(self):
-        """Initialize meta-evaluator with superior model."""
+        """Initialize meta-evaluator with configured model."""
         self.config = get_config()
 
-        self.llm = ChatOpenAI(
-            model="gpt-5.1",  
-            temperature=1,  
-            max_tokens=30000,
-        )
+        # Use configured LLM (supports OpenAI and Anthropic)
+        self.llm = get_llm()
 
-        print("   🧠 Meta-Evaluator initialized with GPT-5")
+        provider = self.config.llm.provider.upper()
+        model = self.config.llm.model
+        print(f"   🧠 Meta-Evaluator initialized with {provider} ({model})")
 
         # Training data collector for RL
         self.training_collector = create_training_collector()
@@ -426,11 +424,16 @@ class MetaEvaluatorAgent:
 
         # FULL CODE AND PERFORMANCE ANALYSIS
         context += "\n## Component Code and Performance Analysis\n"
-        
+
         dev_results = state.get("development_results", [])
         import re
-        
-        for i, res in enumerate(dev_results):
+
+        # Limit to 5 most recent components to reduce token usage
+        recent_results = dev_results[-5:] if len(dev_results) > 5 else dev_results
+        if len(dev_results) > 5:
+            context += f"*(Showing 5 most recent components out of {len(dev_results)} total)*\n\n"
+
+        for i, res in enumerate(recent_results):
             # Extract score from stdout if possible
             score_match = re.search(r"Final Validation Performance: (0\.\d+)", res.stdout)
             score = float(score_match.group(1)) if score_match else "N/A"
@@ -452,10 +455,16 @@ class MetaEvaluatorAgent:
             
             if not res.success:
                 context += f"**Error**: {res.stderr[-200:] if res.stderr else 'Unknown Error'}\n"
-            
-            context += "**Full Code**:\n```python\n"
-            context += res.code
+
+            # Send code summary instead of full code to reduce tokens
+            code_lines = res.code.split('\n')
+            context += "**Code Summary**:\n```python\n"
+            context += '\n'.join(code_lines[:20])  # First 20 lines
+            if len(code_lines) > 30:
+                context += "\n# ... (middle section omitted) ...\n"
+                context += '\n'.join(code_lines[-10:])  # Last 10 lines
             context += "\n```\n"
+            context += f"**Total Lines**: {len(code_lines)}\n"
             context += "-" * 40 + "\n"
 
         context += f"\n## Reward Signals\n"
