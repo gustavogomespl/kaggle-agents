@@ -568,23 +568,25 @@ def run_workflow(
         # Run with config for checkpointing
         config = {
             "configurable": {"thread_id": competition_name},
+            "recursion_limit": 150,
             "metadata": {
                 "competition": competition_name,
                 "project": "default",
                 "type": "autonomous-run"
             }
         }
-        final_state = workflow.invoke(state, config, recursion_limit=50)
+        final_state = workflow.invoke(state, config)
     else:
         workflow = compile_workflow()
         config = {
+            "recursion_limit": 150,
             "metadata": {
                 "competition": competition_name,
                 "project": "default",
                 "type": "autonomous-run"
             }
         }
-        final_state = workflow.invoke(state, config, recursion_limit=50)
+        final_state = workflow.invoke(state, config)
 
     print("\n" + "="*70)
     print("WORKFLOW COMPLETE")

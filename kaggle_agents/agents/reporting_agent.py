@@ -60,22 +60,18 @@ class ReportingAgent:
         
         # Get best submission based on metric direction
         best_sub = None
+        is_minimization = False
         if submissions:
             metric = competition_info.evaluation_metric.lower() if competition_info and competition_info.evaluation_metric else ""
-            
-            # Common minimization metrics
             min_metrics = ['rmse', 'mae', 'logloss', 'error', 'rmsle', 'loss']
             is_minimization = any(m in metric for m in min_metrics)
-            
-            if is_minimization:
-                # For minimization, lower is better
-                # Filter out None scores first
-                valid_subs = [s for s in submissions if s.public_score is not None]
-                if valid_subs:
+
+            valid_subs = [s for s in submissions if s.public_score is not None]
+            if valid_subs:
+                if is_minimization:
                     best_sub = min(valid_subs, key=lambda x: x.public_score)
-            else:
-                # For maximization (AUC, Accuracy, F1, etc.), higher is better
-                best_sub = max(submissions, key=lambda x: x.public_score or 0.0)
+                else:
+                    best_sub = max(valid_subs, key=lambda x: x.public_score)
 
         context = f"""
 # Competition Context
