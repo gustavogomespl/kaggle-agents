@@ -37,6 +37,7 @@ dependencies = [
 
     # Hyperparameter Optimization
     "optuna>=3.0.0",
+    "optuna-integration>=0.1.0",
 
     # Feature Engineering
     "category-encoders>=2.6.0",

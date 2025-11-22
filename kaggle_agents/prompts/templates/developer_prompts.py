@@ -45,10 +45,38 @@ LightGBM/XGBoost Early Stopping:
 - For XGBoost: Use xgb.callback.EarlyStopping(rounds=100) in callbacks parameter
 - NEVER pass early_stopping_rounds as a direct parameter to fit()
 
-Categorical Features:
-- ALWAYS encode categorical columns before training (except CatBoost which handles them natively)
-- Use LabelEncoder, OneHotEncoder, or TargetEncoder for categorical features
-- Check for 'object' or 'category' dtypes and encode them before model training
+Categorical Features (MANDATORY - WILL FAIL WITHOUT THIS):
+- ❌ CRITICAL ERROR: Training LightGBM/XGBoost/sklearn models on unencoded categorical features WILL FAIL
+- ✅ REQUIRED: ALWAYS encode categorical columns before training (except CatBoost which handles them natively)
+- ✅ MUST use ColumnTransformer with OneHotEncoder for categorical features (object/category dtypes)
+- ✅ Pipeline structure: ColumnTransformer([('num', SimpleImputer(), numeric_cols), ('cat', Pipeline([SimpleImputer(), OneHotEncoder(sparse_output=False)]), categorical_cols)])
+- Check for 'object' or 'category' dtypes - if they exist, they MUST be encoded
+- Never pass raw categorical strings to LightGBM/XGBoost/sklearn models
+
+sklearn/pandas Version Compatibility (CRITICAL):
+- ❌ WRONG: OneHotEncoder(sparse=False)  # Deprecated in sklearn 1.2+
+- ✅ CORRECT: OneHotEncoder(sparse_output=False)  # Use this for sklearn 1.2+
+- ❌ WRONG: df.append(other_df)  # Removed in pandas 2.0+
+- ✅ CORRECT: pd.concat([df, other_df], ignore_index=True)  # Use this for pandas 2.0+
+- ❌ WRONG: series.append(other_series)  # Removed in pandas 2.0+
+- ✅ CORRECT: pd.concat([series, other_series], ignore_index=True)  # Use this for pandas 2.0+
+- ALWAYS use sparse_output parameter (not sparse) in OneHotEncoder
+- ALWAYS use pd.concat() instead of .append() for combining DataFrames/Series
+
+Optuna Dependencies (CRITICAL):
+- ❌ WRONG: from optuna.integration import OptunaSearchCV  # May not be installed
+- ✅ CORRECT: Use try/except to check if optuna-integration is available
+- ✅ Example:
+  ```python
+  try:
+      from optuna.integration import OptunaSearchCV
+      USE_OPTUNA_INTEGRATION = True
+  except ImportError:
+      USE_OPTUNA_INTEGRATION = False
+      print("optuna-integration not available, using manual Optuna tuning")
+  ```
+- If optuna-integration is missing, use manual Optuna with study.optimize()
+- NEVER fail because a dependency is missing - always have a fallback
 
 MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
 - Your response must contain ONLY a single Python code block
@@ -107,6 +135,11 @@ Submission Path: {submission_path}
 - **MUST create submission.csv** at {submission_path} with predictions
 - **MUST load sample_submission.csv** (if available) and use it as template: same shape/columns/id ordering
 - **MUST detect target_col** reliably: prefer `target_col = sample_sub.columns[1]` if present; else use common names (`target`, `label`, `loan_paid_back`) or last non-id column; assert existence in train df
+- **CRITICAL: MUST save Out-of-Fold (OOF) predictions** for stacking ensemble:
+  - During CV, collect predictions on validation folds (oof_predictions array, same length as train)
+  - Save to: `{models_dir}/oof_{{component_name}}.npy` using `np.save()`
+  - This enables proper stacking ensemble later (train meta-model on OOF predictions)
+  - Print: "OOF predictions saved to {{oof_path}}"
 - Use **dataset-adaptive hyperparameters** (automatically calculated):
   - Variables `n_estimators`, `max_depth`, `learning_rate` are set based on dataset size
   - Small datasets (<5k): More trees, deeper (n_estimators=1000, max_depth=8)
@@ -139,9 +172,19 @@ Submission Path: {submission_path}
 - For CatBoost: specify `cat_features` by indices; prefer `auto_class_weights='Balanced'` (avoid unsupported `class_weight` in older versions)
 
 ### If component_type == "ensemble":
-- Combine predictions from multiple models
-- Must create submission.csv with ensemble predictions
-- Must use sample_submission.csv as the template and validate shape/columns/id
+- **PREFERRED: Stacking Ensemble** (best performance)
+  - Load OOF predictions from all base models: `np.load('{models_dir}/oof_{{model_name}}.npy')`
+  - Stack OOF predictions horizontally: `oof_stack = np.column_stack([oof_lgb, oof_xgb, oof_cat, ...])`
+  - Train meta-model (LogisticRegression/Ridge) on stacked OOF: `meta_model.fit(oof_stack, y_train)`
+  - Load test predictions from each model and stack them
+  - Use meta-model to predict on stacked test: `final_predictions = meta_model.predict_proba(test_stack)[:, 1]`
+- **FALLBACK: Weighted Average** (if OOF files missing)
+  - Load submission files from each model
+  - Calculate weights based on CV scores or use equal weights
+  - Combine: `final = w1*pred1 + w2*pred2 + w3*pred3`
+- **MUST create submission.csv** with ensemble predictions
+- **MUST use sample_submission.csv** as the template and validate shape/columns/id
+- Print which models were used and their contribution/weights
 
 ## General Requirements
 1. Load data from the provided paths
@@ -149,7 +192,9 @@ Submission Path: {submission_path}
 3. Print progress and key metrics
 4. Handle errors gracefully
 5. Use sklearn Pipeline/ColumnTransformer so that imputers/encoders are fit inside CV splits (no leakage)
-6. Default preprocessing: numeric -> SimpleImputer(strategy='median'); categorical (object/category) -> SimpleImputer(strategy='most_frequent') + OneHotEncoder(handle_unknown='ignore'); wrap model in Pipeline
+6. Default preprocessing: numeric -> SimpleImputer(strategy='median'); categorical (object/category) -> SimpleImputer(strategy='most_frequent') + OneHotEncoder(handle_unknown='ignore', sparse_output=False); wrap model in Pipeline
+7. CRITICAL: Use sparse_output=False (NOT sparse=False) for OneHotEncoder (sklearn 1.2+ compatibility)
+8. CRITICAL: Use pd.concat() instead of .append() for DataFrames/Series (pandas 2.0+ compatibility)
 
 ## CRITICAL GUARDRAILS (You are a Kaggle Grandmaster - follow best practices)
 - **NO try-except blocks that hide errors** - let errors surface for debugging
@@ -180,32 +225,45 @@ print("Loading data...")
 train_df = pd.read_csv('{train_data_path}')
 test_df = pd.read_csv('{test_data_path}')
 sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-print(f"Train shape: {train_df.shape}, Test shape: {test_df.shape}")
-print(f"Train columns: {train_df.columns.tolist()}")
+print(f"Train shape: {{train_df.shape}}, Test shape: {{test_df.shape}}")
+print(f"Train columns: {{train_df.columns.tolist()}}")
 print("Train dtypes:")
 print(train_df.dtypes)
 
-# Detect target column
+# CRITICAL: Detect target column (MUST match sample_submission)
+# Priority 1: Use sample_submission.columns[1] (most reliable)
+# Priority 2: Use common target names if they exist
+# Priority 3: Last non-id column
 candidate_target = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
-fallback_targets = ['target', 'label', 'loan_paid_back']
-target_col = candidate_target if candidate_target in train_df.columns else None
+fallback_targets = ['target', 'label', 'loan_paid_back', 'survived', 'price', 'sales']
+target_col = candidate_target if candidate_target and candidate_target in train_df.columns else None
 if target_col is None:
     for t in fallback_targets:
         if t in train_df.columns:
             target_col = t
             break
 if target_col is None:
-    non_id_cols = [c for c in train_df.columns if c != 'id']
-    target_col = non_id_cols[-1]
+    non_id_cols = [c for c in train_df.columns if c.lower() != 'id']
+    target_col = non_id_cols[-1] if non_id_cols else 'target'
 
 # Validate target column exists
 assert target_col in train_df.columns, f"Target column '{{target_col}}' not found in train data. Available: {{train_df.columns.tolist()}}"
-print(f"✓ Target column detected: {{target_col}}")
+print(f"✓ Target column detected: '{{target_col}}'")
+print(f"  NOTE: This MUST match the submission column name from sample_submission")
 
 # Separate X/y
 y_train = train_df[target_col]
 X_train = train_df.drop(columns=[target_col, 'id'] if 'id' in train_df.columns else [target_col])
 X_test = test_df.drop(columns=['id'], errors='ignore')
+
+# CRITICAL: Identify categorical columns and prepare preprocessing
+numeric_features = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
+categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+print(f"Numeric features: {{len(numeric_features)}}")
+print(f"Categorical features: {{len(categorical_features)}}")
+if categorical_features:
+    print(f"  Categorical columns: {{categorical_features}}")
+    print("  ⚠️  MUST encode categorical features before training")
 
 # Validate target column
 print(f"  Unique values: {{y_train.nunique()}}")
@@ -257,34 +315,74 @@ print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
 if imbalance_ratio > 2.0:
     print("⚠️  Class imbalance detected - applying weights")
     scale_pos_weight = negative_count / positive_count
-    # Example models using dynamic hyperparameters:
-    # model = XGBClassifier(
-    #     n_estimators=n_estimators,
-    #     max_depth=max_depth,
-    #     learning_rate=learning_rate,
-    #     scale_pos_weight=scale_pos_weight,
-    #     random_state=42
-    # )
-    # model = LGBMClassifier(
-    #     n_estimators=n_estimators,
-    #     max_depth=max_depth,
-    #     learning_rate=learning_rate,
-    #     is_unbalance=True,
-    #     random_state=42
-    # )
-else:
-    # Example models for balanced datasets:
-    # model = XGBClassifier(
-    #     n_estimators=n_estimators,
-    #     max_depth=max_depth,
-    #     learning_rate=learning_rate,
-    #     random_state=42
-    # )
 
-# Cross-validation with StratifiedKFold
+# CRITICAL: Build preprocessing pipeline (MANDATORY for categorical features)
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ('num', SimpleImputer(strategy='median'), numeric_features),
+        ('cat', Pipeline([
+            ('imputer', SimpleImputer(strategy='most_frequent')),
+            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
+        ]), categorical_features)
+    ] if categorical_features else [
+        ('num', SimpleImputer(strategy='median'), numeric_features)
+    ]
+)
+
+# Example: Wrap model in pipeline with preprocessing
+# from xgboost import XGBClassifier
+# model = Pipeline([
+#     ('preprocessor', preprocessor),
+#     ('classifier', XGBClassifier(
+#         n_estimators=n_estimators,
+#         max_depth=max_depth,
+#         learning_rate=learning_rate,
+#         scale_pos_weight=scale_pos_weight if imbalance_ratio > 2.0 else 1.0,
+#         random_state=42
+#     ))
+# ])
+#
+# Alternative: Apply preprocessing manually
+# X_train_preprocessed = preprocessor.fit_transform(X_train)
+# X_test_preprocessed = preprocessor.transform(X_test)
+
+# Cross-validation with StratifiedKFold (CRITICAL: Save OOF predictions for stacking)
 skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-cv_scores = cross_val_score(model, X_train, y_train, cv=skf, scoring='accuracy')
-print(f"CV Score (accuracy): {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
+
+# Initialize OOF predictions array
+oof_predictions = np.zeros(len(X_train))
+cv_scores = []
+
+print("\\nTraining with 5-fold cross-validation...")
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
+    print(f"  Fold {{fold}}/5...")
+    X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+    y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+
+    # Train model on fold
+    model.fit(X_tr, y_tr)
+
+    # Predict on validation fold (save for OOF)
+    val_preds = model.predict_proba(X_val)[:, 1]
+    oof_predictions[val_idx] = val_preds
+
+    # Calculate fold score
+    from sklearn.metrics import roc_auc_score
+    fold_score = roc_auc_score(y_val, val_preds)
+    cv_scores.append(fold_score)
+    print(f"    Fold {{fold}} score: {{fold_score:.4f}}")
+
+print(f"\\nCV Score (ROC-AUC): {{np.mean(cv_scores):.4f}} (+/- {{np.std(cv_scores):.4f}})")
+
+# CRITICAL: Save OOF predictions for stacking ensemble
+oof_path = Path('{models_dir}') / 'oof_{{component_name}}.npy'
+np.save(oof_path, oof_predictions)
+print(f"✓ OOF predictions saved to: {{oof_path}}")
 
 # Make predictions (MUST use predict_proba for probabilities)
 predictions = model.predict_proba(X_test)[:, 1]  # Binary classification
@@ -294,14 +392,21 @@ print(f"Prediction distribution: min={{predictions.min():.4f}}, max={{prediction
 # Save outputs
 print("Saving outputs...")
 submission = sample_sub.copy()
-# Preserve id order exactly as sample_submission
-submission[submission.columns[1]] = predictions
-assert submission.shape == sample_sub.shape, "Submission shape mismatch vs sample_submission"
-assert submission.columns.tolist() == sample_sub.columns.tolist(), "Submission columns mismatch vs sample_submission"
+# CRITICAL: Use the EXACT column name from sample_submission (DO NOT hardcode 'target')
+target_submission_col = sample_sub.columns[1]
+print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
+submission[target_submission_col] = predictions
+
+# CRITICAL VALIDATION: Ensure submission matches sample_submission exactly
+assert submission.shape == sample_sub.shape, f"Submission shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
+assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
 assert submission['id'].equals(sample_sub['id']), "Submission id column does not match sample_submission"
-print("Submission head:\n", submission.head())
+print(f"✓ Validation passed: columns={{submission.columns.tolist()}}, shape={{submission.shape}}")
+print("Submission head:")
+print(submission.head())
+print(f"Prediction stats: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
 submission.to_csv('{submission_path}', index=False)
-print(f"Submission saved: {{len(submission)}} rows")
+print(f"✅ Submission saved: {{len(submission)}} rows to {{'{submission_path}'}}")
 
 elapsed_time = time.time() - start_time
 print(f"⏱️  Execution time: {{elapsed_time:.2f}}s")
@@ -642,7 +747,15 @@ print("\\nMaking predictions...")
 predictions = stacking_clf.predict_proba(X_test_imputed)[:, 1]
 
 # Save submission
-submission = pd.DataFrame({{'id': test_df['id'], 'prediction': predictions}})
+# Load sample_submission to get correct column names
+sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+submission = sample_sub.copy()
+target_submission_col = sample_sub.columns[1]
+print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
+submission[target_submission_col] = predictions
+assert submission.shape == sample_sub.shape, f"Shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
+assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
+print(f"✓ Validation passed: columns={{submission.columns.tolist()}}")
 submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
@@ -813,7 +926,15 @@ print(f"  Mean: {{predictions.mean():.6f}}")
 print(f"  Median: {{np.median(predictions):.6f}}")
 
 # Save submission
-submission = pd.DataFrame({{'id': test_ids, target_col: predictions}})
+# Load sample_submission to get correct column names
+sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+submission = sample_sub.copy()
+target_submission_col = sample_sub.columns[1]
+print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
+submission[target_submission_col] = predictions
+assert submission.shape == sample_sub.shape, f"Shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
+assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
+print(f"✓ Validation passed: columns={{submission.columns.tolist()}}")
 submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
@@ -919,7 +1040,15 @@ print(f"  Max: {{predictions.max():.4f}}")
 print(f"  Mean: {{predictions.mean():.4f}}")
 
 # Save submission
-submission = pd.DataFrame({{'id': test_df['id'], 'prediction': predictions}})
+# Load sample_submission to get correct column names
+sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+submission = sample_sub.copy()
+target_submission_col = sample_sub.columns[1]
+print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
+submission[target_submission_col] = predictions
+assert submission.shape == sample_sub.shape, f"Shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
+assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
+print(f"✓ Validation passed: columns={{submission.columns.tolist()}}")
 submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
