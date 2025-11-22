@@ -561,7 +561,7 @@ def run_workflow(
                 "type": "autonomous-run"
             }
         }
-        final_state = workflow.invoke(state, config)
+        final_state = workflow.invoke(state, config, recursion_limit=50)
     else:
         workflow = compile_workflow()
         config = {
@@ -571,7 +571,7 @@ def run_workflow(
                 "type": "autonomous-run"
             }
         }
-        final_state = workflow.invoke(state, config)
+        final_state = workflow.invoke(state, config, recursion_limit=50)
 
     print("\n" + "="*70)
     print("WORKFLOW COMPLETE")
