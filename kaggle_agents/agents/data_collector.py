@@ -46,6 +46,30 @@ class DataCollectorAgent:
             state["test_data_path"] = data_paths.get("test", "")
             state["sample_submission_path"] = data_paths.get("sample_submission", "")
 
+            # Detect target column
+            target_col = "target"  # Default
+            try:
+                import pandas as pd
+                if state["sample_submission_path"]:
+                    sub_df = pd.read_csv(state["sample_submission_path"], nrows=1)
+                    # usually id, target. So second column is target
+                    if len(sub_df.columns) > 1:
+                        target_col = sub_df.columns[1]
+                elif state["train_data_path"]:
+                    train_df = pd.read_csv(state["train_data_path"], nrows=1)
+                    # Heuristic: last column or column with 'target' in name
+                    target_candidates = [c for c in train_df.columns if c.lower() in ['target', 'label', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
+                    if target_candidates:
+                        target_col = target_candidates[0]
+                    else:
+                        target_col = train_df.columns[-1]
+                
+                print(f"Data Collector: Detected target column: '{target_col}'")
+                state["target_col"] = target_col
+            except Exception as e:
+                print(f"Data Collector Warning: Could not detect target column: {e}")
+                state["target_col"] = "target"
+
             # Use LLM to understand competition requirements
             system_msg = SystemMessage(
                 content="""You are a data science expert analyzing Kaggle competitions.
