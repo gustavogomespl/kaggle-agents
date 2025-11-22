@@ -1,4 +1,5 @@
 <img width="2676" height="854" alt="image" src="https://github.com/user-attachments/assets/398dcf92-804c-441d-9399-8957d31ca445" />
+
 # Kaggle Agents
 
 Autonomous agent system for Kaggle competitions using LangGraph, DSPy, and concepts from Google's MLE Star framework (https://www.arxiv.org/abs/2506.15692).
