@@ -593,12 +593,10 @@ class DeveloperAgent:
             if "optuna" in component.name.lower() or "tuned" in component.name.lower() or "optimized" in component.name.lower():
                 instructions.append("\n🔍 HYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:")
                 instructions.append("  - MUST use 'optuna' library for hyperparameter search")
-                instructions.append("  - Run EXACTLY 15 trials (use n_trials=15 in optuna.create_study().optimize())")
+                instructions.append("  - Run AT MOST 5-10 trials (set n_trials=5 or n_trials=10) and timeout=250 to prevent timeouts")
+                instructions.append("  - Prefer fixed moderate params if tuning is expensive; skip Optuna if callbacks/early stopping are not supported")
                 instructions.append("  - Use 'TPESampler' for efficient sampling")
-                instructions.append("  - CRITICAL: Do NOT pass 'early_stopping_rounds' to .fit() for XGBoost/LightGBM/CatBoost scikit-learn API.")
-                instructions.append("    - Instead, use callbacks=[early_stopping_callback] or initialize the model with early_stopping_rounds if supported.")
-                instructions.append("    - For XGBoost >= 1.6: use callbacks=[xgb.callback.EarlyStopping(rounds=...)]")
-                instructions.append("    - For LightGBM >= 4.0: use callbacks=[lgb.early_stopping(stopping_rounds=...)]")
+                instructions.append("  - CRITICAL: Do NOT pass 'callbacks' or 'early_stopping_rounds' to .fit() for XGBoost/LightGBM/CatBoost sklearn API if version is unknown; use fixed n_estimators instead")
                 instructions.append("  - Optimize for the competition metric (minimize RMSE/LogLoss or maximize AUC/Accuracy)")
                 instructions.append("  - Print the best parameters found")
                 instructions.append("  - Train final model with best parameters")
@@ -606,6 +604,10 @@ class DeveloperAgent:
         elif component.component_type == "feature_engineering":
             instructions.append("\n🔧 FEATURE ENGINEERING REQUIREMENTS:")
             instructions.append("  - Create NEW features from existing ones")
+            instructions.append("  - IMPLEMENT SOTA TECHNIQUES:")
+            instructions.append("    - Target Encoding: MUST be done inside Cross-Validation (fit on train folds, transform val fold) to prevent leakage.")
+            instructions.append("    - Frequency Encoding: Map categorical features to their frequency/count.")
+            instructions.append("    - Aggregations: Mean/Count of numeric features grouped by categorical features.")
             instructions.append("  - Save engineered features to file for model components")
             instructions.append("  - NO model training in this component")
             instructions.append("  - Print feature importance or correlation metrics")
@@ -613,7 +615,10 @@ class DeveloperAgent:
             instructions.append("\n🎭 ENSEMBLE REQUIREMENTS:")
             instructions.append("  - Combine predictions from multiple models")
             instructions.append("  - Load predictions from previous model components")
-            instructions.append("  - Use weighted average or stacking approach")
+            instructions.append("  - PREFERRED STRATEGY: Stacking Ensemble")
+            instructions.append("    - Use a meta-model (e.g., LogisticRegression or Ridge) to combine base model predictions.")
+            instructions.append("    - Train meta-model on OOF (Out-of-Fold) predictions from base models.")
+            instructions.append("  - Alternative: Weighted average if stacking fails.")
             instructions.append("  - Generate final submission.csv")
 
         # Standard requirements
@@ -625,12 +630,13 @@ class DeveloperAgent:
 
         return "\n".join(instructions)
 
-    def _get_dataset_info(self, working_dir: Path) -> str:
+    def _get_dataset_info(self, working_dir: Path, state: KaggleState = None) -> str:
         """
         Read dataset columns and basic info to provide to LLM.
 
         Args:
             working_dir: Working directory containing train.csv
+            state: Current state (optional)
 
         Returns:
             Formatted string with dataset information
@@ -649,8 +655,13 @@ class DeveloperAgent:
             dtypes = df.dtypes.to_dict()
 
             # Identify likely target column
-            target_candidates = [c for c in columns if c.lower() in ['target', 'label', 'y', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
-            target_col = target_candidates[0] if target_candidates else "UNKNOWN"
+            target_col = "UNKNOWN"
+            
+            if state and state.get("target_col"):
+                target_col = state["target_col"]
+            else:
+                target_candidates = [c for c in columns if c.lower() in ['target', 'label', 'y', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
+                target_col = target_candidates[0] if target_candidates else "UNKNOWN"
 
             # Format column info
             numeric_cols = [c for c, dtype in dtypes.items() if dtype in ['int64', 'float64']]
@@ -686,7 +697,7 @@ IMPORTANT: Always use target_col='{target_col}' in your code!
         component_details = format_component_details(component)
 
         # Get dataset information
-        dataset_info = self._get_dataset_info(working_dir)
+        dataset_info = self._get_dataset_info(working_dir, state)
 
         competition_context = f"""
 Name: {competition_info.name}

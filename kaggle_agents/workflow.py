@@ -7,6 +7,7 @@ implementing the full pipeline from SOTA search to submission.
 
 from typing import Dict, Any, Literal
 from datetime import datetime
+import pandas as pd
 
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
@@ -20,9 +21,11 @@ from .agents import (
     planner_agent_node,
     developer_agent_node,
     robustness_agent_node,
-    submission_agent_node,
-    submission_agent_node,
-    meta_evaluator_node,  # Meta-Evaluator with RL
+)
+from .agents.submission_agent import submission_agent_node
+from .agents.meta_evaluator_agent import meta_evaluator_node  # Meta-Evaluator with RL
+from .agents.reporting_agent import reporting_agent_node
+from .agents import (
     ensemble_agent_node,  # Ensemble Strategy
     explainability_agent_node,  # Didactic Explanation
 )
@@ -64,14 +67,24 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
         print(f"\n✓ Download complete!")
         print(f"   Train: {data_files.get('train', 'N/A')}")
         print(f"   Test: {data_files.get('test', 'N/A')}")
+        target_col = "target" # Default
         if data_files.get('sample_submission'):
             print(f"   Sample Submission: {data_files['sample_submission']}")
+            try:
+                # Infer target column from sample submission (usually 2nd column)
+                sample_sub = pd.read_csv(data_files['sample_submission'])
+                if len(sample_sub.columns) >= 2:
+                    target_col = sample_sub.columns[1]
+                    print(f"   🎯 Target Column Detected: {target_col}")
+            except Exception as e:
+                print(f"   ⚠️ Could not read sample submission to infer target: {e}")
 
         return {
             "data_files": data_files,
             "train_data_path": data_files.get("train", ""),
             "test_data_path": data_files.get("test", ""),
             "sample_submission_path": data_files.get("sample_submission", ""),
+            "target_col": target_col,
             "last_updated": datetime.now(),
         }
 
@@ -432,7 +445,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
     workflow.add_node("ensemble", ensemble_agent_node)
-    workflow.add_node("explainability", explainability_agent_node)
+    workflow.add_node("reporting", reporting_agent_node)
 
     # Define edges
     # Start → Data Download
@@ -481,12 +494,12 @@ def create_workflow() -> StateGraph:
         route_after_iteration_control,
         {
             "refine": "planner",  # Start refinement cycle
-            "end": "explainability", # Goal achieved or max iterations -> Explain
+            "end": "reporting", # Goal achieved or max iterations -> Explain
         }
     )
 
-    # Explainability → END
-    workflow.add_edge("explainability", END)
+    # Reporting → END
+    workflow.add_edge("reporting", END)
 
     return workflow
 

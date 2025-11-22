@@ -600,10 +600,10 @@ Domain: {domain}
         # Filter out invalid components (keep only high impact >= 10%)
         valid_plan = [c for c in plan if c.estimated_impact >= 0.10]
 
-        # Limit to maximum 5 components (quality over quantity)
-        if len(valid_plan) > 5:
-            print(f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top 5 by impact")
-            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[:5]
+        # Limit to maximum 6 components (quality over quantity)
+        if len(valid_plan) > 6:
+            print(f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top 6 by impact")
+            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[:6]
 
         # CRITICAL: Ensure at least TWO model components exist
         # Model components are required to generate predictions and create ensembles
@@ -717,17 +717,25 @@ Domain: {domain}
                 "estimated_impact": 0.19,
                 "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
                 "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV"
+            },
+            {
+                "name": "neural_network_mlp",
+                "component_type": "model",
+                "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
+                "estimated_impact": 0.15,
+                "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
+                "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping."
             }
         ])
 
-        # ALWAYS add stacking ensemble (combines the 3 models above)
+        # ALWAYS add stacking ensemble (combines the 4 models above)
         plan.append({
             "name": "stacking_ensemble",
             "component_type": "ensemble",
-            "description": "Stack LightGBM, XGBoost, and CatBoost predictions using Ridge/Logistic regression as meta-learner",
-            "estimated_impact": 0.12,
-            "rationale": "Stacking combines diverse models and typically improves scores by 5-10%",
-            "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, catboost], final_estimator=Ridge/LogisticRegression, cv=5"
+            "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
+            "estimated_impact": 0.25,
+            "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
+            "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5"
         })
 
         return plan
