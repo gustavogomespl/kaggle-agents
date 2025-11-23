@@ -7,9 +7,11 @@ with automatic retry and debugging capabilities.
 
 import json
 from typing import List, Dict, Any, Optional
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 import shutil
+import os
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
