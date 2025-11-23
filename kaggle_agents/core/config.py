@@ -51,8 +51,8 @@ class AblationConfig:
     max_components: int = field(default_factory=lambda: int(os.getenv("MAX_COMPONENTS", "3")))  # max components to test
     impact_threshold: float = 0.01  # minimum impact to consider (1%)
     parallel_testing: bool = False  # test components in parallel
-    # Default timeout per component (seconds). Increased to 1800s to avoid premature failures on heavy training.
-    testing_timeout: int = 1800
+    # Default timeout per component (seconds). Increased to 2700s (45 minutes) to avoid premature failures on heavy training.
+    testing_timeout: int = 2700
     optuna_trials: int = 5  # default number of trials for hyperparameter tuning
     enable_code_preview: bool = True  # show code before execution
     save_generated_code: bool = True  # save generated code to files

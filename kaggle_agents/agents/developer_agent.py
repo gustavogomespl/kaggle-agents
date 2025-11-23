@@ -178,7 +178,7 @@ class DeveloperAgent:
 
         # Dynamically adjust execution timeout based on component type
         base_timeout = self.config.ablation.testing_timeout
-        heavy_timeout = max(base_timeout, 1800)  # Longer window for model training/Optuna
+        heavy_timeout = max(base_timeout, 2700)  # Longer window for model training/Optuna (45 minutes)
         # Cap ensembles at ~20 minutes by default; if base_timeout is lower, respect it
         ensemble_timeout = min(base_timeout, 1200) if base_timeout else 1200
         ensemble_timeout = max(ensemble_timeout, 1200)
@@ -218,6 +218,7 @@ class DeveloperAgent:
                 stdout=result.stdout,
                 stderr=result.stderr,
                 execution_time=result.execution_time,
+                exit_code=0 if result.success else -1,
                 artifacts_created=result.artifacts_created,
                 errors=result.errors,
             )
