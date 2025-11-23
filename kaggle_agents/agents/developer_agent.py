@@ -176,6 +176,26 @@ class DeveloperAgent:
         print(f"\n= Implementing: {component.name} ({component.component_type})")
         print(f"   Estimated Impact: {component.estimated_impact:.1%}")
 
+        # Dynamically adjust execution timeout based on component type
+        base_timeout = self.config.ablation.testing_timeout
+        heavy_timeout = max(base_timeout, 1800)  # Longer window for model training/Optuna
+        # Cap ensembles at 20 minutes by default; if base_timeout is lower, respect it
+        ensemble_timeout = min(base_timeout, 1200) if base_timeout else 1200
+        ensemble_timeout = max(ensemble_timeout, 1200)
+        light_timeout = min(base_timeout, 300) if base_timeout else 300  # Fail fast on lightweight scripts
+        name_lower = component.name.lower()
+
+        if component.component_type == "model" or "optuna" in name_lower:
+            desired_timeout = heavy_timeout
+        elif component.component_type == "ensemble":
+            desired_timeout = ensemble_timeout
+        else:
+            desired_timeout = light_timeout if light_timeout > 0 else base_timeout
+
+        if self.executor.timeout != desired_timeout:
+            self.executor.timeout = desired_timeout
+            print(f"   ⏱️  Component timeout set to: {desired_timeout}s ({desired_timeout/60:.1f} min)")
+
         # Generate and execute code
         result = self._implement_component(component, state)
 

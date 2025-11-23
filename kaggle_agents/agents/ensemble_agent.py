@@ -447,6 +447,8 @@ Return a JSON object:
             # Handle both dict and dataclass state access
             models_trained = state.get("models_trained", []) if isinstance(state, dict) else state.models_trained
             train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
+            current_train_path = state.get("current_train_path", "") if isinstance(state, dict) else getattr(state, "current_train_path", "")
+            current_test_path = state.get("current_test_path", "") if isinstance(state, dict) else getattr(state, "current_test_path", "")
             competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
             eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
             best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
@@ -480,8 +482,16 @@ Return a JSON object:
                     "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)"
                 }
 
+            # Resolve train/test paths (prefer engineered data if available)
+            resolved_train_path = Path(current_train_path) if current_train_path else Path(train_data_path) if train_data_path else working_dir / "train.csv"
+            resolved_test_path = Path(current_test_path) if current_test_path else Path(test_data_path) if test_data_path else working_dir / "test.csv"
+
+            if not resolved_train_path.exists():
+                print(f"  ❌ Train data not found at {resolved_train_path}, skipping ensemble")
+                return state
+
             # Load processed data
-            train_df = pd.read_csv(train_data_path)
+            train_df = pd.read_csv(resolved_train_path)
 
             # Identify target
             potential_targets = ["target", "label", train_df.columns[-1]]
@@ -504,7 +514,7 @@ Return a JSON object:
 
             # Prepare test features for submission generation
             test_features = None
-            test_path = Path(test_data_path) if test_data_path else working_dir / "test.csv"
+            test_path = resolved_test_path
             if test_path.exists():
                 try:
                     test_df = pd.read_csv(test_path)

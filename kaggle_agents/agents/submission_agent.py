@@ -107,6 +107,8 @@ class SubmissionAgent:
         # IMPORTANT: best_score must ALWAYS be numeric (never None) to avoid
         # TypeError in workflow.py when formatting with :.4f
         current_best = state.get("best_score", 0.0)
+        if current_best is None:
+            current_best = 0.0
         new_score = submission_result.public_score
         metric_name = state["competition_info"].evaluation_metric
 
