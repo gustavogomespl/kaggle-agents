@@ -14,7 +14,7 @@ import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..core.state import KaggleState, AblationComponent, DevelopmentResult
 from ..core.config import get_config, get_llm_for_role
-from ..tools.code_executor import CodeExecutor, ArtifactValidator
+from ..tools.code_executor import CodeExecutor, ArtifactValidator, ExecutionResult
 from ..prompts.templates.developer_prompts import (
     DEVELOPER_SYSTEM_PROMPT,
     GENERATE_CODE_PROMPT,
@@ -323,10 +323,9 @@ class DeveloperAgent:
 
         # If all retries failed, try debug iterations
         print("\n   = Entering debug mode...")
-        code, debug_success = self._debug_code(code, exec_result, working_dir, max_iterations=5)
-
-        if debug_success:
-            exec_result = self.executor.execute(code=code, working_dir=working_dir)
+        code, exec_result, debug_success = self._debug_code(
+            code, exec_result, working_dir, max_iterations=5
+        )
 
         # Return final result
         return DevelopmentResult(
@@ -865,11 +864,18 @@ Keep response under 150 words."""
     def _debug_code(
         self,
         code: str,
-        exec_result,
+        exec_result: ExecutionResult,
         working_dir: Path,
         max_iterations: int = 10,
-    ) -> tuple[str, bool]:
-        """Debug code iteratively."""
+    ) -> tuple[str, ExecutionResult, bool]:
+        """Debug code iteratively with loop-safety and shorter timeouts."""
+        # Use a shorter timeout during debug to avoid long-running loops
+        original_timeout = getattr(self.executor, "timeout", None)
+        if original_timeout is not None:
+            self.executor.timeout = min(original_timeout, 180)
+
+        last_error_sig = None
+
         for iteration in range(max_iterations):
             print(f"   Debug iteration {iteration + 1}/{max_iterations}")
 
@@ -896,13 +902,34 @@ Keep response under 150 words."""
 
             if test_result.success:
                 print(f"    Debug successful!")
-                return debugged_code, True
+                # Restore timeout before returning
+                if original_timeout is not None:
+                    self.executor.timeout = original_timeout
+                return debugged_code, test_result, True
+
+            # Detect stagnation (same error repeating) to break out of the loop
+            error_sig = "|".join(test_result.errors) if test_result.errors else test_result.stderr.strip()
+            if error_sig and error_sig == last_error_sig:
+                print("   ⚠️  Debug halted: same error persists; stopping to avoid infinite loop")
+                if original_timeout is not None:
+                    self.executor.timeout = original_timeout
+                return debugged_code, test_result, False
+
+            # Stop early on repeated timeouts
+            if any("Timeout" in e for e in test_result.errors):
+                print("   ⚠️  Debug halted: repeated timeout during debug")
+                if original_timeout is not None:
+                    self.executor.timeout = original_timeout
+                return debugged_code, test_result, False
 
             code = debugged_code
             exec_result = test_result
+            last_error_sig = error_sig
 
         print("   L Debug failed after max iterations")
-        return code, False
+        if original_timeout is not None:
+            self.executor.timeout = original_timeout
+        return code, exec_result, False
 
     def _extract_code_from_response(self, response: str) -> str:
         """Extract Python code from LLM response."""
