@@ -19,15 +19,15 @@ load_dotenv()
 class LLMConfig:
     """LLM provider and model configuration."""
 
-    provider: Literal["openai", "anthropic"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
+    provider: Literal["openai", "anthropic", "gemini"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
     # Optional per-role overrides to balance cost/quality across agents
     planner_model: Optional[str] = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
-    planner_provider: Optional[Literal["openai", "anthropic"]] = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
+    planner_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
     developer_model: Optional[str] = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
-    developer_provider: Optional[Literal["openai", "anthropic"]] = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
+    developer_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
     evaluator_model: Optional[str] = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
-    evaluator_provider: Optional[Literal["openai", "anthropic"]] = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
+    evaluator_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192")))  # Safe default
     timeout: int = 120  # seconds
@@ -214,6 +214,8 @@ class AgentConfig:
             issues.append("OPENAI_API_KEY environment variable not set")
         elif self.llm.provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
             issues.append("ANTHROPIC_API_KEY environment variable not set")
+        elif self.llm.provider == "gemini" and not os.getenv("GOOGLE_API_KEY"):
+            issues.append("GOOGLE_API_KEY environment variable not set")
 
         # Check Kaggle credentials if auto-submit enabled
         if self.kaggle.auto_submit and not self.kaggle.is_configured():
@@ -325,6 +327,13 @@ def get_llm(temperature: float = None, max_tokens: int = None):
             temperature=temp,
             max_tokens=tokens,
         )
+    elif config.llm.provider == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=config.llm.model,
+            temperature=temp,
+            max_output_tokens=tokens,
+        )
     else:
         # Default to OpenAI
         return ChatOpenAI(
@@ -373,6 +382,13 @@ def get_llm_for_role(
             model=model,
             temperature=temp,
             max_tokens=tokens,
+        )
+    elif provider == "gemini":
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=model,
+            temperature=temp,
+            max_output_tokens=tokens,
         )
 
     return ChatOpenAI(

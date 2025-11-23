@@ -261,7 +261,7 @@ class DeveloperAgent:
         if self.config.ablation.enable_code_preview if hasattr(self.config.ablation, 'enable_code_preview') else True:
             print("\n   📝 Generated code preview:")
             code_lines = code.split('\n')
-            preview_lines = min(30, len(code_lines))  # Show first 30 lines
+            preview_lines = min(500, len(code_lines))  # Show first 500 lines
             for i, line in enumerate(code_lines[:preview_lines], 1):
                 print(f"      {i:3d} | {line}")
             if len(code_lines) > preview_lines:
@@ -564,7 +564,7 @@ class DeveloperAgent:
                 # Extract common error patterns
                 for i, result in enumerate(failed_components[-2:], 1):  # Last 2 failures
                     if result.errors:
-                        error_msg = result.errors[0][:100]  # First 100 chars
+                        error_msg = result.errors[0][:300]  # First 300 chars
                         instructions.append(f"  - {error_msg}")
 
         # Add performance-based guidance
@@ -807,11 +807,11 @@ Submission: {working_dir / 'submission.csv'}
         prompt = f"""You are a Meta-Evaluator analyzing code failure.
 
 Component: {component_name}
-Error: {error[:300]}
+Error: {error[:500]}
 
-Code Summary (first 30 lines):
+Code Summary (first 500 lines):
 ```python
-{chr(10).join(code.split(chr(10))[:30])}
+{chr(10).join(code.split(chr(10))[:500])}
 ```
 
 Provide 2-3 specific, actionable suggestions to fix this error.
