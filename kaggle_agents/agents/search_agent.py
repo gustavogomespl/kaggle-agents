@@ -39,7 +39,13 @@ class SearchAgent:
                 model=self.config.llm.model,
                 temperature=self.config.llm.temperature,
             )
-        else:
+        elif self.config.llm.provider == "gemini":
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            self.llm = ChatGoogleGenerativeAI(
+                model=self.config.llm.model,
+                temperature=self.config.llm.temperature,
+            )
+        else:  # anthropic
             self.llm = ChatAnthropic(
                 model=self.config.llm.model,
                 temperature=self.config.llm.temperature,

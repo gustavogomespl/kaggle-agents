@@ -55,6 +55,14 @@ class PromptOptimizer:
                 max_tokens=max_tokens,
                 temperature=self.config.llm.temperature,
             )
+        elif self.config.llm.provider == "gemini":
+            # DSPy supports Google Gemini via LiteLLM
+            lm = dspy.LM(
+                model=f"gemini/{self.config.llm.model}",
+                api_key=os.getenv("GOOGLE_API_KEY"),
+                max_tokens=max_tokens,
+                temperature=self.config.llm.temperature,
+            )
         else:
             raise ValueError(f"Unsupported LLM provider: {self.config.llm.provider}")
 
