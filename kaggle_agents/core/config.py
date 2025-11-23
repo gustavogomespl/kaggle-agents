@@ -447,3 +447,106 @@ def get_submission_path(competition_name: str, iteration: int) -> Path:
     sub_dir = config.paths.submissions_dir / competition_name
     sub_dir.mkdir(parents=True, exist_ok=True)
     return sub_dir / f"submission_iter{iteration}.csv"
+
+
+# ==================== Metric Direction Utilities ====================
+
+def is_metric_minimization(metric_name: str) -> bool:
+    """
+    Determine if a metric should be minimized or maximized.
+
+    Args:
+        metric_name: Name of the evaluation metric (e.g., 'rmse', 'accuracy')
+
+    Returns:
+        True if metric should be minimized (lower is better), False otherwise
+
+    Examples:
+        >>> is_metric_minimization('rmse')
+        True
+        >>> is_metric_minimization('accuracy')
+        False
+        >>> is_metric_minimization('log_loss')
+        True
+    """
+    if not metric_name:
+        return False
+
+    metric_lower = metric_name.lower()
+
+    # Metrics where lower values are better
+    minimize_metrics = [
+        'rmse', 'mae', 'mse', 'rmsle',
+        'logloss', 'log_loss', 'log loss',
+        'error', 'loss',
+        'cross_entropy', 'brier',
+        'mean_absolute_error', 'mean_squared_error',
+        'root_mean_squared_error',
+        'mean_absolute_percentage_error', 'mape',
+    ]
+
+    return any(metric in metric_lower for metric in minimize_metrics)
+
+
+def calculate_score_improvement(
+    new_score: float,
+    baseline_score: float,
+    metric_name: str
+) -> float:
+    """
+    Calculate score improvement considering metric direction.
+
+    Args:
+        new_score: New score achieved
+        baseline_score: Baseline score to compare against
+        metric_name: Name of the evaluation metric
+
+    Returns:
+        Improvement value (positive = better, negative = worse)
+
+    Examples:
+        >>> calculate_score_improvement(0.350, 0.400, 'rmse')
+        0.050  # RMSE decreased from 0.400 to 0.350 (better)
+        >>> calculate_score_improvement(0.85, 0.80, 'accuracy')
+        0.050  # Accuracy increased from 0.80 to 0.85 (better)
+        >>> calculate_score_improvement(0.450, 0.400, 'rmse')
+        -0.050  # RMSE increased from 0.400 to 0.450 (worse)
+    """
+    is_minimize = is_metric_minimization(metric_name)
+
+    if is_minimize:
+        # For minimize metrics: lower new_score is better
+        return baseline_score - new_score
+    else:
+        # For maximize metrics: higher new_score is better
+        return new_score - baseline_score
+
+
+def compare_scores(
+    score1: float,
+    score2: float,
+    metric_name: str
+) -> float:
+    """
+    Compare two scores and return the better one.
+
+    Args:
+        score1: First score to compare
+        score2: Second score to compare
+        metric_name: Name of the evaluation metric
+
+    Returns:
+        The better score according to metric direction
+
+    Examples:
+        >>> compare_scores(0.350, 0.400, 'rmse')
+        0.350  # Lower is better for RMSE
+        >>> compare_scores(0.85, 0.80, 'accuracy')
+        0.85  # Higher is better for accuracy
+    """
+    is_minimize = is_metric_minimization(metric_name)
+
+    if is_minimize:
+        return min(score1, score2)
+    else:
+        return max(score1, score2)

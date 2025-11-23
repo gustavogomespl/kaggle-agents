@@ -14,7 +14,7 @@ import pandas as pd
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 from ..core.state import KaggleState, SubmissionResult
-from ..core.config import get_config
+from ..core.config import get_config, compare_scores
 
 
 class SubmissionAgent:
@@ -103,9 +103,17 @@ class SubmissionAgent:
         if submission_result.public_score is not None:
             self._check_goal_achievement(submission_result, state)
 
+        # Update best_score considering metric direction
+        current_best = state.get("best_score", 0.0)
+        new_score = submission_result.public_score or 0.0
+        metric_name = state["competition_info"].evaluation_metric
+
+        # Use compare_scores to handle both minimize and maximize metrics
+        updated_best = compare_scores(current_best, new_score, metric_name)
+
         return {
             "submissions": [submission_result],
-            "best_score": max(state.get("best_score", 0.0), submission_result.public_score or 0.0),
+            "best_score": updated_best,
             "last_updated": datetime.now(),
         }
 

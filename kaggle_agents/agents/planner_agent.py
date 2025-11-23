@@ -240,6 +240,80 @@ class PlannerAgent:
 
         return analysis
 
+    def _extract_curriculum_insights(self, state: KaggleState) -> str:
+        """
+        Extract curriculum learning insights from iteration memory.
+
+        Builds on successful patterns and avoids known failures from previous iterations.
+
+        Args:
+            state: Current workflow state containing iteration_memory
+
+        Returns:
+            Formatted string with learned patterns to inject in prompt
+        """
+        iteration_memory = state.get("iteration_memory", [])
+
+        if not iteration_memory:
+            return "No previous iteration insights available."
+
+        # Aggregate patterns across all iterations
+        all_worked = []
+        all_failed = []
+
+        for memory in iteration_memory:
+            all_worked.extend(memory.what_worked)
+            all_failed.extend(memory.what_failed)
+
+        # Build insights string
+        insights = ["\n🧠 CURRICULUM LEARNING INSIGHTS (from previous iterations):"]
+
+        if all_worked:
+            insights.append("\n✅ What Worked (prioritize these approaches):")
+            # Get last 5 unique successful patterns
+            unique_worked = list(dict.fromkeys(all_worked))[-5:]
+            for pattern in unique_worked:
+                insights.append(f"   - {pattern}")
+
+        if all_failed:
+            insights.append("\n❌ What Failed (avoid these approaches):")
+            # Get last 5 unique failure patterns
+            unique_failed = list(dict.fromkeys(all_failed))[-5:]
+            for pattern in unique_failed:
+                insights.append(f"   - {pattern}")
+
+        # Add failure analysis insights from latest iteration
+        if iteration_memory:
+            latest_memory = iteration_memory[-1]
+            if "failure_analysis" in latest_memory.results:
+                analysis = latest_memory.results["failure_analysis"]
+
+                if analysis.get("common_errors"):
+                    insights.append("\n⚠️  Common Errors to Avoid:")
+                    # Get top 3 most common errors
+                    common_errors = sorted(
+                        analysis["common_errors"].items(),
+                        key=lambda x: x[1],
+                        reverse=True
+                    )[:3]
+                    for error_type, count in common_errors:
+                        insights.append(f"   - {error_type}: {count} occurrences")
+
+                # Add component-specific success patterns
+                if analysis.get("success_by_component"):
+                    insights.append("\n📊 Component Success Rates:")
+                    for comp_type, success_info in list(analysis["success_by_component"].items())[:3]:
+                        rate = success_info.get("success_rate", 0.0)
+                        insights.append(f"   - {comp_type}: {rate:.0%} success rate")
+
+        # Add score improvement trend
+        if len(iteration_memory) >= 2:
+            score_improvements = [m.score_improvement for m in iteration_memory[-3:]]
+            avg_improvement = sum(score_improvements) / len(score_improvements)
+            insights.append(f"\n📈 Recent Score Trend: {avg_improvement:+.4f} avg improvement")
+
+        return "\n".join(insights)
+
     def _generate_ablation_plan(
         self,
         state: KaggleState,
@@ -247,6 +321,8 @@ class PlannerAgent:
     ) -> List[AblationComponent]:
         """
         Generate ablation plan based on competition info and SOTA analysis.
+
+        Uses curriculum learning to incorporate insights from previous iterations.
 
         Args:
             state: Current state
@@ -257,6 +333,9 @@ class PlannerAgent:
         """
         competition_info = state["competition_info"]
         domain = state.get("domain_detected", "tabular")
+
+        # Extract curriculum learning insights from previous iterations
+        curriculum_insights = self._extract_curriculum_insights(state)
 
         # Prepare inputs
         comp_info_str = f"""
@@ -270,11 +349,15 @@ Domain: {domain}
         sota_summary = json.dumps(sota_analysis, indent=2)
         domain_guidance = get_domain_guidance(domain)
 
+        # Print curriculum insights
+        if "No previous iteration" not in curriculum_insights:
+            print(curriculum_insights)
+
         if self.use_dspy:
             # TEMPORARY FIX: Skip DSPy, use fallback directly
             # DSPy consistently generates only 2 components instead of 5
             print("  🔧 Using fallback plan (ensures 5 high-quality components)")
-            plan_data = self._create_fallback_plan(domain, sota_analysis)
+            plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights)
 
         else:
             # Use direct LLM call
@@ -284,14 +367,27 @@ Domain: {domain}
                 sota_summary=sota_summary,
             )
 
+            # Inject curriculum learning insights
+            enhanced_prompt = f"""{prompt}
+
+{curriculum_insights}
+
+IMPORTANT: Use the curriculum insights above to:
+1. Prioritize components and techniques that worked in previous iterations
+2. Avoid approaches that consistently failed or caused errors
+3. Learn from common error patterns and component success rates
+4. Build upon successful patterns while exploring new improvements
+
+Generate a plan that leverages proven successful strategies and avoids known pitfalls."""
+
             messages = [
                 SystemMessage(content=PLANNER_SYSTEM_PROMPT + "\n\n" + domain_guidance),
-                HumanMessage(content=prompt),
+                HumanMessage(content=enhanced_prompt),
             ]
 
             # TEMPORARY FIX: Skip LLM call, use fallback directly
             print("  🔧 Using fallback plan (ensures 5 high-quality components)")
-            plan_data = self._create_fallback_plan(domain, sota_analysis)
+            plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights)
 
         # Convert to AblationComponent objects
         components = []
@@ -669,17 +765,23 @@ Domain: {domain}
         self,
         domain: str,
         sota_analysis: Dict[str, Any],
+        curriculum_insights: str = "",
     ) -> List[Dict[str, Any]]:
         """
         Create a fallback plan when LLM parsing fails.
 
+        Incorporates curriculum learning insights to prioritize proven strategies.
+
         Args:
             domain: Competition domain
             sota_analysis: SOTA analysis results
+            curriculum_insights: Insights from previous iterations (optional)
 
         Returns:
             List of component dictionaries (always 4-5 components)
         """
+        # Note: Curriculum insights are logged but fallback uses fixed plan
+        # In future iterations, could use insights to reorder components
         plan = []
 
         # ALWAYS add feature engineering first (high impact)

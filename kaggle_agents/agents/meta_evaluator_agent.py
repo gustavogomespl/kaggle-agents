@@ -19,7 +19,7 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.state import KaggleState, DevelopmentResult, IterationMemory
-from ..core.config import get_config, get_llm_for_role
+from ..core.config import get_config, get_llm_for_role, calculate_score_improvement
 from ..optimization import create_training_collector
 
 
@@ -285,7 +285,12 @@ class MetaEvaluatorAgent:
         r_performance = min(current_score / target_score, 1.0) if target_score > 0 else 0.0
 
         # Reward 3: Improvement (delta from previous best)
-        score_improvement = current_score - best_score
+        # Get evaluation metric to handle both minimize and maximize metrics correctly
+        competition_info = state.get("competition_info")
+        metric_name = competition_info.evaluation_metric if competition_info else ""
+
+        # Calculate improvement considering metric direction (positive = better)
+        score_improvement = calculate_score_improvement(current_score, best_score, metric_name)
         r_improvement = max(0.0, min(score_improvement * 10, 1.0))  # Scale to 0-1
 
         # Reward 4: Execution Semantics (no errors, fast execution)

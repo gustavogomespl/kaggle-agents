@@ -13,7 +13,7 @@ from pathlib import Path
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..core.state import KaggleState, AblationComponent, DevelopmentResult
-from ..core.config import get_config, get_llm_for_role
+from ..core.config import get_config, get_llm_for_role, calculate_score_improvement, is_metric_minimization
 from ..tools.code_executor import CodeExecutor, ArtifactValidator, ExecutionResult
 from ..prompts.templates.developer_prompts import (
     DEVELOPER_SYSTEM_PROMPT,
@@ -174,6 +174,38 @@ class DeveloperAgent:
         # Generate and execute code
         result = self._implement_component(component, state)
 
+        # Ablation Study: Validate if component improves score (Hill Climbing)
+        should_keep_component = True
+        new_cv_score = 0.0
+
+        if result.success and component.component_type == "model":
+            # Only validate improvement for model components
+            from kaggle_agents.tools.code_executor import ExecutionResult
+
+            # Create ExecutionResult from DevelopmentResult
+            exec_result = ExecutionResult(
+                success=result.success,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                execution_time=result.execution_time,
+                artifacts_created=result.artifacts_created,
+                errors=result.errors,
+            )
+
+            should_keep_component, new_cv_score = self._validate_component_improvement(
+                component, exec_result, state
+            )
+
+            if not should_keep_component:
+                print(f"\n   🔄 ROLLBACK: Component did not improve score - discarding")
+                # Don't advance, don't cache - effectively rolling back this component
+                return {
+                    "development_results": [],  # Empty results (component rejected)
+                    "current_component_index": current_index + 1,  # Move to next component
+                    "component_rollback": component.name,
+                    "rollback_reason": "No CV improvement detected (Ablation Study)",
+                }
+
         # Determine if we should move to next component
         # Always move forward if it's a critical error (data files missing)
         should_advance = result.success or (
@@ -182,15 +214,20 @@ class DeveloperAgent:
 
         # Cache successful results for skip logic (MLE-STAR Pattern)
         state_updates = {
-            "development_results": [result],
+            "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
             "code_retry_count": 0,
             "current_component_index": current_index + 1 if should_advance else current_index,
             "last_updated": datetime.now(),
         }
 
-        # If successful, cache for future iterations
-        if result.success:
+        # Update baseline CV score if component was accepted and score available
+        if result.success and should_keep_component and new_cv_score is not None:
+            state_updates["baseline_cv_score"] = new_cv_score
+            print(f"  📊 Updated baseline CV score: {new_cv_score:.4f}")
+
+        # If successful and kept, cache for future iterations
+        if result.success and should_keep_component:
             cache_key = f"component_result_{component.name}"
             state_updates[cache_key] = result
             print(f"  💾 Cached successful result for: {component.name}")
@@ -337,6 +374,108 @@ class DeveloperAgent:
             artifacts_created=exec_result.artifacts_created,
             errors=exec_result.errors,
         )
+
+    def _extract_cv_score(self, stdout: str) -> Optional[float]:
+        """
+        Extract cross-validation score from stdout using regex patterns.
+
+        Args:
+            stdout: Standard output from code execution
+
+        Returns:
+            Extracted CV score, or None if not found
+        """
+        import re
+
+        # Try multiple patterns to extract CV score
+        patterns = [
+            r"CV Score.*?(\d+\.\d+)",
+            r"Final Validation Performance:\s*(\d+\.\d+)",
+            r"ROC-AUC.*?(\d+\.\d+)",
+            r"Accuracy.*?(\d+\.\d+)",
+            r"RMSE.*?(\d+\.\d+)",
+            r"Mean.*?(\d+\.\d+)\s*\(",  # Mean score with std
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, stdout, re.IGNORECASE)
+            if match:
+                try:
+                    score = float(match.group(1))
+                    return score
+                except ValueError:
+                    continue
+
+        return None
+
+    def _validate_component_improvement(
+        self,
+        component: AblationComponent,
+        exec_result: ExecutionResult,
+        state: KaggleState,
+    ) -> tuple[bool, Optional[float]]:
+        """
+        Validate if component improves score using Hill Climbing strategy.
+
+        Implements ablation studies by comparing CV score before and after component.
+
+        Args:
+            component: Component being tested
+            exec_result: Execution result containing stdout
+            state: Current workflow state
+
+        Returns:
+            (should_keep, new_score) - Whether to keep component and its CV score
+        """
+        # Get evaluation metric from competition info
+        competition_info = state.get("competition_info")
+        metric_name = competition_info.evaluation_metric if competition_info else ""
+
+        # Determine metric direction for defaults
+        is_minimize = is_metric_minimization(metric_name)
+
+        # Extract CV score from component execution
+        cv_score = self._extract_cv_score(exec_result.stdout)
+
+        # Handle missing scores gracefully (avoid false rollbacks)
+        if cv_score is None:
+            print("\n   📊 Ablation Study (Hill Climbing):")
+            print(f"      Metric:         {metric_name} ({'↓' if is_minimize else '↑'} {'minimize' if is_minimize else 'maximize'})")
+            print("      ⚠️  No CV score found in stdout; skipping rollback and keeping component.")
+            return True, None
+
+        # Get baseline score (before this component)
+        baseline_score = state.get("baseline_cv_score")
+        if baseline_score is None:
+            baseline_score = float("inf") if is_minimize else float("-inf")
+
+        # Calculate improvement considering metric direction
+        improvement = calculate_score_improvement(cv_score, baseline_score, metric_name)
+
+        # Determine metric direction for display
+        direction_symbol = "↓" if is_minimize else "↑"
+        direction_text = "minimize" if is_minimize else "maximize"
+
+        print(f"\n   📊 Ablation Study (Hill Climbing):")
+        print(f"      Metric:         {metric_name} ({direction_symbol} {direction_text})")
+        print(f"      Baseline CV:    {baseline_score:.4f}")
+        print(f"      Component CV:   {cv_score:.4f}")
+        print(f"      Improvement:    {improvement:+.4f}")
+
+        # Decision criteria
+        min_improvement = 0.001  # 0.1% minimum improvement threshold
+        should_keep = improvement >= min_improvement
+
+        if not should_keep:
+            print(f"      ❌ Component REJECTED (no improvement or negative impact)")
+            print(f"      Reason: Delta ({improvement:+.4f}) < threshold ({min_improvement})")
+        else:
+            print(f"      ✅ Component ACCEPTED (positive improvement)")
+            if baseline_score not in [float("inf"), float("-inf"), 0]:
+                relative_gain = abs(improvement / baseline_score * 100)
+                print(f"      Impact: {relative_gain:.2f}% relative improvement")
+
+        return should_keep, cv_score
 
     def _execute_with_multi_level_retry_v2(
         self,

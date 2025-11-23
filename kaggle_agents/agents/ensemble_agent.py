@@ -292,7 +292,9 @@ Return a JSON object:
         Returns:
             Updated state with ensemble model
         """
-        print("Ensemble Agent: Creating model ensemble...")
+        print("\n" + "="*60)
+        print("ENSEMBLE AGENT: Creating Model Ensemble")
+        print("="*60)
 
         try:
             # Handle both dict and dataclass state access
@@ -302,10 +304,30 @@ Return a JSON object:
             eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
             best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
 
+            # DEBUG: Detailed information about available models
+            dev_results = state.get("development_results", [])
+            successful_results = [r for r in dev_results if r.success] if dev_results else []
+
+            print(f"\n   📊 Ensemble Prerequisites Check:")
+            print(f"      Total development results: {len(dev_results)}")
+            print(f"      Successful results: {len(successful_results)}")
+            print(f"      Models trained count: {len(models_trained)}")
+
+            if successful_results:
+                print(f"\n   ✅ Successful components:")
+                for i, result in enumerate(successful_results[-5:], 1):  # Last 5
+                    artifacts_str = ', '.join(result.artifacts_created[:3]) if result.artifacts_created else 'none'
+                    print(f"      {i}. {artifacts_str}")
+
             # Check if we have multiple models
             if len(models_trained) < 2:
-                print("  Only one model trained, skipping ensemble")
-                return state
+                print(f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})")
+                print(f"      Reason: Ensemble requires at least 2 trained models")
+                print(f"      Skipping ensemble step")
+                return {
+                    "ensemble_skipped": True,
+                    "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)"
+                }
 
             # Load processed data
             train_df = pd.read_csv(train_data_path)
@@ -329,23 +351,37 @@ Return a JSON object:
             # Determine problem type
             problem_type = "classification" if y.nunique() < 20 else "regression"
 
-            # Load top models (top 3)
+            # Load top models (top 3 by CV score)
+            print(f"\n   🔍 Loading top models for ensemble...")
+            sorted_models = sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]
+
             top_models = []
-            for model_info in sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]:
+            for i, model_info in enumerate(sorted_models, 1):
                 model_path = f"{get_config().paths.models_dir}/{model_info['name']}_{competition_name}.joblib"
+                print(f"      Model {i}: {model_info['name']} (CV: {model_info['mean_cv_score']:.4f})")
+
                 if Path(model_path).exists():
                     model = joblib.load(model_path)
                     top_models.append(model)
+                    print(f"         ✅ Loaded from {model_path}")
+                else:
+                    print(f"         ❌ Model file not found: {model_path}")
 
             if len(top_models) < 2:
-                print("  Not enough trained models for ensemble")
-                return state
+                print(f"\n   ❌ Not enough trained models loaded for ensemble")
+                print(f"      Required: 2+, Found: {len(top_models)}")
+                return {
+                    "ensemble_skipped": True,
+                    "skip_reason": f"models_not_found (loaded {len(top_models)}, need 2+)"
+                }
 
             # PLAN ENSEMBLE STRATEGY
+            print(f"\n   🎯 Planning ensemble strategy...")
             plan = self.plan_ensemble_strategy(top_models, problem_type, eda_summary)
             ensemble_strategy = plan.get("strategy_name", "weighted_blending")
-            print(f"  Selected Ensemble Strategy: {ensemble_strategy}")
-            print(f"  Description: {plan.get('description', '')}")
+            print(f"      Strategy: {ensemble_strategy}")
+            print(f"      Description: {plan.get('description', '')}")
+            print(f"      Combining {len(top_models)} models using {ensemble_strategy}")
 
             # Create ensemble
             if "stack" in ensemble_strategy.lower():

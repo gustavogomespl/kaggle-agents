@@ -164,28 +164,47 @@ class RobustnessAgent:
 
         code = dev_result.code
 
-        # LLM-based Leakage Check
+        # LLM-based Leakage Check (Enhanced with ADK-style structured output)
         from langchain_core.messages import SystemMessage, HumanMessage
         import json
-        
-        prompt = f"""# Python code
+
+        prompt = f"""You are a data science expert reviewing code for data leakage.
+
+CRITICAL: You MUST respond with valid JSON only. No markdown, no extra text.
+
+Code to analyze:
 ```python
-{code}
+{code[:5000]}
 ```
 
 # Your task
-- Extract the code block where the validation and test samples are preprocessed using training samples.
-- Check that the model is trained with only training samples.
-- Check that before printing the final validation score, the model is not trained the validation samples.
-- Also check whether the validation and test samples are preprocessed correctly, preventing information from the validation or test samples from influencing the training process (i.e., preventing data leakage).
+Analyze if this code has data leakage issues:
 
-# Requirement
-- If data leakage is present on validation and test samples, answer 'Yes Data Leakage'.
-- If data leakage is not present on validation and test samples, answer 'No Data Leakage'.
+1. **Training Leakage**: Are validation or test samples used during model training?
+2. **Preprocessing Leakage**: Are scalers/encoders/transformers fitted on validation/test data?
+3. **Target Leakage**: Is the target variable used in feature engineering before split?
+4. **Temporal Leakage**: Is future information used to predict the past?
 
-Use this JSON schema:
-Answer = {{'leakage_status': str, 'reason': str}}
-Return: Answer
+# Common leakage patterns to check:
+- `fit()` or `fit_transform()` on combined train+test
+- `TargetEncoder.fit()` on validation/test data
+- Preprocessing fitted globally before train/test split
+- Training data statistics calculated from validation/test
+
+# Response Format
+Respond with this EXACT JSON format (no markdown, no extra text):
+
+{{
+    "leakage_status": "YES" or "NO",
+    "code_block": "exact lines of code with leakage (empty string if NO)",
+    "line_numbers": "approximate line range like '45-52' (empty string if NO)",
+    "explanation": "brief 1-sentence explanation of the issue (or why it's clean)"
+}}
+
+IMPORTANT:
+- If leakage detected: leakage_status = "YES"
+- If no leakage: leakage_status = "NO"
+- Always provide code_block and line_numbers if YES
 """
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
@@ -195,19 +214,47 @@ Return: Answer
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "```" in content:
                 content = content.split("```")[1].split("```")[0].strip()
-                
+
             result = json.loads(content)
-            
-            if "Yes Data Leakage" in result.get("leakage_status", ""):
-                issues.append(f"Data Leakage Detected: {result.get('reason', 'Unknown reason')}")
-                suggestions.append("Ensure test/validation data is not used for training or fitting scalers")
+
+            leakage_status = result.get("leakage_status", "NO").upper()
+            code_block = result.get("code_block", "")
+            line_numbers = result.get("line_numbers", "")
+            explanation = result.get("explanation", "No explanation provided")
+
+            if leakage_status == "YES":
+                print(f"   ❌ Data Leakage Detected!")
+                print(f"      Lines: {line_numbers}")
+                print(f"      Issue: {explanation}")
+
+                if code_block:
+                    print(f"      Problematic Code:")
+                    print(f"      ```python")
+                    # Show first 300 chars of code block
+                    code_preview = code_block[:300] + "..." if len(code_block) > 300 else code_block
+                    for line in code_preview.split('\n'):
+                        print(f"      {line}")
+                    print(f"      ```")
+
+                issues.append(f"Data Leakage ({line_numbers}): {explanation}")
+                suggestions.append("Fix the code block identified above to prevent leakage")
                 score = 0.0
                 passed = False
+
+                # Store structured leakage details for potential auto-correction
+                leakage_details = {
+                    "leakage_code_block": code_block,
+                    "line_numbers": line_numbers,
+                    "explanation": explanation,
+                }
             else:
+                print(f"   ✅ No Data Leakage: {explanation}")
                 passed = True
-                
+                leakage_details = {}
+
         except Exception as e:
-            print(f"   Warning: LLM Leakage Check failed: {e}")
+            print(f"   ⚠️  Warning: LLM Leakage Check failed: {e}")
+            leakage_details = {}
             # Fallback to regex
             leakage_patterns = [
                 (r"fit.*train_df.*\+.*test_df", "Fitting on train+test together"),
@@ -228,6 +275,7 @@ Return: Answer
             score=score,
             issues=issues,
             suggestions=suggestions,
+            details=leakage_details,  # Structured information for auto-correction
         )
 
     def _validate_data_usage(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:

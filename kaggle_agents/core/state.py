@@ -80,6 +80,7 @@ class ValidationResult:
     score: float
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
+    details: dict[str, Any] = field(default_factory=dict)  # Additional structured information
 
 
 @dataclass
