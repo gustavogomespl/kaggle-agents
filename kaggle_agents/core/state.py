@@ -121,6 +121,8 @@ class KaggleState(TypedDict):
     # Competition Context
     competition_info: CompetitionInfo
     working_directory: str
+    current_train_path: Optional[str]
+    current_test_path: Optional[str]
 
     # Domain Detection
     domain_detected: Optional[DomainType]
@@ -153,6 +155,8 @@ class KaggleState(TypedDict):
     submissions: Annotated[list[SubmissionResult], add]
     best_score: float
     target_percentile: float  # goal: 20th percentile (top 20%)
+    best_single_model_score: Optional[float]
+    best_single_model_name: Optional[str]
 
     # Iteration Control
     current_iteration: int
@@ -229,6 +233,8 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
             problem_type="",
         ),
         working_directory=working_dir,
+        current_train_path=None,
+        current_test_path=None,
 
         # Domain Detection
         domain_detected=None,
@@ -261,6 +267,8 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         submissions=[],
         best_score=0.0,
         target_percentile=20.0,  # top 20%
+        best_single_model_score=None,
+        best_single_model_name=None,
 
         # Iteration Control
         current_iteration=0,

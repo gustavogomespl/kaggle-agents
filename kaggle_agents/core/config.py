@@ -56,6 +56,7 @@ class AblationConfig:
     enable_code_preview: bool = True  # show code before execution
     save_generated_code: bool = True  # save generated code to files
     code_preview_lines: int = 30  # number of lines to show in preview
+    enable_refinement: bool = True  # enable iterative refinement of successful components
 
 
 @dataclass

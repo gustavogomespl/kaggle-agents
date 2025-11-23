@@ -104,16 +104,26 @@ class SubmissionAgent:
             self._check_goal_achievement(submission_result, state)
 
         # Update best_score considering metric direction
+        # IMPORTANT: best_score must ALWAYS be numeric (never None) to avoid
+        # TypeError in workflow.py when formatting with :.4f
         current_best = state.get("best_score", 0.0)
-        new_score = submission_result.public_score or 0.0
+        new_score = submission_result.public_score
         metric_name = state["competition_info"].evaluation_metric
 
-        # Use compare_scores to handle both minimize and maximize metrics
-        updated_best = compare_scores(current_best, new_score, metric_name)
+        # Only update if we have a valid new score
+        if new_score is not None:
+            # First valid score OR comparison with existing best
+            if current_best == 0.0 and len(state.get("submissions", [])) == 0:
+                updated_best = new_score
+            else:
+                updated_best = compare_scores(current_best, new_score, metric_name)
+        else:
+            # No score available (hidden score competition), keep previous best
+            updated_best = current_best
 
         return {
             "submissions": [submission_result],
-            "best_score": updated_best,
+            "best_score": updated_best,  # Guaranteed to be float
             "last_updated": datetime.now(),
         }
 

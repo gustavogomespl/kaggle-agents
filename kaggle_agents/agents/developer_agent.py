@@ -9,6 +9,7 @@ import json
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
+import shutil
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -158,6 +159,10 @@ class DeveloperAgent:
         ablation_plan = state.get("ablation_plan", [])
         current_index = state.get("current_component_index", 0)
 
+        # Extract required variables from state (used throughout __call__)
+        working_dir = Path(state["working_directory"])
+        competition_info = state["competition_info"]
+
         if not ablation_plan:
             print("  No ablation plan found. Run Planner Agent first.")
             return {}
@@ -206,13 +211,14 @@ class DeveloperAgent:
                     "rollback_reason": "No CV improvement detected (Ablation Study)",
                 }
 
-        # Determine if we should move to next component
+        # Determine if we should move to next component (for all component types)
         # Always move forward if it's a critical error (data files missing)
         should_advance = result.success or (
             not result.success and "Data files not found" in (result.stderr or "")
         )
 
-        # Cache successful results for skip logic (MLE-STAR Pattern)
+        # Create state_updates dict early (before blocks that need to modify it)
+        # This must be outside model-specific block since all components use it
         state_updates = {
             "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
@@ -221,16 +227,135 @@ class DeveloperAgent:
             "last_updated": datetime.now(),
         }
 
-        # Update baseline CV score if component was accepted and score available
-        if result.success and should_keep_component and new_cv_score is not None:
-            state_updates["baseline_cv_score"] = new_cv_score
-            print(f"  📊 Updated baseline CV score: {new_cv_score:.4f}")
+        # Model-specific validation and tracking blocks
+        if result.success and component.component_type == "model":
+            # OOF VALIDATION (Last Mile)
+            oof_file = working_dir / "models" / f"oof_{component.name}.npy"
+            if not oof_file.exists():
+                print(f"   ⚠️  WARNING: Model {component.name} did NOT save OOF file!")
+                print(f"      Expected: {oof_file.name}")
+                print(f"      Stacking will fail for this model.")
+                # Optional: Mark as failure? For now, just warn loudly.
+                # result.success = False # Could force retry, but might be too aggressive
+                # result.success = False # Could force retry, but might be too aggressive
+
+            # SUBMISSION BACKUP & BEST MODEL TRACKING (User Request)
+            submission_path = working_dir / "submission.csv"
+            if submission_path.exists():
+                # Backup with component name
+                backup_name = f"submission_{component.name}.csv"
+                backup_path = working_dir / backup_name
+                shutil.copy(submission_path, backup_path)
+                print(f"  💾 Backup submission saved: {backup_name}")
+
+                # Track Best Model
+                current_best_score = state.get("best_single_model_score")
+                metric_name = competition_info.evaluation_metric
+
+                is_best = False
+                if new_cv_score is not None:
+                    if current_best_score is None:
+                        is_best = True
+                    else:
+                        improvement = calculate_score_improvement(new_cv_score, current_best_score, metric_name)
+                        if improvement > 0:
+                            is_best = True
+
+                if is_best:
+                    print(f"  🏆 New Best Single Model! ({new_cv_score:.4f})")
+                    state_updates["best_single_model_score"] = new_cv_score
+                    state_updates["best_single_model_name"] = component.name
+
+                    # Save as submission_best.csv
+                    best_path = working_dir / "submission_best.csv"
+                    shutil.copy(submission_path, best_path)
+                    print(f"     Saved to submission_best.csv")
+            else:
+                print(f"  ⚠️ Warning: submission.csv not found after successful execution")
+
+            # Update baseline CV score if component was accepted and score available
+            if result.success and should_keep_component and new_cv_score is not None:
+                state_updates["baseline_cv_score"] = new_cv_score
+                print(f"  📊 Updated baseline CV score: {new_cv_score:.4f}")
 
         # If successful and kept, cache for future iterations
         if result.success and should_keep_component:
             cache_key = f"component_result_{component.name}"
             state_updates[cache_key] = result
             print(f"  💾 Cached successful result for: {component.name}")
+
+            # REFINEMENT LOOP (ADK Style)
+            if component.component_type == "model" and self.config.ablation.enable_refinement:
+                print("\n   🔄 ADK Refinement Loop: Trying to improve score...")
+                best_code = result.code
+                best_score = new_cv_score if new_cv_score is not None else 0.0
+                
+                # Try to improve 2 times
+                for i in range(2):
+                    print(f"     Refinement Iteration {i+1}/2")
+                    refine_prompt = f"""
+                    Current code achieved CV Score: {best_score}.
+                    Analyze the hyperparameters and architecture.
+                    Suggest a modification to IMPROVE the score.
+                    Return the full updated code.
+                    """
+                    # Create a temporary component for refinement
+                    refine_component = component
+                    
+                    # Generate refined code (using fix_code_error as a proxy for refinement or generate new)
+                    # We'll use _generate_code but with specific refinement instructions injected via state or prompt
+                    # For simplicity, we'll append the refinement prompt to requirements in a hacky way or use a new method
+                    # Let's use the existing _generate_code but modify the component description slightly to trigger optimization
+                    
+                    # Actually, let's use the LLM directly to refine the code
+                    from langchain_core.messages import HumanMessage, SystemMessage
+                    refine_messages = [
+                        SystemMessage(content=DEVELOPER_SYSTEM_PROMPT),
+                        HumanMessage(content=f"Here is the current working code:\n```python\n{best_code}\n```\n\n{refine_prompt}")
+                    ]
+                    
+                    try:
+                        refined_response = self.llm.invoke(refine_messages)
+                        refined_code = self._extract_code_from_response(refined_response.content)
+                        
+                        # Execute refined code
+                        print("     Executing refined code...")
+                        refined_exec = self.executor.execute(refined_code, working_dir)
+                        
+                        if refined_exec.success:
+                            refined_score = self._extract_cv_score(refined_exec.stdout)
+                            if refined_score is not None:
+                                improvement = calculate_score_improvement(refined_score, best_score, competition_info.evaluation_metric)
+                                if improvement > 0:
+                                    print(f"     🚀 Improvement found: {refined_score} (was {best_score})")
+                                    best_score = refined_score
+                                    best_code = refined_code
+                                    # Update result
+                                    result.code = best_code
+                                    result.stdout = refined_exec.stdout
+                                    state_updates["current_code"] = best_code
+                                    state_updates["baseline_cv_score"] = best_score
+                                else:
+                                    print(f"     No improvement ({refined_score} vs {best_score})")
+                            else:
+                                print("     Could not extract score from refined code")
+                        else:
+                            print("     Refined code failed to execute")
+                    except Exception as e:
+                        print(f"     Refinement failed: {e}")
+
+            # PIPELINE UPDATE: Check for new data files
+            if component.component_type == "feature_engineering":
+                # Check for common engineered file names
+                eng_train = working_dir / "train_engineered.csv"
+                eng_test = working_dir / "test_engineered.csv"
+                
+                if eng_train.exists() and eng_test.exists():
+                    state_updates["current_train_path"] = str(eng_train)
+                    state_updates["current_test_path"] = str(eng_test)
+                    print(f"  🔄 Pipeline Update: Pointing subsequent agents to engineered data:")
+                    print(f"     Train: {eng_train.name}")
+                    print(f"     Test:  {eng_test.name}")
 
         return state_updates
 
@@ -728,11 +853,36 @@ class DeveloperAgent:
             instructions.append("  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder")
             instructions.append("  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')")
             instructions.append("  - CatBoost is the ONLY exception that handles categorical features natively")
-            instructions.append("  - MUST use StratifiedKFold for cross-validation")
+
+            # CONSISTENT CV (Last Mile)
+            instructions.append("\n🔄 CONSISTENT CROSS-VALIDATION (CRITICAL):")
+            instructions.append(f"  - Check if '{state.get('working_directory')}/folds.csv' exists.")
+            instructions.append("  - IF EXISTS: Load it and use the 'fold' column for splitting.")
+            instructions.append("    ```python")
+            instructions.append("    folds = pd.read_csv('folds.csv')")
+            instructions.append("    # Assuming X is aligned with folds (reset_index if needed)")
+            instructions.append("    for fold in sorted(folds['fold'].unique()):")
+            instructions.append("        val_idx = folds[folds['fold'] == fold].index")
+            instructions.append("        train_idx = folds[folds['fold'] != fold].index")
+            instructions.append("        # ... train/val split ...")
+            instructions.append("    ```")
+            instructions.append("  - IF NOT EXISTS: Use StratifiedKFold(n_splits=5, shuffle=True, random_state=42)")
+            
             instructions.append("  - CRITICAL: MUST save Out-of-Fold (OOF) predictions during CV to models/oof_{component_name}.npy")
             instructions.append("  - OOF predictions enable proper stacking ensemble (meta-model trained on OOF)")
             instructions.append("  - MUST print 'Final Validation Performance: {score}'")
             instructions.append("  - MUST handle class imbalance with class_weight='balanced'")
+            
+            # OOF AND STACKING REQUIREMENTS (Top 20% Strategy)
+            instructions.append("\n📦 STACKING & OOF REQUIREMENTS (CRITICAL):")
+            instructions.append("  1. Initialize `oof_preds` array of zeros with length of train set.")
+            instructions.append("  2. Initialize `test_preds` array of zeros with length of test set.")
+            instructions.append("  3. During CV loop:")
+            instructions.append("     - Fill `oof_preds[val_idx]` with predictions for validation fold.")
+            instructions.append("     - Predict on test set and accumulate: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`")
+            instructions.append(f"  4. Save OOF predictions: `np.save(str(Path('{state.get('working_directory')}') / 'models' / 'oof_{component.name}.npy'), oof_preds)`")
+            instructions.append(f"  5. Save Test predictions: `np.save(str(Path('{state.get('working_directory')}') / 'models' / 'test_{component.name}.npy'), test_preds)`")
+            instructions.append("  6. This enables the Ensemble Agent to use Stacking later.")
 
             # OPTUNA SPECIFIC GUIDANCE
             if "optuna" in component.name.lower() or "tuned" in component.name.lower() or "optimized" in component.name.lower():
@@ -764,6 +914,15 @@ class DeveloperAgent:
             instructions.append("  - Save engineered features to file for model components")
             instructions.append("  - NO model training in this component")
             instructions.append("  - Print feature importance or correlation metrics")
+            
+            # FEATURE SELECTION (Last Mile)
+            instructions.append("\n🧹 FEATURE SELECTION (CRITICAL):")
+            instructions.append("  - After creating new features, perform selection to remove noise:")
+            instructions.append("  1. Train a quick LightGBM/XGBoost on the new feature set.")
+            instructions.append("  2. Calculate feature importance (gain/split).")
+            instructions.append("  3. Drop features with 0 importance or very low importance (< 1e-4).")
+            instructions.append("  4. Save ONLY the selected features to 'train_engineered.csv' and 'test_engineered.csv'.")
+            instructions.append("  5. Print list of dropped features.")
         elif component.component_type == "ensemble":
             instructions.append("\n🎭 ENSEMBLE REQUIREMENTS:")
             instructions.append("  - Combine predictions from multiple models")
@@ -867,9 +1026,13 @@ Problem Type: {competition_info.problem_type}
 Metric: {competition_info.evaluation_metric}
 """
 
+        # Determine data paths (dynamic or default)
+        train_path = state.get("current_train_path") if state and state.get("current_train_path") else working_dir / 'train.csv'
+        test_path = state.get("current_test_path") if state and state.get("current_test_path") else working_dir / 'test.csv'
+
         data_paths = f"""
-Train: {working_dir / 'train.csv'}
-Test: {working_dir / 'test.csv'}
+Train: {train_path}
+Test: {test_path}
 Models: {working_dir / 'models'}
 Submission: {working_dir / 'submission.csv'}
 """

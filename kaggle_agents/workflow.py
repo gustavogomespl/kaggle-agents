@@ -7,6 +7,7 @@ implementing the full pipeline from SOTA search to submission.
 
 from typing import Dict, Any, Literal
 from datetime import datetime
+from pathlib import Path
 import pandas as pd
 
 from langgraph.graph import StateGraph, END
@@ -48,7 +49,7 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
     print("="*60)
 
     competition_info = state["competition_info"]
-    working_dir = state["working_directory"]
+    working_dir = Path(state["working_directory"])
 
     print(f"\n📥 Downloading data for: {competition_info.name}")
     print(f"   Destination: {working_dir}")
@@ -78,6 +79,22 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
                     print(f"   🎯 Target Column Detected: {target_col}")
             except Exception as e:
                 print(f"   ⚠️ Could not read sample submission to infer target: {e}")
+
+        # GENERATE FIXED FOLDS (Consistent CV)
+        if data_files.get('train'):
+            try:
+                from .utils.cross_validation import generate_folds
+                folds_path = str(working_dir / "folds.csv")
+                generate_folds(
+                    train_path=data_files['train'],
+                    target_col=target_col,
+                    output_path=folds_path,
+                    n_folds=5,
+                    seed=42
+                )
+                data_files['folds'] = folds_path
+            except Exception as e:
+                print(f"   ⚠️ Failed to generate fixed folds: {e}")
 
         return {
             "data_files": data_files,
