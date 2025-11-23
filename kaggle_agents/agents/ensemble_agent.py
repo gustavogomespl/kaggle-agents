@@ -486,6 +486,14 @@ Return a JSON object:
             resolved_train_path = Path(current_train_path) if current_train_path else Path(train_data_path) if train_data_path else working_dir / "train.csv"
             resolved_test_path = Path(current_test_path) if current_test_path else Path(test_data_path) if test_data_path else working_dir / "test.csv"
 
+            print(f"\n   📂 Data Paths:")
+            print(f"      Train: {resolved_train_path.name}")
+            print(f"      Test:  {resolved_test_path.name}")
+            if current_train_path:
+                print(f"      ✅ Using engineered features (from feature_engineering component)")
+            else:
+                print(f"      📊 Using original raw features")
+
             if not resolved_train_path.exists():
                 print(f"  ❌ Train data not found at {resolved_train_path}, skipping ensemble")
                 return state
