@@ -179,9 +179,12 @@ class DeveloperAgent:
         # Dynamically adjust execution timeout based on component type
         base_timeout = self.config.ablation.testing_timeout
         heavy_timeout = max(base_timeout, 1800)  # Longer window for model training/Optuna
-        # Cap ensembles at 20 minutes by default; if base_timeout is lower, respect it
+        # Cap ensembles at ~20 minutes by default; if base_timeout is lower, respect it
         ensemble_timeout = min(base_timeout, 1200) if base_timeout else 1200
         ensemble_timeout = max(ensemble_timeout, 1200)
+        # Feature engineering can be heavy; give it a larger window than "light" steps
+        feature_timeout = min(base_timeout, 900) if base_timeout else 900
+        feature_timeout = max(feature_timeout, 900)
         light_timeout = min(base_timeout, 300) if base_timeout else 300  # Fail fast on lightweight scripts
         name_lower = component.name.lower()
 
@@ -189,6 +192,8 @@ class DeveloperAgent:
             desired_timeout = heavy_timeout
         elif component.component_type == "ensemble":
             desired_timeout = ensemble_timeout
+        elif component.component_type == "feature_engineering":
+            desired_timeout = feature_timeout
         else:
             desired_timeout = light_timeout if light_timeout > 0 else base_timeout
 
@@ -500,11 +505,19 @@ class DeveloperAgent:
 
             # Try to fix
             if attempt < max_retries - 1:
+                error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                if error_msg:
+                    snippet = error_msg.replace("\n", " ")[:400]
+                    print(f"   🧾 Passing error context to fixer: {snippet}")
                 print("   =' Attempting to fix...")
-                code = self._fix_code_error(code, exec_result.errors[0] if exec_result.errors else exec_result.stderr)
+                code = self._fix_code_error(code, error_msg)
 
         # If all retries failed, try debug iterations
         print("\n   = Entering debug mode...")
+        debug_error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
+        if debug_error_msg:
+            snippet = debug_error_msg.replace("\n", " ")[:400]
+            print(f"   🧾 Last error passed to debugger: {snippet}")
         code, exec_result, debug_success = self._debug_code(
             code, exec_result, working_dir, max_iterations=5
         )
