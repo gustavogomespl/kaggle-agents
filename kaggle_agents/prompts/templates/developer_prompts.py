@@ -145,6 +145,7 @@ Submission Path: {submission_path}
   - Small datasets (<5k): More trees, deeper (n_estimators=1000, max_depth=8)
   - Large datasets (>100k): Fewer trees, shallower (n_estimators=400, max_depth=5)
   - **num_leaves** (LightGBM): Use `2^max_depth - 1` for consistency
+- CRITICAL: Check if GPU is available. If yes, set 'device': 'gpu' (LightGBM) or 'tree_method': 'gpu_hist' (XGBoost). This is mandatory for speed.
 - Target execution time: 60-90 seconds per model (use early stopping)
 - Print CV score or validation metrics
 
@@ -525,7 +526,16 @@ X_test = test_df
 # TODO: Implement feature engineering
 
 # Model training
-model = xgb.XGBClassifier(random_state=42, n_estimators=100)
+# Check for GPU
+import torch
+if torch.cuda.is_available():
+    print("GPU detected!")
+    xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor', 'random_state': 42, 'n_estimators': 100}
+else:
+    print("GPU not detected, using CPU")
+    xgb_params = {'tree_method': 'hist', 'random_state': 42, 'n_estimators': 100}
+
+model = xgb.XGBClassifier(**xgb_params)
 model.fit(X, y)
 
 # Cross-validation
@@ -687,6 +697,17 @@ print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
 
 scale_pos_weight = negative_count / positive_count if imbalance_ratio > 2.0 else 1.0
 
+# Check for GPU
+import torch
+if torch.cuda.is_available():
+    print("GPU detected!")
+    xgb_gpu_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
+    lgb_gpu_params = {'device': 'gpu'}
+else:
+    print("GPU not detected, using CPU")
+    xgb_gpu_params = {'tree_method': 'hist'}
+    lgb_gpu_params = {'device': 'cpu'}
+
 # Define base learners (diverse models)
 base_learners = [
     ('xgb', xgb.XGBClassifier(
@@ -695,7 +716,8 @@ base_learners = [
         learning_rate=0.03,
         scale_pos_weight=scale_pos_weight,
         random_state=RANDOM_SEED,
-        n_jobs=-1
+        n_jobs=-1,
+        **xgb_gpu_params
     )),
     ('lgb', lgb.LGBMClassifier(
         n_estimators=2000,
@@ -705,14 +727,16 @@ base_learners = [
         is_unbalance=(imbalance_ratio > 2.0),
         random_state=RANDOM_SEED,
         n_jobs=-1,
-        verbose=-1
+        verbose=-1,
+        **lgb_gpu_params
     )),
     ('catboost', CatBoostClassifier(
         iterations=2000,
         depth=7,
         learning_rate=0.03,
         random_state=RANDOM_SEED,
-        verbose=False
+        verbose=False,
+        task_type="GPU" if torch.cuda.is_available() else "CPU"
     ))
 ]
 
@@ -845,6 +869,17 @@ else:
 
 print(f"Features: {{X_combined.shape[1]}}")
 
+# Check for GPU
+import torch
+if torch.cuda.is_available():
+    print("GPU detected!")
+    xgb_gpu_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
+    lgb_gpu_params = {'device': 'gpu'}
+else:
+    print("GPU not detected, using CPU")
+    xgb_gpu_params = {'tree_method': 'hist'}
+    lgb_gpu_params = {'device': 'cpu'}
+
 # Define base learners with competitive hyperparameters
 base_learners = [
     ('lgb', lgb.LGBMRegressor(
@@ -856,7 +891,8 @@ base_learners = [
         colsample_bytree=0.8,
         random_state=RANDOM_SEED,
         n_jobs=-1,
-        verbose=-1
+        verbose=-1,
+        **lgb_gpu_params
     )),
     ('xgb', xgb.XGBRegressor(
         n_estimators=2000,
@@ -865,14 +901,16 @@ base_learners = [
         subsample=0.8,
         colsample_bytree=0.8,
         random_state=RANDOM_SEED,
-        n_jobs=-1
+        n_jobs=-1,
+        **xgb_gpu_params
     )),
     ('catboost', CatBoostRegressor(
         iterations=2000,
         depth=7,
         learning_rate=0.03,
         random_state=RANDOM_SEED,
-        verbose=False
+        verbose=False,
+        task_type="GPU" if torch.cuda.is_available() else "CPU"
     ))
 ]
 

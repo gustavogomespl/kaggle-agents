@@ -14,7 +14,12 @@ import shutil
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..core.state import KaggleState, AblationComponent, DevelopmentResult
-from ..core.config import get_config, get_llm_for_role, calculate_score_improvement, is_metric_minimization
+from ..core.config import (
+    get_config,
+    get_llm_for_role,
+    calculate_score_improvement,
+    is_metric_minimization,
+)
 from ..tools.code_executor import CodeExecutor, ArtifactValidator, ExecutionResult
 from ..prompts.templates.developer_prompts import (
     DEVELOPER_SYSTEM_PROMPT,
@@ -29,6 +34,7 @@ from ..optimization import create_optimizer, create_developer_metric
 
 
 # ==================== DSPy Signatures ====================
+
 
 class CodeGeneratorSignature(dspy.Signature):
     """Signature for code generation."""
@@ -54,6 +60,7 @@ class CodeFixerSignature(dspy.Signature):
 
 
 # ==================== DSPy Modules ====================
+
 
 class CodeGeneratorModule(dspy.Module):
     """DSPy module for code generation."""
@@ -88,6 +95,7 @@ class CodeFixerModule(dspy.Module):
 
 # ==================== Developer Agent ====================
 
+
 class DeveloperAgent:
     """
     Agent responsible for code generation and execution.
@@ -111,16 +119,13 @@ class DeveloperAgent:
         self.config = get_config()
         self.use_dspy = use_dspy and self.config.dspy.enabled
 
-        # Code executor (use configured timeout)
         timeout = self.config.ablation.testing_timeout
         self.executor = CodeExecutor(timeout=timeout)
         self.validator = ArtifactValidator()
 
-        print(f"   ⏱️  Component timeout set to: {timeout}s ({timeout/60:.1f} min)")
+        print(f"Component timeout set to: {timeout}s ({timeout / 60:.1f} min)")
 
-        # Always create LLM client (used for debugging even with DSPy)
-        # MLE-STAR Pattern: Lower temperature for implementation tasks (0.3)
-        implementation_temperature = 0.3
+        implementation_temperature = 0.1
 
         self.llm = get_llm_for_role(
             role="developer",
@@ -129,17 +134,18 @@ class DeveloperAgent:
         )
 
         if self.use_dspy:
-            # Try to load optimized modules
             optimizer = create_optimizer()
-            self.generator_module = optimizer.load_optimized_prompt("developer_generator")
+            self.generator_module = optimizer.load_optimized_prompt(
+                "developer_generator"
+            )
             self.fixer_module = optimizer.load_optimized_prompt("developer_fixer")
 
             if self.generator_module is None:
-                print("   Using base (unoptimized) generator module")
+                print("Using base (unoptimized) generator module")
                 self.generator_module = CodeGeneratorModule()
 
             if self.fixer_module is None:
-                print("   Using base (unoptimized) fixer module")
+                print("Using base (unoptimized) fixer module")
                 self.fixer_module = CodeFixerModule()
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
@@ -152,40 +158,35 @@ class DeveloperAgent:
         Returns:
             State updates with development results
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("= DEVELOPER AGENT: Implementing Components")
-        print("="*60)
+        print("=" * 60)
 
         ablation_plan = state.get("ablation_plan", [])
         current_index = state.get("current_component_index", 0)
 
-        # Extract required variables from state (used throughout __call__)
         working_dir = Path(state["working_directory"])
         competition_info = state["competition_info"]
 
         if not ablation_plan:
-            print("  No ablation plan found. Run Planner Agent first.")
+            print("No ablation plan found. Run Planner Agent first.")
             return {}
 
         if current_index >= len(ablation_plan):
-            print(" All components implemented!")
+            print("All components implemented!")
             return {"current_component_index": current_index}
 
-        # Implement current component
         component = ablation_plan[current_index]
         print(f"\n= Implementing: {component.name} ({component.component_type})")
-        print(f"   Estimated Impact: {component.estimated_impact:.1%}")
+        print(f"Estimated Impact: {component.estimated_impact:.1%}")
 
-        # Dynamically adjust execution timeout based on component type
         base_timeout = self.config.ablation.testing_timeout
-        heavy_timeout = max(base_timeout, 2700)  # Longer window for model training/Optuna (45 minutes)
-        # Cap ensembles at ~20 minutes by default; if base_timeout is lower, respect it
+        heavy_timeout = max(base_timeout, 2700)
         ensemble_timeout = min(base_timeout, 1200) if base_timeout else 1200
         ensemble_timeout = max(ensemble_timeout, 1200)
-        # Feature engineering can be heavy; give it a larger window than "light" steps
         feature_timeout = min(base_timeout, 900) if base_timeout else 900
         feature_timeout = max(feature_timeout, 900)
-        light_timeout = min(base_timeout, 300) if base_timeout else 300  # Fail fast on lightweight scripts
+        light_timeout = min(base_timeout, 300) if base_timeout else 300
         name_lower = component.name.lower()
 
         if component.component_type == "model" or "optuna" in name_lower:
@@ -199,20 +200,18 @@ class DeveloperAgent:
 
         if self.executor.timeout != desired_timeout:
             self.executor.timeout = desired_timeout
-            print(f"   ⏱️  Component timeout set to: {desired_timeout}s ({desired_timeout/60:.1f} min)")
+            print(
+                f"Component timeout set to: {desired_timeout}s ({desired_timeout / 60:.1f} min)"
+            )
 
-        # Generate and execute code
         result = self._implement_component(component, state)
 
-        # Ablation Study: Validate if component improves score (Hill Climbing)
         should_keep_component = True
         new_cv_score = 0.0
 
         if result.success and component.component_type == "model":
-            # Only validate improvement for model components
             from kaggle_agents.tools.code_executor import ExecutionResult
 
-            # Create ExecutionResult from DevelopmentResult
             exec_result = ExecutionResult(
                 success=result.success,
                 stdout=result.stdout,
@@ -228,53 +227,41 @@ class DeveloperAgent:
             )
 
             if not should_keep_component:
-                print(f"\n   🔄 ROLLBACK: Component did not improve score - discarding")
-                # Don't advance, don't cache - effectively rolling back this component
+                print(f"\nROLLBACK: Component did not improve score - discarding")
                 return {
-                    "development_results": [],  # Empty results (component rejected)
-                    "current_component_index": current_index + 1,  # Move to next component
+                    "development_results": [],
+                    "current_component_index": current_index + 1,
                     "component_rollback": component.name,
                     "rollback_reason": "No CV improvement detected (Ablation Study)",
                 }
 
-        # Determine if we should move to next component (for all component types)
-        # Always move forward if it's a critical error (data files missing)
         should_advance = result.success or (
             not result.success and "Data files not found" in (result.stderr or "")
         )
-
-        # Create state_updates dict early (before blocks that need to modify it)
-        # This must be outside model-specific block since all components use it
         state_updates = {
             "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
             "code_retry_count": 0,
-            "current_component_index": current_index + 1 if should_advance else current_index,
+            "current_component_index": current_index + 1
+            if should_advance
+            else current_index,
             "last_updated": datetime.now(),
         }
 
-        # Model-specific validation and tracking blocks
         if result.success and component.component_type == "model":
-            # OOF VALIDATION (Last Mile)
             oof_file = working_dir / "models" / f"oof_{component.name}.npy"
             if not oof_file.exists():
-                print(f"   ⚠️  WARNING: Model {component.name} did NOT save OOF file!")
-                print(f"      Expected: {oof_file.name}")
-                print(f"      Stacking will fail for this model.")
-                # Optional: Mark as failure? For now, just warn loudly.
-                # result.success = False # Could force retry, but might be too aggressive
-                # result.success = False # Could force retry, but might be too aggressive
+                print(f"WARNING: Model {component.name} did NOT save OOF file!")
+                print(f"Expected: {oof_file.name}")
+                print(f"Stacking will fail for this model.")
 
-            # SUBMISSION BACKUP & BEST MODEL TRACKING (User Request)
             submission_path = working_dir / "submission.csv"
             if submission_path.exists():
-                # Backup with component name
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
                 shutil.copy(submission_path, backup_path)
-                print(f"  💾 Backup submission saved: {backup_name}")
+                print(f"Backup submission saved: {backup_name}")
 
-                # Track Best Model
                 current_best_score = state.get("best_single_model_score")
                 metric_name = competition_info.evaluation_metric
 
@@ -283,103 +270,107 @@ class DeveloperAgent:
                     if current_best_score is None:
                         is_best = True
                     else:
-                        improvement = calculate_score_improvement(new_cv_score, current_best_score, metric_name)
+                        improvement = calculate_score_improvement(
+                            new_cv_score, current_best_score, metric_name
+                        )
                         if improvement > 0:
                             is_best = True
 
                 if is_best:
-                    print(f"  🏆 New Best Single Model! ({new_cv_score:.4f})")
+                    print(f"New Best Single Model! ({new_cv_score:.4f})")
                     state_updates["best_single_model_score"] = new_cv_score
                     state_updates["best_single_model_name"] = component.name
 
-                    # Save as submission_best.csv
                     best_path = working_dir / "submission_best.csv"
                     shutil.copy(submission_path, best_path)
-                    print(f"     Saved to submission_best.csv")
+                    print(f"Saved to submission_best.csv")
             else:
-                print(f"  ⚠️ Warning: submission.csv not found after successful execution")
+                print(f"Warning: submission.csv not found after successful execution")
 
-            # Update baseline CV score if component was accepted and score available
             if result.success and should_keep_component and new_cv_score is not None:
                 state_updates["baseline_cv_score"] = new_cv_score
-                print(f"  📊 Updated baseline CV score: {new_cv_score:.4f}")
+                print(f"Updated baseline CV score: {new_cv_score:.4f}")
 
-        # If successful and kept, cache for future iterations
         if result.success and should_keep_component:
             cache_key = f"component_result_{component.name}"
             state_updates[cache_key] = result
-            print(f"  💾 Cached successful result for: {component.name}")
+            print(f"Cached successful result for: {component.name}")
 
-            # REFINEMENT LOOP (ADK Style)
-            if component.component_type == "model" and self.config.ablation.enable_refinement:
-                print("\n   🔄 ADK Refinement Loop: Trying to improve score...")
+            if (
+                component.component_type == "model"
+                and self.config.ablation.enable_refinement
+            ):
+                print("\nADK Refinement Loop: Trying to improve score...")
                 best_code = result.code
                 best_score = new_cv_score if new_cv_score is not None else 0.0
-                
-                # Try to improve 2 times
+
                 for i in range(2):
-                    print(f"     Refinement Iteration {i+1}/2")
+                    print(f"Refinement Iteration {i + 1}/2")
                     refine_prompt = f"""
                     Current code achieved CV Score: {best_score}.
                     Analyze the hyperparameters and architecture.
                     Suggest a modification to IMPROVE the score.
                     Return the full updated code.
                     """
-                    # Create a temporary component for refinement
                     refine_component = component
-                    
-                    # Generate refined code (using fix_code_error as a proxy for refinement or generate new)
-                    # We'll use _generate_code but with specific refinement instructions injected via state or prompt
-                    # For simplicity, we'll append the refinement prompt to requirements in a hacky way or use a new method
-                    # Let's use the existing _generate_code but modify the component description slightly to trigger optimization
-                    
-                    # Actually, let's use the LLM directly to refine the code
+
                     from langchain_core.messages import HumanMessage, SystemMessage
+
                     refine_messages = [
                         SystemMessage(content=DEVELOPER_SYSTEM_PROMPT),
-                        HumanMessage(content=f"Here is the current working code:\n```python\n{best_code}\n```\n\n{refine_prompt}")
+                        HumanMessage(
+                            content=f"Here is the current working code:\n```python\n{best_code}\n```\n\n{refine_prompt}"
+                        ),
                     ]
-                    
+
                     try:
                         refined_response = self.llm.invoke(refine_messages)
-                        refined_code = self._extract_code_from_response(refined_response.content)
-                        
-                        # Execute refined code
-                        print("     Executing refined code...")
+                        refined_code = self._extract_code_from_response(
+                            refined_response.content
+                        )
+
+                        print("Executing refined code...")
                         refined_exec = self.executor.execute(refined_code, working_dir)
-                        
+
                         if refined_exec.success:
                             refined_score = self._extract_cv_score(refined_exec.stdout)
                             if refined_score is not None:
-                                improvement = calculate_score_improvement(refined_score, best_score, competition_info.evaluation_metric)
+                                improvement = calculate_score_improvement(
+                                    refined_score,
+                                    best_score,
+                                    competition_info.evaluation_metric,
+                                )
                                 if improvement > 0:
-                                    print(f"     🚀 Improvement found: {refined_score} (was {best_score})")
+                                    print(
+                                        f"🚀 Improvement found: {refined_score} (was {best_score})"
+                                    )
                                     best_score = refined_score
                                     best_code = refined_code
-                                    # Update result
                                     result.code = best_code
                                     result.stdout = refined_exec.stdout
                                     state_updates["current_code"] = best_code
                                     state_updates["baseline_cv_score"] = best_score
                                 else:
-                                    print(f"     No improvement ({refined_score} vs {best_score})")
+                                    print(
+                                        f"No improvement ({refined_score} vs {best_score})"
+                                    )
                             else:
-                                print("     Could not extract score from refined code")
+                                print("Could not extract score from refined code")
                         else:
-                            print("     Refined code failed to execute")
+                            print("Refined code failed to execute")
                     except Exception as e:
-                        print(f"     Refinement failed: {e}")
+                        print(f"Refinement failed: {e}")
 
-            # PIPELINE UPDATE: Check for new data files
             if component.component_type == "feature_engineering":
-                # Check for common engineered file names
                 eng_train = working_dir / "train_engineered.csv"
                 eng_test = working_dir / "test_engineered.csv"
-                
+
                 if eng_train.exists() and eng_test.exists():
                     state_updates["current_train_path"] = str(eng_train)
                     state_updates["current_test_path"] = str(eng_test)
-                    print(f"  🔄 Pipeline Update: Pointing subsequent agents to engineered data:")
+                    print(
+                        f"  🔄 Pipeline Update: Pointing subsequent agents to engineered data:"
+                    )
                     print(f"     Train: {eng_train.name}")
                     print(f"     Test:  {eng_test.name}")
 
@@ -404,20 +395,20 @@ class DeveloperAgent:
         working_dir = Path(state["working_directory"])
         domain = state.get("domain_detected", "tabular")
 
-        # Verify data files exist before proceeding
-        train_path = working_dir / 'train.csv'
-        test_path = working_dir / 'test.csv'
+        train_path = working_dir / "train.csv"
+        test_path = working_dir / "test.csv"
 
         if not train_path.exists() or not test_path.exists():
             error_msg = f"Data files not found in {working_dir}\n"
-            error_msg += f"  Expected: {train_path.name}, {test_path.name}\n"
+            error_msg += f"Expected: {train_path.name}, {test_path.name}\n"
 
-            # Check what files are actually present
             if working_dir.exists():
                 existing_files = [f.name for f in working_dir.iterdir() if f.is_file()]
-                error_msg += f"  Found: {existing_files if existing_files else 'No files'}\n"
+                error_msg += (
+                    f"Found: {existing_files if existing_files else 'No files'}\n"
+                )
             else:
-                error_msg += f"  Working directory doesn't exist\n"
+                error_msg += "Working directory doesn't exist\n"
 
             error_msg += "\n💡 Possible causes:\n"
             error_msg += "  - Data download failed (check Kaggle credentials)\n"
@@ -436,46 +427,50 @@ class DeveloperAgent:
                 errors=[error_msg],
             )
 
-        # SKIP LOGIC (MLE-STAR Pattern): Check if component already done
         skip_result = self._should_skip_component(component, state)
         if skip_result is not None:
             return skip_result
 
-        # Generate initial code
-        print("\n   =' Generating code...")
-        code = self._generate_code(component, competition_info, working_dir, domain, state)
+        print("\nGenerating code...")
+        code = self._generate_code(
+            component, competition_info, working_dir, domain, state
+        )
 
-        # Preview generated code
-        if self.config.ablation.enable_code_preview if hasattr(self.config.ablation, 'enable_code_preview') else True:
-            print("\n   📝 Generated code preview:")
-            code_lines = code.split('\n')
-            preview_lines = min(500, len(code_lines))  # Show first 500 lines
+        if (
+            self.config.ablation.enable_code_preview
+            if hasattr(self.config.ablation, "enable_code_preview")
+            else True
+        ):
+            print("\nGenerated code preview:")
+            code_lines = code.split("\n")
+            preview_lines = min(500, len(code_lines))
             for i, line in enumerate(code_lines[:preview_lines], 1):
                 print(f"      {i:3d} | {line}")
             if len(code_lines) > preview_lines:
                 print(f"      ... ({len(code_lines) - preview_lines} more lines)")
             print()
 
-        # Save code to file for inspection
-        if self.config.ablation.save_generated_code if hasattr(self.config.ablation, 'save_generated_code') else True:
+        if (
+            self.config.ablation.save_generated_code
+            if hasattr(self.config.ablation, "save_generated_code")
+            else True
+        ):
             code_file = working_dir / f"generated_code_{component.name}.py"
             try:
                 code_file.write_text(code)
-                print(f"   💾 Code saved to: {code_file.name}")
+                print(f"Code saved to: {code_file.name}")
             except Exception as e:
-                print(f"   ⚠️ Could not save code: {e}")
+                print(f"⚠️ Could not save code: {e}")
 
-        # Validate syntax
         is_valid, syntax_error = self.executor.validate_syntax(code)
         if not is_valid:
-            print(f"     Syntax error detected: {syntax_error}")
+            print(f"Syntax error detected: {syntax_error}")
             code = self._fix_syntax_error(code, syntax_error)
 
-        # Execute with retry
-        print("\n     Executing code...")
+        print("\nExecuting code...")
         max_retries = 3
         for attempt in range(max_retries):
-            print(f"\n   Attempt {attempt + 1}/{max_retries}")
+            print(f"\nAttempt {attempt + 1}/{max_retries}")
 
             exec_result = self.executor.execute(
                 code=code,
@@ -483,7 +478,7 @@ class DeveloperAgent:
             )
 
             if exec_result.success:
-                print(f"    Execution successful ({exec_result.execution_time:.2f}s)")
+                print(f"Execution successful ({exec_result.execution_time:.2f}s)")
 
                 return DevelopmentResult(
                     code=code,
@@ -495,35 +490,40 @@ class DeveloperAgent:
                     errors=[],
                 )
 
-            print(f"   L Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}")
+            print(
+                f"Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}"
+            )
 
-            # Get meta-evaluator feedback on first failure (Phase 4: Mini Meta-Evaluator)
             if attempt == 0:
-                print("\n   🧠 Getting meta-evaluator feedback...")
-                error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                print("\nGetting meta-evaluator feedback...")
+                error_msg = (
+                    exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                )
                 feedback = self._get_meta_feedback(code, error_msg, component.name)
-                print(f"   📋 Meta-Feedback:\n   {feedback}\n")
+                print(f"Meta-Feedback:\n{feedback}\n")
 
-            # Try to fix
             if attempt < max_retries - 1:
-                error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                error_msg = (
+                    exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                )
                 if error_msg:
                     snippet = error_msg.replace("\n", " ")[:400]
-                    print(f"   🧾 Passing error context to fixer: {snippet}")
-                print("   =' Attempting to fix...")
+                    print(f"Passing error context to fixer: {snippet}")
+                print("Attempting to fix...")
                 code = self._fix_code_error(code, error_msg)
 
         # If all retries failed, try debug iterations
-        print("\n   = Entering debug mode...")
-        debug_error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
+        print("\nEntering debug mode...")
+        debug_error_msg = (
+            exec_result.errors[0] if exec_result.errors else exec_result.stderr
+        )
         if debug_error_msg:
             snippet = debug_error_msg.replace("\n", " ")[:400]
-            print(f"   🧾 Last error passed to debugger: {snippet}")
+            print(f"Last error passed to debugger: {snippet}")
         code, exec_result, debug_success = self._debug_code(
             code, exec_result, working_dir, max_iterations=5
         )
 
-        # Return final result
         return DevelopmentResult(
             code=code,
             success=exec_result.success if debug_success else False,
@@ -586,48 +586,46 @@ class DeveloperAgent:
         Returns:
             (should_keep, new_score) - Whether to keep component and its CV score
         """
-        # Get evaluation metric from competition info
         competition_info = state.get("competition_info")
         metric_name = competition_info.evaluation_metric if competition_info else ""
 
-        # Determine metric direction for defaults
         is_minimize = is_metric_minimization(metric_name)
 
-        # Extract CV score from component execution
         cv_score = self._extract_cv_score(exec_result.stdout)
 
-        # Handle missing scores gracefully (avoid false rollbacks)
         if cv_score is None:
             print("\n   📊 Ablation Study (Hill Climbing):")
-            print(f"      Metric:         {metric_name} ({'↓' if is_minimize else '↑'} {'minimize' if is_minimize else 'maximize'})")
-            print("      ⚠️  No CV score found in stdout; skipping rollback and keeping component.")
+            print(
+                f"      Metric:         {metric_name} ({'↓' if is_minimize else '↑'} {'minimize' if is_minimize else 'maximize'})"
+            )
+            print(
+                "      ⚠️  No CV score found in stdout; skipping rollback and keeping component."
+            )
             return True, None
 
-        # Get baseline score (before this component)
         baseline_score = state.get("baseline_cv_score")
         if baseline_score is None:
             baseline_score = float("inf") if is_minimize else float("-inf")
-
-        # Calculate improvement considering metric direction
         improvement = calculate_score_improvement(cv_score, baseline_score, metric_name)
-
-        # Determine metric direction for display
         direction_symbol = "↓" if is_minimize else "↑"
         direction_text = "minimize" if is_minimize else "maximize"
 
         print(f"\n   📊 Ablation Study (Hill Climbing):")
-        print(f"      Metric:         {metric_name} ({direction_symbol} {direction_text})")
+        print(
+            f"      Metric:         {metric_name} ({direction_symbol} {direction_text})"
+        )
         print(f"      Baseline CV:    {baseline_score:.4f}")
         print(f"      Component CV:   {cv_score:.4f}")
         print(f"      Improvement:    {improvement:+.4f}")
 
-        # Decision criteria
-        min_improvement = 0.001  # 0.1% minimum improvement threshold
+        min_improvement = 0.001
         should_keep = improvement >= min_improvement
 
         if not should_keep:
             print(f"      ❌ Component REJECTED (no improvement or negative impact)")
-            print(f"      Reason: Delta ({improvement:+.4f}) < threshold ({min_improvement})")
+            print(
+                f"      Reason: Delta ({improvement:+.4f}) < threshold ({min_improvement})"
+            )
         else:
             print(f"      ✅ Component ACCEPTED (positive improvement)")
             if baseline_score not in [float("inf"), float("-inf"), 0]:
@@ -651,16 +649,10 @@ class DeveloperAgent:
         This wraps the existing retry logic and adds Level 3: simplified rollback.
         Returns (code, success) tuple.
         """
-        # Try normal execution first (Level 1 + Level 2 handled by existing code)
-        # We already have the result from the normal path
-        # If we get here, both Level 1 and 2 failed
 
-        # LEVEL 3: Rollback to simplified version
-        print("\n   ⚠️  LEVEL 3: Attempting simplified version...")
+        print("\nAttempting simplified version...")
         simplified_component = self._create_simplified_component(component)
-        print(f"   📝 Simplified: {simplified_component.name}")
-
-        # Generate code for simplified version
+        print(f"Simplified: {simplified_component.name}")
         simplified_code = self._generate_code(
             simplified_component,
             competition_info,
@@ -669,16 +661,13 @@ class DeveloperAgent:
             state,
         )
 
-        # Validate syntax
         is_valid, syntax_error = self.executor.validate_syntax(simplified_code)
         if not is_valid:
-            print(f"     Syntax error in simplified code: {syntax_error}")
+            print(f"Syntax error in simplified code: {syntax_error}")
             simplified_code = self._fix_syntax_error(simplified_code, syntax_error)
-
-        # Try simplified version with quick retries only
-        print("   Executing simplified version...")
-        for attempt in range(3):  # Fewer attempts for simplified version
-            print(f"   Simplified attempt {attempt + 1}/3")
+        print("Executing simplified version...")
+        for attempt in range(3):
+            print(f"Simplified attempt {attempt + 1}/3")
 
             exec_result = self.executor.execute(
                 code=simplified_code,
@@ -686,19 +675,20 @@ class DeveloperAgent:
             )
 
             if exec_result.success:
-                print(f"   ✅ Simplified version successful!")
+                print("Simplified version successful!")
                 return simplified_code, True
 
-            print(f"   L Simplified attempt failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}")
+            print(
+                f"Simplified attempt failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}"
+            )
 
             if attempt < 2:
                 simplified_code = self._fix_code_error(
                     simplified_code,
-                    exec_result.errors[0] if exec_result.errors else exec_result.stderr
+                    exec_result.errors[0] if exec_result.errors else exec_result.stderr,
                 )
 
-        # All levels exhausted
-        print("\n   ❌ All retry levels exhausted (original + debug + simplified)")
+        print("❌ All retry levels exhausted (original + debug + simplified)")
         return simplified_code, False
 
     def _should_skip_component(
@@ -720,27 +710,22 @@ class DeveloperAgent:
         Returns:
             DevelopmentResult if should skip (reuse previous result), None otherwise
         """
-        # Check if we have previous development results for this component
         dev_results = state.get("development_results", [])
 
-        # Look for existing successful result for this component
         for result in dev_results:
-            # Match by checking if code contains component name
             if result.success and component.name in result.code:
-                print(f"  ⏭️  Skipping {component.name} - already implemented successfully")
-                print(f"     Reusing previous execution ({result.execution_time:.2f}s)")
+                print(f"Skipping {component.name} - already implemented successfully")
+                print(f"Reusing previous execution ({result.execution_time:.2f}s)")
                 return result
 
-        # Check state for explicitly cached results (for refinement iterations)
         cached_result_key = f"component_result_{component.name}"
         if cached_result_key in state:
             cached_result = state[cached_result_key]
             if cached_result.success:
-                print(f"  ⏭️  Skipping {component.name} - found in cache")
-                print(f"     Reusing cached execution ({cached_result.execution_time:.2f}s)")
+                print(f"Skipping {component.name} - found in cache")
+                print(f"Reusing cached execution ({cached_result.execution_time:.2f}s)")
                 return cached_result
 
-        # Don't skip - component needs to be implemented
         return None
 
     def _create_simplified_component(
@@ -764,8 +749,7 @@ class DeveloperAgent:
         simplified_desc = ""
 
         if component.component_type == "model":
-            # Simplify model to basic configuration
-            model_name = component.name.split("_")[0]  # e.g., "lightgbm" from "lightgbm_tuned"
+            model_name = component.name.split("_")[0]
             simplified_desc = f"Simple {model_name} model with basic hyperparameters: n_estimators=100, max_depth=5, learning_rate=0.1. Use default class_weight='balanced' and 5-fold StratifiedKFold."
 
         elif component.component_type == "feature_engineering":
@@ -777,12 +761,10 @@ class DeveloperAgent:
         else:
             simplified_desc = f"Simplified version of {component.name}"
 
-        # Create new component with simplified code outline
-        from dataclasses import replace
         simplified_component = replace(
             component,
             name=f"{component.name}_simplified",
-            code=simplified_desc,  # Use code field for description
+            code=simplified_desc,
             estimated_impact=component.estimated_impact * 0.7,  # Lower expected impact
         )
 
@@ -811,175 +793,303 @@ class DeveloperAgent:
         """
         instructions = []
 
-        # Base instruction
         instructions.append(f"Implement {component.component_type}: {component.name}")
 
-        # Add iteration-specific guidance
         current_iteration = state.get("current_iteration", 0)
         if current_iteration > 0:
             instructions.append(f"\n⚡ REFINEMENT ITERATION {current_iteration}")
-            instructions.append("Focus on improvements that address previous shortcomings.")
+            instructions.append(
+                "Focus on improvements that address previous shortcomings."
+            )
 
-        # INJECT META-EVALUATOR GUIDANCE (RL Pattern)
         refinement_guidance = state.get("refinement_guidance", {})
         if refinement_guidance and refinement_guidance.get("developer_guidance"):
-            instructions.append(f"\n🧠 META-EVALUATOR GUIDANCE:")
+            instructions.append(f"\nMETA-EVALUATOR GUIDANCE:")
             instructions.append(f"  {refinement_guidance['developer_guidance']}")
 
-        # Component-specific guidance from meta-evaluator
         if refinement_guidance and "component_type_guidance" in refinement_guidance:
-            comp_guidance = refinement_guidance["component_type_guidance"].get(component.component_type)
+            comp_guidance = refinement_guidance["component_type_guidance"].get(
+                component.component_type
+            )
             if comp_guidance:
-                instructions.append(f"\n🎯 {component.component_type.upper()} SPECIFIC GUIDANCE:")
+                instructions.append(
+                    f"\n🎯 {component.component_type.upper()} SPECIFIC GUIDANCE:"
+                )
                 instructions.append(f"  {comp_guidance}")
 
-        # Priority fixes from error analysis
         if refinement_guidance and refinement_guidance.get("priority_fixes"):
-            instructions.append("\n⚠️  AVOID THESE ERROR PATTERNS:")
-            for error in refinement_guidance["priority_fixes"][:3]:  # Top 3
+            instructions.append("\nAVOID THESE ERROR PATTERNS:")
+            for error in refinement_guidance["priority_fixes"][:3]:
                 instructions.append(f"  - {error}")
-
-        # Analyze previous results for lessons learned
         dev_results = state.get("development_results", [])
         if dev_results:
             successful_components = [r for r in dev_results if r.success]
             failed_components = [r for r in dev_results if not r.success]
 
             if successful_components:
-                instructions.append("\n✅ SUCCESSFUL PATTERNS FROM PREVIOUS COMPONENTS:")
-                # Extract common patterns from successful code
-                for i, result in enumerate(successful_components[-2:], 1):  # Last 2 successes
+                instructions.append(
+                    "\n✅ SUCCESSFUL PATTERNS FROM PREVIOUS COMPONENTS:"
+                )
+                for i, result in enumerate(successful_components[-2:], 1):
                     if "LightGBM" in result.code:
                         instructions.append(f"  - LightGBM implementation worked well")
                     if "StratifiedKFold" in result.code:
-                        instructions.append(f"  - StratifiedKFold cross-validation successful")
+                        instructions.append(
+                            f"  - StratifiedKFold cross-validation successful"
+                        )
                     if "predict_proba" in result.code:
-                        instructions.append(f"  - predict_proba() for probabilities confirmed working")
+                        instructions.append(
+                            f"  - predict_proba() for probabilities confirmed working"
+                        )
 
             if failed_components:
-                instructions.append("\n⚠️  AVOID THESE ERRORS FROM PREVIOUS ATTEMPTS:")
-                # Extract common error patterns
-                for i, result in enumerate(failed_components[-2:], 1):  # Last 2 failures
+                instructions.append("\nAVOID THESE ERRORS FROM PREVIOUS ATTEMPTS:")
+                for i, result in enumerate(failed_components[-2:], 1):
                     if result.errors:
-                        error_msg = result.errors[0][:300]  # First 300 chars
+                        error_msg = result.errors[0][:300]
                         instructions.append(f"  - {error_msg}")
 
-        # Add performance-based guidance
         current_score = state.get("current_performance_score", 0.0)
-        target_score = 0.9238  # Target for top 20%
+        target_score = os.getenv("TARGET_SCORE", 0.9268)
         if current_score > 0:
             gap = target_score - current_score
-            instructions.append(f"\n📊 PERFORMANCE GAP: {gap:.4f} to reach target ({target_score:.4f})")
+            instructions.append(
+                f"\nPERFORMANCE GAP: {gap:.4f} to reach target ({target_score:.4f})"
+            )
             if gap < 0.01:
-                instructions.append("  - Small gap: Focus on fine-tuning hyperparameters")
+                instructions.append(
+                    "  - Small gap: Focus on fine-tuning hyperparameters"
+                )
             elif gap < 0.05:
-                instructions.append("  - Medium gap: Consider feature engineering or ensemble methods")
+                instructions.append(
+                    "  - Medium gap: Consider feature engineering or ensemble methods"
+                )
             else:
-                instructions.append("  - Large gap: May need different model architecture or approach")
+                instructions.append(
+                    "  - Large gap: May need different model architecture or approach"
+                )
 
-        # Component-type specific instructions
         if component.component_type == "model":
-            instructions.append("\n🎯 MODEL COMPONENT REQUIREMENTS:")
+            instructions.append("\nMODEL COMPONENT REQUIREMENTS:")
             instructions.append("  - MUST train a model and generate predictions")
-            instructions.append("  - MUST create submission.csv with probability predictions (0.0-1.0)")
-            instructions.append(f"  - CRITICAL: Use target_col from dataset info (target_col='{state.get('target_col', 'target')}' if available)")
-            instructions.append("  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')")
-            instructions.append("  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder")
-            instructions.append("  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')")
-            instructions.append("  - CatBoost is the ONLY exception that handles categorical features natively")
+            instructions.append(
+                "  - MUST create submission.csv with probability predictions (0.0-1.0)"
+            )
+            instructions.append(
+                f"  - CRITICAL: Use target_col from dataset info (target_col='{state.get('target_col', 'target')}' if available)"
+            )
+            instructions.append(
+                "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')"
+            )
+            instructions.append(
+                "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder"
+            )
+            instructions.append(
+                "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')"
+            )
+            instructions.append(
+                "  - CatBoost is the ONLY exception that handles categorical features natively"
+            )
+            instructions.append(
+                "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)"
+            )
 
-            # CONSISTENT CV (Last Mile)
             instructions.append("\n🔄 CONSISTENT CROSS-VALIDATION (CRITICAL):")
-            instructions.append(f"  - Check if '{state.get('working_directory')}/folds.csv' exists.")
-            instructions.append("  - IF EXISTS: Load it and use the 'fold' column for splitting.")
+            instructions.append(
+                f"  - Check if '{state.get('working_directory')}/folds.csv' exists."
+            )
+            instructions.append(
+                "  - IF EXISTS: Load it and use the 'fold' column for splitting."
+            )
             instructions.append("    ```python")
             instructions.append("    folds = pd.read_csv('folds.csv')")
-            instructions.append("    # Assuming X is aligned with folds (reset_index if needed)")
+            instructions.append(
+                "    # Assuming X is aligned with folds (reset_index if needed)"
+            )
             instructions.append("    for fold in sorted(folds['fold'].unique()):")
             instructions.append("        val_idx = folds[folds['fold'] == fold].index")
-            instructions.append("        train_idx = folds[folds['fold'] != fold].index")
+            instructions.append(
+                "        train_idx = folds[folds['fold'] != fold].index"
+            )
             instructions.append("        # ... train/val split ...")
             instructions.append("    ```")
-            instructions.append("  - IF NOT EXISTS: Use StratifiedKFold(n_splits=5, shuffle=True, random_state=42)")
-            
-            instructions.append("  - CRITICAL: MUST save Out-of-Fold (OOF) predictions during CV to models/oof_{component_name}.npy")
-            instructions.append("  - OOF predictions enable proper stacking ensemble (meta-model trained on OOF)")
-            instructions.append("  - MUST print 'Final Validation Performance: {score}'")
-            instructions.append("  - MUST handle class imbalance with class_weight='balanced'")
-            
-            # OOF AND STACKING REQUIREMENTS (Top 20% Strategy)
-            instructions.append("\n📦 STACKING & OOF REQUIREMENTS (CRITICAL):")
-            instructions.append("  1. Initialize `oof_preds` array of zeros with length of train set.")
-            instructions.append("  2. Initialize `test_preds` array of zeros with length of test set.")
-            instructions.append("  3. During CV loop:")
-            instructions.append("     - Fill `oof_preds[val_idx]` with predictions for validation fold.")
-            instructions.append("     - Predict on test set and accumulate: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`")
-            instructions.append(f"  4. Save OOF predictions: `np.save(str(Path('{state.get('working_directory')}') / 'models' / 'oof_{component.name}.npy'), oof_preds)`")
-            instructions.append(f"  5. Save Test predictions: `np.save(str(Path('{state.get('working_directory')}') / 'models' / 'test_{component.name}.npy'), test_preds)`")
-            instructions.append("  6. This enables the Ensemble Agent to use Stacking later.")
+            instructions.append(
+                "  - IF NOT EXISTS: Use StratifiedKFold(n_splits=5, shuffle=True, random_state=42)"
+            )
 
-            # OPTUNA SPECIFIC GUIDANCE
-            if "optuna" in component.name.lower() or "tuned" in component.name.lower() or "optimized" in component.name.lower():
+            instructions.append(
+                "  - CRITICAL: MUST save Out-of-Fold (OOF) predictions during CV to models/oof_{component_name}.npy"
+            )
+            instructions.append(
+                "  - OOF predictions enable proper stacking ensemble (meta-model trained on OOF)"
+            )
+            instructions.append(
+                "  - MUST print 'Final Validation Performance: {score}'"
+            )
+            instructions.append(
+                "  - MUST handle class imbalance with class_weight='balanced'"
+            )
+
+            instructions.append("\nSTACKING & OOF REQUIREMENTS (CRITICAL):")
+            instructions.append(
+                "  1. Initialize `oof_preds` array of zeros with length of train set."
+            )
+            instructions.append(
+                "  2. Initialize `test_preds` array of zeros with length of test set."
+            )
+            instructions.append("  3. During CV loop:")
+            instructions.append(
+                "     - Fill `oof_preds[val_idx]` with predictions for validation fold."
+            )
+            instructions.append(
+                "     - Predict on test set and accumulate: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`"
+            )
+            instructions.append(
+                f"  4. Save OOF predictions: `np.save(str(Path('{state.get('working_directory')}') / 'models' / 'oof_{component.name}.npy'), oof_preds)`"
+            )
+            instructions.append(
+                f"  5. Save Test predictions: `np.save(str(Path('{state.get('working_directory')}') / 'models' / 'test_{component.name}.npy'), test_preds)`"
+            )
+            instructions.append(
+                "  6. This enables the Ensemble Agent to use Stacking later."
+            )
+
+            if (
+                "optuna" in component.name.lower()
+                or "tuned" in component.name.lower()
+                or "optimized" in component.name.lower()
+            ):
                 n_trials = self.config.ablation.optuna_trials
-                timeout = self.config.ablation.testing_timeout - 60  # Leave 60s buffer
-                
-                instructions.append("\n🔍 HYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:")
-                instructions.append("  - MUST use 'optuna' library for hyperparameter search")
-                instructions.append(f"  - Run AT MOST {n_trials} trials (n_trials={n_trials}) and timeout={timeout}s to prevent timeouts")
-                instructions.append("  - CRITICAL: Check if 'optuna-integration' is available with try/except:")
+                timeout = self.config.ablation.testing_timeout - 60
+
+                instructions.append("\nHYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:")
+                instructions.append(
+                    "  - MUST use 'optuna' library for hyperparameter search"
+                )
+                instructions.append(
+                    f"  - Run AT MOST {n_trials} trials (n_trials={n_trials}) and timeout={timeout}s to prevent timeouts"
+                )
+                instructions.append(
+                    "  - CRITICAL: Check if 'optuna-integration' is available with try/except:"
+                )
                 instructions.append("    try:")
-                instructions.append("        from optuna.integration import OptunaSearchCV")
+                instructions.append(
+                    "        from optuna.integration import OptunaSearchCV"
+                )
                 instructions.append("    except ImportError:")
-                instructions.append("        # Use manual Optuna with study.optimize() instead")
-                instructions.append("  - If optuna-integration is missing, use manual Optuna tuning with study.optimize()")
+                instructions.append(
+                    "        # Use manual Optuna with study.optimize() instead"
+                )
+                instructions.append(
+                    "  - If optuna-integration is missing, use manual Optuna tuning with study.optimize()"
+                )
                 instructions.append("  - Use 'TPESampler' for efficient sampling")
-                instructions.append("  - CRITICAL: Do NOT pass 'callbacks' or 'early_stopping_rounds' to .fit() for XGBoost/LightGBM/CatBoost sklearn API; use fixed n_estimators")
-                instructions.append("  - Optimize for the competition metric (minimize RMSE/LogLoss or maximize AUC/Accuracy)")
+                instructions.append(
+                    "  - CRITICAL: Do NOT pass 'callbacks' or 'early_stopping_rounds' to .fit() for XGBoost/LightGBM/CatBoost sklearn API; use fixed n_estimators"
+                )
+                instructions.append(
+                    "  - Optimize for the competition metric (minimize RMSE/LogLoss or maximize AUC/Accuracy)"
+                )
                 instructions.append("  - Print the best parameters found")
                 instructions.append("  - Train final model with best parameters")
 
-                # SPEED OPTIMIZATION (Proxy Tuning Strategy)
-                instructions.append("\n⚡ SPEED OPTIMIZATION (CRITICAL TO AVOID TIMEOUT):")
-                instructions.append("  - **SUBSAMPLE FOR TUNING**: If train dataset > 10,000 rows:")
+                instructions.append(
+                    "\n⚡ SPEED OPTIMIZATION (CRITICAL TO AVOID TIMEOUT):"
+                )
+                instructions.append(
+                    "  - **SUBSAMPLE FOR TUNING**: If train dataset > 10,000 rows:"
+                )
                 instructions.append("    1. Create tuning subset with train_test_split")
-                instructions.append("    2. For CLASSIFICATION only: pass stratify=y when sampling (y discrete: y.nunique() < 20 or dtype category/object)")
-                instructions.append("    3. For REGRESSION (continuous y): DO NOT use stratify parameter")
-                instructions.append("    4. Run Optuna study on 25% sample (reduce to 15% if memory errors occur)")
-                instructions.append("    5. After finding best_params, retrain on FULL dataset")
+                instructions.append(
+                    "    2. For CLASSIFICATION only: pass stratify=y when sampling (y discrete: y.nunique() < 20 or dtype category/object)"
+                )
+                instructions.append(
+                    "    3. For REGRESSION (continuous y): DO NOT use stratify parameter"
+                )
+                instructions.append(
+                    "    4. Run Optuna study on 25% sample (reduce to 15% if memory errors occur)"
+                )
+                instructions.append(
+                    "    5. After finding best_params, retrain on FULL dataset"
+                )
                 instructions.append("  - **REDUCE ESTIMATORS DURING TUNING**:")
-                instructions.append("    - Inside objective(): Use n_estimators=150-200 (fast convergence)")
-                instructions.append("    - Final model: Use n_estimators=1000 with early_stopping_rounds=50 (if supported)")
-                instructions.append("  - **TIMEOUT BUDGET**: Set study.optimize(n_trials=5, timeout=600) for max 10 min tuning")
+                instructions.append(
+                    "    - Inside objective(): Use n_estimators=150-200 (fast convergence)"
+                )
+                instructions.append(
+                    "    - Final model: Use n_estimators=1000 with early_stopping_rounds=50 (if supported)"
+                )
+                instructions.append(
+                    "  - **TIMEOUT BUDGET**: Set study.optimize(n_trials=5, timeout=600) for max 10 min tuning"
+                )
                 instructions.append("  - **MEMORY SAFETY (PREVENT OOM CRASHES)**:")
-                instructions.append("    - ALWAYS set n_jobs=1 in model __init__ (LGBMClassifier, XGBClassifier, etc.)")
-                instructions.append("    - ALWAYS set n_jobs=1 in cross_val_score (avoid nested parallelism → memory explosion)")
-                instructions.append("    - Add 'import gc; gc.collect()' inside objective() after computing score")
-                instructions.append("    - Delete model object explicitly: 'del model' before gc.collect()")
-                instructions.append("    - If memory errors persist, reduce train_size from 0.25 → 0.15 (15% of data)")
+                instructions.append(
+                    "    - ALWAYS set n_jobs=1 in model __init__ (LGBMClassifier, XGBClassifier, etc.)"
+                )
+                instructions.append(
+                    "    - ALWAYS set n_jobs=1 in cross_val_score (avoid nested parallelism → memory explosion)"
+                )
+                instructions.append(
+                    "    - Add 'import gc; gc.collect()' inside objective() after computing score"
+                )
+                instructions.append(
+                    "    - Delete model object explicitly: 'del model' before gc.collect()"
+                )
+                instructions.append(
+                    "    - If memory errors persist, reduce train_size from 0.25 → 0.15 (15% of data)"
+                )
+                instructions.append(
+                    "  - **ROBUST TRIALS**: Wrap objective logic in try/except; on exception log and return 0.0 so trials finish"
+                )
+                instructions.append(
+                    "  - **NO-COMPLETION GUARD**: After study.optimize, if NO trials completed, fall back to safe default params instead of study.best_params"
+                )
                 instructions.append("  - **EXAMPLE PATTERN**:")
                 instructions.append("    ```python")
                 instructions.append("    # Subsample for fast tuning")
                 instructions.append("    if len(X) > 10000:")
-                instructions.append("        # Only stratify for classification (y discrete)")
-                instructions.append("        is_classification = y.nunique() < 20 or y.dtype in ['object', 'category']")
+                instructions.append(
+                    "        # Only stratify for classification (y discrete)"
+                )
+                instructions.append(
+                    "        is_classification = y.nunique() < 20 or y.dtype in ['object', 'category']"
+                )
                 instructions.append("        if is_classification:")
-                instructions.append("            tune_X, _, tune_y, _ = train_test_split(X, y, train_size=0.25, stratify=y, random_state=42)")
+                instructions.append(
+                    "            tune_X, _, tune_y, _ = train_test_split(X, y, train_size=0.25, stratify=y, random_state=42)"
+                )
                 instructions.append("        else:")
-                instructions.append("            tune_X, _, tune_y, _ = train_test_split(X, y, train_size=0.25, random_state=42)")
+                instructions.append(
+                    "            tune_X, _, tune_y, _ = train_test_split(X, y, train_size=0.25, random_state=42)"
+                )
                 instructions.append("    else:")
                 instructions.append("        tune_X, tune_y = X, y")
                 instructions.append("    ")
                 instructions.append("    def objective(trial):")
                 instructions.append("        params = {")
-                instructions.append("            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),")
-                instructions.append("            'n_estimators': 150,  # Fast for tuning")
-                instructions.append("            'max_depth': trial.suggest_int('max_depth', 3, 10),")
-                instructions.append("            'n_jobs': 1,  # CRITICAL: Prevent memory explosion")
+                instructions.append(
+                    "            'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),"
+                )
+                instructions.append(
+                    "            'n_estimators': 150,  # Fast for tuning"
+                )
+                instructions.append(
+                    "            'max_depth': trial.suggest_int('max_depth', 3, 10),"
+                )
+                instructions.append(
+                    "            'n_jobs': 1,  # CRITICAL: Prevent memory explosion"
+                )
                 instructions.append("            # ... other params ...")
                 instructions.append("        }")
-                instructions.append("        model = LGBMClassifier(**params, random_state=42)")
-                instructions.append("        # Use 3-fold CV on subsample (faster, n_jobs=1 for memory)")
-                instructions.append("        score = cross_val_score(model, tune_X, tune_y, cv=3, n_jobs=1, scoring='roc_auc').mean()")
+                instructions.append(
+                    "        model = LGBMClassifier(**params, random_state=42)"
+                )
+                instructions.append(
+                    "        # Use 3-fold CV on subsample (faster, n_jobs=1 for memory)"
+                )
+                instructions.append(
+                    "        score = cross_val_score(model, tune_X, tune_y, cv=3, n_jobs=1, scoring='roc_auc').mean()"
+                )
                 instructions.append("        ")
                 instructions.append("        # Free memory immediately after trial")
                 instructions.append("        del model")
@@ -988,60 +1098,112 @@ class DeveloperAgent:
                 instructions.append("        ")
                 instructions.append("        return score")
                 instructions.append("    ")
-                instructions.append("    study = optuna.create_study(direction='maximize', sampler=TPESampler(seed=42))")
-                instructions.append("    study.optimize(objective, n_trials=5, timeout=600)  # 10 min max")
+                instructions.append(
+                    "    study = optuna.create_study(direction='maximize', sampler=TPESampler(seed=42))"
+                )
+                instructions.append(
+                    "    study.optimize(objective, n_trials=5, timeout=600)  # 10 min max"
+                )
                 instructions.append("    ")
-                instructions.append("    # Train final model on FULL data with best params")
+                instructions.append(
+                    "    # Train final model on FULL data with best params"
+                )
                 instructions.append("    best_params = study.best_params.copy()")
-                instructions.append("    best_params['n_estimators'] = 1000  # More estimators for final")
-                instructions.append("    final_model = LGBMClassifier(**best_params, random_state=42)")
-                instructions.append("    # If early_stopping supported (XGBoost/LightGBM native API):")
-                instructions.append("    # final_model.fit(X, y, eval_set=[(X_val, y_val)], early_stopping_rounds=50)")
-                instructions.append("    final_model.fit(X, y)  # Or just train on full data")
+                instructions.append(
+                    "    best_params['n_estimators'] = 1000  # More estimators for final"
+                )
+                instructions.append(
+                    "    final_model = LGBMClassifier(**best_params, random_state=42)"
+                )
+                instructions.append(
+                    "    # If early_stopping supported (XGBoost/LightGBM native API):"
+                )
+                instructions.append(
+                    "    # final_model.fit(X, y, eval_set=[(X_val, y_val)], early_stopping_rounds=50)"
+                )
+                instructions.append(
+                    "    final_model.fit(X, y)  # Or just train on full data"
+                )
                 instructions.append("    ```")
 
         elif component.component_type == "feature_engineering":
             instructions.append("\n🔧 FEATURE ENGINEERING REQUIREMENTS:")
             instructions.append("  - Create NEW features from existing ones")
             instructions.append("  - IMPLEMENT SOTA TECHNIQUES:")
-            instructions.append("    - Target Encoding: MUST be done inside Cross-Validation (fit on train folds, transform val fold) to prevent leakage.")
-            instructions.append("    - Frequency Encoding: Map categorical features to their frequency/count.")
-            instructions.append("    - Aggregations: Mean/Count of numeric features grouped by categorical features.")
-            instructions.append("  - Save engineered features to file for model components")
+            instructions.append(
+                "    - Target Encoding: MUST be done inside Cross-Validation (fit on train folds, transform val fold) to prevent leakage."
+            )
+            instructions.append(
+                "    - Frequency Encoding: Map categorical features to their frequency/count."
+            )
+            instructions.append(
+                "    - Aggregations: Mean/Count of numeric features grouped by categorical features."
+            )
+            instructions.append(
+                "  - Save engineered features to file for model components"
+            )
             instructions.append("  - NO model training in this component")
             instructions.append("  - Print feature importance or correlation metrics")
-            
-            # FEATURE SELECTION (Last Mile)
-            instructions.append("\n🧹 FEATURE SELECTION (CRITICAL):")
-            instructions.append("  - After creating new features, perform selection to remove noise:")
-            instructions.append("  1. Train a quick LightGBM/XGBoost on the new feature set.")
+
+            instructions.append("\nFEATURE SELECTION (CRITICAL):")
+            instructions.append(
+                "  - After creating new features, perform selection to remove noise:"
+            )
+            instructions.append(
+                "  1. Train a quick LightGBM/XGBoost on the new feature set."
+            )
             instructions.append("  2. Calculate feature importance (gain/split).")
-            instructions.append("  3. Drop features with 0 importance or very low importance (< 1e-4).")
-            instructions.append("  4. Save ONLY the selected features to 'train_engineered.csv' and 'test_engineered.csv'.")
+            instructions.append(
+                "  3. Drop features with 0 importance or very low importance (< 1e-4)."
+            )
+            instructions.append(
+                "  4. Save ONLY the selected features to 'train_engineered.csv' and 'test_engineered.csv'."
+            )
             instructions.append("  5. Print list of dropped features.")
         elif component.component_type == "ensemble":
-            instructions.append("\n🎭 ENSEMBLE REQUIREMENTS:")
+            instructions.append("\nENSEMBLE REQUIREMENTS:")
             instructions.append("  - Combine predictions from multiple models")
-            instructions.append("  - PREFERRED STRATEGY: Stacking Ensemble (best performance)")
-            instructions.append("    - Load OOF predictions from models/oof_*.npy files")
-            instructions.append("    - Stack OOF predictions: oof_stack = np.column_stack([oof1, oof2, ...])")
-            instructions.append("    - Train meta-model (LogisticRegression/Ridge) on stacked OOF")
-            instructions.append("    - Load test predictions from each model and stack them")
-            instructions.append("    - Use meta-model to predict on stacked test predictions")
+            instructions.append(
+                "  - PREFERRED STRATEGY: Stacking Ensemble (best performance)"
+            )
+            instructions.append(
+                "    - Load OOF predictions from models/oof_*.npy files"
+            )
+            instructions.append(
+                "    - Stack OOF predictions: oof_stack = np.column_stack([oof1, oof2, ...])"
+            )
+            instructions.append(
+                "    - Train meta-model (LogisticRegression/Ridge) on stacked OOF"
+            )
+            instructions.append(
+                "    - Load test predictions from each model and stack them"
+            )
+            instructions.append(
+                "    - Use meta-model to predict on stacked test predictions"
+            )
             instructions.append("  - FALLBACK: Weighted average if OOF files missing")
             instructions.append("    - Load submission files from each model")
-            instructions.append("    - Combine with weights: final = w1*pred1 + w2*pred2 + ...")
+            instructions.append(
+                "    - Combine with weights: final = w1*pred1 + w2*pred2 + ..."
+            )
             instructions.append("  - Generate final submission.csv")
-            instructions.append(f"  - CRITICAL: Use target_col from dataset info (target_col='{state.get('target_col', 'target')}' if available)")
-            instructions.append("  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target' or 'prediction')")
-            instructions.append("  - Print which models were used and their contribution/weights")
+            instructions.append(
+                f"  - CRITICAL: Use target_col from dataset info (target_col='{state.get('target_col', 'target')}' if available)"
+            )
+            instructions.append(
+                "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target' or 'prediction')"
+            )
+            instructions.append(
+                "  - Print which models were used and their contribution/weights"
+            )
 
-        # Standard requirements
-        instructions.append("\n📋 STANDARD REQUIREMENTS:")
+        instructions.append("\nSTANDARD REQUIREMENTS:")
         instructions.append("  - Save models to models/ directory")
         instructions.append("  - Print progress and metrics throughout execution")
         instructions.append("  - NO sys.exit() or exit() calls")
-        instructions.append("  - CRITICAL: Do NOT use deprecated 'pandas.append()'. Use 'pd.concat()' instead.")
+        instructions.append(
+            "  - CRITICAL: Do NOT use deprecated 'pandas.append()'. Use 'pd.concat()' instead."
+        )
         instructions.append("  - Complete, executable single-file Python program")
 
         return "\n".join(instructions)
@@ -1059,43 +1221,56 @@ class DeveloperAgent:
         """
         try:
             import pandas as pd
-            train_path = working_dir / 'train.csv'
+
+            train_path = working_dir / "train.csv"
 
             if not train_path.exists():
                 return "Dataset info not available (file not found)"
 
-            # Read just first few rows to get columns
             df = pd.read_csv(train_path, nrows=5)
 
             columns = df.columns.tolist()
             dtypes = df.dtypes.to_dict()
-
-            # Identify likely target column
             target_col = "UNKNOWN"
-            
+
             if state and state.get("target_col"):
                 target_col = state["target_col"]
             else:
-                target_candidates = [c for c in columns if c.lower() in ['target', 'label', 'y', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
+                target_candidates = [
+                    c
+                    for c in columns
+                    if c.lower()
+                    in [
+                        "target",
+                        "label",
+                        "y",
+                        "class",
+                        "loan_paid_back",
+                        "survived",
+                        "price",
+                        "sales",
+                    ]
+                ]
                 target_col = target_candidates[0] if target_candidates else "UNKNOWN"
 
-            # Format column info
-            numeric_cols = [c for c, dtype in dtypes.items() if dtype in ['int64', 'float64']]
-            categorical_cols = [c for c, dtype in dtypes.items() if dtype == 'object']
+            numeric_cols = [
+                c for c, dtype in dtypes.items() if dtype in ["int64", "float64"]
+            ]
+            categorical_cols = [c for c, dtype in dtypes.items() if dtype == "object"]
 
             info = f"""
-**CRITICAL**: Use these EXACT column names from the dataset:
+            **CRITICAL**: Use these EXACT column names from the dataset:
 
-Target Column: {target_col}
-Total Columns: {len(columns)}
+            Target Column: {target_col}
+            Total Columns: {len(columns)}
 
-Numeric Columns ({len(numeric_cols)}): {', '.join(numeric_cols[:10])}{'...' if len(numeric_cols) > 10 else ''}
-Categorical Columns ({len(categorical_cols)}): {', '.join(categorical_cols[:10])}{'...' if len(categorical_cols) > 10 else ''}
+            Numeric Columns ({len(numeric_cols)}): {", ".join(numeric_cols[:10])}{"..." if len(numeric_cols) > 10 else ""}
+            Categorical Columns ({len(categorical_cols)}): {", ".join(categorical_cols[:10])}{"..." if len(categorical_cols) > 10 else ""}
 
-All Columns: {', '.join(columns)}
+            All Columns: {", ".join(columns)}
 
-IMPORTANT: Always use target_col='{target_col}' in your code!
-"""
+            IMPORTANT: Always use target_col='{target_col}' in your code!
+            """
             return info
 
         except Exception as e:
@@ -1112,62 +1287,62 @@ IMPORTANT: Always use target_col='{target_col}' in your code!
         """Generate code for a component."""
         component_details = format_component_details(component)
 
-        # Get dataset information
         dataset_info = self._get_dataset_info(working_dir, state)
 
         competition_context = f"""
-Name: {competition_info.name}
-Domain: {domain}
-Problem Type: {competition_info.problem_type}
-Metric: {competition_info.evaluation_metric}
-"""
+        Name: {competition_info.name}
+        Domain: {domain}
+        Problem Type: {competition_info.problem_type}
+        Metric: {competition_info.evaluation_metric}
+        """
 
-        # Determine data paths (dynamic or default)
-        train_path = state.get("current_train_path") if state and state.get("current_train_path") else working_dir / 'train.csv'
-        test_path = state.get("current_test_path") if state and state.get("current_test_path") else working_dir / 'test.csv'
+        train_path = (
+            state.get("current_train_path")
+            if state and state.get("current_train_path")
+            else working_dir / "train.csv"
+        )
+        test_path = (
+            state.get("current_test_path")
+            if state and state.get("current_test_path")
+            else working_dir / "test.csv"
+        )
 
         data_paths = f"""
-Train: {train_path}
-Test: {test_path}
-Models: {working_dir / 'models'}
-Submission: {working_dir / 'submission.csv'}
-"""
+        Train: {train_path}
+        Test: {test_path}
+        Models: {working_dir / "models"}
+        Submission: {working_dir / "submission.csv"}
+        """
 
-        # DYNAMIC INSTRUCTION GENERATION (MLE-STAR Pattern)
-        # Build context-aware requirements based on state
         if state is not None:
             requirements = self._build_dynamic_instructions(component, state)
         else:
-            # Fallback to basic requirements if no state
             requirements = f"""
-1. Implement {component.component_type}: {component.name}
-2. Save models to models/ directory
-3. Print progress and metrics
-4. Handle errors gracefully
-"""
+            1. Implement {component.component_type}: {component.name}
+            2. Save models to models/ directory
+            3. Print progress and metrics
+            4. Handle errors gracefully
+            """
 
         if self.use_dspy:
-            # Use DSPy module
             result = self.generator_module(
                 component_details=component_details,
                 competition_context=competition_context,
                 data_paths=data_paths,
                 requirements=requirements,
             )
-            # Extract code from markdown if present
             code = self._extract_code_from_response(result.code)
         else:
-            # Use direct LLM call
             prompt = GENERATE_CODE_PROMPT.format(
                 component_details=component_details,
                 competition_name=competition_info.name,
                 domain=domain,
                 problem_type=competition_info.problem_type,
                 metric=competition_info.evaluation_metric,
-                train_data_path=str(working_dir / 'train.csv'),
-                test_data_path=str(working_dir / 'test.csv'),
-                models_dir=str(working_dir / 'models'),
-                submission_path=str(working_dir / 'submission.csv'),
+                train_data_path=str(working_dir / "train.csv"),
+                test_data_path=str(working_dir / "test.csv"),
+                models_dir=str(working_dir / "models"),
+                submission_path=str(working_dir / "submission.csv"),
                 dataset_info=dataset_info,
                 component_name=component.name,
             )
@@ -1203,25 +1378,27 @@ Submission: {working_dir / 'submission.csv'}
         # Quick analysis prompt
         prompt = f"""You are a Meta-Evaluator analyzing code failure.
 
-Component: {component_name}
-Error: {error[:500]}
+        Component: {component_name}
+        Error: {error[:500]}
 
-Code Summary (first 500 lines):
-```python
-{chr(10).join(code.split(chr(10))[:500])}
-```
+        Code Summary (first 500 lines):
+        ```python
+        {chr(10).join(code.split(chr(10))[:500])}
+        ```
 
-Provide 2-3 specific, actionable suggestions to fix this error.
-Focus on:
-1. Root cause of the error
-2. Specific code changes needed
-3. Best practices to avoid similar errors
+        Provide 2-3 specific, actionable suggestions to fix this error.
+        Focus on:
+        1. Root cause of the error
+        2. Specific code changes needed
+        3. Best practices to avoid similar errors
 
-Keep response under 150 words."""
+        Keep response under 150 words."""
 
         try:
             messages = [
-                SystemMessage(content="You are an expert code reviewer and meta-evaluator."),
+                SystemMessage(
+                    content="You are an expert code reviewer and meta-evaluator."
+                ),
                 HumanMessage(content=prompt),
             ]
 
@@ -1240,7 +1417,6 @@ Keep response under 150 words."""
                 error=error_info["error"],
                 error_type=error_info["error_type"],
             )
-            # Extract code from markdown if present
             fixed_code = self._extract_code_from_response(result.fixed_code)
         else:
             prompt = FIX_CODE_PROMPT.format(
@@ -1267,7 +1443,6 @@ Keep response under 150 words."""
         max_iterations: int = 10,
     ) -> tuple[str, ExecutionResult, bool]:
         """Debug code iteratively with loop-safety and shorter timeouts."""
-        # Use a shorter timeout during debug to avoid long-running loops
         original_timeout = getattr(self.executor, "timeout", None)
         if original_timeout is not None:
             self.executor.timeout = min(original_timeout, 180)
@@ -1277,45 +1452,49 @@ Keep response under 150 words."""
         for iteration in range(max_iterations):
             print(f"   Debug iteration {iteration + 1}/{max_iterations}")
 
-            # Prepare debug prompt
             issue = f"Code failed after {iteration + 1} attempts. Errors: {', '.join(exec_result.errors)}"
 
             prompt = DEBUG_CODE_PROMPT.format(
                 code=code,
                 issue=issue,
-                stdout=exec_result.stdout[-2000:] if exec_result.stdout else "",  # Last 2000 chars
+                stdout=exec_result.stdout[-2000:] if exec_result.stdout else "",
                 stderr=exec_result.stderr[-2000:] if exec_result.stderr else "",
             )
 
             messages = [
-                SystemMessage(content=DEVELOPER_SYSTEM_PROMPT + "\n\nYou are in DEBUG MODE. Fix the code carefully."),
+                SystemMessage(
+                    content=DEVELOPER_SYSTEM_PROMPT
+                    + "\n\nYou are in DEBUG MODE. Fix the code carefully."
+                ),
                 HumanMessage(content=prompt),
             ]
 
             response = self.llm.invoke(messages)
             debugged_code = self._extract_code_from_response(response.content)
 
-            # Test the debugged code
             test_result = self.executor.execute(debugged_code, working_dir)
 
             if test_result.success:
-                print(f"    Debug successful!")
-                # Restore timeout before returning
+                print(f"Debug successful!")
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return debugged_code, test_result, True
 
-            # Detect stagnation (same error repeating) to break out of the loop
-            error_sig = "|".join(test_result.errors) if test_result.errors else test_result.stderr.strip()
+            error_sig = (
+                "|".join(test_result.errors)
+                if test_result.errors
+                else test_result.stderr.strip()
+            )
             if error_sig and error_sig == last_error_sig:
-                print("   ⚠️  Debug halted: same error persists; stopping to avoid infinite loop")
+                print(
+                    "Debug halted: same error persists; stopping to avoid infinite loop"
+                )
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return debugged_code, test_result, False
 
-            # Stop early on repeated timeouts
             if any("Timeout" in e for e in test_result.errors):
-                print("   ⚠️  Debug halted: repeated timeout during debug")
+                print("Debug halted: repeated timeout during debug")
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return debugged_code, test_result, False
@@ -1324,14 +1503,13 @@ Keep response under 150 words."""
             exec_result = test_result
             last_error_sig = error_sig
 
-        print("   L Debug failed after max iterations")
+        print("Debug failed after max iterations")
         if original_timeout is not None:
             self.executor.timeout = original_timeout
         return code, exec_result, False
 
     def _extract_code_from_response(self, response: str) -> str:
         """Extract Python code from LLM response."""
-        # Try to extract from markdown code block
         if "```python" in response:
             code = response.split("```python")[1].split("```")[0]
         elif "```" in response:
@@ -1343,6 +1521,7 @@ Keep response under 150 words."""
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def developer_agent_node(state: KaggleState) -> Dict[str, Any]:
     """
