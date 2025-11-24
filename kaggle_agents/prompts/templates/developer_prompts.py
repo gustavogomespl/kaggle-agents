@@ -66,8 +66,13 @@ sklearn/pandas Version Compatibility (CRITICAL):
 Optuna Dependencies (CRITICAL):
 - ❌ WRONG: from optuna.integration import OptunaSearchCV  # May not be installed
 - ✅ CORRECT: Use try/except to check if optuna-integration is available
+- ✅ SILENCE OPTUNA: ALWAYS set optuna.logging.set_verbosity(optuna.logging.WARNING) to prevent "False Positive Error Detection"
+- ✅ LIMIT TUNING: For validation, use n_trials=2 or timeout=60 to prevent timeouts.
 - ✅ Example:
   ```python
+  import optuna
+  optuna.logging.set_verbosity(optuna.logging.WARNING)  # SILENCE OPTUNA
+  
   try:
       from optuna.integration import OptunaSearchCV
       USE_OPTUNA_INTEGRATION = True
@@ -106,7 +111,17 @@ Optuna Dependencies (CRITICAL):
       xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
   else:
       xgb_params = {'tree_method': 'hist'}
-  model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
+  
+  # ROBUST FALLBACK: Wrap fit in try-except to handle GPU failures
+  try:
+      model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
+      model.fit(X, y)
+  except Exception as e:
+      print(f"⚠️  GPU Training failed: {e}. Falling back to CPU...")
+      xgb_params['tree_method'] = 'hist'
+      xgb_params.pop('predictor', None)
+      model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
+      model.fit(X, y)
   ```
 - **CatBoost GPU params (REQUIRED if GPU available)**:
   ```python
@@ -207,7 +222,22 @@ Submission Path: {submission_path}
     lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0} if use_gpu else {'device': 'cpu'}
     model = lgb.LGBMClassifier(**lgb_gpu_params, n_estimators=n_estimators, max_depth=max_depth, ...)
     ```
+  - **Example for XGBoost (ROBUST FALLBACK REQUIRED)**:
+    ```python
+    try:
+        model = xgb.XGBClassifier(**xgb_params, ...)
+        model.fit(X_train, y_train)
+    except Exception as e:
+        print(f"⚠️ GPU failed: {e}. Retrying with CPU...")
+        xgb_params['tree_method'] = 'hist' # Fallback
+        model = xgb.XGBClassifier(**xgb_params, ...)
+        model.fit(X_train, y_train)
+    ```
   - **This is NOT optional** - GPU reduces training time from minutes to seconds
+
+🛑 **OPTUNA CONFIGURATION (CRITICAL)**:
+  - **SILENCE LOGGING**: `optuna.logging.set_verbosity(optuna.logging.WARNING)` (Prevent "False Positive Error Detection")
+  - **LIMIT TUNING**: Use `n_trials=2` or `timeout=60` for validation runs. Do NOT run for 10 minutes.
 
 - Target execution time: 60-90 seconds per model (use early stopping)
 - Print CV score or validation metrics
