@@ -904,14 +904,13 @@ class DeveloperAgent:
             instructions.append("    ```python")
             instructions.append("    folds = pd.read_csv('folds.csv')")
             instructions.append(
-                "
-            )
+            instructions.append("")
             instructions.append("    for fold in sorted(folds['fold'].unique()):")
             instructions.append("        val_idx = folds[folds['fold'] == fold].index")
             instructions.append(
                 "        train_idx = folds[folds['fold'] != fold].index"
             )
-            instructions.append("
+            instructions.append("")
             instructions.append("    ```")
             instructions.append(
                 "  - IF NOT EXISTS: Use StratifiedKFold(n_splits=5, shuffle=True, random_state=42)"
@@ -977,9 +976,7 @@ class DeveloperAgent:
                     "        from optuna.integration import OptunaSearchCV"
                 )
                 instructions.append("    except ImportError:")
-                instructions.append(
-                    "
-                )
+                instructions.append("        USE_OPTUNA_INTEGRATION = False")
                 instructions.append(
                     "  - If optuna-integration is missing, use manual Optuna tuning with study.optimize()"
                 )
@@ -1046,7 +1043,7 @@ class DeveloperAgent:
                 )
                 instructions.append("  - **EXAMPLE PATTERN**:")
                 instructions.append("    ```python")
-                instructions.append("
+                instructions.append("")
                 instructions.append("    import torch")
                 instructions.append("    use_gpu = torch.cuda.is_available()")
                 instructions.append("    print(f'GPU Available: {use_gpu}')")
@@ -1055,11 +1052,9 @@ class DeveloperAgent:
                 instructions.append("    else:")
                 instructions.append("        print('⚠️  CPU mode (slower)')")
                 instructions.append("    ")
-                instructions.append("
+                instructions.append("")
                 instructions.append("    if len(X) > 10000:")
-                instructions.append(
-                    "
-                )
+                instructions.append("")
                 instructions.append(
                     "        is_classification = y.nunique() < 20 or y.dtype in ['object', 'category']"
                 )
@@ -1088,37 +1083,31 @@ class DeveloperAgent:
                 instructions.append(
                     "            'n_jobs': 1,
                 )
-                instructions.append("
+                instructions.append("")
                 instructions.append("        }")
                 instructions.append("        ")
-                instructions.append("
+                instructions.append("")
                 instructions.append("        if use_gpu:")
                 instructions.append("
                 instructions.append("            params['device'] = 'gpu'")
                 instructions.append("            params['gpu_platform_id'] = 0")
                 instructions.append("            params['gpu_device_id'] = 0")
-                instructions.append("
-                instructions.append("
-                instructions.append(
-                    "
-                )
+                instructions.append("")
+                instructions.append("")
+                instructions.append("")
                 instructions.append("        else:")
                 instructions.append("            params['device'] = 'cpu'")
-                instructions.append(
-                    "
-                )
+                instructions.append("")
                 instructions.append("        ")
                 instructions.append(
                     "        model = LGBMClassifier(**params, random_state=42)"
                 )
-                instructions.append(
-                    "
-                )
+                instructions.append("")
                 instructions.append(
                     "        score = cross_val_score(model, tune_X, tune_y, cv=3, n_jobs=1, scoring='roc_auc').mean()"
                 )
                 instructions.append("        ")
-                instructions.append("
+                instructions.append("")
                 instructions.append("        del model")
                 instructions.append("        import gc")
                 instructions.append("        gc.collect()")
@@ -1129,48 +1118,31 @@ class DeveloperAgent:
                     "    study = optuna.create_study(direction='maximize', sampler=TPESampler(seed=42))"
                 )
                 instructions.append(
-                    "    study.optimize(objective, n_trials=5, timeout=600)
-                )
+                instructions.append("    study.optimize(objective, n_trials=5, timeout=600)")
                 instructions.append("    ")
-                instructions.append(
-                    "
-                )
+                instructions.append("")
                 instructions.append("    best_params = study.best_params.copy()")
                 instructions.append(
-                    "    best_params['n_estimators'] = 1000
-                )
+                instructions.append("    best_params['n_estimators'] = 1000")
                 instructions.append("    ")
-                instructions.append(
-                    "
-                )
+                instructions.append("")
                 instructions.append("    if use_gpu:")
                 instructions.append("        best_params['device'] = 'gpu'")
                 instructions.append("        best_params['gpu_platform_id'] = 0")
                 instructions.append("        best_params['gpu_device_id'] = 0")
-                instructions.append(
-                    "
-                )
-                instructions.append(
-                    "
-                )
+                instructions.append("")
+                instructions.append("")
                 instructions.append("    else:")
                 instructions.append("        best_params['device'] = 'cpu'")
-                instructions.append(
-                    "
-                )
+                instructions.append("")
                 instructions.append("    ")
                 instructions.append(
                     "    final_model = LGBMClassifier(**best_params, random_state=42)"
                 )
+                instructions.append("")
+                instructions.append("")
                 instructions.append(
-                    "
-                )
-                instructions.append(
-                    "
-                )
-                instructions.append(
-                    "    final_model.fit(X, y)
-                )
+                instructions.append("    final_model.fit(X, y)")
                 instructions.append("    ```")
 
         elif component.component_type == "feature_engineering":
