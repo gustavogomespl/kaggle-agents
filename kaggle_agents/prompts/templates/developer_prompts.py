@@ -78,6 +78,44 @@ Optuna Dependencies (CRITICAL):
 - If optuna-integration is missing, use manual Optuna with study.optimize()
 - NEVER fail because a dependency is missing - always have a fallback
 
+🚀 GPU ACCELERATION (CRITICAL - ALWAYS ENABLE):
+- **ALWAYS check for GPU availability at the start of code**
+- **ALWAYS enable GPU for LightGBM, XGBoost, and CatBoost models**
+- GPU acceleration is **MANDATORY** for competitive training speed
+- Detection pattern (REQUIRED in ALL model code):
+  ```python
+  import torch
+  use_gpu = torch.cuda.is_available()
+  print(f"GPU Available: {use_gpu}")
+  if use_gpu:
+      print("✅ GPU acceleration ENABLED")
+  else:
+      print("⚠️  Running on CPU (slower)")
+  ```
+- **LightGBM GPU params (REQUIRED if GPU available)**:
+  ```python
+  if use_gpu:
+      lgb_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}
+  else:
+      lgb_params = {'device': 'cpu'}
+  model = lgb.LGBMClassifier(**lgb_params, n_estimators=..., ...)
+  ```
+- **XGBoost GPU params (REQUIRED if GPU available)**:
+  ```python
+  if use_gpu:
+      xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
+  else:
+      xgb_params = {'tree_method': 'hist'}
+  model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
+  ```
+- **CatBoost GPU params (REQUIRED if GPU available)**:
+  ```python
+  task_type = "GPU" if use_gpu else "CPU"
+  model = CatBoostClassifier(task_type=task_type, iterations=..., ...)
+  ```
+- **NEVER skip GPU configuration** - it's the difference between 30s and 5min training time
+- **ALWAYS print GPU status** so users know if GPU is being used
+
 MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
 - Your response must contain ONLY a single Python code block
 - No additional text, explanations, or markdown outside the code block
@@ -145,7 +183,32 @@ Submission Path: {submission_path}
   - Small datasets (<5k): More trees, deeper (n_estimators=1000, max_depth=8)
   - Large datasets (>100k): Fewer trees, shallower (n_estimators=400, max_depth=5)
   - **num_leaves** (LightGBM): Use `2^max_depth - 1` for consistency
-- CRITICAL: Check if GPU is available. If yes, set 'device': 'gpu' (LightGBM) or 'tree_method': 'gpu_hist' (XGBoost). This is mandatory for speed.
+
+🚀 **GPU ACCELERATION (CRITICAL - MANDATORY)**:
+  - **STEP 1**: ALWAYS detect GPU at the start of your code:
+    ```python
+    import torch
+    use_gpu = torch.cuda.is_available()
+    print(f"GPU Available: {use_gpu}")
+    ```
+  - **STEP 2**: Configure model params based on GPU availability:
+    - **LightGBM**: Add `'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0` if GPU available
+    - **XGBoost**: Add `'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'` if GPU available
+    - **CatBoost**: Set `task_type="GPU"` if GPU available (otherwise "CPU")
+  - **STEP 3**: Print GPU status so users can verify:
+    ```python
+    if use_gpu:
+        print("✅ GPU ENABLED for training (fast)")
+    else:
+        print("⚠️  CPU mode (slower)")
+    ```
+  - **Example for LightGBM**:
+    ```python
+    lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0} if use_gpu else {'device': 'cpu'}
+    model = lgb.LGBMClassifier(**lgb_gpu_params, n_estimators=n_estimators, max_depth=max_depth, ...)
+    ```
+  - **This is NOT optional** - GPU reduces training time from minutes to seconds
+
 - Target execution time: 60-90 seconds per model (use early stopping)
 - Print CV score or validation metrics
 
@@ -526,13 +589,16 @@ X_test = test_df
 # TODO: Implement feature engineering
 
 # Model training
-# Check for GPU
+# GPU Detection (CRITICAL - MANDATORY)
 import torch
-if torch.cuda.is_available():
-    print("GPU detected!")
+use_gpu = torch.cuda.is_available()
+print(f"GPU Available: {use_gpu}")
+
+if use_gpu:
+    print("✅ GPU ENABLED for training")
     xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor', 'random_state': 42, 'n_estimators': 100}
 else:
-    print("GPU not detected, using CPU")
+    print("⚠️  Running on CPU (slower)")
     xgb_params = {'tree_method': 'hist', 'random_state': 42, 'n_estimators': 100}
 
 model = xgb.XGBClassifier(**xgb_params)
@@ -697,14 +763,17 @@ print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
 
 scale_pos_weight = negative_count / positive_count if imbalance_ratio > 2.0 else 1.0
 
-# Check for GPU
+# GPU Detection (CRITICAL - MANDATORY)
 import torch
-if torch.cuda.is_available():
-    print("GPU detected!")
+use_gpu = torch.cuda.is_available()
+print(f"GPU Available: {use_gpu}")
+
+if use_gpu:
+    print("✅ GPU ENABLED for training")
     xgb_gpu_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
-    lgb_gpu_params = {'device': 'gpu'}
+    lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}
 else:
-    print("GPU not detected, using CPU")
+    print("⚠️  Running on CPU (slower)")
     xgb_gpu_params = {'tree_method': 'hist'}
     lgb_gpu_params = {'device': 'cpu'}
 
@@ -736,7 +805,7 @@ base_learners = [
         learning_rate=0.03,
         random_state=RANDOM_SEED,
         verbose=False,
-        task_type="GPU" if torch.cuda.is_available() else "CPU"
+        task_type="GPU" if use_gpu else "CPU"
     ))
 ]
 
@@ -869,14 +938,17 @@ else:
 
 print(f"Features: {{X_combined.shape[1]}}")
 
-# Check for GPU
+# GPU Detection (CRITICAL - MANDATORY)
 import torch
-if torch.cuda.is_available():
-    print("GPU detected!")
+use_gpu = torch.cuda.is_available()
+print(f"GPU Available: {use_gpu}")
+
+if use_gpu:
+    print("✅ GPU ENABLED for training")
     xgb_gpu_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
-    lgb_gpu_params = {'device': 'gpu'}
+    lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}
 else:
-    print("GPU not detected, using CPU")
+    print("⚠️  Running on CPU (slower)")
     xgb_gpu_params = {'tree_method': 'hist'}
     lgb_gpu_params = {'device': 'cpu'}
 
@@ -910,7 +982,7 @@ base_learners = [
         learning_rate=0.03,
         random_state=RANDOM_SEED,
         verbose=False,
-        task_type="GPU" if torch.cuda.is_available() else "CPU"
+        task_type="GPU" if use_gpu else "CPU"
     ))
 ]
 
@@ -1012,6 +1084,16 @@ negative_count = (y == 0).sum()
 imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
 print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
 
+# GPU Detection (CRITICAL - MANDATORY)
+import torch
+use_gpu = torch.cuda.is_available()
+print(f"GPU Available: {{use_gpu}}")
+task_type = "GPU" if use_gpu else "CPU"
+if use_gpu:
+    print("✅ GPU ENABLED for CatBoost training")
+else:
+    print("⚠️  Running on CPU (slower)")
+
 # CatBoost handles categorical features natively (no encoding needed!)
 # Create Pool objects for efficient training
 train_pool = Pool(
@@ -1035,7 +1117,8 @@ model = CatBoostClassifier(
     random_seed=RANDOM_SEED,
     verbose=50,  # Print every 50 iterations
     early_stopping_rounds=50,
-    auto_class_weights='Balanced' if imbalance_ratio > 2.0 else None
+    auto_class_weights='Balanced' if imbalance_ratio > 2.0 else None,
+    task_type=task_type  # GPU or CPU
 )
 
 # Train model
@@ -1056,7 +1139,8 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
         depth=6,
         learning_rate=0.05,
         random_seed=RANDOM_SEED,
-        verbose=False
+        verbose=False,
+        task_type=task_type  # GPU or CPU
     )
     fold_model.fit(X_train_fold, y_train_fold, cat_features=cat_features)
 
