@@ -41,9 +41,9 @@ class RobustnessAgent:
         Returns:
             State updates with validation results
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("=  ROBUSTNESS AGENT: Validating Code")
-        print("="*60)
+        print("=" * 60)
 
         # Get development results
         dev_results = state.get("development_results", [])
@@ -51,9 +51,10 @@ class RobustnessAgent:
         if not dev_results:
             print("  No development results to validate")
             return {}
-            
+
         # Initialize LLM (supports OpenAI and Anthropic)
         from ..core.config import get_llm
+
         self.llm = get_llm()
 
         # Get latest result
@@ -86,7 +87,9 @@ class RobustnessAgent:
         self._print_validation(format_result)
 
         # Calculate overall score
-        overall_score = sum(r.score for r in validation_results) / len(validation_results)
+        overall_score = sum(r.score for r in validation_results) / len(
+            validation_results
+        )
 
         print(f"\n= Overall Validation Score: {overall_score:.1%}")
 
@@ -129,7 +132,9 @@ class RobustnessAgent:
 
         # Check for warnings
         if "Warning" in dev_result.stdout or "WARNING" in dev_result.stdout:
-            warnings_count = dev_result.stdout.count("Warning") + dev_result.stdout.count("WARNING")
+            warnings_count = dev_result.stdout.count(
+                "Warning"
+            ) + dev_result.stdout.count("WARNING")
             issues.append(f"Found {warnings_count} warnings")
             suggestions.append("Review and fix warnings")
             score *= 0.9
@@ -149,7 +154,9 @@ class RobustnessAgent:
             suggestions=suggestions,
         )
 
-    def _validate_leakage(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:
+    def _validate_leakage(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
         """
         Module 2: Data leakage detection.
 
@@ -231,13 +238,19 @@ IMPORTANT:
                     print("      Problematic Code:")
                     print("      ```python")
                     # Show first 300 chars of code block
-                    code_preview = code_block[:300] + "..." if len(code_block) > 300 else code_block
-                    for line in code_preview.split('\n'):
+                    code_preview = (
+                        code_block[:300] + "..."
+                        if len(code_block) > 300
+                        else code_block
+                    )
+                    for line in code_preview.split("\n"):
                         print(f"      {line}")
                     print("      ```")
 
                 issues.append(f"Data Leakage ({line_numbers}): {explanation}")
-                suggestions.append("Fix the code block identified above to prevent leakage")
+                suggestions.append(
+                    "Fix the code block identified above to prevent leakage"
+                )
                 score = 0.0
                 passed = False
 
@@ -258,7 +271,10 @@ IMPORTANT:
             # Fallback to regex
             leakage_patterns = [
                 (r"fit.*train_df.*\+.*test_df", "Fitting on train+test together"),
-                (r"TargetEncoder.*fit.*(?!train)", "Target encoding might use test data"),
+                (
+                    r"TargetEncoder.*fit.*(?!train)",
+                    "Target encoding might use test data",
+                ),
                 (r"fit_transform.*(?!train)", "fit_transform might include test data"),
             ]
 
@@ -278,7 +294,9 @@ IMPORTANT:
             details=leakage_details,  # Structured information for auto-correction
         )
 
-    def _validate_data_usage(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:
+    def _validate_data_usage(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
         """
         Module 3: Data usage validation.
 
@@ -308,7 +326,10 @@ IMPORTANT:
         # Check for head/tail (might be debugging code left in)
         if ".head(" in code or ".tail(" in code:
             # Check if it's just for printing
-            if "print" not in code[max(0, code.find(".head(") - 50):code.find(".head(") + 50]:
+            if (
+                "print"
+                not in code[max(0, code.find(".head(") - 50) : code.find(".head(") + 50]
+            ):
                 issues.append("Using head/tail - might not be using full data")
                 score *= 0.95
 
@@ -322,7 +343,9 @@ IMPORTANT:
             suggestions=suggestions,
         )
 
-    def _validate_format(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:
+    def _validate_format(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
         """
         Module 4: Format compliance validation.
 
@@ -417,6 +440,7 @@ IMPORTANT:
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def robustness_agent_node(state: KaggleState) -> Dict[str, Any]:
     """

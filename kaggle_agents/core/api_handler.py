@@ -15,10 +15,13 @@ from openai import OpenAI
 try:
     from langsmith import traceable
 except ImportError:
+
     def traceable(*args, **kwargs):
         def decorator(func):
             return func
+
         return decorator
+
 
 # Constantes
 MAX_ATTEMPTS = 5
@@ -33,6 +36,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 @dataclass
 class APISettings:
     """Configurações padrão para geração."""
+
     max_completion_tokens: int
     temperature: Optional[float] = 0.7  # pode ser ignorado por alguns modelos
     top_p: Optional[float] = 1.0
@@ -84,7 +88,10 @@ def _to_responses_messages(messages: List[Dict[str, str]]) -> List[Dict[str, Any
             # Responses API usa "input_text" para user/system e "output_text" para assistant
             content_type = "output_text" if role == "assistant" else "input_text"
             converted.append(
-                {"role": role, "content": [{"type": content_type, "text": str(content)}]}
+                {
+                    "role": role,
+                    "content": [{"type": content_type, "text": str(content)}],
+                }
             )
     return converted
 
@@ -123,7 +130,9 @@ def generate_response(
                 model=model,
                 messages=messages,
                 max_completion_tokens=settings.max_completion_tokens,
-                temperature=settings.temperature if settings.temperature is not None else 0.7,
+                temperature=settings.temperature
+                if settings.temperature is not None
+                else 0.7,
                 top_p=settings.top_p if settings.top_p is not None else 1.0,
                 frequency_penalty=settings.frequency_penalty or 0.0,
                 presence_penalty=settings.presence_penalty or 0.0,
@@ -173,7 +182,9 @@ class APIHandler:
             http_client=http_client,
         )
 
-    def _save_long_message(self, messages: List[Dict[str, str]], save_dir: Optional[Path] = None):
+    def _save_long_message(
+        self, messages: List[Dict[str, str]], save_dir: Optional[Path] = None
+    ):
         save_dir = Path(save_dir) if save_dir else Path.cwd()
         save_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -183,7 +194,9 @@ class APIHandler:
                 f.write(f"Role: {m.get('role')}\nContent: {m.get('content')}\n\n")
         logger.info(f"Mensagem longa salva em {filename}")
 
-    def _truncate_messages(self, messages: List[Dict[str, str]], max_length: int = DEFAULT_MAX_LENGTH) -> List[Dict[str, str]]:
+    def _truncate_messages(
+        self, messages: List[Dict[str, str]], max_length: int = DEFAULT_MAX_LENGTH
+    ) -> List[Dict[str, str]]:
         total_len = sum(len(str(m.get("content", ""))) for m in messages)
         if total_len <= max_length:
             return messages
@@ -196,7 +209,9 @@ class APIHandler:
             content = str(last.get("content", ""))
             newc = content[: rem - 3] + "..."
             truncated.append({"role": last.get("role", "user"), "content": newc})
-            logger.warning(f"Truncado último conteúdo de {len(content)} para {len(newc)} chars.")
+            logger.warning(
+                f"Truncado último conteúdo de {len(content)} para {len(newc)} chars."
+            )
         else:
             logger.warning("Sem espaço útil para incluir a última mensagem truncada.")
         return truncated
@@ -255,25 +270,43 @@ class APIHandler:
                     logger.error(f"Empty content. Response: {resp}")
                     # Try to identify reason (Responses API sometimes has status/reason)
                     status = getattr(resp, "status", "")
-                    reason = getattr(getattr(resp, "incomplete_details", None), "reason", "")
+                    reason = getattr(
+                        getattr(resp, "incomplete_details", None), "reason", ""
+                    )
                     error_msg = "Error: Empty response."
                     if status == "incomplete":
-                        error_msg += f" Status: incomplete. Reason: {reason or 'unknown'}"
-                        logger.warning("Response was incomplete - consider increasing max_output_tokens")
+                        error_msg += (
+                            f" Status: incomplete. Reason: {reason or 'unknown'}"
+                        )
+                        logger.warning(
+                            "Response was incomplete - consider increasing max_output_tokens"
+                        )
                     return error_msg
                 return content
 
             except openai.BadRequestError as e:
                 msg = str(e).lower()
                 last_error = e
-                if any(x in msg for x in ["string too long", "maximum context length", "context_length_exceeded"]):
+                if any(
+                    x in msg
+                    for x in [
+                        "string too long",
+                        "maximum context length",
+                        "context_length_exceeded",
+                    ]
+                ):
                     logger.error("Mensagem muito longa. Tentando truncar…")
                     self._save_long_message(messages, save_dir)
                     messages = self._truncate_messages(messages)
                     continue
                 logger.error(f"Tentativa {attempt}/{MAX_ATTEMPTS} falhou (400): {e}")
 
-            except (TimeoutError, openai.APIError, openai.APIConnectionError, openai.RateLimitError) as e:
+            except (
+                TimeoutError,
+                openai.APIError,
+                openai.APIConnectionError,
+                openai.RateLimitError,
+            ) as e:
                 last_error = e
                 logger.error(f"Tentativa {attempt}/{MAX_ATTEMPTS} falhou: {e}")
 
@@ -281,7 +314,9 @@ class APIHandler:
                 logger.info(f"Retry em {RETRY_DELAY}s…")
                 time.sleep(RETRY_DELAY)
             else:
-                return f"Error: Máximo de tentativas atingido. Último erro: {last_error}"
+                return (
+                    f"Error: Máximo de tentativas atingido. Último erro: {last_error}"
+                )
 
         return "Error: todas as tentativas falharam."
 
@@ -291,7 +326,10 @@ if __name__ == "__main__":
     handler = APIHandler("gpt-5-mini")
     msgs = [
         {"role": "system", "content": "Você é um assistente útil."},
-        {"role": "user", "content": "Resuma em 1 frase por que a Responses API é útil."},
+        {
+            "role": "user",
+            "content": "Resuma em 1 frase por que a Responses API é útil.",
+        },
     ]
     settings = APISettings(max_completion_tokens=64, temperature=0.7)
     print(handler.get_output(messages=msgs, settings=settings))

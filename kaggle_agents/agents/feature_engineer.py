@@ -14,9 +14,7 @@ class FeatureEngineeringAgent:
 
     def __init__(self):
         """Initialize feature engineering agent."""
-        self.llm = ChatOpenAI(
-            model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
-        )
+        self.llm = ChatOpenAI(model=Config.LLM_MODEL, temperature=Config.TEMPERATURE)
         self.engineer = AdvancedFeatureEngineer()
 
     def __call__(self, state: KaggleState) -> KaggleState:
@@ -32,10 +30,26 @@ class FeatureEngineeringAgent:
 
         try:
             # Handle both dict and dataclass state access
-            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
-            test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
-            eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
-            iteration = state.get("iteration", 0) if isinstance(state, dict) else state.iteration
+            train_data_path = (
+                state.get("train_data_path", "")
+                if isinstance(state, dict)
+                else state.train_data_path
+            )
+            test_data_path = (
+                state.get("test_data_path", "")
+                if isinstance(state, dict)
+                else state.test_data_path
+            )
+            eda_summary = (
+                state.get("eda_summary", {})
+                if isinstance(state, dict)
+                else state.eda_summary
+            )
+            iteration = (
+                state.get("iteration", 0)
+                if isinstance(state, dict)
+                else state.iteration
+            )
 
             # Load data
             train_df = pd.read_csv(train_data_path)
@@ -44,9 +58,16 @@ class FeatureEngineeringAgent:
             # Get strategy recommendations
             strategy = eda_summary.get("strategy", {})
             fe_priorities = strategy.get("feature_engineering_priorities", [])
-            encoding_strategy = strategy.get("encoding_strategy", {"low_cardinality": "label", "high_cardinality": "target"})
+            encoding_strategy = strategy.get(
+                "encoding_strategy",
+                {"low_cardinality": "label", "high_cardinality": "target"},
+            )
             scaling_required = strategy.get("scaling_required", False)
-            date_columns = strategy.get("data_characteristics", {}).get("temporal", {}).get("date_columns", [])
+            date_columns = (
+                strategy.get("data_characteristics", {})
+                .get("temporal", {})
+                .get("date_columns", [])
+            )
 
             # Identify target column
             potential_targets = ["target", "label", train_df.columns[-1]]
@@ -97,7 +118,9 @@ class FeatureEngineeringAgent:
                 )
 
             # 5. Create aggregation features
-            train_df, test_df = self.engineer.create_aggregation_features(train_df, test_df)
+            train_df, test_df = self.engineer.create_aggregation_features(
+                train_df, test_df
+            )
 
             # 6. Scale features if required
             if scaling_required:
@@ -131,8 +154,12 @@ class FeatureEngineeringAgent:
 
             # Save processed data
             iteration_suffix = f"_iter{iteration}" if iteration > 0 else ""
-            train_processed_path = train_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
-            test_processed_path = test_data_path.replace(".csv", f"_processed{iteration_suffix}.csv")
+            train_processed_path = train_data_path.replace(
+                ".csv", f"_processed{iteration_suffix}.csv"
+            )
+            test_processed_path = test_data_path.replace(
+                ".csv", f"_processed{iteration_suffix}.csv"
+            )
 
             train_df.to_csv(train_processed_path, index=False)
             test_df.to_csv(test_processed_path, index=False)
@@ -141,7 +168,9 @@ class FeatureEngineeringAgent:
             new_features_count = len(self.engineer.created_features)
 
             # Handle messages state access
-            messages = state.get("messages", []) if isinstance(state, dict) else state.messages
+            messages = (
+                state.get("messages", []) if isinstance(state, dict) else state.messages
+            )
             messages.append(
                 HumanMessage(
                     content=f"Feature engineering completed. Created {new_features_count} new features using advanced techniques."
@@ -161,5 +190,7 @@ class FeatureEngineeringAgent:
             error_msg = f"Feature engineering failed: {str(e)}"
             print(f"Feature Engineering Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            errors = (
+                state.get("errors", []) if isinstance(state, dict) else state.errors
+            )
             return {"errors": errors + [error_msg]}

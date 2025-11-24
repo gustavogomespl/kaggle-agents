@@ -67,10 +67,19 @@ class CodeExecutor:
         """
         # Check 1: Has required output format
         if "Final Validation Performance" not in code:
-            return False, "Missing required output: 'Final Validation Performance: {score}'"
+            return (
+                False,
+                "Missing required output: 'Final Validation Performance: {score}'",
+            )
 
         # Check 2: No prohibited exit() calls (enhanced check)
-        prohibited_calls = ["exit()", "sys.exit(", "quit()", "raise SystemExit", "os._exit("]
+        prohibited_calls = [
+            "exit()",
+            "sys.exit(",
+            "quit()",
+            "raise SystemExit",
+            "os._exit(",
+        ]
         for call in prohibited_calls:
             if call in code:
                 return False, f"Code contains prohibited termination call: {call}"
@@ -78,7 +87,7 @@ class CodeExecutor:
         # Check 3: Early stopping rounds misuse (common API error)
         if "early_stopping_rounds=" in code and ".fit(" in code:
             # Check if it's being passed as a parameter to fit()
-            if re.search(r'\.fit\([^)]*early_stopping_rounds=', code):
+            if re.search(r"\.fit\([^)]*early_stopping_rounds=", code):
                 return False, (
                     "API Error: early_stopping_rounds cannot be passed to fit(). "
                     "Use callbacks=[lgb.early_stopping(100)] or callbacks=[xgb.callback.EarlyStopping(100)] instead."
@@ -86,7 +95,10 @@ class CodeExecutor:
 
         # Check 4: Has basic structure for ML code
         required_patterns = [
-            ("import pandas" in code or "import numpy" in code, "Missing required imports (pandas or numpy)"),
+            (
+                "import pandas" in code or "import numpy" in code,
+                "Missing required imports (pandas or numpy)",
+            ),
         ]
 
         for has_pattern, error_msg in required_patterns:
@@ -96,16 +108,22 @@ class CodeExecutor:
         # Check 5: Warning about categorical features (informational only)
         # This is a soft check - we warn but don't fail
         has_categorical_check = (
-            "select_dtypes" in code or
-            "LabelEncoder" in code or
-            "OneHotEncoder" in code or
-            "TargetEncoder" in code or
-            "CatBoost" in code
+            "select_dtypes" in code
+            or "LabelEncoder" in code
+            or "OneHotEncoder" in code
+            or "TargetEncoder" in code
+            or "CatBoost" in code
         )
 
-        if not has_categorical_check and "LGBMClassifier" in code or "XGBClassifier" in code:
+        if (
+            not has_categorical_check
+            and "LGBMClassifier" in code
+            or "XGBClassifier" in code
+        ):
             # This is just a warning, not a failure
-            print("   ⚠️  Warning: LightGBM/XGBoost code without categorical encoding detected")
+            print(
+                "   ⚠️  Warning: LightGBM/XGBoost code without categorical encoding detected"
+            )
 
         return True, "Validation passed"
 
@@ -125,7 +143,7 @@ class CodeExecutor:
                     # Extract score after the colon
                     score_str = line.split(":")[-1].strip()
                     # Remove any non-numeric characters except decimal point and minus
-                    score_str = re.sub(r'[^\d.\-]', '', score_str)
+                    score_str = re.sub(r"[^\d.\-]", "", score_str)
                     return float(score_str)
                 except (ValueError, IndexError):
                     continue
@@ -162,7 +180,9 @@ class CodeExecutor:
                 errors=[validation_msg],
             )
 
-        working_path = Path(working_dir) if isinstance(working_dir, str) else working_dir
+        working_path = (
+            Path(working_dir) if isinstance(working_dir, str) else working_dir
+        )
         working_path.mkdir(parents=True, exist_ok=True)
 
         # Track artifacts before execution
@@ -173,7 +193,7 @@ class CodeExecutor:
 
         try:
             # Write code to file
-            with open(script_file, 'w', encoding='utf-8') as f:
+            with open(script_file, "w", encoding="utf-8") as f:
                 f.write(code)
 
             # Execute in subprocess with progress monitoring
@@ -209,7 +229,9 @@ class CodeExecutor:
                 # Print progress update
                 if elapsed - (last_progress_time - start_time) >= progress_interval:
                     remaining = self.timeout - elapsed
-                    print(f"      ⏳ Execution in progress... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)")
+                    print(
+                        f"      ⏳ Execution in progress... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)"
+                    )
                     last_progress_time = time.time()
 
                 # Sleep briefly before next check
@@ -233,7 +255,9 @@ class CodeExecutor:
             artifacts_created = list(set(artifacts_after) - set(artifacts_before))
 
             # Remove the script file from artifacts
-            artifacts_created = [a for a in artifacts_created if not a.endswith(script_file.name)]
+            artifacts_created = [
+                a for a in artifacts_created if not a.endswith(script_file.name)
+            ]
 
             # Parse errors
             errors = self._parse_errors(result.stderr, result.stdout)
@@ -243,7 +267,9 @@ class CodeExecutor:
 
             # Validate expected artifacts
             if expected_artifacts and success:
-                missing = [a for a in expected_artifacts if not (working_path / a).exists()]
+                missing = [
+                    a for a in expected_artifacts if not (working_path / a).exists()
+                ]
                 if missing:
                     success = False
                     errors.append(f"Missing expected artifacts: {', '.join(missing)}")
@@ -255,7 +281,9 @@ class CodeExecutor:
                 if performance_score is not None:
                     print(f"   📊 Validation Performance: {performance_score:.6f}")
                 else:
-                    print("   ⚠️  Warning: Could not extract performance metric from output")
+                    print(
+                        "   ⚠️  Warning: Could not extract performance metric from output"
+                    )
 
             return ExecutionResult(
                 success=success,
@@ -322,7 +350,9 @@ class CodeExecutor:
                 print("    Execution successful")
                 return result, attempt + 1
 
-            print(f"   L Execution failed: {result.errors[0] if result.errors else 'Unknown error'}")
+            print(
+                f"   L Execution failed: {result.errors[0] if result.errors else 'Unknown error'}"
+            )
 
         return result, max_retries
 
@@ -337,7 +367,7 @@ class CodeExecutor:
             Tuple of (is_valid, error_message)
         """
         try:
-            compile(code, '<string>', 'exec')
+            compile(code, "<string>", "exec")
             return True, None
         except SyntaxError as e:
             error_msg = f"Syntax error at line {e.lineno}: {e.msg}"
@@ -384,7 +414,7 @@ class CodeExecutor:
         if stderr:
             # Extract traceback info
             if "Traceback" in stderr:
-                lines = stderr.split('\n')
+                lines = stderr.split("\n")
                 for i, line in enumerate(lines):
                     if line.startswith("Traceback"):
                         # Get the actual error (usually last line)
@@ -448,7 +478,9 @@ class ArtifactValidator:
         Returns:
             Validation results dictionary
         """
-        working_path = Path(working_dir) if isinstance(working_dir, str) else working_dir
+        working_path = (
+            Path(working_dir) if isinstance(working_dir, str) else working_dir
+        )
 
         results = {
             "valid": False,
@@ -490,7 +522,9 @@ class ArtifactValidator:
         """
         import pandas as pd
 
-        working_path = Path(working_dir) if isinstance(working_dir, str) else working_dir
+        working_path = (
+            Path(working_dir) if isinstance(working_dir, str) else working_dir
+        )
 
         results = {
             "valid": False,
@@ -541,6 +575,7 @@ class ArtifactValidator:
 
 
 # ==================== Convenience Functions ====================
+
 
 def execute_code(
     code: str,

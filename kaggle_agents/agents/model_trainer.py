@@ -4,10 +4,10 @@ import os
 
 # Fix matplotlib backend for Google Colab compatibility
 # Must be set before importing lightgbm
-if 'MPLBACKEND' in os.environ:
-    if os.environ['MPLBACKEND'] == 'module://matplotlib_inline.backend_inline':
+if "MPLBACKEND" in os.environ:
+    if os.environ["MPLBACKEND"] == "module://matplotlib_inline.backend_inline":
         # Colab sets this inline backend which causes issues with some versions
-        os.environ['MPLBACKEND'] = 'Agg'
+        os.environ["MPLBACKEND"] = "Agg"
 
 import pandas as pd
 import joblib
@@ -31,9 +31,7 @@ class ModelTrainingAgent:
 
     def __init__(self):
         """Initialize model training agent."""
-        self.llm = ChatOpenAI(
-            model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
-        )
+        self.llm = ChatOpenAI(model=Config.LLM_MODEL, temperature=Config.TEMPERATURE)
         self.cv_adapter = AdaptiveCrossValidator()
         self.optimizer = HyperparameterOptimizer(n_trials=30, timeout=180)
 
@@ -83,9 +81,7 @@ class ModelTrainingAgent:
                 "random_forest": RandomForestClassifier(
                     n_estimators=100, random_state=42, n_jobs=-1
                 ),
-                "xgboost": XGBClassifier(
-                    n_estimators=100, random_state=42, n_jobs=-1
-                ),
+                "xgboost": XGBClassifier(n_estimators=100, random_state=42, n_jobs=-1),
                 "lightgbm": LGBMClassifier(
                     n_estimators=100, random_state=42, n_jobs=-1, verbose=-1
                 ),
@@ -96,9 +92,7 @@ class ModelTrainingAgent:
                 "random_forest": RandomForestRegressor(
                     n_estimators=100, random_state=42, n_jobs=-1
                 ),
-                "xgboost": XGBRegressor(
-                    n_estimators=100, random_state=42, n_jobs=-1
-                ),
+                "xgboost": XGBRegressor(n_estimators=100, random_state=42, n_jobs=-1),
                 "lightgbm": LGBMRegressor(
                     n_estimators=100, random_state=42, n_jobs=-1, verbose=-1
                 ),
@@ -122,7 +116,9 @@ class ModelTrainingAgent:
         results = []
 
         # Determine scoring metric
-        scoring = "accuracy" if problem_type == "classification" else "neg_mean_squared_error"
+        scoring = (
+            "accuracy" if problem_type == "classification" else "neg_mean_squared_error"
+        )
 
         for name, model in models.items():
             print(f"  Training {name}...")
@@ -153,7 +149,9 @@ class ModelTrainingAgent:
                     }
                 )
 
-                print(f"    {name}: CV Score = {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
+                print(
+                    f"    {name}: CV Score = {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})"
+                )
 
             except Exception as e:
                 print(f"    Failed to train {name}: {str(e)}")
@@ -207,7 +205,9 @@ class ModelTrainingAgent:
 
             # Save best model
             Path(Config.MODELS_DIR).mkdir(parents=True, exist_ok=True)
-            model_path = f"{Config.MODELS_DIR}/best_model_{state['competition_name']}.joblib"
+            model_path = (
+                f"{Config.MODELS_DIR}/best_model_{state['competition_name']}.joblib"
+            )
             joblib.dump(best_result["model"], model_path)
 
             # Update state
@@ -236,14 +236,14 @@ class ModelTrainingAgent:
             human_msg = HumanMessage(
                 content=f"""Model Training Results:
 
-Best Model: {best_result['name']}
-CV Score: {best_result['mean_cv_score']:.4f} (+/- {best_result['std_cv_score']:.4f})
+Best Model: {best_result["name"]}
+CV Score: {best_result["mean_cv_score"]:.4f} (+/- {best_result["std_cv_score"]:.4f})
 
 All Models:
 {chr(10).join(f"- {r['name']}: {r['mean_cv_score']:.4f} (+/- {r['std_cv_score']:.4f})" for r in results)}
 
 Problem Type: {problem_type}
-Metric: {state.get('metric', 'unknown')}
+Metric: {state.get("metric", "unknown")}
 
 Provide analysis and next steps recommendations."""
             )
@@ -256,13 +256,17 @@ Provide analysis and next steps recommendations."""
                 )
             )
 
-            print(f"Model Training Agent: Best model is {best_result['name']} with CV score {best_result['mean_cv_score']:.4f}")
+            print(
+                f"Model Training Agent: Best model is {best_result['name']} with CV score {best_result['mean_cv_score']:.4f}"
+            )
 
         except Exception as e:
             error_msg = f"Model training failed: {str(e)}"
             print(f"Model Training Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            errors = (
+                state.get("errors", []) if isinstance(state, dict) else state.errors
+            )
             return {"errors": errors + [error_msg]}
 
         return state

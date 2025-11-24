@@ -48,8 +48,8 @@ class EnsembleAgent:
         valid_names = []
 
         for i, (model, name) in enumerate(zip(models, model_names)):
-            print(f"    Processing model {i+1}/{len(models)}: {name}")
-            
+            print(f"    Processing model {i + 1}/{len(models)}: {name}")
+
             # Try to load OOF predictions
             oof_path = working_dir / "models" / f"oof_{name}.npy"
             if oof_path.exists():
@@ -59,7 +59,9 @@ class EnsembleAgent:
                 valid_models.append(model)
                 valid_names.append(name)
             else:
-                print("      ⚠️  OOF file not found, falling back to cross_val_predict (slow)")
+                print(
+                    "      ⚠️  OOF file not found, falling back to cross_val_predict (slow)"
+                )
                 if problem_type == "classification":
                     oof_preds = cross_val_predict(
                         model, X, y, cv=5, method="predict_proba", n_jobs=-1
@@ -72,7 +74,7 @@ class EnsembleAgent:
                 else:
                     oof_preds = cross_val_predict(model, X, y, cv=5, n_jobs=-1)
                     meta_features.append(oof_preds)
-                
+
                 valid_models.append(model)
                 valid_names.append(name)
 
@@ -93,11 +95,11 @@ class EnsembleAgent:
 
         # We don't need to retrain base models if we use the saved test preds!
         # But we keep them in the return dict for completeness
-        
+
         return {
-            "meta_model": meta_model, 
+            "meta_model": meta_model,
             "base_models": valid_models,
-            "base_model_names": valid_names
+            "base_model_names": valid_names,
         }
 
     def create_blending_ensemble(
@@ -122,7 +124,7 @@ class EnsembleAgent:
 
         # Optimize weights
         weights = self.optimize_blending_weights(models, X, y, problem_type)
-        
+
         return {"base_models": models, "weights": weights}
 
     def optimize_blending_weights(
@@ -135,14 +137,16 @@ class EnsembleAgent:
         """Optimize blending weights using scipy.minimize."""
         from scipy.optimize import minimize
         from sklearn.metrics import log_loss, mean_squared_error
-        
+
         print("    Optimizing blending weights...")
-        
+
         # Generate OOF predictions
         oof_preds = []
         for model in models:
             if problem_type == "classification":
-                preds = cross_val_predict(model, X, y, cv=5, method="predict_proba", n_jobs=-1)
+                preds = cross_val_predict(
+                    model, X, y, cv=5, method="predict_proba", n_jobs=-1
+                )
                 if preds.ndim > 1:
                     oof_preds.append(preds[:, 1])
                 else:
@@ -150,40 +154,40 @@ class EnsembleAgent:
             else:
                 preds = cross_val_predict(model, X, y, cv=5, n_jobs=-1)
                 oof_preds.append(preds)
-                
+
         oof_preds = np.column_stack(oof_preds)
-        
+
         # Define loss function
         def loss_func(weights):
             # Normalize weights
             weights = np.array(weights)
             weights /= weights.sum()
-            
+
             # Weighted average
             final_preds = np.average(oof_preds, axis=1, weights=weights)
-            
+
             if problem_type == "classification":
                 # Clip to avoid log(0)
                 final_preds = np.clip(final_preds, 1e-15, 1 - 1e-15)
                 return log_loss(y, final_preds)
             else:
                 return np.sqrt(mean_squared_error(y, final_preds))
-                
+
         # Initial weights (equal)
         init_weights = [1.0 / len(models)] * len(models)
-        
+
         # Constraints: weights sum to 1, 0 <= weight <= 1
-        constraints = ({'type': 'eq', 'fun': lambda w: 1 - sum(w)})
+        constraints = {"type": "eq", "fun": lambda w: 1 - sum(w)}
         bounds = [(0, 1)] * len(models)
-        
+
         result = minimize(
-            loss_func, 
-            init_weights, 
-            method='SLSQP', 
-            bounds=bounds, 
-            constraints=constraints
+            loss_func,
+            init_weights,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
         )
-        
+
         opt_weights = result.x / result.x.sum()
         print(f"    Optimal weights: {opt_weights}")
         opt_weights = result.x / result.x.sum()
@@ -198,23 +202,25 @@ class EnsembleAgent:
         X: pd.DataFrame,
         y: pd.Series,
         problem_type: str,
-        n_iterations: int = 100
+        n_iterations: int = 100,
     ) -> Dict[str, Any]:
         """
         Create ensemble using Caruana's Hill Climbing (Forward Selection).
-        
+
         Iteratively adds the model that maximizes the ensemble's CV score.
         Allows repetition of models (weighted ensemble by count).
         """
         from sklearn.metrics import log_loss, mean_squared_error
-        
-        print(f"  Creating Caruana Ensemble (Hill Climbing) with {len(models)} models...")
-        
+
+        print(
+            f"  Creating Caruana Ensemble (Hill Climbing) with {len(models)} models..."
+        )
+
         # Load OOFs
         oof_preds = []
         valid_models = []
         valid_names = []
-        
+
         for i, (model, name) in enumerate(zip(models, model_names)):
             oof_path = working_dir / "models" / f"oof_{name}.npy"
             if oof_path.exists():
@@ -224,84 +230,94 @@ class EnsembleAgent:
                 valid_names.append(name)
             else:
                 print(f"    ⚠️ Skipping {name} (no OOF found)")
-                
+
         if not oof_preds:
             raise ValueError("No OOF predictions found for Caruana ensemble")
-            
+
         oof_preds = np.column_stack(oof_preds)
         n_models = oof_preds.shape[1]
-        
+
         # Metric function
         def get_score(y_true, y_pred):
             if problem_type == "classification":
                 # Assuming AUC for classification if not specified, or LogLoss
                 # Let's use LogLoss for optimization as it's differentiable/smooth
                 y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
-                return -log_loss(y_true, y_pred) # Maximize negative log loss
+                return -log_loss(y_true, y_pred)  # Maximize negative log loss
             else:
-                return -np.sqrt(mean_squared_error(y_true, y_pred)) # Maximize negative RMSE
-                
+                return -np.sqrt(
+                    mean_squared_error(y_true, y_pred)
+                )  # Maximize negative RMSE
+
         # Hill Climbing
         current_ensemble_preds = np.zeros_like(oof_preds[:, 0])
         ensemble_counts = np.zeros(n_models, dtype=int)
-        best_score = -float('inf')
-        
+        best_score = -float("inf")
+
         # Initial step: pick best single model
         for i in range(n_models):
             score = get_score(y, oof_preds[:, i])
             if score > best_score:
                 best_score = score
                 best_init_idx = i
-                
+
         current_ensemble_preds = oof_preds[:, best_init_idx]
         ensemble_counts[best_init_idx] = 1
-        
-        print(f"    Init Best Score: {best_score:.4f} (Model: {valid_names[best_init_idx]})")
-        
+
+        print(
+            f"    Init Best Score: {best_score:.4f} (Model: {valid_names[best_init_idx]})"
+        )
+
         # Iterations
         for it in range(n_iterations):
-            best_iter_score = -float('inf')
+            best_iter_score = -float("inf")
             best_iter_idx = -1
-            
+
             # Try adding each model
-            current_size = it + 2 # +1 for init, +1 for current iter (1-based)
-            
+            current_size = it + 2  # +1 for init, +1 for current iter (1-based)
+
             for i in range(n_models):
                 # Candidate: current sum + new model prediction
                 # Average = (current_sum + new_pred) / current_size
-                # But we maintain sum for efficiency? 
+                # But we maintain sum for efficiency?
                 # Actually, let's maintain the running sum to avoid re-summing everything
                 # current_ensemble_preds is currently the AVERAGE.
                 # So convert back to sum: current_avg * (current_size - 1)
-                
+
                 current_sum = current_ensemble_preds * (current_size - 1)
                 candidate_avg = (current_sum + oof_preds[:, i]) / current_size
-                
+
                 score = get_score(y, candidate_avg)
                 if score > best_iter_score:
                     best_iter_score = score
                     best_iter_idx = i
-            
+
             # Update best
             if best_iter_score > best_score:
                 best_score = best_iter_score
                 ensemble_counts[best_iter_idx] += 1
-                current_ensemble_preds = (current_ensemble_preds * (current_size - 1) + oof_preds[:, best_iter_idx]) / current_size
+                current_ensemble_preds = (
+                    current_ensemble_preds * (current_size - 1)
+                    + oof_preds[:, best_iter_idx]
+                ) / current_size
                 # print(f"    Iter {it+1}: Added {valid_names[best_iter_idx]} -> Score: {best_score:.4f}")
             else:
                 # If no improvement, should we stop? Caruana usually continues to smooth out
                 # But for simplicity, we can continue or stop. Let's continue.
                 ensemble_counts[best_iter_idx] += 1
-                current_ensemble_preds = (current_ensemble_preds * (current_size - 1) + oof_preds[:, best_iter_idx]) / current_size
-        
+                current_ensemble_preds = (
+                    current_ensemble_preds * (current_size - 1)
+                    + oof_preds[:, best_iter_idx]
+                ) / current_size
+
         # Calculate final weights
         weights = ensemble_counts / ensemble_counts.sum()
         print(f"    Final Caruana Weights: {weights}")
-        
+
         return {
             "base_models": valid_models,
             "base_model_names": valid_names,
-            "weights": weights.tolist()
+            "weights": weights.tolist(),
         }
 
     def predict_stacking(
@@ -379,10 +395,7 @@ class EnsembleAgent:
         return ensemble_pred
 
     def plan_ensemble_strategy(
-        self,
-        models: List[Any],
-        problem_type: str,
-        eda_summary: Dict[str, Any]
+        self, models: List[Any], problem_type: str, eda_summary: Dict[str, Any]
     ) -> Dict[str, Any]:
         """Plan ensemble strategy using LLM."""
         from ..core.config import get_llm
@@ -390,14 +403,14 @@ class EnsembleAgent:
         import json
 
         llm = get_llm()
-        
+
         model_descriptions = []
         for i, m in enumerate(models):
-            model_descriptions.append(f"Model {i+1}: {type(m).__name__}")
-            
+            model_descriptions.append(f"Model {i + 1}: {type(m).__name__}")
+
         prompt = f"""# Introduction
 - You are a Kaggle grandmaster attending a competition.
-- We have {len(models)} trained models: {', '.join(model_descriptions)}.
+- We have {len(models)} trained models: {", ".join(model_descriptions)}.
 - Problem Type: {problem_type}
 - EDA Insights: {str(eda_summary)[:500]}...
 
@@ -426,7 +439,10 @@ Return a JSON object:
                 content = content.split("```")[1].split("```")[0].strip()
             return json.loads(content)
         except:
-            return {"strategy_name": "weighted_blending", "description": "Fallback to weighted blending"}
+            return {
+                "strategy_name": "weighted_blending",
+                "description": "Fallback to weighted blending",
+            }
 
     def __call__(self, state: KaggleState) -> KaggleState:
         """Create ensemble from trained models.
@@ -437,27 +453,69 @@ Return a JSON object:
         Returns:
             Updated state with ensemble model
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("ENSEMBLE AGENT: Creating Model Ensemble")
-        print("="*60)
+        print("=" * 60)
 
         try:
             # Handle both dict and dataclass state access
-            models_trained = state.get("models_trained", []) if isinstance(state, dict) else state.models_trained
-            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
-            current_train_path = state.get("current_train_path", "") if isinstance(state, dict) else getattr(state, "current_train_path", "")
-            current_test_path = state.get("current_test_path", "") if isinstance(state, dict) else getattr(state, "current_test_path", "")
-            competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
-            eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
-            best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
-            working_dir_value = state.get("working_directory", "") if isinstance(state, dict) else state.working_directory
+            models_trained = (
+                state.get("models_trained", [])
+                if isinstance(state, dict)
+                else state.models_trained
+            )
+            train_data_path = (
+                state.get("train_data_path", "")
+                if isinstance(state, dict)
+                else state.train_data_path
+            )
+            current_train_path = (
+                state.get("current_train_path", "")
+                if isinstance(state, dict)
+                else getattr(state, "current_train_path", "")
+            )
+            current_test_path = (
+                state.get("current_test_path", "")
+                if isinstance(state, dict)
+                else getattr(state, "current_test_path", "")
+            )
+            competition_name = (
+                state.get("competition_name", "")
+                if isinstance(state, dict)
+                else state.competition_name
+            )
+            eda_summary = (
+                state.get("eda_summary", {})
+                if isinstance(state, dict)
+                else state.eda_summary
+            )
+            best_model = (
+                state.get("best_model", {})
+                if isinstance(state, dict)
+                else state.best_model
+            )
+            working_dir_value = (
+                state.get("working_directory", "")
+                if isinstance(state, dict)
+                else state.working_directory
+            )
             working_dir = Path(working_dir_value) if working_dir_value else Path(".")
-            test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
-            sample_submission_path = state.get("sample_submission_path", "") if isinstance(state, dict) else state.sample_submission_path
+            test_data_path = (
+                state.get("test_data_path", "")
+                if isinstance(state, dict)
+                else state.test_data_path
+            )
+            sample_submission_path = (
+                state.get("sample_submission_path", "")
+                if isinstance(state, dict)
+                else state.sample_submission_path
+            )
 
             # DEBUG: Detailed information about available models
             dev_results = state.get("development_results", [])
-            successful_results = [r for r in dev_results if r.success] if dev_results else []
+            successful_results = (
+                [r for r in dev_results if r.success] if dev_results else []
+            )
 
             print("\n   📊 Ensemble Prerequisites Check:")
             print(f"      Total development results: {len(dev_results)}")
@@ -467,33 +525,55 @@ Return a JSON object:
             if successful_results:
                 print("\n   ✅ Successful components:")
                 for i, result in enumerate(successful_results[-5:], 1):  # Last 5
-                    artifacts_str = ', '.join(result.artifacts_created[:3]) if result.artifacts_created else 'none'
+                    artifacts_str = (
+                        ", ".join(result.artifacts_created[:3])
+                        if result.artifacts_created
+                        else "none"
+                    )
                     print(f"      {i}. {artifacts_str}")
 
             # Check if we have multiple models
             if len(models_trained) < 2:
-                print(f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})")
+                print(
+                    f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})"
+                )
                 print("      Reason: Ensemble requires at least 2 trained models")
                 print("      Skipping ensemble step")
                 return {
                     "ensemble_skipped": True,
-                    "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)"
+                    "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)",
                 }
 
             # Resolve train/test paths (prefer engineered data if available)
-            resolved_train_path = Path(current_train_path) if current_train_path else Path(train_data_path) if train_data_path else working_dir / "train.csv"
-            resolved_test_path = Path(current_test_path) if current_test_path else Path(test_data_path) if test_data_path else working_dir / "test.csv"
+            resolved_train_path = (
+                Path(current_train_path)
+                if current_train_path
+                else Path(train_data_path)
+                if train_data_path
+                else working_dir / "train.csv"
+            )
+            resolved_test_path = (
+                Path(current_test_path)
+                if current_test_path
+                else Path(test_data_path)
+                if test_data_path
+                else working_dir / "test.csv"
+            )
 
             print("\n   📂 Data Paths:")
             print(f"      Train: {resolved_train_path.name}")
             print(f"      Test:  {resolved_test_path.name}")
             if current_train_path:
-                print("      ✅ Using engineered features (from feature_engineering component)")
+                print(
+                    "      ✅ Using engineered features (from feature_engineering component)"
+                )
             else:
                 print("      📊 Using original raw features")
 
             if not resolved_train_path.exists():
-                print(f"  ❌ Train data not found at {resolved_train_path}, skipping ensemble")
+                print(
+                    f"  ❌ Train data not found at {resolved_train_path}, skipping ensemble"
+                )
                 return state
 
             # Load processed data
@@ -524,33 +604,49 @@ Return a JSON object:
             if test_path.exists():
                 try:
                     test_df = pd.read_csv(test_path)
-                    missing_cols = [col for col in X.columns if col not in test_df.columns]
+                    missing_cols = [
+                        col for col in X.columns if col not in test_df.columns
+                    ]
                     if missing_cols:
-                        print(f"   ⚠️ Test data missing columns: {missing_cols} (filled with 0)")
+                        print(
+                            f"   ⚠️ Test data missing columns: {missing_cols} (filled with 0)"
+                        )
                         for col in missing_cols:
                             test_df[col] = 0
                     test_features = test_df[X.columns]
                 except Exception as e:
-                    print(f"   ⚠️ Failed to load test data for ensemble predictions: {e}")
+                    print(
+                        f"   ⚠️ Failed to load test data for ensemble predictions: {e}"
+                    )
             else:
-                print(f"   ⚠️ Test data not found at {test_path}, skipping submission generation")
+                print(
+                    f"   ⚠️ Test data not found at {test_path}, skipping submission generation"
+                )
 
-            sample_sub_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
+            sample_sub_path = (
+                Path(sample_submission_path)
+                if sample_submission_path
+                else working_dir / "sample_submission.csv"
+            )
 
             # Load top models (top 3 by CV score)
             print("\n   🔍 Loading top models for ensemble...")
-            sorted_models = sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]
+            sorted_models = sorted(
+                models_trained, key=lambda x: x["mean_cv_score"], reverse=True
+            )[:3]
 
             top_models = []
             top_model_names = []
             for i, model_info in enumerate(sorted_models, 1):
                 model_path = f"{get_config().paths.models_dir}/{model_info['name']}_{competition_name}.joblib"
-                print(f"      Model {i}: {model_info['name']} (CV: {model_info['mean_cv_score']:.4f})")
+                print(
+                    f"      Model {i}: {model_info['name']} (CV: {model_info['mean_cv_score']:.4f})"
+                )
 
                 if Path(model_path).exists():
                     model = joblib.load(model_path)
                     top_models.append(model)
-                    top_model_names.append(model_info['name'])
+                    top_model_names.append(model_info["name"])
                     print(f"         ✅ Loaded from {model_path}")
                 else:
                     print(f"         ❌ Model file not found: {model_path}")
@@ -560,7 +656,7 @@ Return a JSON object:
                 print(f"      Required: 2+, Found: {len(top_models)}")
                 return {
                     "ensemble_skipped": True,
-                    "skip_reason": f"models_not_found (loaded {len(top_models)}, need 2+)"
+                    "skip_reason": f"models_not_found (loaded {len(top_models)}, need 2+)",
                 }
 
             # PLAN ENSEMBLE STRATEGY
@@ -574,17 +670,16 @@ Return a JSON object:
             # Create ensemble
             if "stack" in ensemble_strategy.lower():
                 ensemble = self.create_stacking_ensemble(
-                    top_models, 
-                    top_model_names, 
-                    working_dir, 
-                    X, 
-                    y, 
-                    problem_type
+                    top_models, top_model_names, working_dir, X, y, problem_type
                 )
                 if test_features is None:
-                    print("  ⚠️ Skipping stacking submission because test features are unavailable")
+                    print(
+                        "  ⚠️ Skipping stacking submission because test features are unavailable"
+                    )
                 else:
-                    final_preds = self.predict_stacking(ensemble, test_features, problem_type)
+                    final_preds = self.predict_stacking(
+                        ensemble, test_features, problem_type
+                    )
                     if sample_sub_path.exists():
                         sub_df = pd.read_csv(sample_sub_path)
                         sub_df.iloc[:, 1] = final_preds
@@ -592,18 +687,15 @@ Return a JSON object:
                         sub_df.to_csv(submission_path, index=False)
                         print(f"  ✅ Saved ensemble submission to {submission_path}")
                     else:
-                        print(f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save")
-            
+                        print(
+                            f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"
+                        )
+
             elif "caruana" in ensemble_strategy.lower():
                 ensemble = self.create_caruana_ensemble(
-                    top_models,
-                    top_model_names,
-                    working_dir,
-                    X,
-                    y,
-                    problem_type
+                    top_models, top_model_names, working_dir, X, y, problem_type
                 )
-                
+
                 # Generate Final Submission using Test Preds (Weighted Average)
                 print("  Generating final submission from Caruana Ensemble...")
                 valid_names = ensemble["base_model_names"]
@@ -622,13 +714,21 @@ Return a JSON object:
                         model = base_models[idx] if idx < len(base_models) else None
                         if model is not None:
                             try:
-                                if problem_type == "classification" and hasattr(model, "predict_proba"):
+                                if problem_type == "classification" and hasattr(
+                                    model, "predict_proba"
+                                ):
                                     model_preds = model.predict_proba(test_features)
-                                    preds = model_preds[:, 1] if model_preds.ndim > 1 else model_preds
+                                    preds = (
+                                        model_preds[:, 1]
+                                        if model_preds.ndim > 1
+                                        else model_preds
+                                    )
                                 else:
                                     preds = model.predict(test_features)
                             except Exception as e:
-                                print(f"  ⚠️ Failed to generate test preds for {name}: {e}")
+                                print(
+                                    f"  ⚠️ Failed to generate test preds for {name}: {e}"
+                                )
                     if preds is not None:
                         test_meta_features.append(preds)
                         used_weights.append(weight)
@@ -636,7 +736,9 @@ Return a JSON object:
                         missing_test_models.append(name)
 
                 if missing_test_models:
-                    print(f"  ⚠️ Missing test predictions for: {', '.join(missing_test_models)}")
+                    print(
+                        f"  ⚠️ Missing test predictions for: {', '.join(missing_test_models)}"
+                    )
 
                 if test_meta_features:
                     weight_array = np.array(used_weights, dtype=float)
@@ -645,8 +747,10 @@ Return a JSON object:
                         weight_array = np.ones_like(weight_array) / len(weight_array)
                     else:
                         weight_array = weight_array / weight_sum
-                    final_preds = np.average(test_meta_features, axis=0, weights=weight_array)
-                    
+                    final_preds = np.average(
+                        test_meta_features, axis=0, weights=weight_array
+                    )
+
                     # Save submission
                     if sample_sub_path.exists():
                         sub_df = pd.read_csv(sample_sub_path)
@@ -655,9 +759,13 @@ Return a JSON object:
                         sub_df.to_csv(submission_path, index=False)
                         print(f"  ✅ Saved ensemble submission to {submission_path}")
                     else:
-                        print(f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save")
+                        print(
+                            f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"
+                        )
                 else:
-                    print("  ❌ No test predictions available for Caruana ensemble, skipping submission.")
+                    print(
+                        "  ❌ No test predictions available for Caruana ensemble, skipping submission."
+                    )
 
             else:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
@@ -666,28 +774,35 @@ Return a JSON object:
             print("  Evaluating ensemble performance...")
             if "stack" in ensemble_strategy.lower():
                 # Optimistic estimate for stacking
-                ensemble_score = best_model.get("mean_cv_score", 0.0) * 1.01 
+                ensemble_score = best_model.get("mean_cv_score", 0.0) * 1.01
             else:
                 # For blending, we already calculated OOF loss during optimization
                 pass
-                
-            # Save ensemble
-            ensemble_path = f"{get_config().paths.models_dir}/ensemble_{competition_name}.joblib"
-            joblib.dump({
-                "ensemble": ensemble,
-                "problem_type": problem_type,
-                "strategy": ensemble_strategy,
-                "plan": plan
-            }, ensemble_path)
 
-            print(f"Ensemble Agent: Created {ensemble_strategy} ensemble with {len(top_models)} models")
+            # Save ensemble
+            ensemble_path = (
+                f"{get_config().paths.models_dir}/ensemble_{competition_name}.joblib"
+            )
+            joblib.dump(
+                {
+                    "ensemble": ensemble,
+                    "problem_type": problem_type,
+                    "strategy": ensemble_strategy,
+                    "plan": plan,
+                },
+                ensemble_path,
+            )
+
+            print(
+                f"Ensemble Agent: Created {ensemble_strategy} ensemble with {len(top_models)} models"
+            )
 
             return {
                 "best_model": {
                     "name": f"ensemble_{ensemble_strategy}",
                     "path": ensemble_path,
-                    "mean_cv_score": best_model.get("mean_cv_score", 0.0), 
-                    "is_ensemble": True
+                    "mean_cv_score": best_model.get("mean_cv_score", 0.0),
+                    "is_ensemble": True,
                 }
             }
 
@@ -695,7 +810,9 @@ Return a JSON object:
             error_msg = f"Ensemble creation failed: {str(e)}"
             print(f"Ensemble Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            errors = (
+                state.get("errors", []) if isinstance(state, dict) else state.errors
+            )
             return {"errors": errors + [error_msg]}
 
 

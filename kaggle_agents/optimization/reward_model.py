@@ -10,7 +10,6 @@ import re
 import dspy
 
 
-
 class PlannerRewardModel:
     """
     Reward model for the Planner Agent.
@@ -22,7 +21,12 @@ class PlannerRewardModel:
     - Feasibility (components are implementable)
     """
 
-    def __init__(self, weight_diversity: float = 0.3, weight_impact: float = 0.4, weight_completeness: float = 0.3):
+    def __init__(
+        self,
+        weight_diversity: float = 0.3,
+        weight_impact: float = 0.4,
+        weight_completeness: float = 0.3,
+    ):
         """
         Initialize reward model.
 
@@ -47,7 +51,7 @@ class PlannerRewardModel:
             Reward score (0-1)
         """
         # Extract ablation plan from prediction
-        plan = prediction.ablation_plan if hasattr(prediction, 'ablation_plan') else []
+        plan = prediction.ablation_plan if hasattr(prediction, "ablation_plan") else []
 
         if not plan:
             return 0.0
@@ -59,9 +63,9 @@ class PlannerRewardModel:
 
         # Weighted average
         total_score = (
-            self.weight_diversity * diversity_score +
-            self.weight_impact * impact_score +
-            self.weight_completeness * completeness_score
+            self.weight_diversity * diversity_score
+            + self.weight_impact * impact_score
+            + self.weight_completeness * completeness_score
         )
 
         return total_score
@@ -179,7 +183,7 @@ class DeveloperRewardModel:
         Returns:
             Reward score (0-1)
         """
-        code = prediction.code if hasattr(prediction, 'code') else ""
+        code = prediction.code if hasattr(prediction, "code") else ""
 
         if not code:
             return 0.0
@@ -204,7 +208,7 @@ class DeveloperRewardModel:
             1.0 if valid syntax, 0.0 otherwise
         """
         try:
-            compile(code, '<string>', 'exec')
+            compile(code, "<string>", "exec")
             return 1.0
         except SyntaxError:
             return 0.0
@@ -222,11 +226,11 @@ class DeveloperRewardModel:
         score = 0.0
 
         # Has imports
-        if re.search(r'^import\s+\w+', code, re.MULTILINE):
+        if re.search(r"^import\s+\w+", code, re.MULTILINE):
             score += 0.3
 
         # Has function definitions
-        if re.search(r'^def\s+\w+', code, re.MULTILINE):
+        if re.search(r"^def\s+\w+", code, re.MULTILINE):
             score += 0.3
 
         # Has main execution logic
@@ -261,7 +265,11 @@ class ValidationRewardModel:
         Returns:
             Reward score (0-1)
         """
-        results = prediction.validation_results if hasattr(prediction, 'validation_results') else []
+        results = (
+            prediction.validation_results
+            if hasattr(prediction, "validation_results")
+            else []
+        )
 
         if not results:
             return 0.0
@@ -318,7 +326,9 @@ class KaggleScoreRewardModel:
             Reward score (0-1)
         """
         # Get submission result
-        submission = prediction.submission if hasattr(prediction, 'submission') else None
+        submission = (
+            prediction.submission if hasattr(prediction, "submission") else None
+        )
 
         if not submission:
             return 0.0
@@ -341,7 +351,12 @@ class KaggleScoreRewardModel:
             return 1.0
         else:
             # Scale from 1.0 at target to 0.0 at 100%
-            return max(0.0, 1.0 - (percentile - self.target_percentile) / (100 - self.target_percentile))
+            return max(
+                0.0,
+                1.0
+                - (percentile - self.target_percentile)
+                / (100 - self.target_percentile),
+            )
 
 
 class CombinedRewardModel:
@@ -395,22 +410,23 @@ class CombinedRewardModel:
 
         # CV score component (if available)
         cv_score = 0.0
-        if hasattr(prediction, 'cv_score') and prediction.cv_score is not None:
+        if hasattr(prediction, "cv_score") and prediction.cv_score is not None:
             # Normalize CV score (assume higher is better)
             # This would need competition-specific normalization
             cv_score = min(prediction.cv_score, 1.0)
 
         # Weighted combination
         total_score = (
-            self.weight_kaggle * kaggle_score +
-            self.weight_quality * quality_score +
-            self.weight_cv * cv_score
+            self.weight_kaggle * kaggle_score
+            + self.weight_quality * quality_score
+            + self.weight_cv * cv_score
         )
 
         return total_score
 
 
 # ==================== Convenience Functions ====================
+
 
 def create_planner_metric() -> PlannerRewardModel:
     """Create a planner reward model."""

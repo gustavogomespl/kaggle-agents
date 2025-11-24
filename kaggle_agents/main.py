@@ -5,12 +5,12 @@ import sys
 
 # Fix matplotlib backend for Google Colab and other environments
 # This must be set before any imports that use matplotlib (e.g., LightGBM)
-if 'MPLBACKEND' in os.environ:
-    if os.environ['MPLBACKEND'] == 'module://matplotlib_inline.backend_inline':
-        os.environ['MPLBACKEND'] = 'Agg'
+if "MPLBACKEND" in os.environ:
+    if os.environ["MPLBACKEND"] == "module://matplotlib_inline.backend_inline":
+        os.environ["MPLBACKEND"] = "Agg"
 else:
     # Set a safe default backend for headless environments
-    os.environ.setdefault('MPLBACKEND', 'Agg')
+    os.environ.setdefault("MPLBACKEND", "Agg")
 
 import argparse
 import logging
@@ -33,7 +33,9 @@ def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:
         Initial state dictionary
     """
     return {
-        "messages": [HumanMessage(content=f"Starting Kaggle competition: {competition}")],
+        "messages": [
+            HumanMessage(content=f"Starting Kaggle competition: {competition}")
+        ],
         "competition_name": competition,
         "competition_type": "",
         "metric": "",
@@ -57,7 +59,9 @@ def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:
     }
 
 
-def initialize_enhanced_state(competition: str, data_dir: str, max_iterations: int = 5) -> dict:
+def initialize_enhanced_state(
+    competition: str, data_dir: str, max_iterations: int = 5
+) -> dict:
     """Initialize the enhanced workflow state.
 
     Args:
@@ -72,7 +76,9 @@ def initialize_enhanced_state(competition: str, data_dir: str, max_iterations: i
     competition_dir.mkdir(parents=True, exist_ok=True)
 
     return {
-        "messages": [HumanMessage(content=f"Starting Kaggle competition: {competition}")],
+        "messages": [
+            HumanMessage(content=f"Starting Kaggle competition: {competition}")
+        ],
         "competition_name": competition,
         "competition_type": "",
         "metric": "",
@@ -118,15 +124,15 @@ def extract_competition_slug(competition_input: str) -> str:
         'https://www.kaggle.com/c/titanic' -> 'titanic'
     """
     # Remove trailing slash
-    competition_input = competition_input.rstrip('/')
+    competition_input = competition_input.rstrip("/")
 
     # If it's a URL, extract the slug
-    if 'kaggle.com' in competition_input:
+    if "kaggle.com" in competition_input:
         # Handle both /competitions/ and /c/ URLs
-        parts = competition_input.split('/')
+        parts = competition_input.split("/")
         # Find 'competitions' or 'c' in the URL
         for i, part in enumerate(parts):
-            if part in ('competitions', 'c') and i + 1 < len(parts):
+            if part in ("competitions", "c") and i + 1 < len(parts):
                 return parts[i + 1]
 
     # Otherwise, assume it's already a slug
@@ -138,8 +144,8 @@ def main():
     # Configure logging to show INFO level messages
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
     parser = argparse.ArgumentParser(
@@ -211,13 +217,10 @@ def main():
     if args.mode == "enhanced":
         print("Using ENHANCED mode with multi-agent system and feedback loops")
         workflow = create_enhanced_workflow(
-            competition_name=competition_slug,
-            model=args.model
+            competition_name=competition_slug, model=args.model
         )
         initial_state = initialize_enhanced_state(
-            competition_slug,
-            Config.DATA_DIR,
-            args.max_iterations
+            competition_slug, Config.DATA_DIR, args.max_iterations
         )
     else:
         print("Using SIMPLE mode with basic LangGraph workflow")
@@ -228,9 +231,12 @@ def main():
     if args.visualize:
         try:
             from IPython.display import Image, display
+
             display(Image(workflow.get_graph().draw_mermaid_png()))
         except ImportError:
-            print("Warning: Visualization requires IPython. Install with: uv add ipython")
+            print(
+                "Warning: Visualization requires IPython. Install with: uv add ipython"
+            )
 
     # Run workflow
     try:
@@ -259,7 +265,9 @@ def main():
             print(f"\nLeaderboard Rank: {final_state['leaderboard_rank']}")
             print(f"Public Score: {final_state.get('submission_score', 0.0)}")
 
-        print(f"\nIterations completed: {final_state.get('iteration', 0)}/{args.max_iterations}")
+        print(
+            f"\nIterations completed: {final_state.get('iteration', 0)}/{args.max_iterations}"
+        )
         print()
 
     except KeyboardInterrupt:
@@ -267,6 +275,7 @@ def main():
     except Exception as e:
         print(f"\n\nWorkflow failed: {str(e)}")
         import traceback
+
         traceback.print_exc()
 
 

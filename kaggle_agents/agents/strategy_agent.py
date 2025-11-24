@@ -26,11 +26,11 @@ class CompetitionStrategy(BaseModel):
     )
     encoding_low_cardinality: str = Field(
         default="label",
-        description="Encoding strategy for low cardinality categoricals (e.g., 'label', 'onehot')"
+        description="Encoding strategy for low cardinality categoricals (e.g., 'label', 'onehot')",
     )
     encoding_high_cardinality: str = Field(
         default="target",
-        description="Encoding strategy for high cardinality categoricals (e.g., 'target', 'catboost', 'frequency')"
+        description="Encoding strategy for high cardinality categoricals (e.g., 'target', 'catboost', 'frequency')",
     )
     scaling_required: bool = Field(
         description="Whether feature scaling is required based on selected models"
@@ -45,9 +45,7 @@ class StrategyAgent:
 
     def __init__(self):
         """Initialize strategy agent."""
-        self.llm = ChatOpenAI(
-            model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
-        )
+        self.llm = ChatOpenAI(model=Config.LLM_MODEL, temperature=Config.TEMPERATURE)
 
     def analyze_data_characteristics(self, train_df: pd.DataFrame) -> Dict[str, Any]:
         """Analyze dataset characteristics for strategy formulation.
@@ -69,7 +67,9 @@ class StrategyAgent:
 
         # Numeric vs categorical ratio
         numeric_cols = train_df.select_dtypes(include=["number"]).columns
-        categorical_cols = train_df.select_dtypes(include=["object", "category"]).columns
+        categorical_cols = train_df.select_dtypes(
+            include=["object", "category"]
+        ).columns
 
         characteristics["column_types"] = {
             "numeric_count": len(numeric_cols),
@@ -100,23 +100,37 @@ class StrategyAgent:
         for col in train_df.columns:
             if "date" in col.lower() or "time" in col.lower() or "year" in col.lower():
                 date_cols.append(col)
-        characteristics["temporal"] = {"has_date_columns": len(date_cols) > 0, "date_columns": date_cols}
+        characteristics["temporal"] = {
+            "has_date_columns": len(date_cols) > 0,
+            "date_columns": date_cols,
+        }
 
         # Target analysis (if identifiable)
-        potential_target_cols = [col for col in train_df.columns if col.lower() in ["target", "label", train_df.columns[-1]]]
+        potential_target_cols = [
+            col
+            for col in train_df.columns
+            if col.lower() in ["target", "label", train_df.columns[-1]]
+        ]
         if potential_target_cols:
             target_col = potential_target_cols[0]
             if target_col in train_df.columns:
                 characteristics["target"] = {
                     "name": target_col,
-                    "type": "numeric" if pd.api.types.is_numeric_dtype(train_df[target_col]) else "categorical",
+                    "type": "numeric"
+                    if pd.api.types.is_numeric_dtype(train_df[target_col])
+                    else "categorical",
                     "unique_values": train_df[target_col].nunique(),
                 }
 
                 # Check for class imbalance
-                if characteristics["target"]["type"] == "categorical" or characteristics["target"]["unique_values"] < 20:
+                if (
+                    characteristics["target"]["type"] == "categorical"
+                    or characteristics["target"]["unique_values"] < 20
+                ):
                     value_counts = train_df[target_col].value_counts()
-                    characteristics["target"]["imbalance_ratio"] = value_counts.max() / value_counts.min()
+                    characteristics["target"]["imbalance_ratio"] = (
+                        value_counts.max() / value_counts.min()
+                    )
 
         return characteristics
 
@@ -133,7 +147,11 @@ class StrategyAgent:
 
         try:
             # Handle both dict and dataclass state access
-            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
+            train_data_path = (
+                state.get("train_data_path", "")
+                if isinstance(state, dict)
+                else state.train_data_path
+            )
 
             # Load training data
             train_df = pd.read_csv(train_data_path)
@@ -158,14 +176,34 @@ class StrategyAgent:
             )
 
             # Build detailed prompt with all information
-            characteristics_str = "\n".join([f"- {k}: {v}" for k, v in data_chars.items()])
-            data_insights = state.get("data_insights", []) if isinstance(state, dict) else state.data_insights
-            insights_str = "\n".join([f"- {insight}" for insight in data_insights]) if data_insights else "No insights yet"
+            characteristics_str = "\n".join(
+                [f"- {k}: {v}" for k, v in data_chars.items()]
+            )
+            data_insights = (
+                state.get("data_insights", [])
+                if isinstance(state, dict)
+                else state.data_insights
+            )
+            insights_str = (
+                "\n".join([f"- {insight}" for insight in data_insights])
+                if data_insights
+                else "No insights yet"
+            )
 
             # Handle more state access for competition details
-            competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
-            competition_type = state.get("competition_type", "") if isinstance(state, dict) else state.competition_type
-            metric = state.get("metric", "") if isinstance(state, dict) else state.metric
+            competition_name = (
+                state.get("competition_name", "")
+                if isinstance(state, dict)
+                else state.competition_name
+            )
+            competition_type = (
+                state.get("competition_type", "")
+                if isinstance(state, dict)
+                else state.competition_type
+            )
+            metric = (
+                state.get("metric", "") if isinstance(state, dict) else state.metric
+            )
 
             human_msg = HumanMessage(
                 content=f"""Competition: {competition_name}
@@ -205,18 +243,22 @@ Based on this information, provide a comprehensive strategy including:
             }
 
             # Handle messages state access
-            messages = state.get("messages", []) if isinstance(state, dict) else state.messages
+            messages = (
+                state.get("messages", []) if isinstance(state, dict) else state.messages
+            )
             messages.append(
                 HumanMessage(
                     content=f"""Strategy formulated:
-- Recommended models: {', '.join(strategy.recommended_models)}
+- Recommended models: {", ".join(strategy.recommended_models)}
 - Validation: {strategy.validation_strategy}
-- Feature engineering: {', '.join(strategy.feature_engineering_priorities[:3])}
+- Feature engineering: {", ".join(strategy.feature_engineering_priorities[:3])}
 - Ensemble: {strategy.ensemble_strategy}"""
                 )
             )
 
-            print(f"Strategy Agent: Formulated strategy with {len(strategy.recommended_models)} priority models")
+            print(
+                f"Strategy Agent: Formulated strategy with {len(strategy.recommended_models)} priority models"
+            )
 
             return {"eda_summary": {"strategy": strategy_dict}}
 
@@ -224,5 +266,7 @@ Based on this information, provide a comprehensive strategy including:
             error_msg = f"Strategy formulation failed: {str(e)}"
             print(f"Strategy Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
+            errors = (
+                state.get("errors", []) if isinstance(state, dict) else state.errors
+            )
             return {"errors": errors + [error_msg]}

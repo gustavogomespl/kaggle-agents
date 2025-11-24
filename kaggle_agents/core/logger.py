@@ -24,7 +24,7 @@ class KaggleLogger:
     - Configurable log levels
     """
 
-    _instance: Optional['KaggleLogger'] = None
+    _instance: Optional["KaggleLogger"] = None
     _initialized: bool = False
 
     def __new__(cls):
@@ -92,13 +92,15 @@ class KaggleLogger:
             log_path.mkdir(parents=True, exist_ok=True)
 
             # Main log file
-            log_file = log_path / f"kaggle_agents_{datetime.now().strftime('%Y%m%d')}.log"
+            log_file = (
+                log_path / f"kaggle_agents_{datetime.now().strftime('%Y%m%d')}.log"
+            )
 
             file_handler = RotatingFileHandler(
                 log_file,
                 maxBytes=10 * 1024 * 1024,  # 10MB
                 backupCount=5,
-                encoding='utf-8',
+                encoding="utf-8",
             )
             file_handler.setLevel(level)
 
@@ -215,9 +217,9 @@ class LogContext:
 
 def log_agent_start(logger: logging.Logger, agent_name: str):
     """Log agent execution start."""
-    logger.info(f"\n{'='*60}")
+    logger.info(f"\n{'=' * 60}")
     logger.info(f"AGENT: {agent_name}")
-    logger.info(f"{'='*60}")
+    logger.info(f"{'=' * 60}")
 
 
 def log_agent_end(logger: logging.Logger, agent_name: str, success: bool = True):

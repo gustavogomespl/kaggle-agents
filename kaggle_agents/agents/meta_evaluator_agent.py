@@ -24,6 +24,7 @@ from ..optimization import create_training_collector
 
 # ==================== Meta-Evaluator Agent ====================
 
+
 class MetaEvaluatorAgent:
     """
     Meta-agent that evaluates other agents and optimizes their prompts using RL.
@@ -61,9 +62,9 @@ class MetaEvaluatorAgent:
         Returns:
             State updates with failure analysis and refinement guidance
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("= META-EVALUATOR: Analyzing Performance & Optimizing Prompts")
-        print("="*60)
+        print("=" * 60)
 
         current_iteration = state.get("current_iteration", 0)
         print(f"\n📊 Iteration: {current_iteration}")
@@ -139,13 +140,15 @@ class MetaEvaluatorAgent:
                 error_msg = result.errors[0] if result.errors else result.stderr[:200]
                 error_type = self._classify_error(error_msg)
 
-                analysis["failed_components"].append({
-                    "name": component_name,
-                    "type": component_type,
-                    "error": error_msg,
-                    "error_type": error_type,
-                    "execution_time": result.execution_time,
-                })
+                analysis["failed_components"].append(
+                    {
+                        "name": component_name,
+                        "type": component_type,
+                        "error": error_msg,
+                        "error_type": error_type,
+                        "execution_time": result.execution_time,
+                    }
+                )
 
                 # Track error pattern
                 analysis["error_patterns"].add(error_type)
@@ -158,16 +161,23 @@ class MetaEvaluatorAgent:
                         "common_errors": [],
                     }
                 analysis["by_type"][component_type]["failures"] += 1
-                if error_type not in analysis["by_type"][component_type]["common_errors"]:
-                    analysis["by_type"][component_type]["common_errors"].append(error_type)
+                if (
+                    error_type
+                    not in analysis["by_type"][component_type]["common_errors"]
+                ):
+                    analysis["by_type"][component_type]["common_errors"].append(
+                        error_type
+                    )
 
             else:
                 # Track success
-                analysis["success_components"].append({
-                    "name": component_name,
-                    "type": component_type,
-                    "execution_time": result.execution_time,
-                })
+                analysis["success_components"].append(
+                    {
+                        "name": component_name,
+                        "type": component_type,
+                        "execution_time": result.execution_time,
+                    }
+                )
 
                 # Track success pattern
                 success_pattern = f"{component_type}_success"
@@ -276,12 +286,16 @@ class MetaEvaluatorAgent:
         # Reward 1: Functional Correctness (binary)
         total_components = len(dev_results)
         successful_components = len(failure_analysis["success_components"])
-        r_functional = successful_components / total_components if total_components > 0 else 0.0
+        r_functional = (
+            successful_components / total_components if total_components > 0 else 0.0
+        )
 
         # Reward 2: Performance (continuous, normalized 0-1)
         # Try to get dynamic target from state (e.g. from leaderboard), else default
         target_score = state.get("target_score", 0.9238)  # Default to 0.9238 if not set
-        r_performance = min(current_score / target_score, 1.0) if target_score > 0 else 0.0
+        r_performance = (
+            min(current_score / target_score, 1.0) if target_score > 0 else 0.0
+        )
 
         # Reward 3: Improvement (delta from previous best)
         # Get evaluation metric to handle both minimize and maximize metrics correctly
@@ -289,17 +303,31 @@ class MetaEvaluatorAgent:
         metric_name = competition_info.evaluation_metric if competition_info else ""
 
         # Calculate improvement considering metric direction (positive = better)
-        score_improvement = calculate_score_improvement(current_score, best_score, metric_name)
+        score_improvement = calculate_score_improvement(
+            current_score, best_score, metric_name
+        )
         r_improvement = max(0.0, min(score_improvement * 10, 1.0))  # Scale to 0-1
 
         # Reward 4: Execution Semantics (no errors, fast execution)
-        avg_execution_time = sum(r.execution_time for r in dev_results) / total_components if total_components > 0 else 0.0
-        r_semantics = 1.0 - min(avg_execution_time / 300.0, 1.0)  # Normalize by 5min timeout
+        avg_execution_time = (
+            sum(r.execution_time for r in dev_results) / total_components
+            if total_components > 0
+            else 0.0
+        )
+        r_semantics = 1.0 - min(
+            avg_execution_time / 300.0, 1.0
+        )  # Normalize by 5min timeout
 
-        # Reward 5: Diversity 
+        # Reward 5: Diversity
         # Encourages trying different types of components (e.g. not just 5 XGBoosts)
-        unique_types = len(set(c.get("type", "unknown") for c in failure_analysis["success_components"]))
-        r_diversity = min(unique_types / 3.0, 1.0)  # Target: at least 3 different types working
+        unique_types = len(
+            set(
+                c.get("type", "unknown") for c in failure_analysis["success_components"]
+            )
+        )
+        r_diversity = min(
+            unique_types / 3.0, 1.0
+        )  # Target: at least 3 different types working
 
         # Reward 6: Robustness/Overfitting Penalty
         # Penalize if Public LB score is much lower than Validation score
@@ -307,10 +335,14 @@ class MetaEvaluatorAgent:
         public_score = 0.0
         if submissions:
             public_score = submissions[-1].public_score or 0.0
-        
+
         # If we have both scores, check gap. If gap > 0.1, heavy penalty.
         gap = abs(validation_score - public_score)
-        r_robustness = 1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
+        r_robustness = (
+            1.0 - min(gap * 5, 1.0)
+            if (validation_score > 0 and public_score > 0)
+            else 1.0
+        )
 
         # Combined reward (weighted)
         weights = {
@@ -318,17 +350,17 @@ class MetaEvaluatorAgent:
             "performance": 0.40,
             "improvement": 0.1,
             "semantics": 0.05,
-            "diversity": 0.1,    
-            "robustness": 0.1,   
+            "diversity": 0.1,
+            "robustness": 0.1,
         }
 
         r_combined = (
-            weights["functional"] * r_functional +
-            weights["performance"] * r_performance +
-            weights["improvement"] * r_improvement +
-            weights["semantics"] * r_semantics +
-            weights["diversity"] * r_diversity +
-            weights["robustness"] * r_robustness
+            weights["functional"] * r_functional
+            + weights["performance"] * r_performance
+            + weights["improvement"] * r_improvement
+            + weights["semantics"] * r_semantics
+            + weights["diversity"] * r_diversity
+            + weights["robustness"] * r_robustness
         )
 
         rewards = {
@@ -341,8 +373,10 @@ class MetaEvaluatorAgent:
             "r_combined": r_combined,
         }
 
-        print(f"   📊 Rewards: functional={r_functional:.2f}, performance={r_performance:.2f}, "
-              f"diversity={r_diversity:.2f}, robustness={r_robustness:.2f}, combined={r_combined:.3f}")
+        print(
+            f"   📊 Rewards: functional={r_functional:.2f}, performance={r_performance:.2f}, "
+            f"diversity={r_diversity:.2f}, robustness={r_robustness:.2f}, combined={r_combined:.3f}"
+        )
 
         return rewards
 
@@ -369,7 +403,9 @@ class MetaEvaluatorAgent:
         print("\n   🎯 Generating refinement guidance...")
 
         # Build context for LLM
-        context = self._build_evaluation_context(state, failure_analysis, reward_signals)
+        context = self._build_evaluation_context(
+            state, failure_analysis, reward_signals
+        )
 
         # Generate guidance using superior model (GPT-5)
         prompt = self._build_refinement_prompt(context)
@@ -415,15 +451,15 @@ class MetaEvaluatorAgent:
 - Gap: {target_score - current_score:.4f}
 
 ## Component Results
-- Total: {len(state.get('development_results', []))}
-- Successful: {len(failure_analysis['success_components'])}
-- Failed: {len(failure_analysis['failed_components'])}
+- Total: {len(state.get("development_results", []))}
+- Successful: {len(failure_analysis["success_components"])}
+- Failed: {len(failure_analysis["failed_components"])}
 
 ## Success Patterns
-{chr(10).join('- ' + p for p in failure_analysis['success_patterns'])}
+{chr(10).join("- " + p for p in failure_analysis["success_patterns"])}
 
 ## Error Patterns
-{chr(10).join('- ' + p for p in failure_analysis['error_patterns'])}
+{chr(10).join("- " + p for p in failure_analysis["error_patterns"])}
 """
 
         # FULL CODE AND PERFORMANCE ANALYSIS
@@ -439,34 +475,36 @@ class MetaEvaluatorAgent:
 
         for i, res in enumerate(recent_results):
             # Extract score from stdout if possible
-            score_match = re.search(r"Final Validation Performance: (0\.\d+)", res.stdout)
+            score_match = re.search(
+                r"Final Validation Performance: (0\.\d+)", res.stdout
+            )
             score = float(score_match.group(1)) if score_match else "N/A"
-            
+
             # Determine component name (heuristic)
-            comp_name = f"Component_{i+1}"
+            comp_name = f"Component_{i + 1}"
             if "class " in res.code:
                 # Try to find class name
                 class_match = re.search(r"class (\w+)", res.code)
                 if class_match:
                     comp_name = class_match.group(1)
-            
+
             status = "✅ Success" if res.success else "❌ Failed"
-            
+
             context += f"\n### {comp_name}\n"
             context += f"**Status**: {status}\n"
             context += f"**Score**: {score}\n"
             context += f"**Execution Time**: {res.execution_time:.2f}s\n"
-            
+
             if not res.success:
                 context += f"**Error**: {res.stderr[-200:] if res.stderr else 'Unknown Error'}\n"
 
             # Send code summary instead of full code to reduce tokens
-            code_lines = res.code.split('\n')
+            code_lines = res.code.split("\n")
             context += "**Code Summary**:\n```python\n"
-            context += '\n'.join(code_lines[:20])  # First 20 lines
+            context += "\n".join(code_lines[:20])  # First 20 lines
             if len(code_lines) > 30:
                 context += "\n# ... (middle section omitted) ...\n"
-                context += '\n'.join(code_lines[-10:])  # Last 10 lines
+                context += "\n".join(code_lines[-10:])  # Last 10 lines
             context += "\n```\n"
             context += f"**Total Lines**: {len(code_lines)}\n"
             context += "-" * 40 + "\n"
@@ -569,9 +607,13 @@ Focus on actionable, specific improvements based on error patterns and performan
         self.training_collector.add_example(
             agent_name="planner",
             inputs={
-                "competition_name": competition_info.name if competition_info else "unknown",
+                "competition_name": competition_info.name
+                if competition_info
+                else "unknown",
                 "domain": state.get("domain_detected", "tabular"),
-                "problem_type": competition_info.problem_type if competition_info else "unknown",
+                "problem_type": competition_info.problem_type
+                if competition_info
+                else "unknown",
             },
             outputs={
                 "ablation_plan": [
@@ -639,6 +681,7 @@ Return structured JSON with clear guidance for each agent type."""
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def meta_evaluator_node(state: KaggleState) -> Dict[str, Any]:
     """

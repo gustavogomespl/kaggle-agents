@@ -58,32 +58,44 @@ class PromptRefinementDecider:
             return {"planner": False, "developer": False}
 
         # Check if it's time for periodic optimization
-        is_optimization_cycle = (current_iteration % self.optimization_frequency == 0)
+        is_optimization_cycle = current_iteration % self.optimization_frequency == 0
 
         if not is_optimization_cycle:
             return {"planner": False, "developer": False}
 
-        print(f"\n🔄 Iteration {current_iteration}: Checking prompt optimization eligibility...")
+        print(
+            f"\n🔄 Iteration {current_iteration}: Checking prompt optimization eligibility..."
+        )
 
         decisions = {}
 
         # Check planner
-        planner_examples = self.training_collector.get_examples("planner", min_score=0.3)
+        planner_examples = self.training_collector.get_examples(
+            "planner", min_score=0.3
+        )
         decisions["planner"] = len(planner_examples) >= self.min_training_examples
 
         if decisions["planner"]:
             print(f"   ✓ Planner: {len(planner_examples)} training examples available")
         else:
-            print(f"   ⏭️ Planner: Only {len(planner_examples)} examples (need {self.min_training_examples})")
+            print(
+                f"   ⏭️ Planner: Only {len(planner_examples)} examples (need {self.min_training_examples})"
+            )
 
         # Check developer
-        developer_examples = self.training_collector.get_examples("developer_generator", min_score=0.5)
+        developer_examples = self.training_collector.get_examples(
+            "developer_generator", min_score=0.5
+        )
         decisions["developer"] = len(developer_examples) >= self.min_training_examples
 
         if decisions["developer"]:
-            print(f"   ✓ Developer: {len(developer_examples)} training examples available")
+            print(
+                f"   ✓ Developer: {len(developer_examples)} training examples available"
+            )
         else:
-            print(f"   ⏭️ Developer: Only {len(developer_examples)} examples (need {self.min_training_examples})")
+            print(
+                f"   ⏭️ Developer: Only {len(developer_examples)} examples (need {self.min_training_examples})"
+            )
 
         return decisions
 
@@ -187,7 +199,9 @@ class PromptOptimizer:
 
             if optimized_module is not None:
                 # Save optimized module
-                self.optimizer.save_optimized_prompt(optimized_module, "developer_generator")
+                self.optimizer.save_optimized_prompt(
+                    optimized_module, "developer_generator"
+                )
                 print("   ✅ Developer prompt optimized and saved")
                 return True
             else:
@@ -201,6 +215,7 @@ class PromptOptimizer:
 
 # ==================== Node Function ====================
 
+
 def prompt_refinement_node(state: KaggleState) -> Dict[str, Any]:
     """
     Check if prompts should be refined and optimize if needed.
@@ -211,9 +226,9 @@ def prompt_refinement_node(state: KaggleState) -> Dict[str, Any]:
     Returns:
         State updates
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("= PROMPT REFINEMENT: RL-based Optimization")
-    print("="*60)
+    print("=" * 60)
 
     # Decide if optimization is needed
     decider = PromptRefinementDecider()
@@ -266,4 +281,4 @@ def should_refine_prompts(state: KaggleState) -> bool:
     if current_iteration < 2:
         return False
 
-    return (current_iteration % 5 == 0)
+    return current_iteration % 5 == 0

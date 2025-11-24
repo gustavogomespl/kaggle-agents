@@ -41,10 +41,7 @@ class CodeExecutor:
         self.working_dir.mkdir(parents=True, exist_ok=True)
 
     def execute_code(
-        self,
-        code: str,
-        timeout: int = 300,
-        capture_output: bool = True
+        self, code: str, timeout: int = 300, capture_output: bool = True
     ) -> Tuple[bool, str, str]:
         """Execute Python code and capture results.
 
@@ -58,7 +55,7 @@ class CodeExecutor:
         """
         # Write code to temporary file
         code_file = self.working_dir / "temp_execution.py"
-        with open(code_file, 'w', encoding='utf-8') as f:
+        with open(code_file, "w", encoding="utf-8") as f:
             f.write(code)
 
         try:
@@ -69,7 +66,7 @@ class CodeExecutor:
                 cwd=str(self.working_dir),
                 capture_output=capture_output,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
             )
 
             success = result.returncode == 0
@@ -102,7 +99,7 @@ class CodeExecutor:
         self,
         code: str,
         globals_dict: Optional[Dict[str, Any]] = None,
-        locals_dict: Optional[Dict[str, Any]] = None
+        locals_dict: Optional[Dict[str, Any]] = None,
     ) -> Tuple[bool, str, str, Dict[str, Any]]:
         """Execute code in memory without subprocess (faster but less isolated).
 
@@ -143,9 +140,7 @@ class CodeExecutor:
             return False, stdout_capture.getvalue(), stderr, locals_dict
 
     def execute_notebook_cell(
-        self,
-        code: str,
-        notebook_globals: Dict[str, Any]
+        self, code: str, notebook_globals: Dict[str, Any]
     ) -> Tuple[bool, str, str]:
         """Execute code as if it were a notebook cell (maintains state).
 
@@ -178,10 +173,7 @@ class CodeExecutor:
             return False, stdout_capture.getvalue(), stderr
 
     def run_python_file(
-        self,
-        filepath: Path,
-        args: Optional[list] = None,
-        timeout: int = 300
+        self, filepath: Path, args: Optional[list] = None, timeout: int = 300
     ) -> Tuple[bool, str, str]:
         """Run a Python file with optional arguments.
 
@@ -206,7 +198,7 @@ class CodeExecutor:
                 cwd=str(filepath.parent),
                 capture_output=True,
                 text=True,
-                timeout=timeout
+                timeout=timeout,
             )
 
             success = result.returncode == 0
@@ -232,7 +224,7 @@ class CodeExecutor:
             Tuple of (is_valid, error_message)
         """
         try:
-            compile(code, '<string>', 'exec')
+            compile(code, "<string>", "exec")
             return True, ""
         except SyntaxError as e:
             error_msg = f"Syntax error at line {e.lineno}: {e.msg}"
@@ -254,26 +246,27 @@ class CodeExecutor:
             "error_type": "Unknown",
             "error_message": "",
             "line_number": None,
-            "traceback": stderr
+            "traceback": stderr,
         }
 
-        lines = stderr.strip().split('\n')
+        lines = stderr.strip().split("\n")
 
         # Find the error type and message (usually the last line)
         if lines:
             last_line = lines[-1]
-            if ': ' in last_line:
-                error_type, error_message = last_line.split(': ', 1)
+            if ": " in last_line:
+                error_type, error_message = last_line.split(": ", 1)
                 error_info["error_type"] = error_type
                 error_info["error_message"] = error_message
 
         # Try to find line number
         for line in lines:
-            if 'line ' in line.lower():
+            if "line " in line.lower():
                 try:
                     # Extract line number using regex or string parsing
                     import re
-                    match = re.search(r'line (\d+)', line, re.IGNORECASE)
+
+                    match = re.search(r"line (\d+)", line, re.IGNORECASE)
                     if match:
                         error_info["line_number"] = int(match.group(1))
                         break
@@ -293,14 +286,14 @@ class CodeExecutor:
             Path to saved file
         """
         filepath = self.working_dir / filename
-        with open(filepath, 'w', encoding='utf-8') as f:
+        with open(filepath, "w", encoding="utf-8") as f:
             f.write(code)
 
         logger.info(f"Code saved to {filepath}")
         return filepath
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     # Test the code executor
     executor = CodeExecutor()
 
