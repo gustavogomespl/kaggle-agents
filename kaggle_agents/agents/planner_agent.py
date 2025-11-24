@@ -516,7 +516,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
         refinement_guidance = state.get("refinement_guidance", {})
         if refinement_guidance:
-            guidance_text = "\n\n"
+            guidance_text = "\n\n
 
             if "planner_guidance" in refinement_guidance:
                 guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
