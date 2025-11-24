@@ -59,7 +59,7 @@ class KaggleAPIClient:
                 competition,
                 path=str(download_path),
                 force=False,  # Don't re-download existing files
-                quiet=quiet,
+                quiet=quiet
             )
         except Exception as e:
             raise Exception(
@@ -83,18 +83,11 @@ class KaggleAPIClient:
         for file_path in download_path.glob("*"):
             if file_path.is_file():
                 filename_lower = file_path.name.lower()
-                if "train" in filename_lower and filename_lower.endswith(
-                    (".csv", ".parquet")
-                ):
+                if "train" in filename_lower and filename_lower.endswith((".csv", ".parquet")):
                     files["train"] = str(file_path)
-                elif "test" in filename_lower and filename_lower.endswith(
-                    (".csv", ".parquet")
-                ):
+                elif "test" in filename_lower and filename_lower.endswith((".csv", ".parquet")):
                     files["test"] = str(file_path)
-                elif (
-                    "sample_submission" in filename_lower
-                    or "samplesubmission" in filename_lower
-                ):
+                elif "sample_submission" in filename_lower or "samplesubmission" in filename_lower:
                     files["sample_submission"] = str(file_path)
 
         if not files.get("train") or not files.get("test"):
@@ -147,17 +140,13 @@ class KaggleAPIClient:
 
             return {
                 "name": comp.ref,
-                "title": comp.title if hasattr(comp, "title") else competition,
-                "description": comp.description if hasattr(comp, "description") else "",
-                "evaluation": comp.evaluationMetric
-                if hasattr(comp, "evaluationMetric")
-                else "unknown",
-                "deadline": str(comp.deadline)
-                if hasattr(comp, "deadline") and comp.deadline
-                else "N/A",
-                "category": comp.category if hasattr(comp, "category") else "unknown",
-                "reward": comp.reward if hasattr(comp, "reward") else "N/A",
-                "team_count": comp.teamCount if hasattr(comp, "teamCount") else 0,
+                "title": comp.title if hasattr(comp, 'title') else competition,
+                "description": comp.description if hasattr(comp, 'description') else "",
+                "evaluation": comp.evaluationMetric if hasattr(comp, 'evaluationMetric') else "unknown",
+                "deadline": str(comp.deadline) if hasattr(comp, 'deadline') and comp.deadline else "N/A",
+                "category": comp.category if hasattr(comp, 'category') else "unknown",
+                "reward": comp.reward if hasattr(comp, 'reward') else "N/A",
+                "team_count": comp.teamCount if hasattr(comp, 'teamCount') else 0,
             }
         except Exception as e:
             raise Exception(
@@ -193,14 +182,17 @@ class KaggleAPIClient:
             # API signature: competition_submit(file_name, message, competition, quiet=False)
             # Note: API returns submission result object
             result = self.api.competition_submit(
-                file_path, message, competition, quiet=quiet
+                file_path,
+                message,
+                competition,
+                quiet=quiet
             )
 
             return {
                 "message": message,
                 "status": "submitted",
                 "file": file_path,
-                "competition": competition,
+                "competition": competition
             }
         except Exception as e:
             raise Exception(
@@ -238,19 +230,13 @@ class KaggleAPIClient:
             entries = []
             # Leaderboard may return fewer than requested
             for i, entry in enumerate(leaderboard[:top_n]):
-                entries.append(
-                    {
-                        "rank": i + 1,
-                        "teamName": entry.teamName
-                        if hasattr(entry, "teamName")
-                        else "Unknown",
-                        "score": float(entry.score) if hasattr(entry, "score") else 0.0,
-                        "submissionDate": str(entry.submissionDate)
-                        if hasattr(entry, "submissionDate")
-                        else "N/A",
-                        "entries": entry.entries if hasattr(entry, "entries") else 0,
-                    }
-                )
+                entries.append({
+                    "rank": i + 1,
+                    "teamName": entry.teamName if hasattr(entry, 'teamName') else "Unknown",
+                    "score": float(entry.score) if hasattr(entry, 'score') else 0.0,
+                    "submissionDate": str(entry.submissionDate) if hasattr(entry, 'submissionDate') else "N/A",
+                    "entries": entry.entries if hasattr(entry, 'entries') else 0,
+                })
 
             return entries
         except Exception as e:
@@ -286,22 +272,14 @@ class KaggleAPIClient:
 
             result = []
             for sub in submissions:
-                result.append(
-                    {
-                        "date": str(sub.date) if hasattr(sub, "date") else "N/A",
-                        "description": sub.description
-                        if hasattr(sub, "description")
-                        else "",
-                        "status": sub.status if hasattr(sub, "status") else "unknown",
-                        "publicScore": float(sub.publicScore)
-                        if hasattr(sub, "publicScore") and sub.publicScore
-                        else 0.0,
-                        "privateScore": float(sub.privateScore)
-                        if hasattr(sub, "privateScore") and sub.privateScore
-                        else 0.0,
-                        "fileName": sub.fileName if hasattr(sub, "fileName") else "",
-                    }
-                )
+                result.append({
+                    "date": str(sub.date) if hasattr(sub, 'date') else "N/A",
+                    "description": sub.description if hasattr(sub, 'description') else "",
+                    "status": sub.status if hasattr(sub, 'status') else "unknown",
+                    "publicScore": float(sub.publicScore) if hasattr(sub, 'publicScore') and sub.publicScore else 0.0,
+                    "privateScore": float(sub.privateScore) if hasattr(sub, 'privateScore') and sub.privateScore else 0.0,
+                    "fileName": sub.fileName if hasattr(sub, 'fileName') else "",
+                })
 
             return result
         except Exception as e:
@@ -316,7 +294,7 @@ class KaggleAPIClient:
         category: str = "all",
         sort_by: str = "latestDeadline",
         page: int = 1,
-        search: Optional[str] = None,
+        search: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """List Kaggle competitions.
 
@@ -344,25 +322,19 @@ class KaggleAPIClient:
                 category=category,
                 sort_by=sort_by,
                 page=page,
-                search=search,
+                search=search
             )
 
             result = []
             for comp in competitions:
-                result.append(
-                    {
-                        "ref": comp.ref if hasattr(comp, "ref") else "",
-                        "title": comp.title if hasattr(comp, "title") else "",
-                        "deadline": str(comp.deadline)
-                        if hasattr(comp, "deadline") and comp.deadline
-                        else "N/A",
-                        "category": comp.category if hasattr(comp, "category") else "",
-                        "reward": comp.reward if hasattr(comp, "reward") else "N/A",
-                        "teamCount": comp.teamCount
-                        if hasattr(comp, "teamCount")
-                        else 0,
-                    }
-                )
+                result.append({
+                    "ref": comp.ref if hasattr(comp, 'ref') else "",
+                    "title": comp.title if hasattr(comp, 'title') else "",
+                    "deadline": str(comp.deadline) if hasattr(comp, 'deadline') and comp.deadline else "N/A",
+                    "category": comp.category if hasattr(comp, 'category') else "",
+                    "reward": comp.reward if hasattr(comp, 'reward') else "N/A",
+                    "teamCount": comp.teamCount if hasattr(comp, 'teamCount') else 0,
+                })
 
             return result
         except Exception as e:

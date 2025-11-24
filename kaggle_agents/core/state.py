@@ -80,9 +80,7 @@ class ValidationResult:
     score: float
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
-    details: dict[str, Any] = field(
-        default_factory=dict
-    )  # Additional structured information
+    details: dict[str, Any] = field(default_factory=dict)  # Additional structured information
 
 
 @dataclass
@@ -111,7 +109,6 @@ class IterationMemory:
 
 
 # ==================== Main State ====================
-
 
 class KaggleState(TypedDict):
     """
@@ -188,15 +185,12 @@ class KaggleState(TypedDict):
 
 # ==================== State Reducers ====================
 
-
 def merge_dict(existing: dict, new: dict) -> dict:
     """Merge dictionaries, with new values overwriting existing ones."""
     return {**existing, **new}
 
 
-def merge_competition_info(
-    existing: Optional[CompetitionInfo], new: CompetitionInfo
-) -> CompetitionInfo:
+def merge_competition_info(existing: Optional[CompetitionInfo], new: CompetitionInfo) -> CompetitionInfo:
     """Merge competition info, preferring new values when provided."""
     if existing is None:
         return new
@@ -205,22 +199,17 @@ def merge_competition_info(
     updated = CompetitionInfo(
         name=new.name if new.name else existing.name,
         description=new.description if new.description else existing.description,
-        evaluation_metric=new.evaluation_metric
-        if new.evaluation_metric
-        else existing.evaluation_metric,
+        evaluation_metric=new.evaluation_metric if new.evaluation_metric else existing.evaluation_metric,
         problem_type=new.problem_type if new.problem_type else existing.problem_type,
         domain=new.domain if new.domain is not None else existing.domain,
         data_files=new.data_files if new.data_files else existing.data_files,
-        submission_format=new.submission_format
-        if new.submission_format
-        else existing.submission_format,
+        submission_format=new.submission_format if new.submission_format else existing.submission_format,
         deadline=new.deadline if new.deadline is not None else existing.deadline,
     )
     return updated
 
 
 # ==================== State Initialization ====================
-
 
 def create_initial_state(competition_name: str, working_dir: str) -> KaggleState:
     """
@@ -246,49 +235,61 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         working_directory=working_dir,
         current_train_path=None,
         current_test_path=None,
+
         # Domain Detection
         domain_detected=None,
         domain_confidence=0.0,
+
         # Search Phase
         sota_solutions=[],
         search_queries_used=[],
+
         # Planning Phase
         ablation_plan=[],
         current_component_index=0,
         optimization_strategy="",
+
         # Development Phase
         development_results=[],
         current_code="",
         code_retry_count=0,
+
         # Validation Phase
         validation_results=[],
         overall_validation_score=0.0,
         critical_issues=[],
+
         # Ensemble Phase
         ensemble_strategy=None,
         ensemble_weights={},
+
         # Submission Phase
         submissions=[],
         best_score=0.0,
         target_percentile=20.0,  # top 20%
         best_single_model_score=None,
         best_single_model_name=None,
+
         # Iteration Control
         current_iteration=0,
         max_iterations=10,
         should_continue=True,
         needs_refinement=False,
         termination_reason=None,
+
         # Memory & Learning
         iteration_memory=[],
         learned_patterns={},
+
         # Prompt Optimization
         optimized_prompts={},
         prompt_performance={},
+
         # Meta-Evaluator & RL
         failure_analysis={},
         refinement_guidance={},
         reward_signals={},
+
         # Metadata
         workflow_start_time=now,
         last_updated=now,

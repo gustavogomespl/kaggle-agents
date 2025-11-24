@@ -12,7 +12,9 @@ class LeaderboardMonitorAgent:
 
     def __init__(self):
         """Initialize leaderboard monitor agent."""
-        self.llm = ChatOpenAI(model=Config.LLM_MODEL, temperature=Config.TEMPERATURE)
+        self.llm = ChatOpenAI(
+            model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
+        )
         self.kaggle_client = KaggleAPIClient()
 
     def __call__(self, state: KaggleState) -> KaggleState:
@@ -28,14 +30,12 @@ class LeaderboardMonitorAgent:
 
         try:
             # Handle both dict and dataclass state access
-            competition_name = (
-                state.get("competition_name")
-                if isinstance(state, dict)
-                else state.competition_name
-            )
+            competition_name = state.get("competition_name") if isinstance(state, dict) else state.competition_name
 
             # Get user's submissions
-            submissions = self.kaggle_client.get_my_submissions(competition_name)
+            submissions = self.kaggle_client.get_my_submissions(
+                competition_name
+            )
 
             if not submissions:
                 print("  No submissions found yet")
@@ -72,11 +72,7 @@ class LeaderboardMonitorAgent:
             percentile = (rank / total_teams) * 100 if total_teams > 0 else 0
 
             # Get CV score from best model for overfitting analysis
-            best_model = (
-                state.get("best_model", {})
-                if isinstance(state, dict)
-                else state.best_model
-            )
+            best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
             cv_score = best_model.get("mean_cv_score", 0.0) if best_model else 0.0
 
             # Detect overfitting
@@ -84,12 +80,8 @@ class LeaderboardMonitorAgent:
             # CV > Public suggests overfitting
             # For metrics where lower is better (RMSE, MAE)
             # Public > CV suggests overfitting
-            metric = (
-                state.get("metric", "") if isinstance(state, dict) else state.metric
-            ).lower()
-            is_higher_better = any(
-                m in metric for m in ["accuracy", "auc", "f1", "recall", "precision"]
-            )
+            metric = (state.get("metric", "") if isinstance(state, dict) else state.metric).lower()
+            is_higher_better = any(m in metric for m in ["accuracy", "auc", "f1", "recall", "precision"])
 
             overfitting_detected = False
             overfitting_severity = "none"
@@ -99,17 +91,13 @@ class LeaderboardMonitorAgent:
                     score_diff = cv_score - public_score
                     if score_diff > 0.05:  # 5% drop
                         overfitting_detected = True
-                        overfitting_severity = (
-                            "severe" if score_diff > 0.1 else "moderate"
-                        )
+                        overfitting_severity = "severe" if score_diff > 0.1 else "moderate"
                 else:
                     # For negative metrics like MSE, both should be negative
                     score_diff = abs(public_score) - abs(cv_score)
                     if score_diff > 0.05:
                         overfitting_detected = True
-                        overfitting_severity = (
-                            "severe" if score_diff > 0.1 else "moderate"
-                        )
+                        overfitting_severity = "severe" if score_diff > 0.1 else "moderate"
 
             # Store analysis results
             iteration_strategy = {
@@ -129,31 +117,11 @@ class LeaderboardMonitorAgent:
             )
 
             # Safe state access for remaining fields
-            features_engineered = (
-                state.get("features_engineered", [])
-                if isinstance(state, dict)
-                else state.features_engineered
-            )
-            models_trained = (
-                state.get("models_trained", [])
-                if isinstance(state, dict)
-                else state.models_trained
-            )
-            iteration = (
-                state.get("iteration", 0)
-                if isinstance(state, dict)
-                else state.iteration
-            )
-            max_iterations = (
-                state.get("max_iterations", 5)
-                if isinstance(state, dict)
-                else state.max_iterations
-            )
-            eda_summary = (
-                state.get("eda_summary", {})
-                if isinstance(state, dict)
-                else state.eda_summary
-            )
+            features_engineered = state.get("features_engineered", []) if isinstance(state, dict) else state.features_engineered
+            models_trained = state.get("models_trained", []) if isinstance(state, dict) else state.models_trained
+            iteration = state.get("iteration", 0) if isinstance(state, dict) else state.iteration
+            max_iterations = state.get("max_iterations", 5) if isinstance(state, dict) else state.max_iterations
+            eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
 
             human_msg = HumanMessage(
                 content=f"""Competition Results Analysis:
@@ -169,7 +137,7 @@ Our Performance:
 - Rank: {rank} / {total_teams}
 - Percentile: Top {percentile:.1f}%
 
-Model Used: {best_model.get("name", "Unknown") if best_model else "Unknown"}
+Model Used: {best_model.get('name', 'Unknown') if best_model else 'Unknown'}
 Features Engineered: {len(features_engineered)}
 Models Tried: {len(models_trained)}
 Iteration: {iteration + 1}/{max_iterations}
@@ -180,9 +148,7 @@ Analyze performance and recommend next steps."""
             response = self.llm.invoke([system_msg, human_msg])
 
             # Store detailed metrics for next iteration
-            print(
-                f"Leaderboard Monitor: Rank {rank}/{total_teams} (Top {percentile:.1f}%)"
-            )
+            print(f"Leaderboard Monitor: Rank {rank}/{total_teams} (Top {percentile:.1f}%)")
             print(f"  CV Score: {cv_score:.4f} | Public Score: {public_score:.4f}")
 
             if overfitting_detected:
@@ -200,25 +166,21 @@ Analyze performance and recommend next steps."""
                     print(f"Iterating to improve from Top {percentile:.1f}% to top 20%")
 
             return {
-                "messages": [
-                    HumanMessage(
-                        content=f"Leaderboard Analysis: Rank {rank}/{total_teams} (Top {percentile:.1f}%). Overfitting: {overfitting_severity}. {response.content}"
-                    )
-                ],
+                "messages": [HumanMessage(
+                    content=f"Leaderboard Analysis: Rank {rank}/{total_teams} (Top {percentile:.1f}%). Overfitting: {overfitting_severity}. {response.content}"
+                )],
                 "submission_score": public_score,
                 "leaderboard_rank": rank,
                 "iteration": iteration + 1,
                 "eda_summary": {
                     **eda_summary,
                     "iteration_strategy": iteration_strategy,
-                },
+                }
             }
 
         except Exception as e:
             error_msg = f"Leaderboard monitoring failed: {str(e)}"
             print(f"Leaderboard Monitor ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = (
-                state.get("errors", []) if isinstance(state, dict) else state.errors
-            )
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
             return {"errors": errors + [error_msg]}

@@ -19,35 +19,17 @@ load_dotenv()
 class LLMConfig:
     """LLM provider and model configuration."""
 
-    provider: Literal["openai", "anthropic", "gemini"] = field(
-        default_factory=lambda: os.getenv("LLM_PROVIDER", "openai")
-    )
+    provider: Literal["openai", "anthropic", "gemini"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
     # Optional per-role overrides to balance cost/quality across agents
-    planner_model: Optional[str] = field(
-        default_factory=lambda: os.getenv("PLANNER_MODEL")
-    )
-    planner_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(
-        default_factory=lambda: os.getenv("PLANNER_PROVIDER")
-    )
-    developer_model: Optional[str] = field(
-        default_factory=lambda: os.getenv("DEVELOPER_MODEL")
-    )
-    developer_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(
-        default_factory=lambda: os.getenv("DEVELOPER_PROVIDER")
-    )
-    evaluator_model: Optional[str] = field(
-        default_factory=lambda: os.getenv("EVALUATOR_MODEL")
-    )
-    evaluator_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(
-        default_factory=lambda: os.getenv("EVALUATOR_PROVIDER")
-    )
-    temperature: float = field(
-        default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7"))
-    )
-    max_tokens: int = field(
-        default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192"))
-    )  # Safe default
+    planner_model: Optional[str] = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
+    planner_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
+    developer_model: Optional[str] = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
+    developer_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
+    evaluator_model: Optional[str] = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
+    evaluator_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
+    temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
+    max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192")))  # Safe default
     timeout: int = 120  # seconds
 
 
@@ -66,9 +48,7 @@ class SearchConfig:
 class AblationConfig:
     """Configuration for ablation-driven optimization."""
 
-    max_components: int = field(
-        default_factory=lambda: int(os.getenv("MAX_COMPONENTS", "3"))
-    )  # max components to test
+    max_components: int = field(default_factory=lambda: int(os.getenv("MAX_COMPONENTS", "3")))  # max components to test
     impact_threshold: float = 0.01  # minimum impact to consider (1%)
     parallel_testing: bool = False  # test components in parallel
     # Default timeout per component (seconds). Increased to 2700s (45 minutes) to avoid premature failures on heavy training.
@@ -77,9 +57,7 @@ class AblationConfig:
     enable_code_preview: bool = True  # show code before execution
     save_generated_code: bool = True  # save generated code to files
     code_preview_lines: int = 30  # number of lines to show in preview
-    enable_refinement: bool = (
-        True  # enable iterative refinement of successful components
-    )
+    enable_refinement: bool = True  # enable iterative refinement of successful components
 
 
 @dataclass
@@ -108,9 +86,7 @@ class DSPyConfig:
 class IterationConfig:
     """Configuration for iteration and convergence."""
 
-    max_iterations: int = field(
-        default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "2"))
-    )
+    max_iterations: int = field(default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "2")))
     target_percentile: float = 20.0  # top 20%
     early_stopping: bool = True
     patience: int = 3  # iterations without improvement
@@ -163,7 +139,6 @@ class PathConfig:
         # Check if running in Google Colab
         try:
             import google.colab
-
             # In Colab, use /content/kaggle_competitions
             colab_base = Path("/content/kaggle_competitions")
             print(f"📍 Colab environment detected, using: {colab_base}")
@@ -188,12 +163,8 @@ class LoggingConfig:
 
     log_level: str = field(default_factory=lambda: os.getenv("LOG_LEVEL", "INFO"))
     log_dir: str = field(default_factory=lambda: os.getenv("LOG_DIR", "./logs"))
-    enable_console: bool = field(
-        default_factory=lambda: os.getenv("LOG_CONSOLE", "true").lower() == "true"
-    )
-    enable_file: bool = field(
-        default_factory=lambda: os.getenv("LOG_FILE", "true").lower() == "true"
-    )
+    enable_console: bool = field(default_factory=lambda: os.getenv("LOG_CONSOLE", "true").lower() == "true")
+    enable_file: bool = field(default_factory=lambda: os.getenv("LOG_FILE", "true").lower() == "true")
     max_file_size_mb: int = 10  # Max size per log file
     backup_count: int = 5  # Number of backup files to keep
 
@@ -204,13 +175,8 @@ class KaggleConfig:
 
     username: str = field(default_factory=lambda: os.getenv("KAGGLE_USERNAME", ""))
     key: str = field(default_factory=lambda: os.getenv("KAGGLE_KEY", ""))
-    auto_submit: bool = field(
-        default_factory=lambda: os.getenv("KAGGLE_AUTO_SUBMIT", "false").lower()
-        == "true"
-    )
-    submission_message_template: str = (
-        "AutoKaggle Agent - Iteration {iteration} (CV: {cv_score:.4f})"
-    )
+    auto_submit: bool = field(default_factory=lambda: os.getenv("KAGGLE_AUTO_SUBMIT", "false").lower() == "true")
+    submission_message_template: str = "AutoKaggle Agent - Iteration {iteration} (CV: {cv_score:.4f})"
 
     def is_configured(self) -> bool:
         """Check if Kaggle API credentials are configured."""
@@ -232,12 +198,8 @@ class AgentConfig:
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     # Global settings
-    debug_mode: bool = field(
-        default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true"
-    )
-    verbose: bool = field(
-        default_factory=lambda: os.getenv("VERBOSE", "true").lower() == "true"
-    )
+    debug_mode: bool = field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")
+    verbose: bool = field(default_factory=lambda: os.getenv("VERBOSE", "true").lower() == "true")
     save_intermediate: bool = True  # save intermediate results
 
     def validate(self) -> list[str]:
@@ -263,22 +225,13 @@ class AgentConfig:
 
         # Validate ranges
         if not 0 <= self.llm.temperature <= 2:
-            issues.append(
-                f"LLM temperature {self.llm.temperature} outside valid range [0, 2]"
-            )
+            issues.append(f"LLM temperature {self.llm.temperature} outside valid range [0, 2]")
 
         if not 0 < self.iteration.target_percentile <= 100:
-            issues.append(
-                f"Target percentile {self.iteration.target_percentile} must be between 0 and 100"
-            )
+            issues.append(f"Target percentile {self.iteration.target_percentile} must be between 0 and 100")
 
-        if (
-            self.validation.min_validation_score < 0
-            or self.validation.min_validation_score > 1
-        ):
-            issues.append(
-                f"Validation score {self.validation.min_validation_score} must be between 0 and 1"
-            )
+        if self.validation.min_validation_score < 0 or self.validation.min_validation_score > 1:
+            issues.append(f"Validation score {self.validation.min_validation_score} must be between 0 and 1")
 
         return issues
 
@@ -349,7 +302,6 @@ def reset_config() -> None:
 
 # ==================== Convenience Functions ====================
 
-
 def get_llm(temperature: float = None, max_tokens: int = None):
     """
     Get the configured LLM instance (OpenAI or Anthropic).
@@ -379,7 +331,6 @@ def get_llm(temperature: float = None, max_tokens: int = None):
         )
     elif config.llm.provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
-
         return ChatGoogleGenerativeAI(
             model=config.llm.model,
             temperature=temp,
@@ -436,7 +387,6 @@ def get_llm_for_role(
         )
     elif provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
-
         return ChatGoogleGenerativeAI(
             model=model,
             temperature=temp,
@@ -503,7 +453,6 @@ def get_submission_path(competition_name: str, iteration: int) -> Path:
 
 # ==================== Metric Direction Utilities ====================
 
-
 def is_metric_minimization(metric_name: str) -> bool:
     """
     Determine if a metric should be minimized or maximized.
@@ -529,29 +478,22 @@ def is_metric_minimization(metric_name: str) -> bool:
 
     # Metrics where lower values are better
     minimize_metrics = [
-        "rmse",
-        "mae",
-        "mse",
-        "rmsle",
-        "logloss",
-        "log_loss",
-        "log loss",
-        "error",
-        "loss",
-        "cross_entropy",
-        "brier",
-        "mean_absolute_error",
-        "mean_squared_error",
-        "root_mean_squared_error",
-        "mean_absolute_percentage_error",
-        "mape",
+        'rmse', 'mae', 'mse', 'rmsle',
+        'logloss', 'log_loss', 'log loss',
+        'error', 'loss',
+        'cross_entropy', 'brier',
+        'mean_absolute_error', 'mean_squared_error',
+        'root_mean_squared_error',
+        'mean_absolute_percentage_error', 'mape',
     ]
 
     return any(metric in metric_lower for metric in minimize_metrics)
 
 
 def calculate_score_improvement(
-    new_score: float, baseline_score: float, metric_name: str
+    new_score: float,
+    baseline_score: float,
+    metric_name: str
 ) -> float:
     """
     Calculate score improvement considering metric direction.
@@ -582,7 +524,11 @@ def calculate_score_improvement(
         return new_score - baseline_score
 
 
-def compare_scores(score1: float, score2: float, metric_name: str) -> float:
+def compare_scores(
+    score1: float,
+    score2: float,
+    metric_name: str
+) -> float:
     """
     Compare two scores and return the better one.
 

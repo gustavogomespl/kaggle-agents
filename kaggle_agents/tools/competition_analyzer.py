@@ -157,9 +157,7 @@ class CompetitionAnalyzer:
         if unique_values == 2:
             # Binary classification
             problem_type = "binary_classification"
-            reasoning["problem_type"] = (
-                f"Target has 2 unique values: {set(sample_values.unique())}"
-            )
+            reasoning["problem_type"] = f"Target has 2 unique values: {set(sample_values.unique())}"
             reasoning["confidence"] = 0.95
 
             # Map metric
@@ -187,9 +185,7 @@ class CompetitionAnalyzer:
             if df[target_col].dtype in ["float64", "float32"]:
                 # Regression
                 problem_type = "regression"
-                reasoning["problem_type"] = (
-                    f"Target is continuous (dtype: {df[target_col].dtype})"
-                )
+                reasoning["problem_type"] = f"Target is continuous (dtype: {df[target_col].dtype})"
                 reasoning["confidence"] = 0.85
 
                 # Map metric
@@ -207,15 +203,11 @@ class CompetitionAnalyzer:
             else:
                 # Many-class classification
                 problem_type = "multiclass_classification"
-                reasoning["problem_type"] = (
-                    f"Target has {unique_values} classes (many-class)"
-                )
+                reasoning["problem_type"] = f"Target has {unique_values} classes (many-class)"
                 reasoning["confidence"] = 0.75
                 metric = "accuracy"
 
-        reasoning["metric"] = (
-            f"Official Kaggle metric: {competition_info.get('evaluationMetric', 'unknown')}"
-        )
+        reasoning["metric"] = f"Official Kaggle metric: {competition_info.get('evaluationMetric', 'unknown')}"
 
         return problem_type, metric, reasoning
 
@@ -254,18 +246,12 @@ class CompetitionAnalyzer:
                 return ptype, metric, reasoning
 
         # Fallback: look for keywords in description/title
-        if any(
-            word in description or word in title
-            for word in ["classify", "classification", "predict class"]
-        ):
+        if any(word in description or word in title for word in ["classify", "classification", "predict class"]):
             problem_type = "binary_classification"
             metric = "accuracy"
             reasoning["problem_type"] = "Keywords in description suggest classification"
             reasoning["confidence"] = 0.5
-        elif any(
-            word in description or word in title
-            for word in ["predict", "regression", "price", "value"]
-        ):
+        elif any(word in description or word in title for word in ["predict", "regression", "price", "value"]):
             problem_type = "regression"
             metric = "rmse"
             reasoning["problem_type"] = "Keywords in description suggest regression"

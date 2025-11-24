@@ -8,7 +8,7 @@ from .state import (
     EnhancedKaggleState,
     should_retry_phase,
     increment_retry_count,
-    reset_retry_count,
+    reset_retry_count
 )
 from .config_manager import get_config
 from ..enhanced_agents import (
@@ -16,7 +16,7 @@ from ..enhanced_agents import (
     PlannerAgent,
     DeveloperAgent,
     ReviewerAgent,
-    SummarizerAgent,
+    SummarizerAgent
 )
 
 logger = logging.getLogger(__name__)
@@ -43,7 +43,7 @@ class SOP:
             "planner": PlannerAgent(model),
             "developer": DeveloperAgent(model),
             "reviewer": ReviewerAgent(model),
-            "summarizer": SummarizerAgent(model),
+            "summarizer": SummarizerAgent(model)
         }
 
         logger.info(f"SOP initialized for competition: {competition_name}")
@@ -61,23 +61,17 @@ class SOP:
                 - "Complete": Workflow completed
                 - "Fail": Workflow failed
         """
-        logger.info("=" * 80)
+        logger.info("="*80)
         logger.info(f"SOP STEP - Executing phase: {state.get('phase', 'UNKNOWN')}")
-        logger.info(
-            f"SOP STEP - Retry count: {state.get('retry_count', 0)}/{state.get('max_phase_retries', 3)}"
-        )
-        logger.info(
-            f"SOP STEP - Iteration: {state.get('iteration', 0)}/{state.get('max_iterations', 1)}"
-        )
-        logger.info("=" * 80)
+        logger.info(f"SOP STEP - Retry count: {state.get('retry_count', 0)}/{state.get('max_phase_retries', 3)}")
+        logger.info(f"SOP STEP - Iteration: {state.get('iteration', 0)}/{state.get('max_iterations', 1)}")
+        logger.info("="*80)
 
         # Get agents for this phase
-        agent_roles = self.config.get_phase_agents(state.get("phase", ""))
+        agent_roles = self.config.get_phase_agents(state.get('phase', ''))
 
         if not agent_roles:
-            logger.error(
-                f"❌ SOP STEP - No agents configured for phase: {state.get('phase', '')}"
-            )
+            logger.error(f"❌ SOP STEP - No agents configured for phase: {state.get('phase', '')}")
             return "Fail", state
 
         logger.info(f"✓ SOP STEP - Agent roles for this phase: {agent_roles}")
@@ -88,13 +82,11 @@ class SOP:
         # Add initial empty entry to memory so reviewer can access current phase results
         memory = state.get("memory", [])
         current_phase_index = len(memory)
-        memory.append(
-            {
-                "phase": state.get("phase", ""),
-                "iteration": state.get("iteration", 0),
-                "retry_count": state.get("retry_count", 0),
-            }
-        )
+        memory.append({
+            "phase": state.get("phase", ""),
+            "iteration": state.get("iteration", 0),
+            "retry_count": state.get("retry_count", 0),
+        })
         state["memory"] = memory
 
         for agent_role in agent_roles:
@@ -125,34 +117,30 @@ class SOP:
                         logger.info(f"   └─ Success: {agent_result['success']}")
 
             except Exception as e:
-                logger.error(
-                    f"❌ SOP STEP - Agent {agent_role} failed: {e}", exc_info=True
-                )
+                logger.error(f"❌ SOP STEP - Agent {agent_role} failed: {e}", exc_info=True)
                 # Continue with other agents even if one fails
                 phase_results[agent_role] = {
                     "role": agent_role,
                     "error": str(e),
-                    "result": f"Agent failed with error: {str(e)}",
+                    "result": f"Agent failed with error: {str(e)}"
                 }
                 # Update memory entry with error
-                state["memory"][current_phase_index][agent_role] = phase_results[
-                    agent_role
-                ]
+                state["memory"][current_phase_index][agent_role] = phase_results[agent_role]
 
         # Memory already updated incrementally above, no need to add again
 
         # Check if phase was successful
         status = self._evaluate_phase_results(state, phase_results)
 
-        logger.info(
-            f"📊 SOP STEP - Phase '{state.get('phase', 'UNKNOWN')}' evaluation result: {status}"
-        )
-        logger.info("=" * 80)
+        logger.info(f"📊 SOP STEP - Phase '{state.get('phase', 'UNKNOWN')}' evaluation result: {status}")
+        logger.info("="*80)
 
         return status, state
 
     def _evaluate_phase_results(
-        self, state: EnhancedKaggleState, phase_results: Dict[str, Any]
+        self,
+        state: EnhancedKaggleState,
+        phase_results: Dict[str, Any]
     ) -> str:
         """Evaluate phase results and determine next action.
 
@@ -169,9 +157,7 @@ class SOP:
             should_proceed = reviewer_result.get("should_proceed", False)
             average_score = reviewer_result.get("average_score", 0)
 
-            logger.info(
-                f"📈 EVALUATION - Reviewer score: {average_score:.2f}/5.0, Proceed: {should_proceed}"
-            )
+            logger.info(f"📈 EVALUATION - Reviewer score: {average_score:.2f}/5.0, Proceed: {should_proceed}")
 
             if should_proceed:
                 # Phase successful - workflow will handle phase transition
@@ -184,9 +170,7 @@ class SOP:
             else:
                 # Phase needs retry
                 if should_retry_phase(state):
-                    logger.warning(
-                        f"🔄 EVALUATION - Phase needs retry. Retry count: {state.get('retry_count', 0) + 1}/{state.get('max_phase_retries', 3)}"
-                    )
+                    logger.warning(f"🔄 EVALUATION - Phase needs retry. Retry count: {state.get('retry_count', 0) + 1}/{state.get('max_phase_retries', 3)}")
                     increment_retry_count(state)
                     return "Retry"
                 else:
@@ -201,9 +185,7 @@ class SOP:
             # Don't change phase - let workflow handle it
             return "Continue"
 
-    def run(
-        self, initial_state: EnhancedKaggleState, max_steps: int = 100
-    ) -> EnhancedKaggleState:
+    def run(self, initial_state: EnhancedKaggleState, max_steps: int = 100) -> EnhancedKaggleState:
         """Run the complete workflow.
 
         Args:
@@ -221,9 +203,9 @@ class SOP:
 
         while step_count < max_steps:
             step_count += 1
-            logger.info(f"\n{'=' * 80}")
+            logger.info(f"\n{'='*80}")
             logger.info(f"Step {step_count}/{max_steps}")
-            logger.info(f"{'=' * 80}\n")
+            logger.info(f"{'='*80}\n")
 
             # Execute one step
             status, state = self.step(state)
@@ -260,7 +242,7 @@ class SOP:
         return state
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     # Test SOP
     import sys
     from pathlib import Path
@@ -268,11 +250,11 @@ if __name__ == "__main__":
     # Setup logging
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler("sop_test.log"),
-        ],
+            logging.FileHandler('sop_test.log')
+        ]
     )
 
     # Create test state
@@ -282,7 +264,7 @@ if __name__ == "__main__":
     initial_state = EnhancedKaggleState(
         competition_name="titanic",
         competition_dir=str(competition_dir),
-        phase="Understand Background",
+        phase="Understand Background"
     )
 
     # Create and run SOP
@@ -290,13 +272,13 @@ if __name__ == "__main__":
 
     print("Starting SOP test run...")
     print("This will execute the complete workflow for the Titanic competition")
-    print("=" * 80)
+    print("="*80)
 
     final_state = sop.run(initial_state, max_steps=20)
 
-    print("\n" + "=" * 80)
+    print("\n" + "="*80)
     print("SOP Test Complete")
     print(f"Final phase: {final_state.phase}")
     print(f"Total iterations: {final_state.iteration}")
     print(f"Memory entries: {len(final_state.memory)}")
-    print("=" * 80)
+    print("="*80)

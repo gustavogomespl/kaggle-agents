@@ -100,7 +100,7 @@ class KaggleSearcher:
                     title=kernel.title,
                     author=kernel.author,
                     total_votes=kernel.total_votes,
-                    medal_type=getattr(kernel, "medal_type", None),
+                    medal_type=getattr(kernel, 'medal_type', None),
                     language=kernel.language,
                     competition=competition,
                     url=f"https://www.kaggle.com/code/{kernel.ref}",
@@ -139,9 +139,7 @@ class KaggleSearcher:
             )
 
             # Find downloaded file
-            notebook_files = list(output_path.glob("*.ipynb")) + list(
-                output_path.glob("*.py")
-            )
+            notebook_files = list(output_path.glob("*.ipynb")) + list(output_path.glob("*.py"))
             if notebook_files:
                 return notebook_files[0]
 
@@ -162,20 +160,20 @@ class KaggleSearcher:
             List of code snippets
         """
         try:
-            with open(notebook_path, "r", encoding="utf-8") as f:
+            with open(notebook_path, 'r', encoding='utf-8') as f:
                 notebook_data = json.load(f)
 
             code_snippets = []
-            for cell in notebook_data.get("cells", []):
-                if cell.get("cell_type") == "code":
-                    source = cell.get("source", [])
+            for cell in notebook_data.get('cells', []):
+                if cell.get('cell_type') == 'code':
+                    source = cell.get('source', [])
                     if isinstance(source, list):
-                        code = "".join(source)
+                        code = ''.join(source)
                     else:
                         code = source
 
                     # Skip empty cells and magic commands
-                    if code.strip() and not code.strip().startswith("%"):
+                    if code.strip() and not code.strip().startswith('%'):
                         code_snippets.append(code)
 
             return code_snippets
@@ -195,11 +193,11 @@ class KaggleSearcher:
             List of code snippets (split by major sections)
         """
         try:
-            with open(script_path, "r", encoding="utf-8") as f:
+            with open(script_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
             # Split by major comments (### or more #)
-            sections = re.split(r"\n#{3,}.*?\n", content)
+            sections = re.split(r'\n#{3,}.*?\n', content)
 
             # Filter out empty sections
             code_snippets = [s.strip() for s in sections if s.strip()]
@@ -291,31 +289,29 @@ class KaggleSearcher:
             url = f"https://www.kaggle.com/competitions/{competition}/discussion"
 
             headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             }
 
             response = requests.get(url, headers=headers, timeout=30)
             response.raise_for_status()
 
-            soup = BeautifulSoup(response.text, "html.parser")
+            soup = BeautifulSoup(response.text, 'html.parser')
 
             # Find discussion elements (this may need adjustment based on Kaggle's HTML structure)
             # Note: This is a simplified example and may need to be updated
-            discussion_items = soup.find_all(
-                "div", class_="topic-list-item", limit=max_results
-            )
+            discussion_items = soup.find_all('div', class_='topic-list-item', limit=max_results)
 
             for item in discussion_items[:max_results]:
                 try:
                     # Extract metadata (adjust selectors as needed)
-                    title_elem = item.find("a", class_="topic-title")
-                    votes_elem = item.find("span", class_="vote-count")
+                    title_elem = item.find('a', class_='topic-title')
+                    votes_elem = item.find('span', class_='vote-count')
 
                     if title_elem:
                         discussion = DiscussionMetadata(
-                            id=hash(title_elem.get("href", "")),
+                            id=hash(title_elem.get('href', '')),
                             title=title_elem.text.strip(),
-                            author="",  # Would need additional parsing
+                            author='',  # Would need additional parsing
                             total_votes=int(votes_elem.text) if votes_elem else 0,
                             total_comments=0,  # Would need additional parsing
                             tags=[],
@@ -363,7 +359,6 @@ class KaggleSearcher:
 
 
 # ==================== Convenience Functions ====================
-
 
 def search_competition_notebooks(
     competition: str,

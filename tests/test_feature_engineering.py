@@ -20,24 +20,20 @@ class TestAdvancedFeatureEngineer:
         np.random.seed(42)
         n = 100
 
-        train = pd.DataFrame(
-            {
-                "num1": np.random.randn(n),
-                "num2": np.random.randn(n),
-                "cat_low": np.random.choice(["A", "B", "C"], n),
-                "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
-                "target": np.random.choice([0, 1], n),
-            }
-        )
+        train = pd.DataFrame({
+            "num1": np.random.randn(n),
+            "num2": np.random.randn(n),
+            "cat_low": np.random.choice(["A", "B", "C"], n),
+            "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
+            "target": np.random.choice([0, 1], n),
+        })
 
-        test = pd.DataFrame(
-            {
-                "num1": np.random.randn(n),
-                "num2": np.random.randn(n),
-                "cat_low": np.random.choice(["A", "B", "C"], n),
-                "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
-            }
-        )
+        test = pd.DataFrame({
+            "num1": np.random.randn(n),
+            "num2": np.random.randn(n),
+            "cat_low": np.random.choice(["A", "B", "C"], n),
+            "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
+        })
 
         # Add some missing values
         train.loc[0:10, "num1"] = np.nan
@@ -113,9 +109,7 @@ class TestAdvancedFeatureEngineer:
             train.copy(), test.copy(), strategy="basic"
         )
 
-        train_agg, test_agg = engineer.create_aggregation_features(
-            train_clean, test_clean
-        )
+        train_agg, test_agg = engineer.create_aggregation_features(train_clean, test_clean)
 
         # Check aggregation features
         assert "numeric_sum" in train_agg.columns

@@ -69,9 +69,7 @@ class PromptOptimizer:
         # Configure DSPy
         dspy.settings.configure(lm=lm)
 
-        print(
-            f" DSPy configured with {self.config.llm.provider}/{self.config.llm.model}"
-        )
+        print(f" DSPy configured with {self.config.llm.provider}/{self.config.llm.model}")
 
     def optimize_prompt(
         self,
@@ -123,16 +121,11 @@ class PromptOptimizer:
 
         # Save if path provided
         if save_path is None:
-            save_path = (
-                self.config.paths.base_dir
-                / "prompts"
-                / "optimized"
-                / f"{agent_name}.pkl"
-            )
+            save_path = self.config.paths.base_dir / "prompts" / "optimized" / f"{agent_name}.pkl"
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(save_path, "wb") as f:
+        with open(save_path, 'wb') as f:
             pickle.dump(optimized_module, f)
 
         print(f" Optimized prompts saved to {save_path}")
@@ -155,19 +148,14 @@ class PromptOptimizer:
             Loaded DSPy module or None if not found
         """
         if load_path is None:
-            load_path = (
-                self.config.paths.base_dir
-                / "prompts"
-                / "optimized"
-                / f"{agent_name}.pkl"
-            )
+            load_path = self.config.paths.base_dir / "prompts" / "optimized" / f"{agent_name}.pkl"
 
         if not load_path.exists():
             print(f"  No optimized prompts found for {agent_name}")
             return None
 
         try:
-            with open(load_path, "rb") as f:
+            with open(load_path, 'rb') as f:
                 module = pickle.load(f)
             print(f" Loaded optimized prompts for {agent_name}")
             return module
@@ -249,14 +237,14 @@ class TrainingDataCollector:
         examples = []
 
         if examples_file.exists():
-            with open(examples_file, "r") as f:
+            with open(examples_file, 'r') as f:
                 examples = json.load(f)
 
         # Add new example
         examples.append(example)
 
         # Save
-        with open(examples_file, "w") as f:
+        with open(examples_file, 'w') as f:
             json.dump(examples, f, indent=2, default=str)
 
         print(f" Added training example for {agent_name} (score: {score:.4f})")
@@ -283,7 +271,7 @@ class TrainingDataCollector:
         if not examples_file.exists():
             return []
 
-        with open(examples_file, "r") as f:
+        with open(examples_file, 'r') as f:
             examples = json.load(f)
 
         # Filter by score
@@ -329,7 +317,6 @@ class TrainingDataCollector:
 
 
 # ==================== Convenience Functions ====================
-
 
 def create_optimizer() -> PromptOptimizer:
     """

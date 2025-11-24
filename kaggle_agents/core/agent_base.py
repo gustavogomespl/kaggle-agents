@@ -22,13 +22,10 @@ from ..prompts.prompt_base import (
 try:
     from langsmith import traceable
 except ImportError:
-
     def traceable(*args, **kwargs):
         def decorator(func):
             return func
-
         return decorator
-
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +45,7 @@ class Agent:
         self.description = description
         self.model = model
         self.api_handler = APIHandler(model)
-        logger.info(f"Agent {self.role} created with model {model}.")
+        logger.info(f'Agent {self.role} created with model {model}.')
 
     @traceable(name="Agent_Generate", run_type="chain")
     def generate(
@@ -56,7 +53,7 @@ class Agent:
         prompt: str,
         history: Optional[List[Dict[str, str]]] = None,
         max_completion_tokens: int = 16000,
-        temperature: Optional[float] = None,
+        temperature: Optional[float] = None
     ) -> Tuple[str, List[Dict[str, str]]]:
         """Generate response from LLM.
 
@@ -72,23 +69,23 @@ class Agent:
         if history is None:
             history = []
 
-        messages = history + [{"role": "user", "content": prompt}]
+        messages = history + [{'role': 'user', 'content': prompt}]
 
         # Use temperature from config if not specified
         if temperature is None:
             from .config_manager import get_config
-
             config = get_config()
             temperature = config.get_temperature()
 
         settings = APISettings(
-            max_completion_tokens=max_completion_tokens, temperature=temperature
+            max_completion_tokens=max_completion_tokens,
+            temperature=temperature
         )
 
         reply = self.api_handler.get_output(messages=messages, settings=settings)
 
-        history.append({"role": "user", "content": prompt})
-        history.append({"role": "assistant", "content": reply})
+        history.append({'role': 'user', 'content': prompt})
+        history.append({'role': 'assistant', 'content': reply})
 
         return reply, history
 
@@ -115,30 +112,29 @@ class Agent:
 
             # Get reviewer's feedback for this agent
             reviewer_memory = each_state_memory.get("reviewer", {})
-            suggestion = reviewer_memory.get("suggestion", {}).get(
-                f"agent {self.role}", ""
-            )
+            suggestion = reviewer_memory.get("suggestion", {}).get(f"agent {self.role}", "")
             score = reviewer_memory.get("score", {}).get(f"agent {self.role}", 3)
 
             experience_with_suggestion += PROMPT_EACH_EXPERIENCE_WITH_SUGGESTION.format(
-                index=i, experience=result, suggestion=suggestion, score=score
+                index=i,
+                experience=result,
+                suggestion=suggestion,
+                score=score
             )
 
             # For developer: include error messages if available
-            if self.role == "developer":
+            if self.role == 'developer':
                 restore_dir = get_restore_dir(state)
                 dir_name = get_dir_name(state)
                 error_file = restore_dir / f"{dir_name}_error.txt"
                 not_pass_file = restore_dir / f"{dir_name}_not_pass_information.txt"
 
                 if error_file.exists():
-                    with open(error_file, "r") as f:
+                    with open(error_file, 'r') as f:
                         error_message = f.read()
-                    experience_with_suggestion += (
-                        f"\n<ERROR MESSAGE>\n{error_message}\n</ERROR MESSAGE>\n"
-                    )
+                    experience_with_suggestion += f"\n<ERROR MESSAGE>\n{error_message}\n</ERROR MESSAGE>\n"
                 elif not_pass_file.exists():
-                    with open(not_pass_file, "r") as f:
+                    with open(not_pass_file, 'r') as f:
                         not_pass_info = f.read()
                     experience_with_suggestion += f"\n<NOT PASS INFORMATION>\n{not_pass_info}\n</NOT PASS INFORMATION>\n"
 
@@ -154,11 +150,10 @@ class Agent:
         Returns:
             Formatted data string
         """
-
         def read_sample(file_path: Path, num_lines: int) -> str:
             """Read first num_lines from a file."""
             sample_lines = []
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, 'r', encoding='utf-8') as f:
                 for i, line in enumerate(f):
                     if i >= num_lines:
                         break
@@ -176,11 +171,7 @@ class Agent:
 
         # Phase-specific data reading
         phase = state.get("phase", "")
-        if phase in [
-            "Understand Background",
-            "Preliminary Exploratory Data Analysis",
-            "Data Cleaning",
-        ]:
+        if phase in ["Understand Background", "Preliminary Exploratory Data Analysis", "Data Cleaning"]:
             train_sample = read_sample(competition_dir / "train.csv", num_lines)
             test_sample = read_sample(competition_dir / "test.csv", num_lines)
             result += f"\n#############\n# TRAIN DATA #\n{train_sample}\n#############\n# TEST DATA #\n{test_sample}"
@@ -201,9 +192,7 @@ class Agent:
             if processed_train.exists() and processed_test.exists():
                 train_sample = read_sample(processed_train, num_lines)
                 test_sample = read_sample(processed_test, num_lines)
-                submission_sample = read_sample(
-                    competition_dir / "sample_submission.csv", num_lines
-                )
+                submission_sample = read_sample(competition_dir / "sample_submission.csv", num_lines)
                 result += f"\n#############\n# PROCESSED TRAIN DATA #\n{train_sample}\n#############\n# PROCESSED TEST DATA #\n{test_sample}\n#############\n# SUBMISSION FORMAT #\n{submission_sample}"
 
                 # Extract evaluation metric
@@ -232,7 +221,7 @@ class Agent:
         # Save preview to disk
         restore_dir = get_restore_dir(state)
         preview_file = restore_dir / "data_preview.txt"
-        with open(preview_file, "w") as f:
+        with open(preview_file, 'w') as f:
             f.write(data_preview)
 
         return data_preview
@@ -246,7 +235,6 @@ class Agent:
         Returns:
             Parsed dictionary
         """
-
         def try_json_loads(data: str) -> Optional[Dict[str, Any]]:
             try:
                 return json.loads(data)
@@ -258,7 +246,7 @@ class Agent:
         logger.info("Attempting to extract JSON from raw reply.")
 
         # Try to extract JSON from code blocks
-        json_match = re.search(r"```json\s*(.+?)\s*```", raw_reply, re.DOTALL)
+        json_match = re.search(r'```json\s*(.+?)\s*```', raw_reply, re.DOTALL)
 
         if json_match:
             reply_str = json_match.group(1).strip()
@@ -267,7 +255,7 @@ class Agent:
                 return reply
 
         # Try without code blocks
-        json_match = re.search(r"\{.+\}", raw_reply, re.DOTALL)
+        json_match = re.search(r'\{.+\}', raw_reply, re.DOTALL)
         if json_match:
             reply_str = json_match.group(0).strip()
             reply = try_json_loads(reply_str)
@@ -277,14 +265,14 @@ class Agent:
         # Fallback: Ask LLM to reorganize
         logger.info("Failed to parse JSON, attempting reorganization.")
 
-        if self.role == "developer":
+        if self.role == 'developer':
             prompt = PROMPT_REORGANIZE_EXTRACT_TOOLS.format(information=raw_reply)
         else:
             prompt = PROMPT_REORGANIZE_JSON.format(information=raw_reply)
 
         json_reply, _ = self.generate(prompt, history=[])
 
-        json_match = re.search(r"```json\s*(.+?)\s*```", json_reply, re.DOTALL)
+        json_match = re.search(r'```json\s*(.+?)\s*```', json_reply, re.DOTALL)
         if json_match:
             reply_str = json_match.group(1).strip()
             reply = try_json_loads(reply_str)
@@ -304,24 +292,22 @@ class Agent:
             Extracted markdown content
         """
         # Try to match ```markdown first
-        markdown_match = re.search(r"```markdown\s*(.+?)\s*```", raw_reply, re.DOTALL)
+        markdown_match = re.search(r'```markdown\s*(.+?)\s*```', raw_reply, re.DOTALL)
         if markdown_match:
             logger.debug("Found ```markdown block")
             return markdown_match.group(1).strip()
 
         # Try to match any ``` code block
-        generic_match = re.search(r"```\s*(.+?)\s*```", raw_reply, re.DOTALL)
+        generic_match = re.search(r'```\s*(.+?)\s*```', raw_reply, re.DOTALL)
         if generic_match:
             logger.debug("Found generic ``` block")
             content = generic_match.group(1).strip()
             # Remove language identifier if present at the start
-            content = re.sub(r"^[a-z]+\n", "", content)
+            content = re.sub(r'^[a-z]+\n', '', content)
             return content
 
         # If no code blocks, return as-is (LLM might have returned plain text)
-        logger.debug(
-            f"No markdown code blocks found. Reply preview: {raw_reply[:200]}..."
-        )
+        logger.debug(f"No markdown code blocks found. Reply preview: {raw_reply[:200]}...")
         return raw_reply.strip()
 
     def _parse_code(self, raw_reply: str) -> str:
@@ -337,33 +323,33 @@ class Agent:
         raw_reply = raw_reply.strip()
 
         # Try to match ```python first (most specific)
-        code_match = re.search(r"```python\s*\n?(.*?)\n?```", raw_reply, re.DOTALL)
+        code_match = re.search(r'```python\s*\n?(.*?)\n?```', raw_reply, re.DOTALL)
         if code_match:
             logger.debug("Found ```python block")
             return code_match.group(1).strip()
 
         # Try to match ```py
-        py_match = re.search(r"```py\s*\n?(.*?)\n?```", raw_reply, re.DOTALL)
+        py_match = re.search(r'```py\s*\n?(.*?)\n?```', raw_reply, re.DOTALL)
         if py_match:
             logger.debug("Found ```py block")
             return py_match.group(1).strip()
 
         # Try to match any ``` code block (might be unlabeled Python code)
-        generic_match = re.search(r"```\s*\n?(.*?)\n?```", raw_reply, re.DOTALL)
+        generic_match = re.search(r'```\s*\n?(.*?)\n?```', raw_reply, re.DOTALL)
         if generic_match:
             logger.debug("Found generic ``` block, assuming Python code")
             content = generic_match.group(1).strip()
             # Remove language identifier if present at the start
-            content = re.sub(r"^(python|py)\s*\n", "", content)
+            content = re.sub(r'^(python|py)\s*\n', '', content)
             return content
 
         # Check if raw_reply starts with ``` (malformed markdown)
-        if raw_reply.startswith("```"):
+        if raw_reply.startswith('```'):
             logger.warning("Malformed code block detected, attempting to extract...")
             # Remove opening ```python or ```
-            content = re.sub(r"^```(?:python|py)?\s*\n?", "", raw_reply)
+            content = re.sub(r'^```(?:python|py)?\s*\n?', '', raw_reply)
             # Remove trailing ```
-            content = re.sub(r"\n?```\s*$", "", content)
+            content = re.sub(r'\n?```\s*$', '', content)
             return content.strip()
 
         # If no code blocks found, return as-is (might be plain code)
@@ -381,36 +367,11 @@ class Agent:
         """
         # Define file mappings for each phase
         phase_files = {
-            "Preliminary Exploratory Data Analysis": (
-                "train.csv",
-                "test.csv",
-                "train.csv",
-                "test.csv",
-            ),
-            "Data Cleaning": (
-                "train.csv",
-                "test.csv",
-                "cleaned_train.csv",
-                "cleaned_test.csv",
-            ),
-            "In-depth Exploratory Data Analysis": (
-                "cleaned_train.csv",
-                "cleaned_test.csv",
-                "cleaned_train.csv",
-                "cleaned_test.csv",
-            ),
-            "Feature Engineering": (
-                "cleaned_train.csv",
-                "cleaned_test.csv",
-                "processed_train.csv",
-                "processed_test.csv",
-            ),
-            "Model Building, Validation, and Prediction": (
-                "processed_train.csv",
-                "processed_test.csv",
-                "processed_train.csv",
-                "processed_test.csv",
-            ),
+            "Preliminary Exploratory Data Analysis": ("train.csv", "test.csv", "train.csv", "test.csv"),
+            "Data Cleaning": ("train.csv", "test.csv", "cleaned_train.csv", "cleaned_test.csv"),
+            "In-depth Exploratory Data Analysis": ("cleaned_train.csv", "cleaned_test.csv", "cleaned_train.csv", "cleaned_test.csv"),
+            "Feature Engineering": ("cleaned_train.csv", "cleaned_test.csv", "processed_train.csv", "processed_test.csv"),
+            "Model Building, Validation, and Prediction": ("processed_train.csv", "processed_test.csv", "processed_train.csv", "processed_test.csv")
         }
 
         phase = state.get("phase", "")
@@ -438,14 +399,14 @@ class Agent:
             target_variable = target_variable[0]
         elif len(target_variable) > 1:
             logger.warning(f"Multiple target variables found: {target_variable}")
-            target_variable = ", ".join(target_variable)
+            target_variable = ', '.join(target_variable)
         else:
             target_variable = "Unknown"
 
         return PROMPT_FEATURE_INFO.format(
             target_variable=target_variable,
             features_before=features_before,
-            features_after=features_after,
+            features_after=features_after
         )
 
     @traceable(name="Agent_Action", run_type="chain")

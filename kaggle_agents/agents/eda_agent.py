@@ -14,7 +14,9 @@ class EDAAgent:
 
     def __init__(self):
         """Initialize EDA agent."""
-        self.llm = ChatOpenAI(model=Config.LLM_MODEL, temperature=Config.TEMPERATURE)
+        self.llm = ChatOpenAI(
+            model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
+        )
 
     def analyze_dataframe(self, df: pd.DataFrame, name: str) -> Dict[str, Any]:
         """Analyze a dataframe and extract key statistics.
@@ -46,9 +48,7 @@ class EDAAgent:
             analysis["categorical_stats"] = {
                 col: {
                     "unique_values": df[col].nunique(),
-                    "most_common": df[col].mode().iloc[0]
-                    if len(df[col].mode()) > 0
-                    else None,
+                    "most_common": df[col].mode().iloc[0] if len(df[col].mode()) > 0 else None,
                 }
                 for col in categorical_cols
             }
@@ -89,17 +89,17 @@ class EDAAgent:
 
             human_msg = HumanMessage(
                 content=f"""Train Data Analysis:
-- Shape: {train_analysis["shape"]}
-- Columns: {train_analysis["columns"]}
-- Missing values: {train_analysis["missing_values"]}
+- Shape: {train_analysis['shape']}
+- Columns: {train_analysis['columns']}
+- Missing values: {train_analysis['missing_values']}
 
 Test Data Analysis:
-- Shape: {test_analysis["shape"]}
-- Columns: {test_analysis["columns"]}
-- Missing values: {test_analysis["missing_values"]}
+- Shape: {test_analysis['shape']}
+- Columns: {test_analysis['columns']}
+- Missing values: {test_analysis['missing_values']}
 
-Competition Type: {state.get("competition_type", "unknown")}
-Evaluation Metric: {state.get("metric", "unknown")}
+Competition Type: {state.get('competition_type', 'unknown')}
+Evaluation Metric: {state.get('metric', 'unknown')}
 
 Provide 5-7 key insights about this data and what we should focus on."""
             )
@@ -110,21 +110,17 @@ Provide 5-7 key insights about this data and what we should focus on."""
             insights = [
                 line.strip("- ").strip()
                 for line in response.content.split("\n")
-                if line.strip()
-                and (
-                    line.strip().startswith("-")
-                    or (len(line.strip()) > 0 and line.strip()[0].isdigit())
-                )
+                if line.strip() and (line.strip().startswith("-") or (len(line.strip()) > 0 and line.strip()[0].isdigit()))
             ]
 
             state["data_insights"] = insights
 
             # Handle messages state access
-            messages = (
-                state.get("messages", []) if isinstance(state, dict) else state.messages
-            )
+            messages = state.get("messages", []) if isinstance(state, dict) else state.messages
             messages.append(
-                HumanMessage(content=f"EDA completed. Key insights: {response.content}")
+                HumanMessage(
+                    content=f"EDA completed. Key insights: {response.content}"
+                )
             )
 
             print(f"EDA Agent: Analysis complete. Found {len(insights)} key insights")
@@ -135,9 +131,7 @@ Provide 5-7 key insights about this data and what we should focus on."""
             error_msg = f"EDA failed: {str(e)}"
             print(f"EDA Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = (
-                state.get("errors", []) if isinstance(state, dict) else state.errors
-            )
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
             return {"errors": errors + [error_msg]}
 
         return state

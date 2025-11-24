@@ -13,7 +13,6 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..core.state import KaggleState
 from ..core.config import get_config, get_llm
 
-
 class ExplainabilityAgent:
     """
     Agent that produces didactic explanations of the solving process.
@@ -34,9 +33,9 @@ class ExplainabilityAgent:
         Returns:
             State updates with explanation report
         """
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
         print("= EXPLAINABILITY AGENT: Generating Didactic Report")
-        print("=" * 60)
+        print("="*60)
 
         # Gather context
         competition_info = state.get("competition_info")
@@ -62,15 +61,14 @@ class ExplainabilityAgent:
             "last_updated": datetime.now(),
         }
 
-    def _build_context(
-        self, competition_info, domain, ablation_plan, dev_results, ensemble, meta_eval
-    ) -> str:
+    def _build_context(self, competition_info, domain, ablation_plan, dev_results, ensemble, meta_eval) -> str:
         """Build context for the LLM."""
-
+        
         # Format ablation plan
         plan_str = ""
         for comp in ablation_plan:
             plan_str += f"- {comp.name} ({comp.component_type}): Impact {comp.estimated_impact}\n"
+
 
         # Format results
         results_str = ""
@@ -79,9 +77,9 @@ class ExplainabilityAgent:
             results_str += f"- {status}: Time {res.execution_time:.2f}s\n"
 
         return f"""
-        Competition: {competition_info.name if competition_info else "Unknown"}
+        Competition: {competition_info.name if competition_info else 'Unknown'}
         Domain: {domain}
-        Problem Type: {competition_info.problem_type if competition_info else "Unknown"}
+        Problem Type: {competition_info.problem_type if competition_info else 'Unknown'}
         
         ## Strategy Plan
         {plan_str}
@@ -90,17 +88,17 @@ class ExplainabilityAgent:
         {results_str}
         
         ## Ensemble Strategy
-        Model: {ensemble.get("name", "None")}
-        Score: {ensemble.get("mean_cv_score", "N/A")}
+        Model: {ensemble.get('name', 'None')}
+        Score: {ensemble.get('mean_cv_score', 'N/A')}
         
         ## Meta-Evaluation (Self-Correction)
-        Success Patterns: {", ".join(meta_eval.get("success_patterns", []))}
-        Error Patterns: {", ".join(meta_eval.get("error_patterns", []))}
+        Success Patterns: {', '.join(meta_eval.get('success_patterns', []))}
+        Error Patterns: {', '.join(meta_eval.get('error_patterns', []))}
         """
 
     def _generate_report(self, context: str) -> str:
         """Generate the didactic report using LLM."""
-
+        
         system_prompt = """You are an expert Data Science Professor explaining an automated solution.
         Your goal is to write a DIDACTIC REPORT explaining the decisions made by the AI system.
         
@@ -115,9 +113,7 @@ class ExplainabilityAgent:
 
         messages = [
             SystemMessage(content=system_prompt),
-            HumanMessage(
-                content=f"Analyze this run context and generate the report:\n\n{context}"
-            ),
+            HumanMessage(content=f"Analyze this run context and generate the report:\n\n{context}"),
         ]
 
         response = self.llm.invoke(messages)
@@ -126,12 +122,10 @@ class ExplainabilityAgent:
     def _save_report(self, working_dir: str, report: str):
         """Save the report to a markdown file."""
         import os
-
         path = os.path.join(working_dir, "DECISION_EXPLANATION.md")
         with open(path, "w") as f:
             f.write(report)
         print(f"\n📝 Report saved to: {path}")
-
 
 def explainability_agent_node(state: KaggleState) -> Dict[str, Any]:
     """LangGraph node for explainability agent."""

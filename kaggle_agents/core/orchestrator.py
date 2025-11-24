@@ -163,9 +163,7 @@ class KaggleOrchestrator:
     def _display_results(self, results: WorkflowResults):
         """Display workflow results."""
         # Create results table
-        table = Table(
-            title="Workflow Results", show_header=True, header_style="bold magenta"
-        )
+        table = Table(title="Workflow Results", show_header=True, header_style="bold magenta")
         table.add_column("Metric", style="cyan", width=30)
         table.add_column("Value", style="green")
 
@@ -183,9 +181,7 @@ class KaggleOrchestrator:
 
         # Success/failure message
         if results.success:
-            console.print(
-                "\n[bold green] Workflow completed successfully![/bold green]"
-            )
+            console.print("\n[bold green] Workflow completed successfully![/bold green]")
         else:
             console.print("\n[bold yellow]  Workflow incomplete[/bold yellow]")
 
@@ -206,7 +202,6 @@ class KaggleOrchestrator:
 
 
 # ==================== Convenience Function ====================
-
 
 def solve_competition(
     competition_name: str,

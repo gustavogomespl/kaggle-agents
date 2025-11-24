@@ -25,21 +25,16 @@ from ..optimization import create_optimizer
 
 # ==================== DSPy Signatures ====================
 
-
 class AblationPlannerSignature(dspy.Signature):
     """Signature for ablation plan generation."""
 
     competition_info: str = dspy.InputField(desc="Competition metadata and description")
     domain: str = dspy.InputField(desc="Competition domain (tabular, CV, NLP, etc.)")
     sota_summary: str = dspy.InputField(desc="Summary of SOTA solutions and strategies")
-    domain_guidance: str = dspy.InputField(
-        desc="Domain-specific guidance and priorities"
-    )
+    domain_guidance: str = dspy.InputField(desc="Domain-specific guidance and priorities")
 
     ablation_plan: str = dspy.OutputField(desc="JSON list of ablation components")
-    analysis: str = dspy.OutputField(
-        desc="Analysis of SOTA patterns and rationale for plan"
-    )
+    analysis: str = dspy.OutputField(desc="Analysis of SOTA patterns and rationale for plan")
 
 
 class SOTAAnalysisSignature(dspy.Signature):
@@ -48,16 +43,13 @@ class SOTAAnalysisSignature(dspy.Signature):
     sota_solutions: str = dspy.InputField(desc="List of SOTA solutions with strategies")
 
     common_models: str = dspy.OutputField(desc="Most frequently used models")
-    feature_patterns: str = dspy.OutputField(
-        desc="Common feature engineering techniques"
-    )
+    feature_patterns: str = dspy.OutputField(desc="Common feature engineering techniques")
     ensemble_strategies: str = dspy.OutputField(desc="Popular ensemble methods")
     unique_tricks: str = dspy.OutputField(desc="Novel or unique approaches")
     success_factors: str = dspy.OutputField(desc="Key factors separating top solutions")
 
 
 # ==================== DSPy Modules ====================
-
 
 class AblationPlannerModule(dspy.Module):
     """DSPy module for ablation planning."""
@@ -91,7 +83,6 @@ class SOTAAnalyzerModule(dspy.Module):
 
 
 # ==================== Planner Agent ====================
-
 
 class PlannerAgent:
     """
@@ -153,13 +144,13 @@ class PlannerAgent:
         is_refinement = current_iteration > 1
 
         if is_refinement:
-            print("\n" + "=" * 60)
+            print("\n" + "="*60)
             print("= PLANNER AGENT: Refining Ablation Plan (RL-based)")
-            print("=" * 60)
+            print("="*60)
         else:
-            print("\n" + "=" * 60)
+            print("\n" + "="*60)
             print("= PLANNER AGENT: Creating Ablation Plan")
-            print("=" * 60)
+            print("="*60)
 
         # 1. Analyze SOTA solutions
         print("\nAnalyzing SOTA patterns...")
@@ -210,26 +201,16 @@ class PlannerAgent:
         # Format SOTA solutions for analysis
         sota_summary = self._format_sota_solutions(sota_solutions)
 
-        if self.use_dspy and hasattr(self, "sota_analyzer"):
+        if self.use_dspy and hasattr(self, 'sota_analyzer'):
             # Use DSPy module
             result = self.sota_analyzer(sota_solutions=sota_summary)
 
             analysis = {
-                "common_models": result.common_models.split(", ")
-                if result.common_models
-                else [],
-                "feature_patterns": result.feature_patterns.split(", ")
-                if result.feature_patterns
-                else [],
-                "ensemble_strategies": result.ensemble_strategies
-                if result.ensemble_strategies
-                else "",
-                "unique_tricks": result.unique_tricks.split(", ")
-                if result.unique_tricks
-                else [],
-                "success_factors": result.success_factors.split(", ")
-                if result.success_factors
-                else [],
+                "common_models": result.common_models.split(", ") if result.common_models else [],
+                "feature_patterns": result.feature_patterns.split(", ") if result.feature_patterns else [],
+                "ensemble_strategies": result.ensemble_strategies if result.ensemble_strategies else "",
+                "unique_tricks": result.unique_tricks.split(", ") if result.unique_tricks else [],
+                "success_factors": result.success_factors.split(", ") if result.success_factors else [],
             }
         else:
             # Use direct LLM call
@@ -313,7 +294,7 @@ class PlannerAgent:
                     common_errors = sorted(
                         analysis["common_errors"].items(),
                         key=lambda x: x[1],
-                        reverse=True,
+                        reverse=True
                     )[:3]
                     for error_type, count in common_errors:
                         insights.append(f"   - {error_type}: {count} occurrences")
@@ -321,9 +302,7 @@ class PlannerAgent:
                 # Add component-specific success patterns
                 if analysis.get("success_by_component"):
                     insights.append("\n📊 Component Success Rates:")
-                    for comp_type, success_info in list(
-                        analysis["success_by_component"].items()
-                    )[:3]:
+                    for comp_type, success_info in list(analysis["success_by_component"].items())[:3]:
                         rate = success_info.get("success_rate", 0.0)
                         insights.append(f"   - {comp_type}: {rate:.0%} success rate")
 
@@ -331,9 +310,7 @@ class PlannerAgent:
         if len(iteration_memory) >= 2:
             score_improvements = [m.score_improvement for m in iteration_memory[-3:]]
             avg_improvement = sum(score_improvements) / len(score_improvements)
-            insights.append(
-                f"\n📈 Recent Score Trend: {avg_improvement:+.4f} avg improvement"
-            )
+            insights.append(f"\n📈 Recent Score Trend: {avg_improvement:+.4f} avg improvement")
 
         return "\n".join(insights)
 
@@ -380,9 +357,7 @@ Domain: {domain}
             # TEMPORARY FIX: Skip DSPy, use fallback directly
             # DSPy consistently generates only 2 components instead of 5
             print("  🔧 Using fallback plan (ensures 5 high-quality components)")
-            plan_data = self._create_fallback_plan(
-                domain, sota_analysis, curriculum_insights
-            )
+            plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights)
 
         else:
             # Use direct LLM call
@@ -412,9 +387,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
             # TEMPORARY FIX: Skip LLM call, use fallback directly
             print("  🔧 Using fallback plan (ensures 5 high-quality components)")
-            plan_data = self._create_fallback_plan(
-                domain, sota_analysis, curriculum_insights
-            )
+            plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights)
 
         # Convert to AblationComponent objects
         components = []
@@ -424,18 +397,13 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             if not name or name == "unnamed":
                 comp_type = item.get("component_type", "component")
                 # Create descriptive name from type and index
-                name = f"{comp_type}_{i + 1}"
+                name = f"{comp_type}_{i+1}"
                 # If there's a description, try to extract key words
                 if item.get("description"):
                     desc = item["description"].lower()
                     # Extract first meaningful word
                     for word in desc.split():
-                        if len(word) > 4 and word not in [
-                            "using",
-                            "apply",
-                            "create",
-                            "implement",
-                        ]:
+                        if len(word) > 4 and word not in ["using", "apply", "create", "implement"]:
                             name = f"{word}_{comp_type}"
                             break
 
@@ -479,29 +447,24 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         for i, component in enumerate(previous_plan):
             if i < len(dev_results):
                 result = dev_results[i]
-                test_results_summary.append(
-                    {
-                        "component": component.name,
-                        "type": component.component_type,
-                        "success": result.success,
-                        "execution_time": result.execution_time,
-                        "impact": "positive" if result.success else "failed",
-                    }
-                )
+                test_results_summary.append({
+                    "component": component.name,
+                    "type": component.component_type,
+                    "success": result.success,
+                    "execution_time": result.execution_time,
+                    "impact": "positive" if result.success else "failed"
+                })
 
         # Format previous plan for prompt
-        previous_plan_str = json.dumps(
-            [
-                {
-                    "name": c.name,
-                    "type": c.component_type,
-                    "description": c.code[:100] + "...",
-                    "estimated_impact": c.estimated_impact,
-                }
-                for c in previous_plan
-            ],
-            indent=2,
-        )
+        previous_plan_str = json.dumps([
+            {
+                "name": c.name,
+                "type": c.component_type,
+                "description": c.code[:100] + "...",
+                "estimated_impact": c.estimated_impact
+            }
+            for c in previous_plan
+        ], indent=2)
 
         # Format test results
         test_results_str = json.dumps(test_results_summary, indent=2)
@@ -510,7 +473,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         prompt = REFINE_ABLATION_PLAN_PROMPT.format(
             previous_plan=previous_plan_str,
             test_results=test_results_str,
-            current_score=current_score,
+            current_score=current_score
         )
 
         # INJECT META-EVALUATOR GUIDANCE (RL Pattern)
@@ -521,19 +484,13 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             if "planner_guidance" in refinement_guidance:
                 guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
 
-            if (
-                "priority_fixes" in refinement_guidance
-                and refinement_guidance["priority_fixes"]
-            ):
+            if "priority_fixes" in refinement_guidance and refinement_guidance["priority_fixes"]:
                 guidance_text += "**Priority Error Fixes:**\n"
                 for error in refinement_guidance["priority_fixes"]:
                     guidance_text += f"- Avoid components that cause: {error}\n"
                 guidance_text += "\n"
 
-            if (
-                "success_amplification" in refinement_guidance
-                and refinement_guidance["success_amplification"]
-            ):
+            if "success_amplification" in refinement_guidance and refinement_guidance["success_amplification"]:
                 guidance_text += "**Amplify These Successes:**\n"
                 for success in refinement_guidance["success_amplification"]:
                     guidance_text += f"- {success}\n"
@@ -541,9 +498,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
             if "component_type_guidance" in refinement_guidance:
                 guidance_text += "**Component-Specific Guidance:**\n"
-                for comp_type, guide in refinement_guidance[
-                    "component_type_guidance"
-                ].items():
+                for comp_type, guide in refinement_guidance["component_type_guidance"].items():
                     guidance_text += f"- {comp_type}: {guide}\n"
 
             prompt += guidance_text
@@ -566,9 +521,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 from langchain.schema import SystemMessage, HumanMessage
 
                 messages = [
-                    SystemMessage(
-                        content="You are a Kaggle Grandmaster expert at refining ML solutions based on test results."
-                    ),
+                    SystemMessage(content="You are a Kaggle Grandmaster expert at refining ML solutions based on test results."),
                     HumanMessage(content=prompt),
                 ]
 
@@ -602,10 +555,10 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             code = item.get("code_outline", item.get("description", ""))
 
             component = AblationComponent(
-                name=item.get("name", f"refined_component_{i + 1}"),
+                name=item.get("name", f"refined_component_{i+1}"),
                 component_type=item.get("component_type", "model"),
                 code=code,
-                estimated_impact=item.get("estimated_impact", 0.15),
+                estimated_impact=item.get("estimated_impact", 0.15)
             )
             components.append(component)
 
@@ -641,13 +594,11 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 score = self._extract_validation_score(dev_results[idx].stdout)
             reward = score if score is not None else comp.estimated_impact
             success = idx < len(dev_results) and dev_results[idx].success
-            arms.append(
-                {
-                    "component": comp,
-                    "reward": reward if reward is not None else 0.0,
-                    "success": success,
-                }
-            )
+            arms.append({
+                "component": comp,
+                "reward": reward if reward is not None else 0.0,
+                "success": success,
+            })
 
         # Exploit: keep top-2 successful arms
         successful_arms = [a for a in arms if a["success"]]
@@ -657,76 +608,62 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         plan = []
 
         # Ensure a strong feature engineering arm is present
-        fe_in_keep = any(
-            a["component"].component_type == "feature_engineering" for a in keep
-        )
+        fe_in_keep = any(a["component"].component_type == "feature_engineering" for a in keep)
         if not fe_in_keep:
-            plan.append(
-                {
-                    "name": "advanced_feature_engineering",
-                    "component_type": "feature_engineering",
-                    "description": "Polynomial + interaction features with leak-safe pipelines (imputer/encoder in CV)",
-                    "estimated_impact": 0.15,
-                    "rationale": "Consistently strong FE baseline",
-                    "code_outline": "Pipeline with ColumnTransformer, SimpleImputer, OneHot/TargetEncoder, interactions",
-                }
-            )
+            plan.append({
+                "name": "advanced_feature_engineering",
+                "component_type": "feature_engineering",
+                "description": "Polynomial + interaction features with leak-safe pipelines (imputer/encoder in CV)",
+                "estimated_impact": 0.15,
+                "rationale": "Consistently strong FE baseline",
+                "code_outline": "Pipeline with ColumnTransformer, SimpleImputer, OneHot/TargetEncoder, interactions",
+            })
 
         # Add kept winners
         for arm in keep:
             comp = arm["component"]
-            plan.append(
-                {
-                    "name": comp.name,
-                    "component_type": comp.component_type,
-                    "description": comp.code or comp.component_type,
-                    "estimated_impact": float(comp.estimated_impact)
-                    if comp.estimated_impact
-                    else max(0.12, arm["reward"]),
-                    "rationale": "Kept from previous iteration (top reward)",
-                    "code_outline": comp.code or comp.component_type,
-                }
-            )
+            plan.append({
+                "name": comp.name,
+                "component_type": comp.component_type,
+                "description": comp.code or comp.component_type,
+                "estimated_impact": float(comp.estimated_impact) if comp.estimated_impact else max(0.12, arm["reward"]),
+                "rationale": "Kept from previous iteration (top reward)",
+                "code_outline": comp.code or comp.component_type,
+            })
 
         # Ensure at least two model components
         model_count = sum(1 for p in plan if p["component_type"] == "model")
         if model_count < 2:
-            plan.append(
-                {
-                    "name": "lightgbm_fast_cv",
-                    "component_type": "model",
-                    "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
-                    "estimated_impact": 0.20,
-                    "rationale": "High-ROI baseline model",
-                    "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
-                }
-            )
+            plan.append({
+                "name": "lightgbm_fast_cv",
+                "component_type": "model",
+                "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
+                "estimated_impact": 0.20,
+                "rationale": "High-ROI baseline model",
+                "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
+            })
             model_count += 1
 
         if model_count < 2:
-            plan.append(
-                {
-                    "name": "xgboost_fast_cv",
-                    "component_type": "model",
-                    "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
-                    "estimated_impact": 0.18,
-                    "rationale": "Adds diversity for ensemble",
-                    "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
-                }
-            )
+            plan.append({
+                "name": "xgboost_fast_cv",
+                "component_type": "model",
+                "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
+                "estimated_impact": 0.18,
+                "rationale": "Adds diversity for ensemble",
+                "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
+            })
 
         # Exploration arm if capacity allows
         if len(plan) < 4:
-            plan.append(
-                {
-                    "name": "stacking_light",
-                    "component_type": "ensemble",
-                    "description": "Weighted average of top models using CV rewards as weights; validate submission vs sample",
-                    "estimated_impact": 0.12,
-                    "rationale": "Cheap ensemble leveraging existing predictions",
-                    "code_outline": "Load saved preds, weight by CV reward, validate sample_submission shape/ids",
-                }
-            )
+            plan.append({
+                "name": "stacking_light",
+                "component_type": "ensemble",
+                "description": "Weighted average of top models using CV rewards as weights; validate submission vs sample",
+                "estimated_impact": 0.12,
+                "rationale": "Cheap ensemble leveraging existing predictions",
+                "code_outline": "Load saved preds, weight by CV reward, validate sample_submission shape/ids",
+            })
 
         return plan[:4]
 
@@ -760,12 +697,8 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
         # Limit to maximum 6 components (quality over quantity)
         if len(valid_plan) > 6:
-            print(
-                f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top 6 by impact"
-            )
-            valid_plan = sorted(
-                valid_plan, key=lambda x: x.estimated_impact, reverse=True
-            )[:6]
+            print(f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top 6 by impact")
+            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[:6]
 
         # CRITICAL: Ensure at least TWO model components exist
         # Model components are required to generate predictions and create ensembles
@@ -814,27 +747,18 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
         # Sort by type: preprocessing first, then models, then ensembles
         # This ensures data is prepared before models are trained
-        preprocessing_components = [
-            c
-            for c in valid_plan
-            if c.component_type in ["preprocessing", "feature_engineering"]
-        ]
+        preprocessing_components = [c for c in valid_plan if c.component_type in ["preprocessing", "feature_engineering"]]
         model_components = [c for c in valid_plan if c.component_type == "model"]
-        other_components = [
-            c
-            for c in valid_plan
-            if c.component_type not in ["preprocessing", "feature_engineering", "model"]
-        ]
+        other_components = [c for c in valid_plan if c.component_type not in ["preprocessing", "feature_engineering", "model"]]
 
         # Reorder: preprocessing first, then models, then ensembles
         valid_plan = preprocessing_components + model_components + other_components
 
         # Debug log: Show final plan composition
-        print(
-            f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total"
-        )
+        print(f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total")
 
         return valid_plan
+
 
     def _create_fallback_plan(
         self,
@@ -860,66 +784,60 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         plan = []
 
         # ALWAYS add feature engineering first (high impact)
-        plan.append(
-            {
-                "name": "advanced_feature_engineering",
-                "component_type": "feature_engineering",
-                "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
-                "estimated_impact": 0.15,
-                "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
-                "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder",
-            }
-        )
+        plan.append({
+            "name": "advanced_feature_engineering",
+            "component_type": "feature_engineering",
+            "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
+            "estimated_impact": 0.15,
+            "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
+            "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder"
+        })
 
         # ALWAYS add 3 diverse models for ensemble diversity
-        plan.extend(
-            [
-                {
-                    "name": "lightgbm_optuna_tuned",
-                    "component_type": "model",
-                    "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
-                    "estimated_impact": 0.22,
-                    "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
-                    "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100",
-                },
-                {
-                    "name": "xgboost_optuna_tuned",
-                    "component_type": "model",
-                    "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
-                    "estimated_impact": 0.20,
-                    "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
-                    "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50",
-                },
-                {
-                    "name": "catboost_optuna_tuned",
-                    "component_type": "model",
-                    "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
-                    "estimated_impact": 0.19,
-                    "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
-                    "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV",
-                },
-                {
-                    "name": "neural_network_mlp",
-                    "component_type": "model",
-                    "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
-                    "estimated_impact": 0.15,
-                    "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
-                    "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping.",
-                },
-            ]
-        )
+        plan.extend([
+            {
+                "name": "lightgbm_optuna_tuned",
+                "component_type": "model",
+                "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
+                "estimated_impact": 0.22,
+                "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
+                "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100"
+            },
+            {
+                "name": "xgboost_optuna_tuned",
+                "component_type": "model",
+                "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
+                "estimated_impact": 0.20,
+                "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
+                "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50"
+            },
+            {
+                "name": "catboost_optuna_tuned",
+                "component_type": "model",
+                "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
+                "estimated_impact": 0.19,
+                "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
+                "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV"
+            },
+            {
+                "name": "neural_network_mlp",
+                "component_type": "model",
+                "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
+                "estimated_impact": 0.15,
+                "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
+                "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping."
+            }
+        ])
 
         # ALWAYS add stacking ensemble (combines the 4 models above)
-        plan.append(
-            {
-                "name": "stacking_ensemble",
-                "component_type": "ensemble",
-                "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
-                "estimated_impact": 0.25,
-                "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
-                "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5",
-            }
-        )
+        plan.append({
+            "name": "stacking_ensemble",
+            "component_type": "ensemble",
+            "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
+            "estimated_impact": 0.25,
+            "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
+            "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5"
+        })
 
         return plan
 
@@ -930,9 +848,9 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             formatted.append(f"""
 Title: {sol.title}
 Votes: {sol.votes}
-Models: {", ".join(sol.models_used) if sol.models_used else "N/A"}
-Features: {", ".join(sol.feature_engineering) if sol.feature_engineering else "N/A"}
-Ensemble: {sol.ensemble_approach or "N/A"}
+Models: {', '.join(sol.models_used) if sol.models_used else 'N/A'}
+Features: {', '.join(sol.feature_engineering) if sol.feature_engineering else 'N/A'}
+Ensemble: {sol.ensemble_approach or 'N/A'}
 """)
         return "\n---\n".join(formatted)
 
@@ -947,11 +865,10 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             if comp.code:
                 print(f"   Code: {comp.code[:80]}...")
 
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
 
 
 # ==================== LangGraph Node Function ====================
-
 
 def planner_agent_node(state: KaggleState) -> Dict[str, Any]:
     """

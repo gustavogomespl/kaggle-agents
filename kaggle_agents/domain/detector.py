@@ -28,66 +28,22 @@ class DomainDetector:
     # Keywords for domain detection in competition descriptions
     DOMAIN_KEYWORDS = {
         "computer_vision": [
-            "image",
-            "images",
-            "vision",
-            "computer vision",
-            "cv",
-            "cnn",
-            "object detection",
-            "segmentation",
-            "classification of images",
-            "photo",
-            "photos",
-            "visual",
-            "pixel",
-            "resnet",
-            "vgg",
-            "yolo",
-            "unet",
-            "detection",
-            "recognition",
+            "image", "images", "vision", "computer vision", "cv", "cnn",
+            "object detection", "segmentation", "classification of images",
+            "photo", "photos", "visual", "pixel", "resnet", "vgg", "yolo",
+            "unet", "detection", "recognition"
         ],
         "nlp": [
-            "text",
-            "language",
-            "nlp",
-            "natural language",
-            "sentiment",
-            "translation",
-            "question answering",
-            "qa",
-            "named entity",
-            "ner",
-            "topic modeling",
-            "document",
-            "corpus",
-            "tokenization",
-            "bert",
-            "gpt",
-            "transformer",
-            "embedding",
-            "word",
-            "sentence",
+            "text", "language", "nlp", "natural language", "sentiment",
+            "translation", "question answering", "qa", "named entity",
+            "ner", "topic modeling", "document", "corpus", "tokenization",
+            "bert", "gpt", "transformer", "embedding", "word", "sentence"
         ],
         "time_series": [
-            "time series",
-            "temporal",
-            "forecasting",
-            "forecast",
-            "prediction",
-            "timeseries",
-            "sequential",
-            "time-dependent",
-            "datetime",
-            "trend",
-            "seasonality",
-            "lag",
-            "arima",
-            "lstm for time",
-            "sales forecast",
-            "demand forecast",
-            "stock price",
+            "time series", "temporal", "forecasting", "forecast", "prediction",
+            "timeseries", "sequential", "time-dependent", "datetime", "trend",
+            "seasonality", "lag", "arima", "lstm for time", "sales forecast",
+            "demand forecast", "stock price"
         ],
     }
 
@@ -117,9 +73,7 @@ class DomainDetector:
             Tuple of (detected_domain, confidence_score)
             confidence_score is between 0 and 1
         """
-        data_dir = (
-            Path(data_directory) if isinstance(data_directory, str) else data_directory
-        )
+        data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
 
         # Score each domain
         scores = {
@@ -131,9 +85,7 @@ class DomainDetector:
         }
 
         # 1. Analyze competition description and name
-        description_text = (
-            f"{competition_info.name} {competition_info.description}".lower()
-        )
+        description_text = f"{competition_info.name} {competition_info.description}".lower()
 
         for domain, keywords in self.DOMAIN_KEYWORDS.items():
             keyword_matches = sum(1 for kw in keywords if kw in description_text)
@@ -144,14 +96,8 @@ class DomainDetector:
             all_files = list(data_dir.rglob("*"))
 
             # Count file types
-            image_files = sum(
-                1
-                for f in all_files
-                if f.suffix.lower() in self.FILE_EXTENSIONS["computer_vision"]
-            )
-            text_files = sum(
-                1 for f in all_files if f.suffix.lower() in self.FILE_EXTENSIONS["nlp"]
-            )
+            image_files = sum(1 for f in all_files if f.suffix.lower() in self.FILE_EXTENSIONS["computer_vision"])
+            text_files = sum(1 for f in all_files if f.suffix.lower() in self.FILE_EXTENSIONS["nlp"])
             csv_files = sum(1 for f in all_files if f.suffix.lower() == ".csv")
 
             if image_files > 0:
@@ -169,13 +115,9 @@ class DomainDetector:
 
         # 3. Detect multi-modal
         # If multiple domains have high scores, it's likely multi-modal
-        high_scoring_domains = [
-            domain for domain, score in scores.items() if score > 20
-        ]
+        high_scoring_domains = [domain for domain, score in scores.items() if score > 20]
         if len(high_scoring_domains) >= 2:
-            scores["multi_modal"] = (
-                sum(scores[d] for d in high_scoring_domains if d != "multi_modal") * 0.5
-            )
+            scores["multi_modal"] = sum(scores[d] for d in high_scoring_domains if d != "multi_modal") * 0.5
 
         # 4. Default to tabular if no strong signals
         if max(scores.values()) < 10:
@@ -223,67 +165,32 @@ class DomainDetector:
                 scores["time_series"] += 20
 
             # Check column names for datetime patterns
-            date_patterns = [
-                "date",
-                "time",
-                "timestamp",
-                "datetime",
-                "year",
-                "month",
-                "day",
-            ]
-            date_like_cols = [
-                col
-                for col in df.columns
-                if any(p in col.lower() for p in date_patterns)
-            ]
+            date_patterns = ["date", "time", "timestamp", "datetime", "year", "month", "day"]
+            date_like_cols = [col for col in df.columns if any(p in col.lower() for p in date_patterns)]
             if date_like_cols:
                 scores["time_series"] += 10
 
             # Check for image path columns (CV indicator)
             path_patterns = ["image", "img", "photo", "file", "path", "filename"]
-            path_cols = [
-                col
-                for col in df.columns
-                if any(p in col.lower() for p in path_patterns)
-            ]
+            path_cols = [col for col in df.columns if any(p in col.lower() for p in path_patterns)]
 
             if path_cols:
                 # Check if values look like file paths
                 for col in path_cols:
                     sample_values = df[col].dropna().head(5).astype(str)
-                    if any(
-                        any(ext in val.lower() for ext in [".jpg", ".png", ".jpeg"])
-                        for val in sample_values
-                    ):
+                    if any(any(ext in val.lower() for ext in [".jpg", ".png", ".jpeg"]) for val in sample_values):
                         scores["computer_vision"] += 25
                         break
 
             # Check for text columns (NLP indicator)
-            text_patterns = [
-                "text",
-                "comment",
-                "review",
-                "description",
-                "content",
-                "message",
-                "title",
-            ]
-            text_cols = [
-                col
-                for col in df.columns
-                if any(p in col.lower() for p in text_patterns)
-            ]
+            text_patterns = ["text", "comment", "review", "description", "content", "message", "title"]
+            text_cols = [col for col in df.columns if any(p in col.lower() for p in text_patterns)]
 
             if text_cols:
                 # Check if values are long strings (typical for NLP)
                 for col in text_cols:
                     sample_values = df[col].dropna().head(5).astype(str)
-                    avg_length = (
-                        sum(len(val) for val in sample_values) / len(sample_values)
-                        if sample_values.size > 0
-                        else 0
-                    )
+                    avg_length = sum(len(val) for val in sample_values) / len(sample_values) if sample_values.size > 0 else 0
 
                     if avg_length > 50:  # Long text suggests NLP
                         scores["nlp"] += 20
@@ -325,7 +232,6 @@ class DomainDetector:
 
 
 # ==================== Convenience Function ====================
-
 
 def detect_competition_domain(
     competition_info: CompetitionInfo,

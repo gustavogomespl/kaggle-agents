@@ -51,15 +51,13 @@ class SubmissionAgent:
         Returns:
             State updates with submission results
         """
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
         print("📤 SUBMISSION AGENT: Uploading to Kaggle")
-        print("=" * 60)
+        print("="*60)
 
         working_dir = Path(state["working_directory"])
         competition_name = state["competition_info"].name
-        sample_submission_path = (
-            state.get("sample_submission_path") or working_dir / "sample_submission.csv"
-        )
+        sample_submission_path = state.get("sample_submission_path") or working_dir / "sample_submission.csv"
 
         # Find submission file
         submission_path = self._find_submission_file(working_dir)
@@ -168,10 +166,7 @@ class SubmissionAgent:
                 return False, "Submission is empty"
 
             if len(df.columns) < 2:
-                return (
-                    False,
-                    "Submission must have at least 2 columns (ID + prediction)",
-                )
+                return False, "Submission must have at least 2 columns (ID + prediction)"
 
             # Check for nulls
             if df.isnull().any().any():
@@ -183,15 +178,9 @@ class SubmissionAgent:
                 try:
                     sample_sub = pd.read_csv(sample_submission_path)
                     if df.shape != sample_sub.shape:
-                        return (
-                            False,
-                            f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})",
-                        )
+                        return False, f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})"
                     if df.columns.tolist() != sample_sub.columns.tolist():
-                        return (
-                            False,
-                            f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}",
-                        )
+                        return False, f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}"
                     if "id" in df.columns and not df["id"].equals(sample_sub["id"]):
                         return False, "ID column does not match sample_submission"
                 except Exception as e:
@@ -199,9 +188,7 @@ class SubmissionAgent:
 
             # Prediction sanity checks
             problem_lower = (problem_type or "").lower()
-            is_classification = (
-                "class" in problem_lower
-            )  # covers binary_classification, classification, multiclass
+            is_classification = "class" in problem_lower  # covers binary_classification, classification, multiclass
 
             pred_col = df.columns[1]
             preds = df[pred_col]
@@ -211,10 +198,7 @@ class SubmissionAgent:
             # For classification/probabilities, enforce [0,1]; for regression, allow any numeric range
             if is_classification:
                 if (preds < 0).any() or (preds > 1).any():
-                    return (
-                        False,
-                        f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})",
-                    )
+                    return False, f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})"
 
             if not preds.replace([float("inf"), float("-inf")], pd.NA).notna().all():
                 return False, "Predictions contain inf or NaN values"
@@ -285,21 +269,13 @@ class SubmissionAgent:
             # Try using Kaggle CLI first (more reliable in some environments)
             try:
                 import subprocess
-
                 cmd = [
-                    "kaggle",
-                    "competitions",
-                    "submit",
-                    "-c",
-                    competition_name,
-                    "-f",
-                    str(submission_path),
-                    "-m",
-                    message,
+                    "kaggle", "competitions", "submit",
+                    "-c", competition_name,
+                    "-f", str(submission_path),
+                    "-m", message
                 ]
-                result_cli = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=30
-                )
+                result_cli = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
                 if result_cli.returncode == 0:
                     print("✅ Uploaded successfully via CLI!")
@@ -354,9 +330,7 @@ class SubmissionAgent:
                 submitted_at=datetime.now(),
             )
 
-    def _fetch_score(
-        self, competition_name: str
-    ) -> tuple[Optional[float], Optional[float]]:
+    def _fetch_score(self, competition_name: str) -> tuple[Optional[float], Optional[float]]:
         """
         Fetch latest submission score from leaderboard.
 
@@ -385,9 +359,7 @@ class SubmissionAgent:
             print(f"⚠️  Could not fetch score: {str(e)}")
             return None, None
 
-    def _calculate_percentile(
-        self, competition_name: str, score: float
-    ) -> Optional[float]:
+    def _calculate_percentile(self, competition_name: str, score: float) -> Optional[float]:
         """
         Calculate percentile rank on leaderboard.
 
@@ -418,9 +390,7 @@ class SubmissionAgent:
             # Assume we're in the middle if we can't get leaderboard
             return 50.0
 
-    def _check_goal_achievement(
-        self, submission_result: SubmissionResult, state: KaggleState
-    ):
+    def _check_goal_achievement(self, submission_result: SubmissionResult, state: KaggleState):
         """Check if we achieved the goal (top 20%)."""
         target_percentile = state.get("target_percentile", 20.0)
 
@@ -436,15 +406,12 @@ class SubmissionAgent:
             state["should_continue"] = False
             state["termination_reason"] = "goal_achieved"
         else:
-            print(
-                f"\n📈 Progress: {submission_result.percentile:.1f}% (target: {target_percentile}%)"
-            )
+            print(f"\n📈 Progress: {submission_result.percentile:.1f}% (target: {target_percentile}%)")
             remaining = submission_result.percentile - target_percentile
             print(f"   Need to improve by {remaining:.1f} percentile points")
 
 
 # ==================== LangGraph Node Function ====================
-
 
 def submission_agent_node(state: KaggleState) -> Dict[str, Any]:
     """

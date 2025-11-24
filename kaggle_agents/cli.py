@@ -21,7 +21,8 @@ def print_header():
     """Print application header."""
     console.print(
         Panel.fit(
-            "[bold]Kaggle Agents[/bold]\nAutonomous Competition Solving",
+            "[bold]Kaggle Agents[/bold]\n"
+            "Autonomous Competition Solving",
             border_style="blue",
         )
     )

@@ -1099,14 +1099,10 @@ class DeveloperAgent:
                 instructions.append("            params['gpu_device_id'] = 0")
                 instructions.append("            # For XGBoost (if using XGBoost)")
                 instructions.append("            # params['tree_method'] = 'gpu_hist'")
-                instructions.append(
-                    "            # params['predictor'] = 'gpu_predictor'"
-                )
+                instructions.append("            # params['predictor'] = 'gpu_predictor'")
                 instructions.append("        else:")
                 instructions.append("            params['device'] = 'cpu'")
-                instructions.append(
-                    "            # params['tree_method'] = 'hist'  # XGBoost CPU"
-                )
+                instructions.append("            # params['tree_method'] = 'hist'  # XGBoost CPU")
                 instructions.append("        ")
                 instructions.append(
                     "        model = LGBMClassifier(**params, random_state=42)"
@@ -1140,24 +1136,16 @@ class DeveloperAgent:
                     "    best_params['n_estimators'] = 1000  # More estimators for final"
                 )
                 instructions.append("    ")
-                instructions.append(
-                    "    # STEP 3: Add GPU params to final model (MANDATORY)"
-                )
+                instructions.append("    # STEP 3: Add GPU params to final model (MANDATORY)")
                 instructions.append("    if use_gpu:")
                 instructions.append("        best_params['device'] = 'gpu'")
                 instructions.append("        best_params['gpu_platform_id'] = 0")
                 instructions.append("        best_params['gpu_device_id'] = 0")
-                instructions.append(
-                    "        # best_params['tree_method'] = 'gpu_hist'  # XGBoost"
-                )
-                instructions.append(
-                    "        # best_params['predictor'] = 'gpu_predictor'  # XGBoost"
-                )
+                instructions.append("        # best_params['tree_method'] = 'gpu_hist'  # XGBoost")
+                instructions.append("        # best_params['predictor'] = 'gpu_predictor'  # XGBoost")
                 instructions.append("    else:")
                 instructions.append("        best_params['device'] = 'cpu'")
-                instructions.append(
-                    "        # best_params['tree_method'] = 'hist'  # XGBoost"
-                )
+                instructions.append("        # best_params['tree_method'] = 'hist'  # XGBoost")
                 instructions.append("    ")
                 instructions.append(
                     "    final_model = LGBMClassifier(**best_params, random_state=42)"

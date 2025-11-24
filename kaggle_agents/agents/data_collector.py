@@ -12,7 +12,9 @@ class DataCollectorAgent:
 
     def __init__(self):
         """Initialize data collector agent."""
-        self.llm = ChatOpenAI(model=Config.LLM_MODEL, temperature=Config.TEMPERATURE)
+        self.llm = ChatOpenAI(
+            model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
+        )
         self.kaggle_client = KaggleAPIClient()
 
     def __call__(self, state: KaggleState) -> KaggleState:
@@ -47,7 +49,6 @@ class DataCollectorAgent:
             target_col = "target"  # Default
             try:
                 import pandas as pd
-
                 if state["sample_submission_path"]:
                     sub_df = pd.read_csv(state["sample_submission_path"], nrows=1)
                     # usually id, target. So second column is target
@@ -56,25 +57,12 @@ class DataCollectorAgent:
                 elif state["train_data_path"]:
                     train_df = pd.read_csv(state["train_data_path"], nrows=1)
                     # Heuristic: last column or column with 'target' in name
-                    target_candidates = [
-                        c
-                        for c in train_df.columns
-                        if c.lower()
-                        in [
-                            "target",
-                            "label",
-                            "class",
-                            "loan_paid_back",
-                            "survived",
-                            "price",
-                            "sales",
-                        ]
-                    ]
+                    target_candidates = [c for c in train_df.columns if c.lower() in ['target', 'label', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
                     if target_candidates:
                         target_col = target_candidates[0]
                     else:
                         target_col = train_df.columns[-1]
-
+                
                 print(f"Data Collector: Detected target column: '{target_col}'")
                 state["target_col"] = target_col
             except Exception as e:
@@ -88,10 +76,10 @@ class DataCollectorAgent:
             )
 
             human_msg = HumanMessage(
-                content=f"""Competition: {comp_info["title"]}
-Description: {comp_info["description"]}
-Evaluation Metric: {comp_info["evaluation"]}
-Category: {comp_info["category"]}
+                content=f"""Competition: {comp_info['title']}
+Description: {comp_info['description']}
+Evaluation Metric: {comp_info['evaluation']}
+Category: {comp_info['category']}
 
 What are the key characteristics of this competition and what should we focus on?"""
             )
@@ -110,9 +98,7 @@ What are the key characteristics of this competition and what should we focus on
             error_msg = f"Data collection failed: {str(e)}"
             print(f"Data Collector ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = (
-                state.get("errors", []) if isinstance(state, dict) else state.errors
-            )
+            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
             return {"errors": errors + [error_msg]}
 
         return state

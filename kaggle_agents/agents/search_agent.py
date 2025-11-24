@@ -40,7 +40,6 @@ class SearchAgent:
             )
         elif self.config.llm.provider == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
-
             self.llm = ChatGoogleGenerativeAI(
                 model=self.config.llm.model,
                 temperature=self.config.llm.temperature,
@@ -61,9 +60,9 @@ class SearchAgent:
         Returns:
             State updates with SOTA solutions
         """
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
         print("SEARCH AGENT: Retrieving SOTA Solutions")
-        print("=" * 60)
+        print("="*60)
 
         competition_name = state["competition_info"].name
         domain = state.get("domain_detected", "tabular")
@@ -166,7 +165,6 @@ class SearchAgent:
         Returns:
             Ranked list of solutions
         """
-
         def score_solution(sol: SOTASolution) -> float:
             score = 0.0
 
@@ -239,11 +237,10 @@ class SearchAgent:
                 print(f"   Ensemble: {sol.ensemble_approach}")
             print(f"   Code Snippets: {len(sol.code_snippets)}")
 
-        print("\n" + "=" * 60)
+        print("\n" + "="*60)
 
 
 # ==================== LangGraph Node Function ====================
-
 
 def search_agent_node(state: KaggleState) -> Dict[str, Any]:
     """

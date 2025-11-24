@@ -645,6 +645,7 @@ predictions = model.predict(X_test)
 import joblib
 joblib.dump(model, '{model_path}')
 """,
+
     "computer_vision": """
 # Computer Vision Template
 import torch
@@ -676,6 +677,7 @@ model = model.to(device)
 # Save model
 torch.save(model.state_dict(), '{model_path}')
 """,
+
     "nlp": """
 # NLP Template
 import torch
@@ -721,6 +723,7 @@ trainer = Trainer(
 # Save
 model.save_pretrained('{model_path}')
 """,
+
     "time_series": """
 # Time Series Template
 import pandas as pd
@@ -882,6 +885,7 @@ elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
 print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
 """,
+
     "stacking_ensemble_regression": """
 # Stacking Ensemble Template for Regression
 import pandas as pd
@@ -1077,6 +1081,7 @@ elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
 print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
 """,
+
     "catboost_model": """
 # CatBoost Model Template (for model component_type)
 import pandas as pd
@@ -1202,6 +1207,7 @@ elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
 print(f"✅ CatBoost model complete! Submission saved with {{len(submission)}} rows")
 """,
+
     "advanced_feature_engineering": """
 # Advanced Feature Engineering Template (for feature_engineering component_type)
 import pandas as pd
