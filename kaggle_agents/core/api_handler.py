@@ -130,7 +130,7 @@ def generate_response(
                 stop=settings.stop,
                 timeout=settings.timeout,
             )
-    except openai.BadRequestError as e:
+    except openai.BadRequestError:
         # Trata erros específicos
         raise
 

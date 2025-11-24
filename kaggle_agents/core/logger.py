@@ -5,7 +5,6 @@ Clean, simple, and efficient logging with file rotation and structured output.
 """
 
 import logging
-import sys
 from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler

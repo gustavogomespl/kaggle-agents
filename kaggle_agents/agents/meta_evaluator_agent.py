@@ -12,13 +12,12 @@ Based on:
 """
 
 import json
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any
 from datetime import datetime
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..core.state import KaggleState, DevelopmentResult, IterationMemory
+from ..core.state import KaggleState, IterationMemory
 from ..core.config import get_config, get_llm_for_role, calculate_score_improvement
 from ..optimization import create_training_collector
 
@@ -393,7 +392,7 @@ class MetaEvaluatorAgent:
                 "priority_fixes": failure_analysis["error_patterns"],
             }
 
-        print(f"   ✓ Generated guidance for Planner and Developer")
+        print("   ✓ Generated guidance for Planner and Developer")
 
         return guidance
 
@@ -472,7 +471,7 @@ class MetaEvaluatorAgent:
             context += f"**Total Lines**: {len(code_lines)}\n"
             context += "-" * 40 + "\n"
 
-        context += f"\n## Reward Signals\n"
+        context += "\n## Reward Signals\n"
         for key, value in reward_signals.items():
             context += f"- {key}: {value:.3f}\n"
 
@@ -609,7 +608,7 @@ Focus on actionable, specific improvements based on error patterns and performan
                 score=component_score,
             )
 
-        print(f"   ✓ Collected training examples for Planner and Developer")
+        print("   ✓ Collected training examples for Planner and Developer")
 
 
 # ==================== Prompts ====================

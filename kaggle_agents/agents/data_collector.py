@@ -1,6 +1,5 @@
 """Data collection agent for Kaggle competitions."""
 
-from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..tools.kaggle_api import KaggleAPIClient

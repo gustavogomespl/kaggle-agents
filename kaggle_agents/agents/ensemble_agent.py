@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import List, Dict, Any
 from sklearn.model_selection import cross_val_predict
 from sklearn.linear_model import Ridge, LogisticRegression
-from sklearn.model_selection import cross_val_predict
-from sklearn.linear_model import Ridge, LogisticRegression
 from ..core.config import get_config
 from ..core.state import KaggleState
 
@@ -61,7 +59,7 @@ class EnsembleAgent:
                 valid_models.append(model)
                 valid_names.append(name)
             else:
-                print(f"      ⚠️  OOF file not found, falling back to cross_val_predict (slow)")
+                print("      ⚠️  OOF file not found, falling back to cross_val_predict (slow)")
                 if problem_type == "classification":
                     oof_preds = cross_val_predict(
                         model, X, y, cv=5, method="predict_proba", n_jobs=-1
@@ -208,7 +206,7 @@ class EnsembleAgent:
         Iteratively adds the model that maximizes the ensemble's CV score.
         Allows repetition of models (weighted ensemble by count).
         """
-        from sklearn.metrics import log_loss, mean_squared_error, roc_auc_score
+        from sklearn.metrics import log_loss, mean_squared_error
         
         print(f"  Creating Caruana Ensemble (Hill Climbing) with {len(models)} models...")
         
@@ -388,7 +386,7 @@ class EnsembleAgent:
     ) -> Dict[str, Any]:
         """Plan ensemble strategy using LLM."""
         from ..core.config import get_llm
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.messages import HumanMessage
         import json
 
         llm = get_llm()
@@ -461,13 +459,13 @@ Return a JSON object:
             dev_results = state.get("development_results", [])
             successful_results = [r for r in dev_results if r.success] if dev_results else []
 
-            print(f"\n   📊 Ensemble Prerequisites Check:")
+            print("\n   📊 Ensemble Prerequisites Check:")
             print(f"      Total development results: {len(dev_results)}")
             print(f"      Successful results: {len(successful_results)}")
             print(f"      Models trained count: {len(models_trained)}")
 
             if successful_results:
-                print(f"\n   ✅ Successful components:")
+                print("\n   ✅ Successful components:")
                 for i, result in enumerate(successful_results[-5:], 1):  # Last 5
                     artifacts_str = ', '.join(result.artifacts_created[:3]) if result.artifacts_created else 'none'
                     print(f"      {i}. {artifacts_str}")
@@ -475,8 +473,8 @@ Return a JSON object:
             # Check if we have multiple models
             if len(models_trained) < 2:
                 print(f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})")
-                print(f"      Reason: Ensemble requires at least 2 trained models")
-                print(f"      Skipping ensemble step")
+                print("      Reason: Ensemble requires at least 2 trained models")
+                print("      Skipping ensemble step")
                 return {
                     "ensemble_skipped": True,
                     "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)"
@@ -486,13 +484,13 @@ Return a JSON object:
             resolved_train_path = Path(current_train_path) if current_train_path else Path(train_data_path) if train_data_path else working_dir / "train.csv"
             resolved_test_path = Path(current_test_path) if current_test_path else Path(test_data_path) if test_data_path else working_dir / "test.csv"
 
-            print(f"\n   📂 Data Paths:")
+            print("\n   📂 Data Paths:")
             print(f"      Train: {resolved_train_path.name}")
             print(f"      Test:  {resolved_test_path.name}")
             if current_train_path:
-                print(f"      ✅ Using engineered features (from feature_engineering component)")
+                print("      ✅ Using engineered features (from feature_engineering component)")
             else:
-                print(f"      📊 Using original raw features")
+                print("      📊 Using original raw features")
 
             if not resolved_train_path.exists():
                 print(f"  ❌ Train data not found at {resolved_train_path}, skipping ensemble")
@@ -540,7 +538,7 @@ Return a JSON object:
             sample_sub_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
 
             # Load top models (top 3 by CV score)
-            print(f"\n   🔍 Loading top models for ensemble...")
+            print("\n   🔍 Loading top models for ensemble...")
             sorted_models = sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]
 
             top_models = []
@@ -558,7 +556,7 @@ Return a JSON object:
                     print(f"         ❌ Model file not found: {model_path}")
 
             if len(top_models) < 2:
-                print(f"\n   ❌ Not enough trained models loaded for ensemble")
+                print("\n   ❌ Not enough trained models loaded for ensemble")
                 print(f"      Required: 2+, Found: {len(top_models)}")
                 return {
                     "ensemble_skipped": True,
@@ -566,7 +564,7 @@ Return a JSON object:
                 }
 
             # PLAN ENSEMBLE STRATEGY
-            print(f"\n   🎯 Planning ensemble strategy...")
+            print("\n   🎯 Planning ensemble strategy...")
             plan = self.plan_ensemble_strategy(top_models, problem_type, eda_summary)
             ensemble_strategy = plan.get("strategy_name", "weighted_blending")
             print(f"      Strategy: {ensemble_strategy}")

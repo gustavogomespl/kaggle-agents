@@ -6,7 +6,7 @@ Implements PREFACE pattern for error-guided prompt repair.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 from dataclasses import dataclass
 
 

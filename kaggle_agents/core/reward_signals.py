@@ -5,7 +5,7 @@ Implements CodeRL+ pattern for multi-faceted reward calculation.
 Based on execution semantics alignment and performance metrics.
 """
 
-from typing import Dict, List, Any
+from typing import Dict, List
 from dataclasses import dataclass
 
 from .state import KaggleState, DevelopmentResult

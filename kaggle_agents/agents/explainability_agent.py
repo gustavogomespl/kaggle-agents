@@ -6,7 +6,7 @@ didactic report explaining WHY certain decisions were made, suitable for
 educational purposes and TCC documentation.
 """
 
-from typing import Dict, Any, List
+from typing import Dict, Any
 from datetime import datetime
 from langchain_core.messages import HumanMessage, SystemMessage
 

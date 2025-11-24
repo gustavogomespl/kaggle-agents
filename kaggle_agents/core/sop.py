@@ -6,14 +6,11 @@ from pathlib import Path
 
 from .state import (
     EnhancedKaggleState,
-    add_memory,
-    next_phase,
     should_retry_phase,
     increment_retry_count,
     reset_retry_count
 )
 from .config_manager import get_config
-from .memory import Memory
 from ..enhanced_agents import (
     ReaderAgent,
     PlannerAgent,
@@ -64,11 +61,11 @@ class SOP:
                 - "Complete": Workflow completed
                 - "Fail": Workflow failed
         """
-        logger.info(f"="*80)
+        logger.info("="*80)
         logger.info(f"SOP STEP - Executing phase: {state.get('phase', 'UNKNOWN')}")
         logger.info(f"SOP STEP - Retry count: {state.get('retry_count', 0)}/{state.get('max_phase_retries', 3)}")
         logger.info(f"SOP STEP - Iteration: {state.get('iteration', 0)}/{state.get('max_iterations', 1)}")
-        logger.info(f"="*80)
+        logger.info("="*80)
 
         # Get agents for this phase
         agent_roles = self.config.get_phase_agents(state.get('phase', ''))
@@ -136,7 +133,7 @@ class SOP:
         status = self._evaluate_phase_results(state, phase_results)
 
         logger.info(f"📊 SOP STEP - Phase '{state.get('phase', 'UNKNOWN')}' evaluation result: {status}")
-        logger.info(f"="*80)
+        logger.info("="*80)
 
         return status, state
 

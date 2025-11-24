@@ -5,8 +5,7 @@ This agent generates Python code to implement ablation components,
 with automatic retry and debugging capabilities.
 """
 
-import json
-from typing import List, Dict, Any, Optional
+from typing import Dict, Any, Optional
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -30,9 +29,8 @@ from ..prompts.templates.developer_prompts import (
     DEBUG_CODE_PROMPT,
     format_component_details,
     format_error_info,
-    get_domain_template,
 )
-from ..optimization import create_optimizer, create_developer_metric
+from ..optimization import create_optimizer
 
 
 # ==================== DSPy Signatures ====================
@@ -229,7 +227,7 @@ class DeveloperAgent:
             )
 
             if not should_keep_component:
-                print(f"\nROLLBACK: Component did not improve score - discarding")
+                print("\nROLLBACK: Component did not improve score - discarding")
                 return {
                     "development_results": [],
                     "current_component_index": current_index + 1,
@@ -255,7 +253,7 @@ class DeveloperAgent:
             if not oof_file.exists():
                 print(f"WARNING: Model {component.name} did NOT save OOF file!")
                 print(f"Expected: {oof_file.name}")
-                print(f"Stacking will fail for this model.")
+                print("Stacking will fail for this model.")
 
             submission_path = working_dir / "submission.csv"
             if submission_path.exists():
@@ -285,9 +283,9 @@ class DeveloperAgent:
 
                     best_path = working_dir / "submission_best.csv"
                     shutil.copy(submission_path, best_path)
-                    print(f"Saved to submission_best.csv")
+                    print("Saved to submission_best.csv")
             else:
-                print(f"Warning: submission.csv not found after successful execution")
+                print("Warning: submission.csv not found after successful execution")
 
             if result.success and should_keep_component and new_cv_score is not None:
                 state_updates["baseline_cv_score"] = new_cv_score
@@ -371,7 +369,7 @@ class DeveloperAgent:
                     state_updates["current_train_path"] = str(eng_train)
                     state_updates["current_test_path"] = str(eng_test)
                     print(
-                        f"  🔄 Pipeline Update: Pointing subsequent agents to engineered data:"
+                        "  🔄 Pipeline Update: Pointing subsequent agents to engineered data:"
                     )
                     print(f"     Train: {eng_train.name}")
                     print(f"     Test:  {eng_test.name}")
@@ -612,7 +610,7 @@ class DeveloperAgent:
         direction_symbol = "↓" if is_minimize else "↑"
         direction_text = "minimize" if is_minimize else "maximize"
 
-        print(f"\n   📊 Ablation Study (Hill Climbing):")
+        print("\n   📊 Ablation Study (Hill Climbing):")
         print(
             f"      Metric:         {metric_name} ({direction_symbol} {direction_text})"
         )
@@ -624,12 +622,12 @@ class DeveloperAgent:
         should_keep = improvement >= min_improvement
 
         if not should_keep:
-            print(f"      ❌ Component REJECTED (no improvement or negative impact)")
+            print("      ❌ Component REJECTED (no improvement or negative impact)")
             print(
                 f"      Reason: Delta ({improvement:+.4f}) < threshold ({min_improvement})"
             )
         else:
-            print(f"      ✅ Component ACCEPTED (positive improvement)")
+            print("      ✅ Component ACCEPTED (positive improvement)")
             if baseline_score not in [float("inf"), float("-inf"), 0]:
                 relative_gain = abs(improvement / baseline_score * 100)
                 print(f"      Impact: {relative_gain:.2f}% relative improvement")
@@ -755,10 +753,10 @@ class DeveloperAgent:
             simplified_desc = f"Simple {model_name} model with basic hyperparameters: n_estimators=100, max_depth=5, learning_rate=0.1. Use default class_weight='balanced' and 5-fold StratifiedKFold."
 
         elif component.component_type == "feature_engineering":
-            simplified_desc = f"Basic feature engineering: simple polynomial features (degree 2) and basic statistical aggregations (mean, std, min, max). Avoid complex transformations."
+            simplified_desc = "Basic feature engineering: simple polynomial features (degree 2) and basic statistical aggregations (mean, std, min, max). Avoid complex transformations."
 
         elif component.component_type == "ensemble":
-            simplified_desc = f"Simple ensemble: weighted average of model predictions with equal weights. Load predictions from submission files and average them."
+            simplified_desc = "Simple ensemble: weighted average of model predictions with equal weights. Load predictions from submission files and average them."
 
         else:
             simplified_desc = f"Simplified version of {component.name}"
@@ -806,7 +804,7 @@ class DeveloperAgent:
 
         refinement_guidance = state.get("refinement_guidance", {})
         if refinement_guidance and refinement_guidance.get("developer_guidance"):
-            instructions.append(f"\nMETA-EVALUATOR GUIDANCE:")
+            instructions.append("\nMETA-EVALUATOR GUIDANCE:")
             instructions.append(f"  {refinement_guidance['developer_guidance']}")
 
         if refinement_guidance and "component_type_guidance" in refinement_guidance:
@@ -834,14 +832,14 @@ class DeveloperAgent:
                 )
                 for i, result in enumerate(successful_components[-2:], 1):
                     if "LightGBM" in result.code:
-                        instructions.append(f"  - LightGBM implementation worked well")
+                        instructions.append("  - LightGBM implementation worked well")
                     if "StratifiedKFold" in result.code:
                         instructions.append(
-                            f"  - StratifiedKFold cross-validation successful"
+                            "  - StratifiedKFold cross-validation successful"
                         )
                     if "predict_proba" in result.code:
                         instructions.append(
-                            f"  - predict_proba() for probabilities confirmed working"
+                            "  - predict_proba() for probabilities confirmed working"
                         )
 
             if failed_components:
@@ -1512,7 +1510,7 @@ class DeveloperAgent:
             test_result = self.executor.execute(debugged_code, working_dir)
 
             if test_result.success:
-                print(f"Debug successful!")
+                print("Debug successful!")
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return debugged_code, test_result, True

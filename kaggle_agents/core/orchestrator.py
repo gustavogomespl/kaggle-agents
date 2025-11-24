@@ -6,16 +6,14 @@ the complete agent pipeline with progress tracking and control.
 """
 
 import time
-from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
 
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 from rich.table import Table
 from rich.panel import Panel
 
-from .state import KaggleState, CompetitionInfo, create_initial_state
+from .state import KaggleState
 from .config import get_config, get_competition_dir
 from ..workflow import run_workflow, run_simple_workflow
 

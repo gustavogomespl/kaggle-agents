@@ -9,19 +9,14 @@ This module provides sandboxed Python code execution with:
 - Resource monitoring
 """
 
-import os
 import sys
 import subprocess
 import time
-import tempfile
-import shutil
-import threading
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 from dataclasses import dataclass
 import re
 
-from ..core.state import DevelopmentResult
 from ..core.config import get_config
 
 
@@ -260,7 +255,7 @@ class CodeExecutor:
                 if performance_score is not None:
                     print(f"   📊 Validation Performance: {performance_score:.6f}")
                 else:
-                    print(f"   ⚠️  Warning: Could not extract performance metric from output")
+                    print("   ⚠️  Warning: Could not extract performance metric from output")
 
             return ExecutionResult(
                 success=success,
@@ -324,7 +319,7 @@ class CodeExecutor:
             result = self.execute(code, working_dir, expected_artifacts)
 
             if result.success:
-                print(f"    Execution successful")
+                print("    Execution successful")
                 return result, attempt + 1
 
             print(f"   L Execution failed: {result.errors[0] if result.errors else 'Unknown error'}")

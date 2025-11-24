@@ -5,8 +5,7 @@ Uses DSPy MIPROv2 to optimize prompts based on collected training data.
 Implements RLPrompt pattern for discrete prompt optimization.
 """
 
-from typing import Dict, Any, List
-from pathlib import Path
+from typing import Dict, Any
 
 from ..core.state import KaggleState
 from ..optimization import create_optimizer, create_training_collector
@@ -245,7 +244,7 @@ def prompt_refinement_node(state: KaggleState) -> Dict[str, Any]:
             # Set flag to reload developer
             results["reload_developer"] = True
 
-    print(f"\n✅ Prompt refinement completed")
+    print("\n✅ Prompt refinement completed")
     print(f"   Results: {results}")
 
     return results

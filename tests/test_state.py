@@ -1,6 +1,5 @@
 """Tests for state management."""
 
-import pytest
 from kaggle_agents.utils.state import KaggleState, merge_dict
 
 

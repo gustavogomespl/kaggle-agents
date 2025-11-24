@@ -90,7 +90,7 @@ class SubmissionAgent:
                 "last_updated": datetime.now(),
             }
 
-        print(f"✅ Validation passed")
+        print("✅ Validation passed")
 
         # Upload to Kaggle
         submission_result = self._upload_to_kaggle(
@@ -262,7 +262,7 @@ class SubmissionAgent:
         )
 
         try:
-            print(f"\n📤 Uploading to Kaggle...")
+            print("\n📤 Uploading to Kaggle...")
             print(f"   Competition: {competition_name}")
             print(f"   Message: {message}")
 
@@ -278,26 +278,26 @@ class SubmissionAgent:
                 result_cli = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
                 if result_cli.returncode == 0:
-                    print(f"✅ Uploaded successfully via CLI!")
+                    print("✅ Uploaded successfully via CLI!")
                     print(f"   {result_cli.stdout}")
                     submission_id = None  # CLI doesn't return ID easily
                 else:
                     # Fall back to API
                     raise Exception("CLI failed, using API")
 
-            except Exception as cli_error:
+            except Exception:
                 # Fall back to Python API
-                print(f"   ℹ️  CLI upload failed, using Python API...")
+                print("   ℹ️  CLI upload failed, using Python API...")
                 result = self.kaggle_api.competition_submit(
                     file_name=str(submission_path),
                     message=message,
                     competition=competition_name,
                 )
                 submission_id = result.get("id")
-                print(f"✅ Uploaded successfully via API!")
+                print("✅ Uploaded successfully via API!")
 
             # Wait a bit for processing
-            print(f"\n⏳ Waiting for score (30s)...")
+            print("\n⏳ Waiting for score (30s)...")
             time.sleep(30)
 
             # Fetch score
@@ -307,7 +307,7 @@ class SubmissionAgent:
                 print(f"\n📊 Public Score: {public_score:.4f}")
                 print(f"   Percentile: {percentile:.1f}%")
             else:
-                print(f"\n⏳ Score not yet available (check leaderboard later)")
+                print("\n⏳ Score not yet available (check leaderboard later)")
 
             return SubmissionResult(
                 submission_id=submission_id,

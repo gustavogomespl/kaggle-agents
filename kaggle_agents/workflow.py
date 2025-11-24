@@ -14,7 +14,6 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from .core.state import KaggleState, create_initial_state
-from .core.config import get_config
 from .domain import detect_competition_domain
 from .tools.kaggle_api import KaggleAPIClient
 from .agents import (
@@ -28,8 +27,7 @@ from .agents.meta_evaluator_agent import meta_evaluator_node  # Meta-Evaluator w
 from .agents.reporting_agent import reporting_agent_node
 from .agents import (
     ensemble_agent_node,  # Ensemble Strategy
-    explainability_agent_node,  # Didactic Explanation
-)
+    )
 
 
 # ==================== Agent Nodes ====================
@@ -65,7 +63,7 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
             quiet=False
         )
 
-        print(f"\n✓ Download complete!")
+        print("\n✓ Download complete!")
         print(f"   Train: {data_files.get('train', 'N/A')}")
         print(f"   Test: {data_files.get('test', 'N/A')}")
         target_col = "target" # Default
@@ -108,12 +106,12 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
     except RuntimeError as e:
         # Authentication error
         error_msg = str(e)
-        print(f"\n❌ Kaggle API Authentication Failed")
+        print("\n❌ Kaggle API Authentication Failed")
         print(f"   {error_msg}")
-        print(f"\n💡 To fix:")
-        print(f"   1. Set KAGGLE_USERNAME and KAGGLE_KEY environment variables")
-        print(f"   2. Or create ~/.kaggle/kaggle.json with your credentials")
-        print(f"   3. Get credentials from: https://www.kaggle.com/settings/account")
+        print("\n💡 To fix:")
+        print("   1. Set KAGGLE_USERNAME and KAGGLE_KEY environment variables")
+        print("   2. Or create ~/.kaggle/kaggle.json with your credentials")
+        print("   3. Get credentials from: https://www.kaggle.com/settings/account")
 
         return {
             "errors": [f"Kaggle authentication failed: {error_msg}"],
@@ -123,12 +121,12 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
     except Exception as e:
         # Download error
         error_msg = str(e)
-        print(f"\n❌ Data Download Failed")
+        print("\n❌ Data Download Failed")
         print(f"   {error_msg}")
-        print(f"\n💡 Possible causes:")
+        print("\n💡 Possible causes:")
         print(f"   - Competition '{competition_info.name}' doesn't exist")
-        print(f"   - You haven't accepted the competition rules")
-        print(f"   - Network connectivity issues")
+        print("   - You haven't accepted the competition rules")
+        print("   - Network connectivity issues")
 
         return {
             "errors": [f"Data download failed: {error_msg}"],
@@ -213,7 +211,7 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
 
     # If this is a refinement iteration (> 1), reset component index
     if new_iteration > 1:
-        print(f"   🔄 Starting refinement iteration - resetting component index")
+        print("   🔄 Starting refinement iteration - resetting component index")
         updates["current_component_index"] = 0
 
     return updates
@@ -278,7 +276,7 @@ def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
             needs_refinement = True
             refinement_reason = "score_below_target"
         else:
-            print(f"\n✅ Close enough to target")
+            print("\n✅ Close enough to target")
             needs_refinement = False
 
     return {
@@ -411,14 +409,14 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
-    print(f"\n🔀 Routing decision:")
+    print("\n🔀 Routing decision:")
     print(f"   Current iteration: {current_iteration}")
     print(f"   Max iterations: {max_iterations}")
     print(f"   Needs refinement: {needs_refinement}")
 
     # Check termination conditions first
     if current_iteration >= max_iterations:
-        print(f"   ➡️  Ending (max iterations reached)")
+        print("   ➡️  Ending (max iterations reached)")
         return "end"
 
     # Check if goal already achieved
@@ -434,7 +432,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         print(f"   ➡️  Refining (iteration {current_iteration})")
         return "refine"
     else:
-        print(f"   ➡️  Ending (no refinement needed or first iteration)")
+        print("   ➡️  Ending (no refinement needed or first iteration)")
         return "end"
 
 
@@ -610,7 +608,7 @@ def run_workflow(
     print("="*70)
 
     # Print summary
-    print(f"\n📊 Summary:")
+    print("\n📊 Summary:")
     print(f"   Iterations: {final_state.get('current_iteration', 0)}")
     print(f"   SOTA Solutions: {len(final_state.get('sota_solutions', []))}")
     print(f"   Components Planned: {len(final_state.get('ablation_plan', []))}")

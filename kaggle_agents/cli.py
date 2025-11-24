@@ -5,7 +5,6 @@ Simple, clean, and efficient command-line interface with Rich output.
 """
 
 import sys
-from pathlib import Path
 from typing import Optional
 
 from rich.console import Console
@@ -14,7 +13,6 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from .core import solve_competition, get_config
-from .core.state import CompetitionInfo
 
 console = Console()
 

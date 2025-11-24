@@ -53,7 +53,7 @@ class CompetitionAnalyzer:
 
         # 1. Get competition metadata from Kaggle API
         competition_info = self._get_competition_info(competition_name)
-        print(f"   ✓ Retrieved competition metadata")
+        print("   ✓ Retrieved competition metadata")
 
         # 2. Download and analyze sample submission
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -61,7 +61,7 @@ class CompetitionAnalyzer:
 
             try:
                 # Download sample_submission.csv
-                print(f"   ⏳ Downloading sample data...")
+                print("   ⏳ Downloading sample data...")
                 self.api.competition_download_file(
                     competition_name, "sample_submission.csv", path=str(tmppath)
                 )
@@ -73,19 +73,19 @@ class CompetitionAnalyzer:
                 sample_sub_path = self._find_file(tmppath, "sample_submission")
 
                 if sample_sub_path:
-                    print(f"   ✓ Sample submission found")
+                    print("   ✓ Sample submission found")
                     problem_type, metric, reasoning = self._analyze_sample_submission(
                         sample_sub_path, competition_info
                     )
                 else:
-                    print(f"   ⚠️  No sample_submission.csv, using metadata only")
+                    print("   ⚠️  No sample_submission.csv, using metadata only")
                     problem_type, metric, reasoning = self._infer_from_metadata(
                         competition_info
                     )
 
             except Exception as e:
                 print(f"   ⚠️  Sample download failed: {str(e)}")
-                print(f"   → Using metadata-only inference")
+                print("   → Using metadata-only inference")
                 problem_type, metric, reasoning = self._infer_from_metadata(
                     competition_info
                 )

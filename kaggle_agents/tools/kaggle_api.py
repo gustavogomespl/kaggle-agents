@@ -4,7 +4,6 @@ Follows official Kaggle API documentation:
 https://github.com/Kaggle/kaggle-api
 """
 
-import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from kaggle.api.kaggle_api_extended import KaggleApi

@@ -20,8 +20,6 @@ from .workflows.kaggle_workflow import create_kaggle_workflow
 from .workflows.enhanced_workflow import create_enhanced_workflow
 from .utils.config import Config
 from .utils.state import KaggleState
-from .core.state import EnhancedKaggleState
-from .core.config_manager import get_config
 
 
 def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:

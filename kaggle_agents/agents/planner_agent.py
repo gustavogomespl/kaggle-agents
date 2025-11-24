@@ -20,7 +20,7 @@ from ..prompts.templates.planner_prompts import (
     ANALYZE_SOTA_PROMPT,
     get_domain_guidance,
 )
-from ..optimization import create_optimizer, create_planner_metric
+from ..optimization import create_optimizer
 
 
 # ==================== DSPy Signatures ====================
@@ -435,7 +435,6 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         Returns:
             Refined ablation plan
         """
-        from ..prompts.templates.planner_prompts import REFINE_ABLATION_PLAN_PROMPT
 
         # Gather previous results
         previous_plan = state.get("ablation_plan", [])
@@ -486,19 +485,19 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
 
             if "priority_fixes" in refinement_guidance and refinement_guidance["priority_fixes"]:
-                guidance_text += f"**Priority Error Fixes:**\n"
+                guidance_text += "**Priority Error Fixes:**\n"
                 for error in refinement_guidance["priority_fixes"]:
                     guidance_text += f"- Avoid components that cause: {error}\n"
                 guidance_text += "\n"
 
             if "success_amplification" in refinement_guidance and refinement_guidance["success_amplification"]:
-                guidance_text += f"**Amplify These Successes:**\n"
+                guidance_text += "**Amplify These Successes:**\n"
                 for success in refinement_guidance["success_amplification"]:
                     guidance_text += f"- {success}\n"
                 guidance_text += "\n"
 
             if "component_type_guidance" in refinement_guidance:
-                guidance_text += f"**Component-Specific Guidance:**\n"
+                guidance_text += "**Component-Specific Guidance:**\n"
                 for comp_type, guide in refinement_guidance["component_type_guidance"].items():
                     guidance_text += f"- {comp_type}: {guide}\n"
 

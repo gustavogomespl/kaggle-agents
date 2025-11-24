@@ -5,12 +5,10 @@ This module defines metrics for evaluating agent performance,
 used by DSPy to optimize prompts automatically.
 """
 
-from typing import Dict, Any, Optional
 import re
 
 import dspy
 
-from ..core.state import AblationComponent, ValidationResult
 
 
 class PlannerRewardModel:

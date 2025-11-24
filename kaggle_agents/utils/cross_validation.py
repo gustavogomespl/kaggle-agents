@@ -3,8 +3,6 @@ Cross-validation utilities for consistent evaluation.
 """
 
 import pandas as pd
-import numpy as np
-from pathlib import Path
 from sklearn.model_selection import StratifiedKFold, KFold
 
 def generate_folds(
@@ -46,7 +44,7 @@ def generate_folds(
         for fold, (train_idx, val_idx) in enumerate(kf.split(df, y)):
             df.loc[val_idx, 'fold'] = fold
     else:
-        print(f"      Detected regression -> Using KFold")
+        print("      Detected regression -> Using KFold")
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
         for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             df.loc[val_idx, 'fold'] = fold

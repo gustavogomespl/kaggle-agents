@@ -5,7 +5,6 @@ Automatically detects the type of competition (tabular, CV, NLP, time series, mu
 based on data files, competition description, and data analysis.
 """
 
-import re
 from pathlib import Path
 from typing import Tuple
 import pandas as pd

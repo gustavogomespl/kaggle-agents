@@ -1,6 +1,5 @@
 """Leaderboard monitoring agent."""
 
-from typing import Dict, Any
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 from ..tools.kaggle_api import KaggleAPIClient
@@ -162,7 +161,7 @@ Analyze performance and recommend next steps."""
                 print(f"Reached max iterations. Final rank: Top {percentile:.1f}%")
             else:
                 if overfitting_detected:
-                    print(f"Iterating to address overfitting and improve to top 20%")
+                    print("Iterating to address overfitting and improve to top 20%")
                 else:
                     print(f"Iterating to improve from Top {percentile:.1f}% to top 20%")
 

@@ -5,8 +5,7 @@ This agent analyzes the final state of the workflow and generates a comprehensiv
 report (report.md) with insights, feature importance, and model performance.
 """
 
-import json
-from typing import Dict, Any, List
+from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
 

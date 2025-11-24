@@ -6,7 +6,7 @@ ensuring code quality and preventing common ML mistakes.
 """
 
 import re
-from typing import Dict, Any, List
+from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
 
@@ -165,7 +165,7 @@ class RobustnessAgent:
         code = dev_result.code
 
         # LLM-based Leakage Check (Enhanced with ADK-style structured output)
-        from langchain_core.messages import SystemMessage, HumanMessage
+        from langchain_core.messages import HumanMessage
         import json
 
         prompt = f"""You are a data science expert reviewing code for data leakage.
@@ -223,18 +223,18 @@ IMPORTANT:
             explanation = result.get("explanation", "No explanation provided")
 
             if leakage_status == "YES":
-                print(f"   ❌ Data Leakage Detected!")
+                print("   ❌ Data Leakage Detected!")
                 print(f"      Lines: {line_numbers}")
                 print(f"      Issue: {explanation}")
 
                 if code_block:
-                    print(f"      Problematic Code:")
-                    print(f"      ```python")
+                    print("      Problematic Code:")
+                    print("      ```python")
                     # Show first 300 chars of code block
                     code_preview = code_block[:300] + "..." if len(code_block) > 300 else code_block
                     for line in code_preview.split('\n'):
                         print(f"      {line}")
-                    print(f"      ```")
+                    print("      ```")
 
                 issues.append(f"Data Leakage ({line_numbers}): {explanation}")
                 suggestions.append("Fix the code block identified above to prevent leakage")
@@ -406,12 +406,12 @@ IMPORTANT:
         print(f"\n{status} {result.module.upper()}: {result.score:.1%}")
 
         if result.issues:
-            print(f"   Issues:")
+            print("   Issues:")
             for issue in result.issues:
                 print(f"   - {issue}")
 
         if result.suggestions:
-            print(f"   Suggestions:")
+            print("   Suggestions:")
             for suggestion in result.suggestions:
                 print(f"   - {suggestion}")
 

@@ -1,7 +1,6 @@
 """Model training agent with multiple algorithms."""
 
 import os
-import sys
 
 # Fix matplotlib backend for Google Colab compatibility
 # Must be set before importing lightgbm
@@ -11,11 +10,10 @@ if 'MPLBACKEND' in os.environ:
         os.environ['MPLBACKEND'] = 'Agg'
 
 import pandas as pd
-import numpy as np
 import joblib
 from pathlib import Path
 from typing import Dict, Any, List
-from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.model_selection import cross_val_score
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
 from xgboost import XGBClassifier, XGBRegressor
