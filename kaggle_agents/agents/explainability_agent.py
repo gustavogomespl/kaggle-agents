@@ -21,7 +21,7 @@ class ExplainabilityAgent:
 
     def __init__(self):
         self.config = get_config()
-        # Using configured LLM for explanations (supports OpenAI and Anthropic)
+
         self.llm = get_llm()
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
@@ -38,7 +38,7 @@ class ExplainabilityAgent:
         print("= EXPLAINABILITY AGENT: Generating Didactic Report")
         print("=" * 60)
 
-        # Gather context
+
         competition_info = state.get("competition_info")
         domain = state.get("domain_detected", "unknown")
         ablation_plan = state.get("ablation_plan", [])
@@ -46,15 +46,15 @@ class ExplainabilityAgent:
         ensemble = state.get("best_model", {})
         meta_eval = state.get("failure_analysis", {})
 
-        # Build context string
+
         context = self._build_context(
             competition_info, domain, ablation_plan, dev_results, ensemble, meta_eval
         )
 
-        # Generate report
+
         report = self._generate_report(context)
 
-        # Save report to file
+
         self._save_report(state.get("working_directory", "."), report)
 
         return {
@@ -67,12 +67,12 @@ class ExplainabilityAgent:
     ) -> str:
         """Build context for the LLM."""
 
-        # Format ablation plan
+
         plan_str = ""
         for comp in ablation_plan:
             plan_str += f"- {comp.name} ({comp.component_type}): Impact {comp.estimated_impact}\n"
 
-        # Format results
+
         results_str = ""
         for res in dev_results:
             status = "✅ Success" if res.success else "❌ Failed"
@@ -83,17 +83,17 @@ class ExplainabilityAgent:
         Domain: {domain}
         Problem Type: {competition_info.problem_type if competition_info else "Unknown"}
         
-        ## Strategy Plan
+
         {plan_str}
         
-        ## Execution Results
+
         {results_str}
         
-        ## Ensemble Strategy
+
         Model: {ensemble.get("name", "None")}
         Score: {ensemble.get("mean_cv_score", "N/A")}
         
-        ## Meta-Evaluation (Self-Correction)
+
         Success Patterns: {", ".join(meta_eval.get("success_patterns", []))}
         Error Patterns: {", ".join(meta_eval.get("error_patterns", []))}
         """

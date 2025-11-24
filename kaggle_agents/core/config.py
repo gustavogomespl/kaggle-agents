@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from dotenv import load_dotenv
 
-# Load environment variables
+
 load_dotenv()
 
 
@@ -23,7 +23,7 @@ class LLMConfig:
         default_factory=lambda: os.getenv("LLM_PROVIDER", "openai")
     )
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
-    # Optional per-role overrides to balance cost/quality across agents
+
     planner_model: Optional[str] = field(
         default_factory=lambda: os.getenv("PLANNER_MODEL")
     )
@@ -47,16 +47,16 @@ class LLMConfig:
     )
     max_tokens: int = field(
         default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192"))
-    )  # Safe default
-    timeout: int = 120  # seconds
+    )
+    timeout: int = 120
 
 
 @dataclass
 class SearchConfig:
     """Configuration for SOTA search and retrieval."""
 
-    max_notebooks: int = 10  # max notebooks to retrieve
-    min_votes: int = 5  # minimum votes for consideration
+    max_notebooks: int = 10
+    min_votes: int = 5
     embedding_model: str = "text-embedding-ada-002"
     vector_store_path: str = ".chromadb"
     search_depth: Literal["quick", "moderate", "thorough"] = "moderate"
@@ -68,17 +68,17 @@ class AblationConfig:
 
     max_components: int = field(
         default_factory=lambda: int(os.getenv("MAX_COMPONENTS", "3"))
-    )  # max components to test
-    impact_threshold: float = 0.01  # minimum impact to consider (1%)
-    parallel_testing: bool = False  # test components in parallel
-    # Default timeout per component (seconds). Increased to 2700s (45 minutes) to avoid premature failures on heavy training.
+    )
+    impact_threshold: float = 0.01
+    parallel_testing: bool = False
+
     testing_timeout: int = 2700
-    optuna_trials: int = 5  # default number of trials for hyperparameter tuning
-    enable_code_preview: bool = True  # show code before execution
-    save_generated_code: bool = True  # save generated code to files
-    code_preview_lines: int = 30  # number of lines to show in preview
+    optuna_trials: int = 5
+    enable_code_preview: bool = True
+    save_generated_code: bool = True
+    code_preview_lines: int = 30
     enable_refinement: bool = (
-        True  # enable iterative refinement of successful components
+        True
     )
 
 
@@ -90,7 +90,7 @@ class ValidationConfig:
     enable_leakage_check: bool = True
     enable_data_usage_check: bool = True
     enable_format_check: bool = True
-    min_validation_score: float = 0.7  # 70% pass rate
+    min_validation_score: float = 0.7
 
 
 @dataclass
@@ -111,10 +111,10 @@ class IterationConfig:
     max_iterations: int = field(
         default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "2"))
     )
-    target_percentile: float = 20.0  # top 20%
+    target_percentile: float = 20.0
     early_stopping: bool = True
-    patience: int = 3  # iterations without improvement
-    min_score_improvement: float = 0.001  # 0.1% minimum improvement
+    patience: int = 3
+    min_score_improvement: float = 0.001
 
 
 @dataclass
@@ -130,10 +130,10 @@ class PathConfig:
 
     def __post_init__(self):
         """Initialize derived paths."""
-        # Detect Colab environment and adjust base_dir
+
         base_dir = self._detect_environment()
 
-        # Override base_dir if in special environment
+
         if base_dir != self.base_dir:
             self.base_dir = base_dir
 
@@ -143,7 +143,7 @@ class PathConfig:
         self.logs_dir = self.base_dir / "logs"
         self.cache_dir = self.base_dir / ".cache"
 
-        # Create directories
+
         for dir_path in [
             self.competitions_dir,
             self.models_dir,
@@ -160,25 +160,25 @@ class PathConfig:
         Returns:
             Path: Best base directory for the environment
         """
-        # Check if running in Google Colab
+
         try:
             import google.colab
 
-            # In Colab, use /content/kaggle_competitions
+
             colab_base = Path("/content/kaggle_competitions")
             print(f"📍 Colab environment detected, using: {colab_base}")
             return colab_base
         except ImportError:
             pass
 
-        # Check if in Kaggle Kernels
+
         if os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
-            # In Kaggle, use /kaggle/working
+
             kaggle_base = Path("/kaggle/working")
             print(f"📍 Kaggle Kernel detected, using: {kaggle_base}")
             return kaggle_base
 
-        # Default: use current working directory
+
         return Path.cwd()
 
 
@@ -194,8 +194,8 @@ class LoggingConfig:
     enable_file: bool = field(
         default_factory=lambda: os.getenv("LOG_FILE", "true").lower() == "true"
     )
-    max_file_size_mb: int = 10  # Max size per log file
-    backup_count: int = 5  # Number of backup files to keep
+    max_file_size_mb: int = 10
+    backup_count: int = 5
 
 
 @dataclass
@@ -231,14 +231,14 @@ class AgentConfig:
     kaggle: KaggleConfig = field(default_factory=KaggleConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
-    # Global settings
+
     debug_mode: bool = field(
         default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true"
     )
     verbose: bool = field(
         default_factory=lambda: os.getenv("VERBOSE", "true").lower() == "true"
     )
-    save_intermediate: bool = True  # save intermediate results
+    save_intermediate: bool = True
 
     def validate(self) -> list[str]:
         """
@@ -249,7 +249,7 @@ class AgentConfig:
         """
         issues = []
 
-        # Check LLM API keys
+
         if self.llm.provider == "openai" and not os.getenv("OPENAI_API_KEY"):
             issues.append("OPENAI_API_KEY environment variable not set")
         elif self.llm.provider == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
@@ -257,11 +257,11 @@ class AgentConfig:
         elif self.llm.provider == "gemini" and not os.getenv("GOOGLE_API_KEY"):
             issues.append("GOOGLE_API_KEY environment variable not set")
 
-        # Check Kaggle credentials if auto-submit enabled
+
         if self.kaggle.auto_submit and not self.kaggle.is_configured():
             issues.append("Kaggle auto-submit enabled but credentials not configured")
 
-        # Validate ranges
+
         if not 0 <= self.llm.temperature <= 2:
             issues.append(
                 f"LLM temperature {self.llm.temperature} outside valid range [0, 2]"
@@ -303,7 +303,7 @@ class AgentConfig:
         return config
 
 
-# ==================== Global Config Instance ====================
+
 
 _global_config: Optional[AgentConfig] = None
 
@@ -320,7 +320,7 @@ def get_config() -> AgentConfig:
     if _global_config is None:
         _global_config = AgentConfig.from_env()
 
-        # Validate and raise if critical issues
+
         issues = _global_config.validate()
         if issues:
             print("  Configuration Issues:")
@@ -347,7 +347,7 @@ def reset_config() -> None:
     _global_config = None
 
 
-# ==================== Convenience Functions ====================
+
 
 
 def get_llm(temperature: float = None, max_tokens: int = None):
@@ -386,7 +386,7 @@ def get_llm(temperature: float = None, max_tokens: int = None):
             max_output_tokens=tokens,
         )
     else:
-        # Default to OpenAI
+
         return ChatOpenAI(
             model=config.llm.model,
             temperature=temp,
@@ -501,7 +501,7 @@ def get_submission_path(competition_name: str, iteration: int) -> Path:
     return sub_dir / f"submission_iter{iteration}.csv"
 
 
-# ==================== Metric Direction Utilities ====================
+
 
 
 def is_metric_minimization(metric_name: str) -> bool:
@@ -527,7 +527,7 @@ def is_metric_minimization(metric_name: str) -> bool:
 
     metric_lower = metric_name.lower()
 
-    # Metrics where lower values are better
+
     minimize_metrics = [
         "rmse",
         "mae",
@@ -566,19 +566,19 @@ def calculate_score_improvement(
 
     Examples:
         >>> calculate_score_improvement(0.350, 0.400, 'rmse')
-        0.050  # RMSE decreased from 0.400 to 0.350 (better)
+        0.050
         >>> calculate_score_improvement(0.85, 0.80, 'accuracy')
-        0.050  # Accuracy increased from 0.80 to 0.85 (better)
+        0.050
         >>> calculate_score_improvement(0.450, 0.400, 'rmse')
-        -0.050  # RMSE increased from 0.400 to 0.450 (worse)
+        -0.050
     """
     is_minimize = is_metric_minimization(metric_name)
 
     if is_minimize:
-        # For minimize metrics: lower new_score is better
+
         return baseline_score - new_score
     else:
-        # For maximize metrics: higher new_score is better
+
         return new_score - baseline_score
 
 
@@ -596,9 +596,9 @@ def compare_scores(score1: float, score2: float, metric_name: str) -> float:
 
     Examples:
         >>> compare_scores(0.350, 0.400, 'rmse')
-        0.350  # Lower is better for RMSE
+        0.350
         >>> compare_scores(0.85, 0.80, 'accuracy')
-        0.85  # Higher is better for accuracy
+        0.85
     """
     is_minimize = is_metric_minimization(metric_name)
 

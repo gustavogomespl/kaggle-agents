@@ -21,7 +21,7 @@ class ReportingAgent:
 
     def __init__(self):
         self.config = get_config()
-        self.llm = get_llm_for_role(role="developer")  # Use developer role for now
+        self.llm = get_llm_for_role(role="developer")
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
         """
@@ -34,13 +34,13 @@ class ReportingAgent:
         working_dir = Path(state["working_directory"])
         report_path = working_dir / "report.md"
 
-        # Gather data for the report
+
         context = self._gather_context(state)
 
-        # Generate report content using LLM
+
         report_content = self._generate_report_content(context)
 
-        # Save report
+
         with open(report_path, "w") as f:
             f.write(report_content)
 
@@ -58,7 +58,7 @@ class ReportingAgent:
         submissions = state.get("submissions", [])
         dev_results = state.get("development_results", [])
 
-        # Get best submission based on metric direction
+
         best_sub = None
         is_minimization = False
         if submissions:
@@ -78,18 +78,18 @@ class ReportingAgent:
                     best_sub = max(valid_subs, key=lambda x: x.public_score)
 
         context = f"""
-# Competition Context
+
 Name: {competition_info.name if competition_info else "Unknown"}
 Problem Type: {competition_info.problem_type if competition_info else "Unknown"}
 Metric: {competition_info.evaluation_metric if competition_info else "Unknown"}
 Metric Direction: {"Minimize" if is_minimization else "Maximize"}
 
-# Performance
+
 Best Score: {best_sub.public_score if best_sub else best_score}
 Best Public LB Score: {best_sub.public_score if best_sub else "N/A"}
 Best Percentile: {best_sub.percentile if best_sub else "N/A"}%
 
-# Components Developed
+
 """
         for res in dev_results:
             status = "Success" if res.success else "Failed"
@@ -105,21 +105,21 @@ Your goal is to write a clear, insightful, and educational report about the mach
 The report should be in Markdown format.
 
 Structure:
-# 📊 Solution Report
 
-## 1. Executive Summary
+
+
 - Brief overview of the best performing approach.
 - Key metrics achieved.
 
-## 2. Methodology
+
 - Explain the models used (e.g., XGBoost, Neural Networks, Stacking).
 - Describe key feature engineering steps.
 
-## 3. Insights & Explainability
+
 - What features were likely most important? (Infer from the context of tabular data).
 - Why did this approach work? (e.g., "Ensembling diverse models captured non-linear patterns").
 
-## 4. Recommendations
+
 - What could be improved further?
 """
 

@@ -65,14 +65,14 @@ class CodeExecutor:
         Returns:
             Tuple of (is_valid, message)
         """
-        # Check 1: Has required output format
+
         if "Final Validation Performance" not in code:
             return (
                 False,
                 "Missing required output: 'Final Validation Performance: {score}'",
             )
 
-        # Check 2: No prohibited exit() calls (enhanced check)
+
         prohibited_calls = [
             "exit()",
             "sys.exit(",
@@ -84,16 +84,16 @@ class CodeExecutor:
             if call in code:
                 return False, f"Code contains prohibited termination call: {call}"
 
-        # Check 3: Early stopping rounds misuse (common API error)
+
         if "early_stopping_rounds=" in code and ".fit(" in code:
-            # Check if it's being passed as a parameter to fit()
+
             if re.search(r"\.fit\([^)]*early_stopping_rounds=", code):
                 return False, (
                     "API Error: early_stopping_rounds cannot be passed to fit(). "
                     "Use callbacks=[lgb.early_stopping(100)] or callbacks=[xgb.callback.EarlyStopping(100)] instead."
                 )
 
-        # Check 4: Has basic structure for ML code
+
         required_patterns = [
             (
                 "import pandas" in code or "import numpy" in code,
@@ -105,8 +105,8 @@ class CodeExecutor:
             if not has_pattern:
                 return False, error_msg
 
-        # Check 5: Warning about categorical features (informational only)
-        # This is a soft check - we warn but don't fail
+
+
         has_categorical_check = (
             "select_dtypes" in code
             or "LabelEncoder" in code
@@ -120,7 +120,7 @@ class CodeExecutor:
             and "LGBMClassifier" in code
             or "XGBClassifier" in code
         ):
-            # This is just a warning, not a failure
+
             print(
                 "   ⚠️  Warning: LightGBM/XGBoost code without categorical encoding detected"
             )
@@ -140,9 +140,9 @@ class CodeExecutor:
         for line in stdout.splitlines():
             if "Final Validation Performance:" in line:
                 try:
-                    # Extract score after the colon
+
                     score_str = line.split(":")[-1].strip()
-                    # Remove any non-numeric characters except decimal point and minus
+
                     score_str = re.sub(r"[^\d.\-]", "", score_str)
                     return float(score_str)
                 except (ValueError, IndexError):
@@ -166,7 +166,7 @@ class CodeExecutor:
         Returns:
             ExecutionResult with execution details
         """
-        # PRE-EXECUTION VALIDATION (MLE-STAR Pattern)
+
         is_valid, validation_msg = self.validate_code_before_execution(code)
         if not is_valid:
             print(f"   ⚠️  Code validation failed: {validation_msg}")
@@ -185,21 +185,21 @@ class CodeExecutor:
         )
         working_path.mkdir(parents=True, exist_ok=True)
 
-        # Track artifacts before execution
+
         artifacts_before = self._get_artifacts(working_path)
 
-        # Create temporary script file
+
         script_file = working_path / f"_exec_{int(time.time())}.py"
 
         try:
-            # Write code to file
+
             with open(script_file, "w", encoding="utf-8") as f:
                 f.write(code)
 
-            # Execute in subprocess with progress monitoring
+
             start_time = time.time()
 
-            # Start process
+
             process = subprocess.Popen(
                 [sys.executable, str(script_file)],
                 cwd=str(working_path),
@@ -208,25 +208,25 @@ class CodeExecutor:
                 text=True,
             )
 
-            # Monitor progress with timeout
-            progress_interval = 30  # Print progress every 30s
+
+            progress_interval = 30
             last_progress_time = start_time
 
             while True:
-                # Check if process completed
+
                 poll_result = process.poll()
                 if poll_result is not None:
-                    # Process finished
+
                     break
 
-                # Check timeout
+
                 elapsed = time.time() - start_time
                 if elapsed >= self.timeout:
                     process.kill()
                     process.wait()
                     raise subprocess.TimeoutExpired(process.args, self.timeout)
 
-                # Print progress update
+
                 if elapsed - (last_progress_time - start_time) >= progress_interval:
                     remaining = self.timeout - elapsed
                     print(
@@ -234,14 +234,14 @@ class CodeExecutor:
                     )
                     last_progress_time = time.time()
 
-                # Sleep briefly before next check
+
                 time.sleep(1)
 
-            # Get output
+
             stdout, stderr = process.communicate()
             execution_time = time.time() - start_time
 
-            # Create result object compatible with subprocess.run
+
             class Result:
                 def __init__(self, returncode, stdout, stderr):
                     self.returncode = returncode
@@ -250,22 +250,22 @@ class CodeExecutor:
 
             result = Result(process.returncode, stdout, stderr)
 
-            # Track artifacts after execution
+
             artifacts_after = self._get_artifacts(working_path)
             artifacts_created = list(set(artifacts_after) - set(artifacts_before))
 
-            # Remove the script file from artifacts
+
             artifacts_created = [
                 a for a in artifacts_created if not a.endswith(script_file.name)
             ]
 
-            # Parse errors
+
             errors = self._parse_errors(result.stderr, result.stdout)
 
-            # Check success
+
             success = result.returncode == 0 and not errors
 
-            # Validate expected artifacts
+
             if expected_artifacts and success:
                 missing = [
                     a for a in expected_artifacts if not (working_path / a).exists()
@@ -274,7 +274,7 @@ class CodeExecutor:
                     success = False
                     errors.append(f"Missing expected artifacts: {', '.join(missing)}")
 
-            # EXTRACT PERFORMANCE METRIC (MLE-STAR Pattern)
+
             performance_score = None
             if success:
                 performance_score = self.extract_performance_metric(result.stdout)
@@ -318,7 +318,7 @@ class CodeExecutor:
             )
 
         finally:
-            # Cleanup script file
+
             if script_file.exists():
                 script_file.unlink()
 
@@ -390,7 +390,7 @@ class CodeExecutor:
 
         for item in directory.rglob("*"):
             if item.is_file():
-                # Exclude temp files and Python cache
+
                 if not any(x in str(item) for x in ["__pycache__", ".pyc", "_exec_"]):
                     rel_path = str(item.relative_to(directory))
                     artifacts.append(rel_path)
@@ -410,19 +410,19 @@ class CodeExecutor:
         """
         errors = []
 
-        # Check stderr for Python exceptions
+
         if stderr:
-            # Extract traceback info
+
             if "Traceback" in stderr:
                 lines = stderr.split("\n")
                 for i, line in enumerate(lines):
                     if line.startswith("Traceback"):
-                        # Get the actual error (usually last line)
+
                         error_line = lines[-2] if len(lines) > 1 else line
                         errors.append(error_line.strip())
                         break
 
-            # Common error patterns
+
             error_patterns = [
                 (r"ModuleNotFoundError: No module named '(\w+)'", "Missing module: {}"),
                 (r"FileNotFoundError: .* '(.*)'", "File not found: {}"),
@@ -440,14 +440,14 @@ class CodeExecutor:
                     else:
                         errors.append(template)
 
-            # If no specific error found, add generic stderr
+
             if not errors and stderr.strip():
                 errors.append(f"Error: {stderr.strip()[:200]}")
 
-        # Check stdout for warnings
+
         if "Warning:" in stdout or "WARNING:" in stdout:
             warnings = re.findall(r"(Warning:.*|WARNING:.*)", stdout)
-            if warnings and len(errors) < 3:  # Limit warnings
+            if warnings and len(errors) < 3:
                 errors.extend(warnings[:3])
 
         return errors
@@ -488,7 +488,7 @@ class ArtifactValidator:
             "issues": [],
         }
 
-        # Check for model files
+
         model_extensions = [".pkl", ".joblib", ".h5", ".pth", ".pt"]
         models_dir = working_path / "models"
 
@@ -534,7 +534,7 @@ class ArtifactValidator:
             "issues": [],
         }
 
-        # Check for submission.csv
+
         submission_file = working_path / "submission.csv"
 
         if not submission_file.exists():
@@ -542,29 +542,29 @@ class ArtifactValidator:
             return results
 
         try:
-            # Read and validate
+
             df = pd.read_csv(submission_file)
 
             results["submission_path"] = str(submission_file)
             results["row_count"] = len(df)
             results["columns"] = df.columns.tolist()
 
-            # Check for empty
+
             if len(df) == 0:
                 results["issues"].append("Submission file is empty")
                 return results
 
-            # Check expected columns
+
             if expected_columns:
                 missing = set(expected_columns) - set(df.columns)
                 if missing:
                     results["issues"].append(f"Missing columns: {missing}")
                     return results
 
-            # Check for NaN values
+
             if df.isnull().any().any():
                 results["issues"].append("Submission contains NaN values")
-                # Allow warning but not failure for NaNs
+
 
             results["valid"] = True
 
@@ -574,7 +574,7 @@ class ArtifactValidator:
         return results
 
 
-# ==================== Convenience Functions ====================
+
 
 
 def execute_code(

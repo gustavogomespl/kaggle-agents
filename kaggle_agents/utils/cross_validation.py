@@ -26,11 +26,11 @@ def generate_folds(
 
     df = pd.read_csv(train_path)
 
-    # Create 'fold' column
+
     df["fold"] = -1
 
-    # Determine problem type for splitting strategy
-    # Simple heuristic: if target has few unique values -> classification
+
+
     n_unique = df[target_col].nunique()
     is_classification = n_unique < 20
 
@@ -48,13 +48,13 @@ def generate_folds(
         for fold, (train_idx, val_idx) in enumerate(kf.split(df)):
             df.loc[val_idx, "fold"] = fold
 
-    # Save only index (if needed) or full dataframe?
-    # Saving full dataframe with 'fold' column is safest for alignment
-    # But to save space/time, maybe just save the fold column?
-    # Actually, user requested "folds.csv". Let's save the whole dataframe with the fold column
-    # so agents can just load this instead of train.csv if they want, OR join it.
-    # BETTER: Save just the 'fold' column aligned with original index, or the full file.
-    # Saving full file is easiest for agents to use: "Load folds.csv instead of train.csv"
+
+
+
+
+
+
+
 
     df.to_csv(output_path, index=False)
     print(f"      ✅ Saved fixed folds to: {output_path}")

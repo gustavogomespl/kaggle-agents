@@ -40,7 +40,7 @@ class EnsembleAgent:
         Returns:
             Trained meta-model
         """
-        # Generate out-of-fold predictions from base models
+
         print(f"  Creating stacking ensemble with {len(models)} base models...")
 
         meta_features = []
@@ -50,7 +50,7 @@ class EnsembleAgent:
         for i, (model, name) in enumerate(zip(models, model_names)):
             print(f"    Processing model {i + 1}/{len(models)}: {name}")
 
-            # Try to load OOF predictions
+
             oof_path = working_dir / "models" / f"oof_{name}.npy"
             if oof_path.exists():
                 print(f"      ✅ Loaded OOF from {oof_path.name}")
@@ -66,7 +66,7 @@ class EnsembleAgent:
                     oof_preds = cross_val_predict(
                         model, X, y, cv=5, method="predict_proba", n_jobs=-1
                     )
-                    # Take probabilities for positive class
+
                     if oof_preds.ndim > 1:
                         meta_features.append(oof_preds[:, 1])
                     else:
@@ -81,10 +81,10 @@ class EnsembleAgent:
         if not meta_features:
             raise ValueError("No meta-features could be generated")
 
-        # Create meta-feature matrix
+
         meta_X = np.column_stack(meta_features)
 
-        # Train meta-model
+
         print("    Training meta-model (LogisticRegression/Ridge)...")
         if problem_type == "classification":
             meta_model = LogisticRegression(random_state=42, max_iter=1000)
@@ -93,8 +93,8 @@ class EnsembleAgent:
 
         meta_model.fit(meta_X, y)
 
-        # We don't need to retrain base models if we use the saved test preds!
-        # But we keep them in the return dict for completeness
+
+
 
         return {
             "meta_model": meta_model,
@@ -122,7 +122,7 @@ class EnsembleAgent:
         """
         print(f"  Creating blending ensemble with {len(models)} models...")
 
-        # Optimize weights
+
         weights = self.optimize_blending_weights(models, X, y, problem_type)
 
         return {"base_models": models, "weights": weights}
@@ -140,7 +140,7 @@ class EnsembleAgent:
 
         print("    Optimizing blending weights...")
 
-        # Generate OOF predictions
+
         oof_preds = []
         for model in models:
             if problem_type == "classification":
@@ -157,26 +157,26 @@ class EnsembleAgent:
 
         oof_preds = np.column_stack(oof_preds)
 
-        # Define loss function
+
         def loss_func(weights):
-            # Normalize weights
+
             weights = np.array(weights)
             weights /= weights.sum()
 
-            # Weighted average
+
             final_preds = np.average(oof_preds, axis=1, weights=weights)
 
             if problem_type == "classification":
-                # Clip to avoid log(0)
+
                 final_preds = np.clip(final_preds, 1e-15, 1 - 1e-15)
                 return log_loss(y, final_preds)
             else:
                 return np.sqrt(mean_squared_error(y, final_preds))
 
-        # Initial weights (equal)
+
         init_weights = [1.0 / len(models)] * len(models)
 
-        # Constraints: weights sum to 1, 0 <= weight <= 1
+
         constraints = {"type": "eq", "fun": lambda w: 1 - sum(w)}
         bounds = [(0, 1)] * len(models)
 
@@ -216,7 +216,7 @@ class EnsembleAgent:
             f"  Creating Caruana Ensemble (Hill Climbing) with {len(models)} models..."
         )
 
-        # Load OOFs
+
         oof_preds = []
         valid_models = []
         valid_names = []
@@ -237,24 +237,24 @@ class EnsembleAgent:
         oof_preds = np.column_stack(oof_preds)
         n_models = oof_preds.shape[1]
 
-        # Metric function
+
         def get_score(y_true, y_pred):
             if problem_type == "classification":
-                # Assuming AUC for classification if not specified, or LogLoss
-                # Let's use LogLoss for optimization as it's differentiable/smooth
+
+
                 y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
-                return -log_loss(y_true, y_pred)  # Maximize negative log loss
+                return -log_loss(y_true, y_pred)
             else:
                 return -np.sqrt(
                     mean_squared_error(y_true, y_pred)
-                )  # Maximize negative RMSE
+                )
 
-        # Hill Climbing
+
         current_ensemble_preds = np.zeros_like(oof_preds[:, 0])
         ensemble_counts = np.zeros(n_models, dtype=int)
         best_score = -float("inf")
 
-        # Initial step: pick best single model
+
         for i in range(n_models):
             score = get_score(y, oof_preds[:, i])
             if score > best_score:
@@ -268,21 +268,21 @@ class EnsembleAgent:
             f"    Init Best Score: {best_score:.4f} (Model: {valid_names[best_init_idx]})"
         )
 
-        # Iterations
+
         for it in range(n_iterations):
             best_iter_score = -float("inf")
             best_iter_idx = -1
 
-            # Try adding each model
-            current_size = it + 2  # +1 for init, +1 for current iter (1-based)
+
+            current_size = it + 2
 
             for i in range(n_models):
-                # Candidate: current sum + new model prediction
-                # Average = (current_sum + new_pred) / current_size
-                # But we maintain sum for efficiency?
-                # Actually, let's maintain the running sum to avoid re-summing everything
-                # current_ensemble_preds is currently the AVERAGE.
-                # So convert back to sum: current_avg * (current_size - 1)
+
+
+
+
+
+
 
                 current_sum = current_ensemble_preds * (current_size - 1)
                 candidate_avg = (current_sum + oof_preds[:, i]) / current_size
@@ -292,7 +292,7 @@ class EnsembleAgent:
                     best_iter_score = score
                     best_iter_idx = i
 
-            # Update best
+
             if best_iter_score > best_score:
                 best_score = best_iter_score
                 ensemble_counts[best_iter_idx] += 1
@@ -300,17 +300,17 @@ class EnsembleAgent:
                     current_ensemble_preds * (current_size - 1)
                     + oof_preds[:, best_iter_idx]
                 ) / current_size
-                # print(f"    Iter {it+1}: Added {valid_names[best_iter_idx]} -> Score: {best_score:.4f}")
+
             else:
-                # If no improvement, should we stop? Caruana usually continues to smooth out
-                # But for simplicity, we can continue or stop. Let's continue.
+
+
                 ensemble_counts[best_iter_idx] += 1
                 current_ensemble_preds = (
                     current_ensemble_preds * (current_size - 1)
                     + oof_preds[:, best_iter_idx]
                 ) / current_size
 
-        # Calculate final weights
+
         weights = ensemble_counts / ensemble_counts.sum()
         print(f"    Final Caruana Weights: {weights}")
 
@@ -336,7 +336,7 @@ class EnsembleAgent:
         base_models = ensemble["base_models"]
         meta_model = ensemble["meta_model"]
 
-        # Generate predictions from base models
+
         meta_features = []
         for model in base_models:
             if problem_type == "classification":
@@ -351,10 +351,10 @@ class EnsembleAgent:
             else:
                 meta_features.append(model.predict(X))
 
-        # Create meta-features
+
         meta_X = np.column_stack(meta_features)
 
-        # Predict with meta-model
+
         if problem_type == "classification" and hasattr(meta_model, "predict_proba"):
             return meta_model.predict_proba(meta_X)[:, 1]
         else:
@@ -390,7 +390,7 @@ class EnsembleAgent:
             else:
                 predictions.append(model.predict(X))
 
-        # Weighted average
+
         ensemble_pred = np.average(predictions, axis=0, weights=weights)
         return ensemble_pred
 
@@ -408,13 +408,13 @@ class EnsembleAgent:
         for i, m in enumerate(models):
             model_descriptions.append(f"Model {i + 1}: {type(m).__name__}")
 
-        prompt = f"""# Introduction
+        prompt = f"""
 - You are a Kaggle grandmaster attending a competition.
 - We have {len(models)} trained models: {", ".join(model_descriptions)}.
 - Problem Type: {problem_type}
 - EDA Insights: {str(eda_summary)[:500]}...
 
-# Your task
+
 - Suggest a plan to ensemble these solutions.
 - The suggested plan should be novel, effective, and easy to implement.
         - Consider: 
@@ -422,7 +422,7 @@ class EnsembleAgent:
             2. "stacking": Train a meta-model (LogisticRegression) on OOF predictions.
             3. "weighted_blending": Simple optimized weights.
 
-# Response format
+
 Return a JSON object:
 {{
     "strategy_name": "caruana_ensemble" or "stacking_xgboost_meta" or "weighted_blending",
@@ -458,7 +458,7 @@ Return a JSON object:
         print("=" * 60)
 
         try:
-            # Handle both dict and dataclass state access
+
             models_trained = (
                 state.get("models_trained", [])
                 if isinstance(state, dict)
@@ -511,7 +511,7 @@ Return a JSON object:
                 else state.sample_submission_path
             )
 
-            # DEBUG: Detailed information about available models
+
             dev_results = state.get("development_results", [])
             successful_results = (
                 [r for r in dev_results if r.success] if dev_results else []
@@ -524,7 +524,7 @@ Return a JSON object:
 
             if successful_results:
                 print("\n   ✅ Successful components:")
-                for i, result in enumerate(successful_results[-5:], 1):  # Last 5
+                for i, result in enumerate(successful_results[-5:], 1):
                     artifacts_str = (
                         ", ".join(result.artifacts_created[:3])
                         if result.artifacts_created
@@ -532,7 +532,7 @@ Return a JSON object:
                     )
                     print(f"      {i}. {artifacts_str}")
 
-            # Check if we have multiple models
+
             if len(models_trained) < 2:
                 print(
                     f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})"
@@ -544,7 +544,7 @@ Return a JSON object:
                     "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)",
                 }
 
-            # Resolve train/test paths (prefer engineered data if available)
+
             resolved_train_path = (
                 Path(current_train_path)
                 if current_train_path
@@ -576,10 +576,10 @@ Return a JSON object:
                 )
                 return state
 
-            # Load processed data
+
             train_df = pd.read_csv(resolved_train_path)
 
-            # Identify target
+
             potential_targets = ["target", "label", train_df.columns[-1]]
             target_col = None
             for col in potential_targets:
@@ -591,14 +591,14 @@ Return a JSON object:
                 print("  Could not identify target column, skipping ensemble")
                 return state
 
-            # Separate features and target
+
             X = train_df.drop(columns=[target_col])
             y = train_df[target_col]
 
-            # Determine problem type
+
             problem_type = "classification" if y.nunique() < 20 else "regression"
 
-            # Prepare test features for submission generation
+
             test_features = None
             test_path = resolved_test_path
             if test_path.exists():
@@ -629,7 +629,7 @@ Return a JSON object:
                 else working_dir / "sample_submission.csv"
             )
 
-            # Load top models (top 3 by CV score)
+
             print("\n   🔍 Loading top models for ensemble...")
             sorted_models = sorted(
                 models_trained, key=lambda x: x["mean_cv_score"], reverse=True
@@ -659,7 +659,7 @@ Return a JSON object:
                     "skip_reason": f"models_not_found (loaded {len(top_models)}, need 2+)",
                 }
 
-            # PLAN ENSEMBLE STRATEGY
+
             print("\n   🎯 Planning ensemble strategy...")
             plan = self.plan_ensemble_strategy(top_models, problem_type, eda_summary)
             ensemble_strategy = plan.get("strategy_name", "weighted_blending")
@@ -667,7 +667,7 @@ Return a JSON object:
             print(f"      Description: {plan.get('description', '')}")
             print(f"      Combining {len(top_models)} models using {ensemble_strategy}")
 
-            # Create ensemble
+
             if "stack" in ensemble_strategy.lower():
                 ensemble = self.create_stacking_ensemble(
                     top_models, top_model_names, working_dir, X, y, problem_type
@@ -696,7 +696,7 @@ Return a JSON object:
                     top_models, top_model_names, working_dir, X, y, problem_type
                 )
 
-                # Generate Final Submission using Test Preds (Weighted Average)
+
                 print("  Generating final submission from Caruana Ensemble...")
                 valid_names = ensemble["base_model_names"]
                 weights = np.array(ensemble["weights"], dtype=float)
@@ -751,7 +751,7 @@ Return a JSON object:
                         test_meta_features, axis=0, weights=weight_array
                     )
 
-                    # Save submission
+
                     if sample_sub_path.exists():
                         sub_df = pd.read_csv(sample_sub_path)
                         sub_df.iloc[:, 1] = final_preds
@@ -770,16 +770,16 @@ Return a JSON object:
             else:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
 
-            # Evaluate ensemble
+
             print("  Evaluating ensemble performance...")
             if "stack" in ensemble_strategy.lower():
-                # Optimistic estimate for stacking
+
                 ensemble_score = best_model.get("mean_cv_score", 0.0) * 1.01
             else:
-                # For blending, we already calculated OOF loss during optimization
+
                 pass
 
-            # Save ensemble
+
             ensemble_path = (
                 f"{get_config().paths.models_dir}/ensemble_{competition_name}.joblib"
             )
@@ -809,7 +809,7 @@ Return a JSON object:
         except Exception as e:
             error_msg = f"Ensemble creation failed: {str(e)}"
             print(f"Ensemble Agent ERROR: {error_msg}")
-            # Return state with error appended, don't lose existing state
+
             errors = (
                 state.get("errors", []) if isinstance(state, dict) else state.errors
             )

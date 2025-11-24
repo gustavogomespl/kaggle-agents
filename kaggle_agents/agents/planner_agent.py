@@ -23,7 +23,7 @@ from ..prompts.templates.planner_prompts import (
 from ..optimization import create_optimizer
 
 
-# ==================== DSPy Signatures ====================
+
 
 
 class AblationPlannerSignature(dspy.Signature):
@@ -56,7 +56,7 @@ class SOTAAnalysisSignature(dspy.Signature):
     success_factors: str = dspy.OutputField(desc="Key factors separating top solutions")
 
 
-# ==================== DSPy Modules ====================
+
 
 
 class AblationPlannerModule(dspy.Module):
@@ -90,7 +90,7 @@ class SOTAAnalyzerModule(dspy.Module):
         return result
 
 
-# ==================== Planner Agent ====================
+
 
 
 class PlannerAgent:
@@ -116,7 +116,7 @@ class PlannerAgent:
         self.use_dspy = use_dspy and self.config.dspy.enabled
 
         if self.use_dspy:
-            # Try to load optimized module, fallback to base; if none, fall back to direct LLM
+
             optimizer = create_optimizer()
             self.planner_module = optimizer.load_optimized_prompt("planner")
 
@@ -131,7 +131,7 @@ class PlannerAgent:
             else:
                 self.sota_analyzer = SOTAAnalyzerModule()
         else:
-            # Use direct LLM calls
+
             self.llm = get_llm_for_role(
                 role="planner",
                 temperature=self.config.llm.temperature,
@@ -148,7 +148,7 @@ class PlannerAgent:
         Returns:
             State updates with ablation plan
         """
-        # Check if this is a refinement iteration
+
         current_iteration = state.get("current_iteration", 0)
         is_refinement = current_iteration > 1
 
@@ -161,11 +161,11 @@ class PlannerAgent:
             print("= PLANNER AGENT: Creating Ablation Plan")
             print("=" * 60)
 
-        # 1. Analyze SOTA solutions
+
         print("\nAnalyzing SOTA patterns...")
         sota_analysis = self._analyze_sota_solutions(state)
 
-        # 2. Generate ablation plan (initial or refinement)
+
         if is_refinement:
             print("\n🔄 Refining plan based on previous results...")
             ablation_plan = self._refine_ablation_plan(state, sota_analysis)
@@ -173,13 +173,13 @@ class PlannerAgent:
             print("\n📝 Generating ablation plan...")
             ablation_plan = self._generate_ablation_plan(state, sota_analysis)
 
-        # 3. Validate and enhance plan
+
         validated_plan = self._validate_plan(ablation_plan)
 
-        # 4. Print summary
+
         self._print_summary(validated_plan)
 
-        # Return state updates
+
         return {
             "ablation_plan": validated_plan,
             "optimization_strategy": "ablation_driven",
@@ -207,11 +207,11 @@ class PlannerAgent:
                 "success_factors": [],
             }
 
-        # Format SOTA solutions for analysis
+
         sota_summary = self._format_sota_solutions(sota_solutions)
 
         if self.use_dspy and hasattr(self, "sota_analyzer"):
-            # Use DSPy module
+
             result = self.sota_analyzer(sota_solutions=sota_summary)
 
             analysis = {
@@ -232,7 +232,7 @@ class PlannerAgent:
                 else [],
             }
         else:
-            # Use direct LLM call
+
             prompt = ANALYZE_SOTA_PROMPT.format(sota_solutions=sota_summary)
             messages = [
                 SystemMessage(content=PLANNER_SYSTEM_PROMPT),
@@ -241,11 +241,11 @@ class PlannerAgent:
 
             response = self.llm.invoke(messages)
 
-            # Parse JSON from response
+
             try:
                 analysis = json.loads(response.content)
             except json.JSONDecodeError:
-                # Fallback to empty analysis
+
                 analysis = {
                     "common_models": [],
                     "feature_patterns": [],
@@ -276,7 +276,7 @@ class PlannerAgent:
         if not iteration_memory:
             return "No previous iteration insights available."
 
-        # Aggregate patterns across all iterations
+
         all_worked = []
         all_failed = []
 
@@ -284,24 +284,24 @@ class PlannerAgent:
             all_worked.extend(memory.what_worked)
             all_failed.extend(memory.what_failed)
 
-        # Build insights string
+
         insights = ["\n🧠 CURRICULUM LEARNING INSIGHTS (from previous iterations):"]
 
         if all_worked:
             insights.append("\n✅ What Worked (prioritize these approaches):")
-            # Get last 5 unique successful patterns
+
             unique_worked = list(dict.fromkeys(all_worked))[-5:]
             for pattern in unique_worked:
                 insights.append(f"   - {pattern}")
 
         if all_failed:
             insights.append("\n❌ What Failed (avoid these approaches):")
-            # Get last 5 unique failure patterns
+
             unique_failed = list(dict.fromkeys(all_failed))[-5:]
             for pattern in unique_failed:
                 insights.append(f"   - {pattern}")
 
-        # Add failure analysis insights from latest iteration
+
         if iteration_memory:
             latest_memory = iteration_memory[-1]
             if "failure_analysis" in latest_memory.results:
@@ -309,7 +309,7 @@ class PlannerAgent:
 
                 if analysis.get("common_errors"):
                     insights.append("\n⚠️  Common Errors to Avoid:")
-                    # Get top 3 most common errors
+
                     common_errors = sorted(
                         analysis["common_errors"].items(),
                         key=lambda x: x[1],
@@ -318,7 +318,7 @@ class PlannerAgent:
                     for error_type, count in common_errors:
                         insights.append(f"   - {error_type}: {count} occurrences")
 
-                # Add component-specific success patterns
+
                 if analysis.get("success_by_component"):
                     insights.append("\n📊 Component Success Rates:")
                     for comp_type, success_info in list(
@@ -327,7 +327,7 @@ class PlannerAgent:
                         rate = success_info.get("success_rate", 0.0)
                         insights.append(f"   - {comp_type}: {rate:.0%} success rate")
 
-        # Add score improvement trend
+
         if len(iteration_memory) >= 2:
             score_improvements = [m.score_improvement for m in iteration_memory[-3:]]
             avg_improvement = sum(score_improvements) / len(score_improvements)
@@ -357,10 +357,10 @@ class PlannerAgent:
         competition_info = state["competition_info"]
         domain = state.get("domain_detected", "tabular")
 
-        # Extract curriculum learning insights from previous iterations
+
         curriculum_insights = self._extract_curriculum_insights(state)
 
-        # Prepare inputs
+
         comp_info_str = f"""
 Name: {competition_info.name}
 Description: {competition_info.description}
@@ -372,27 +372,27 @@ Domain: {domain}
         sota_summary = json.dumps(sota_analysis, indent=2)
         domain_guidance = get_domain_guidance(domain)
 
-        # Print curriculum insights
+
         if "No previous iteration" not in curriculum_insights:
             print(curriculum_insights)
 
         if self.use_dspy:
-            # TEMPORARY FIX: Skip DSPy, use fallback directly
-            # DSPy consistently generates only 2 components instead of 5
+
+
             print("  🔧 Using fallback plan (ensures 5 high-quality components)")
             plan_data = self._create_fallback_plan(
                 domain, sota_analysis, curriculum_insights
             )
 
         else:
-            # Use direct LLM call
+
             prompt = CREATE_ABLATION_PLAN_PROMPT.format(
                 competition_info=comp_info_str,
                 domain=domain,
                 sota_summary=sota_summary,
             )
 
-            # Inject curriculum learning insights
+
             enhanced_prompt = f"""{prompt}
 
 {curriculum_insights}
@@ -410,25 +410,25 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 HumanMessage(content=enhanced_prompt),
             ]
 
-            # TEMPORARY FIX: Skip LLM call, use fallback directly
+
             print("  🔧 Using fallback plan (ensures 5 high-quality components)")
             plan_data = self._create_fallback_plan(
                 domain, sota_analysis, curriculum_insights
             )
 
-        # Convert to AblationComponent objects
+
         components = []
         for i, item in enumerate(plan_data):
-            # Generate name if not provided by LLM
+
             name = item.get("name")
             if not name or name == "unnamed":
                 comp_type = item.get("component_type", "component")
-                # Create descriptive name from type and index
+
                 name = f"{comp_type}_{i + 1}"
-                # If there's a description, try to extract key words
+
                 if item.get("description"):
                     desc = item["description"].lower()
-                    # Extract first meaningful word
+
                     for word in desc.split():
                         if len(word) > 4 and word not in [
                             "using",
@@ -449,7 +449,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             )
             components.append(component)
 
-        # Sort by estimated impact (descending)
+
         components.sort(key=lambda x: x.estimated_impact, reverse=True)
 
         return components
@@ -468,13 +468,13 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             Refined ablation plan
         """
 
-        # Gather previous results
+
         previous_plan = state.get("ablation_plan", [])
         dev_results = state.get("development_results", [])
         best_score = state.get("best_score", 0.0)
         current_score = state.get("current_performance_score", best_score)
 
-        # Build test results summary
+
         test_results_summary = []
         for i, component in enumerate(previous_plan):
             if i < len(dev_results):
@@ -489,7 +489,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                     }
                 )
 
-        # Format previous plan for prompt
+
         previous_plan_str = json.dumps(
             [
                 {
@@ -503,20 +503,20 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             indent=2,
         )
 
-        # Format test results
+
         test_results_str = json.dumps(test_results_summary, indent=2)
 
-        # Use the refinement prompt
+
         prompt = REFINE_ABLATION_PLAN_PROMPT.format(
             previous_plan=previous_plan_str,
             test_results=test_results_str,
             current_score=current_score,
         )
 
-        # INJECT META-EVALUATOR GUIDANCE (RL Pattern)
+
         refinement_guidance = state.get("refinement_guidance", {})
         if refinement_guidance:
-            guidance_text = "\n\n## 🎯 META-EVALUATOR GUIDANCE (from RL analysis)\n\n"
+            guidance_text = "\n\n
 
             if "planner_guidance" in refinement_guidance:
                 guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
@@ -551,8 +551,8 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
         try:
             if self.use_dspy:
-                # For now, use fallback in refinement mode too
-                # TODO: Create DSPy refinement module
+
+
                 print("  🔧 Using enhanced fallback with refinement logic")
                 plan_data = self._create_refined_fallback_plan(
                     state,
@@ -562,7 +562,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                     dev_results,
                 )
             else:
-                # Use LLM with refinement prompt
+
                 from langchain.schema import SystemMessage, HumanMessage
 
                 messages = [
@@ -575,8 +575,8 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 response = self.llm.invoke(messages)
                 plan_text = response.content.strip()
 
-                # Parse JSON
-                # Remove markdown code blocks if present
+
+
                 if "```json" in plan_text:
                     plan_text = plan_text.split("```json")[1].split("```")[0].strip()
                 elif "```" in plan_text:
@@ -595,10 +595,10 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 dev_results,
             )
 
-        # Convert to AblationComponent objects
+
         components = []
         for i, item in enumerate(plan_data):
-            # Get code from code_outline or description (fallback for compatibility)
+
             code = item.get("code_outline", item.get("description", ""))
 
             component = AblationComponent(
@@ -609,7 +609,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             )
             components.append(component)
 
-        # Sort by estimated impact
+
         components.sort(key=lambda x: x.estimated_impact, reverse=True)
 
         return components
@@ -633,7 +633,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         Returns:
             Refined plan as list of dicts
         """
-        # Bandit-lite: keep top-2 successful arms by reward, explore one new arm
+
         arms = []
         for idx, comp in enumerate(previous_plan):
             score = None
@@ -649,14 +649,14 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 }
             )
 
-        # Exploit: keep top-2 successful arms
+
         successful_arms = [a for a in arms if a["success"]]
         successful_arms.sort(key=lambda a: a["reward"], reverse=True)
         keep = successful_arms[:2]
 
         plan = []
 
-        # Ensure a strong feature engineering arm is present
+
         fe_in_keep = any(
             a["component"].component_type == "feature_engineering" for a in keep
         )
@@ -672,7 +672,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 }
             )
 
-        # Add kept winners
+
         for arm in keep:
             comp = arm["component"]
             plan.append(
@@ -688,7 +688,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 }
             )
 
-        # Ensure at least two model components
+
         model_count = sum(1 for p in plan if p["component_type"] == "model")
         if model_count < 2:
             plan.append(
@@ -715,7 +715,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 }
             )
 
-        # Exploration arm if capacity allows
+
         if len(plan) < 4:
             plan.append(
                 {
@@ -755,10 +755,10 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         Returns:
             Validated plan
         """
-        # Filter out invalid components (keep only high impact >= 10%)
+
         valid_plan = [c for c in plan if c.estimated_impact >= 0.10]
 
-        # Limit to maximum 6 components (quality over quantity)
+
         if len(valid_plan) > 6:
             print(
                 f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top 6 by impact"
@@ -767,17 +767,17 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 valid_plan, key=lambda x: x.estimated_impact, reverse=True
             )[:6]
 
-        # CRITICAL: Ensure at least TWO model components exist
-        # Model components are required to generate predictions and create ensembles
+
+
         model_count = sum(1 for c in valid_plan if c.component_type == "model")
 
         if model_count == 0:
             print("  ⚠️  No 'model' components found - adding 2 baseline models")
-            # Add two different baseline models
+
             baseline_lgbm = AblationComponent(
                 name="baseline_lightgbm",
                 component_type="model",
-                code="",  # Will be generated by developer agent
+                code="",
                 estimated_impact=0.20,
                 tested=False,
                 actual_impact=None,
@@ -806,14 +806,14 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             valid_plan.append(baseline_model)
             print(f"     Added: {baseline_model.name}")
 
-        # Ensure 3-5 components total
+
         if len(valid_plan) < 3:
             print("  ⚠️  Plan has fewer than 3 components")
         elif len(valid_plan) > 5:
             print(f"  ⚠️  Plan still has {len(valid_plan)} components after filtering")
 
-        # Sort by type: preprocessing first, then models, then ensembles
-        # This ensures data is prepared before models are trained
+
+
         preprocessing_components = [
             c
             for c in valid_plan
@@ -826,10 +826,10 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             if c.component_type not in ["preprocessing", "feature_engineering", "model"]
         ]
 
-        # Reorder: preprocessing first, then models, then ensembles
+
         valid_plan = preprocessing_components + model_components + other_components
 
-        # Debug log: Show final plan composition
+
         print(
             f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total"
         )
@@ -855,11 +855,11 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         Returns:
             List of component dictionaries (always 4-5 components)
         """
-        # Note: Curriculum insights are logged but fallback uses fixed plan
-        # In future iterations, could use insights to reorder components
+
+
         plan = []
 
-        # ALWAYS add feature engineering first (high impact)
+
         plan.append(
             {
                 "name": "advanced_feature_engineering",
@@ -871,7 +871,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             }
         )
 
-        # ALWAYS add 3 diverse models for ensemble diversity
+
         plan.extend(
             [
                 {
@@ -909,7 +909,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             ]
         )
 
-        # ALWAYS add stacking ensemble (combines the 4 models above)
+
         plan.append(
             {
                 "name": "stacking_ensemble",
@@ -926,7 +926,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
     def _format_sota_solutions(self, solutions: List[SOTASolution]) -> str:
         """Format SOTA solutions for prompts."""
         formatted = []
-        for sol in solutions[:5]:  # Top 5
+        for sol in solutions[:5]:
             formatted.append(f"""
 Title: {sol.title}
 Votes: {sol.votes}
@@ -950,7 +950,7 @@ Ensemble: {sol.ensemble_approach or "N/A"}
         print("\n" + "=" * 60)
 
 
-# ==================== LangGraph Node Function ====================
+
 
 
 def planner_agent_node(state: KaggleState) -> Dict[str, Any]:
