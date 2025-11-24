@@ -48,29 +48,3 @@ This downloads data, plans, generates code, validates, and creates `submission.c
 ## License
 
 MIT License - use as you want.
-
-## Citation
-
-```bibtex
-@software{kaggle_agents_2025,
-  title={Kaggle Agents: Autonomous Competition Solving},
-  author={Gustavo Paulino Gomes},
-  year={2025},
-  url={https://github.com/gustavogomespl/kaggle-agents}
-}
-```
-
-## Status
-
-Version: 1.0.0
-
-Pipeline Status: Production Ready
-
-- Domain Detection: Complete
-- Search Agent: Complete
-- Planner Agent: Complete
-- Developer Agent: Complete
-- Robustness Agent: Complete
-- Submission Agent: Complete
-- LangGraph Workflow: Complete
-- DSPy Optimization: Complete
