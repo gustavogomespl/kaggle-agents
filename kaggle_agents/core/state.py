@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 
-
+# ==================== Domain Types ====================
 
 DomainType = Literal["tabular", "computer_vision", "nlp", "time_series", "multi_modal"]
 
@@ -24,7 +24,7 @@ class CompetitionInfo:
     name: str
     description: str
     evaluation_metric: str
-    problem_type: str
+    problem_type: str  # classification, regression, ranking, etc.
     domain: Optional[DomainType] = None
     data_files: list[str] = field(default_factory=list)
     submission_format: dict[str, Any] = field(default_factory=dict)
@@ -35,7 +35,7 @@ class CompetitionInfo:
 class SOTASolution:
     """State-of-the-art solution retrieved from search."""
 
-    source: str
+    source: str  # notebook_id or discussion_url
     title: str
     score: float
     votes: int
@@ -51,7 +51,7 @@ class AblationComponent:
     """A code component identified for ablation testing."""
 
     name: str
-    component_type: str
+    component_type: str  # feature_engineering, model, preprocessing, ensemble
     code: str
     estimated_impact: float = 0.0
     tested: bool = False
@@ -75,14 +75,14 @@ class DevelopmentResult:
 class ValidationResult:
     """Result from robustness validation."""
 
-    module: str
+    module: str  # debugging, leakage, data_usage, format
     passed: bool
     score: float
     issues: list[str] = field(default_factory=list)
     suggestions: list[str] = field(default_factory=list)
     details: dict[str, Any] = field(
         default_factory=dict
-    )
+    )  # Additional structured information
 
 
 @dataclass
@@ -110,7 +110,7 @@ class IterationMemory:
     what_failed: list[str] = field(default_factory=list)
 
 
-
+# ==================== Main State ====================
 
 
 class KaggleState(TypedDict):
@@ -121,72 +121,72 @@ class KaggleState(TypedDict):
     accumulating data and enabling agents to make informed decisions.
     """
 
-
+    # Competition Context
     competition_info: CompetitionInfo
     working_directory: str
     current_train_path: Optional[str]
     current_test_path: Optional[str]
 
-
+    # Domain Detection
     domain_detected: Optional[DomainType]
     domain_confidence: float
 
-
+    # Search Phase
     sota_solutions: Annotated[list[SOTASolution], add]
     search_queries_used: Annotated[list[str], add]
 
-
+    # Planning Phase
     ablation_plan: list[AblationComponent]
     current_component_index: int
     optimization_strategy: str
 
-
+    # Development Phase
     development_results: Annotated[list[DevelopmentResult], add]
     current_code: str
     code_retry_count: int
 
-
+    # Validation Phase
     validation_results: Annotated[list[ValidationResult], add]
     overall_validation_score: float
     critical_issues: Annotated[list[str], add]
 
-
+    # Ensemble Phase
     ensemble_strategy: Optional[str]
     ensemble_weights: dict[str, float]
 
-
+    # Submission Phase
     submissions: Annotated[list[SubmissionResult], add]
     best_score: float
-    target_percentile: float
+    target_percentile: float  # goal: 20th percentile (top 20%)
     best_single_model_score: Optional[float]
     best_single_model_name: Optional[str]
 
-
+    # Iteration Control
     current_iteration: int
     max_iterations: int
     should_continue: bool
     needs_refinement: bool
     termination_reason: Optional[str]
 
-
+    # Memory & Learning
     iteration_memory: Annotated[list[IterationMemory], add]
     learned_patterns: dict[str, Any]
 
+    # Prompt Optimization (DSPy)
+    optimized_prompts: dict[str, str]  # agent_name -> optimized_prompt
+    prompt_performance: dict[str, float]  # agent_name -> performance_score
 
-    optimized_prompts: dict[str, str]
-    prompt_performance: dict[str, float]
+    # Meta-Evaluator & RL (NEW)
+    failure_analysis: dict[str, Any]  # Error patterns and component analysis
+    refinement_guidance: dict[str, str]  # Guidance for prompt refinement
+    reward_signals: dict[str, float]  # RL reward components
 
-
-    failure_analysis: dict[str, Any]
-    refinement_guidance: dict[str, str]
-    reward_signals: dict[str, float]
-
-
+    # Metadata
     workflow_start_time: datetime
     last_updated: datetime
 
 
-
+# ==================== State Reducers ====================
 
 
 def merge_dict(existing: dict, new: dict) -> dict:
@@ -201,7 +201,7 @@ def merge_competition_info(
     if existing is None:
         return new
 
-
+    # Update existing with new non-None values
     updated = CompetitionInfo(
         name=new.name if new.name else existing.name,
         description=new.description if new.description else existing.description,
@@ -219,7 +219,7 @@ def merge_competition_info(
     return updated
 
 
-
+# ==================== State Initialization ====================
 
 
 def create_initial_state(competition_name: str, working_dir: str) -> KaggleState:
@@ -236,7 +236,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
     now = datetime.now()
 
     return KaggleState(
-
+        # Competition Context
         competition_info=CompetitionInfo(
             name=competition_name,
             description="",
@@ -246,50 +246,50 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         working_directory=working_dir,
         current_train_path=None,
         current_test_path=None,
-
+        # Domain Detection
         domain_detected=None,
         domain_confidence=0.0,
-
+        # Search Phase
         sota_solutions=[],
         search_queries_used=[],
-
+        # Planning Phase
         ablation_plan=[],
         current_component_index=0,
         optimization_strategy="",
-
+        # Development Phase
         development_results=[],
         current_code="",
         code_retry_count=0,
-
+        # Validation Phase
         validation_results=[],
         overall_validation_score=0.0,
         critical_issues=[],
-
+        # Ensemble Phase
         ensemble_strategy=None,
         ensemble_weights={},
-
+        # Submission Phase
         submissions=[],
         best_score=0.0,
-        target_percentile=20.0,
+        target_percentile=20.0,  # top 20%
         best_single_model_score=None,
         best_single_model_name=None,
-
+        # Iteration Control
         current_iteration=0,
         max_iterations=10,
         should_continue=True,
         needs_refinement=False,
         termination_reason=None,
-
+        # Memory & Learning
         iteration_memory=[],
         learned_patterns={},
-
+        # Prompt Optimization
         optimized_prompts={},
         prompt_performance={},
-
+        # Meta-Evaluator & RL
         failure_analysis={},
         refinement_guidance={},
         reward_signals={},
-
+        # Metadata
         workflow_start_time=now,
         last_updated=now,
     )

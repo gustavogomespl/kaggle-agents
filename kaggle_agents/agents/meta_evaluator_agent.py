@@ -22,7 +22,7 @@ from ..core.config import get_config, get_llm_for_role, calculate_score_improvem
 from ..optimization import create_training_collector
 
 
-
+# ==================== Meta-Evaluator Agent ====================
 
 
 class MetaEvaluatorAgent:
@@ -42,14 +42,14 @@ class MetaEvaluatorAgent:
         """Initialize meta-evaluator with configured model."""
         self.config = get_config()
 
-
+        # Use configured LLM (supports OpenAI and Anthropic)
         self.llm = get_llm_for_role(role="evaluator")
 
         provider = self.config.llm.provider.upper()
         model = self.config.llm.model
         print(f"   🧠 Meta-Evaluator initialized with {provider} ({model})")
 
-
+        # Training data collector for RL
         self.training_collector = create_training_collector()
 
     def __call__(self, state: KaggleState) -> Dict[str, Any]:
@@ -69,31 +69,31 @@ class MetaEvaluatorAgent:
         current_iteration = state.get("current_iteration", 0)
         print(f"\n📊 Iteration: {current_iteration}")
 
-
+        # Analyze component performance
         failure_analysis = self._analyze_failures(state)
 
-
+        # Calculate reward signals (CodeRL+ pattern)
         reward_signals = self._calculate_reward_signals(state, failure_analysis)
 
-
+        # Generate refinement guidance (PREFACE pattern)
         refinement_guidance = self._generate_refinement_guidance(
             state, failure_analysis, reward_signals
         )
 
-
+        # Create iteration memory for learning
         iteration_memory = self._create_iteration_memory(
             state, failure_analysis, reward_signals
         )
 
-
+        # Collect training data for DSPy optimization
         self._collect_training_data(state, failure_analysis, reward_signals)
 
-
+        # Update state
         return {
             "failure_analysis": failure_analysis,
             "reward_signals": reward_signals,
             "refinement_guidance": refinement_guidance,
-            "iteration_memory": [iteration_memory],
+            "iteration_memory": [iteration_memory],  # Append to list
             "last_updated": datetime.now(),
         }
 
@@ -129,14 +129,14 @@ class MetaEvaluatorAgent:
             "by_type": {},
         }
 
-
+        # Analyze each component result
         for i, result in enumerate(dev_results):
             component = ablation_plan[i] if i < len(ablation_plan) else None
             component_type = component.component_type if component else "unknown"
             component_name = component.name if component else f"component_{i}"
 
             if not result.success:
-
+                # Extract error information
                 error_msg = result.errors[0] if result.errors else result.stderr[:200]
                 error_type = self._classify_error(error_msg)
 
@@ -150,10 +150,10 @@ class MetaEvaluatorAgent:
                     }
                 )
 
-
+                # Track error pattern
                 analysis["error_patterns"].add(error_type)
 
-
+                # Track by component type
                 if component_type not in analysis["by_type"]:
                     analysis["by_type"][component_type] = {
                         "failures": 0,
@@ -170,7 +170,7 @@ class MetaEvaluatorAgent:
                     )
 
             else:
-
+                # Track success
                 analysis["success_components"].append(
                     {
                         "name": component_name,
@@ -179,11 +179,11 @@ class MetaEvaluatorAgent:
                     }
                 )
 
-
+                # Track success pattern
                 success_pattern = f"{component_type}_success"
                 analysis["success_patterns"].add(success_pattern)
 
-
+                # Track by component type
                 if component_type not in analysis["by_type"]:
                     analysis["by_type"][component_type] = {
                         "failures": 0,
@@ -192,11 +192,11 @@ class MetaEvaluatorAgent:
                     }
                 analysis["by_type"][component_type]["successes"] += 1
 
-
+        # Convert sets to lists for serialization
         analysis["error_patterns"] = list(analysis["error_patterns"])
         analysis["success_patterns"] = list(analysis["success_patterns"])
 
-
+        # Print summary
         total = len(dev_results)
         success_count = len(analysis["success_components"])
         failed_count = len(analysis["failed_components"])
@@ -224,7 +224,7 @@ class MetaEvaluatorAgent:
 
         error_lower = error_msg.lower()
 
-
+        # Common error patterns
         if "importerror" in error_lower or "modulenotfounderror" in error_lower:
             return "import_error"
         elif "filenotfounderror" in error_lower or "no such file" in error_lower:
@@ -283,32 +283,32 @@ class MetaEvaluatorAgent:
         current_score = state.get("current_performance_score", 0.0)
         best_score = state.get("best_score", 0.0)
 
-
+        # Reward 1: Functional Correctness (binary)
         total_components = len(dev_results)
         successful_components = len(failure_analysis["success_components"])
         r_functional = (
             successful_components / total_components if total_components > 0 else 0.0
         )
 
-
-
-        target_score = state.get("target_score", 0.9238)
+        # Reward 2: Performance (continuous, normalized 0-1)
+        # Try to get dynamic target from state (e.g. from leaderboard), else default
+        target_score = state.get("target_score", 0.9238)  # Default to 0.9238 if not set
         r_performance = (
             min(current_score / target_score, 1.0) if target_score > 0 else 0.0
         )
 
-
-
+        # Reward 3: Improvement (delta from previous best)
+        # Get evaluation metric to handle both minimize and maximize metrics correctly
         competition_info = state.get("competition_info")
         metric_name = competition_info.evaluation_metric if competition_info else ""
 
-
+        # Calculate improvement considering metric direction (positive = better)
         score_improvement = calculate_score_improvement(
             current_score, best_score, metric_name
         )
-        r_improvement = max(0.0, min(score_improvement * 10, 1.0))
+        r_improvement = max(0.0, min(score_improvement * 10, 1.0))  # Scale to 0-1
 
-
+        # Reward 4: Execution Semantics (no errors, fast execution)
         avg_execution_time = (
             sum(r.execution_time for r in dev_results) / total_components
             if total_components > 0
@@ -316,10 +316,10 @@ class MetaEvaluatorAgent:
         )
         r_semantics = 1.0 - min(
             avg_execution_time / 300.0, 1.0
-        )
+        )  # Normalize by 5min timeout
 
-
-
+        # Reward 5: Diversity
+        # Encourages trying different types of components (e.g. not just 5 XGBoosts)
         unique_types = len(
             set(
                 c.get("type", "unknown") for c in failure_analysis["success_components"]
@@ -327,16 +327,16 @@ class MetaEvaluatorAgent:
         )
         r_diversity = min(
             unique_types / 3.0, 1.0
-        )
+        )  # Target: at least 3 different types working
 
-
-
+        # Reward 6: Robustness/Overfitting Penalty
+        # Penalize if Public LB score is much lower than Validation score
         validation_score = state.get("overall_validation_score", 0.0)
         public_score = 0.0
         if submissions:
             public_score = submissions[-1].public_score or 0.0
 
-
+        # If we have both scores, check gap. If gap > 0.1, heavy penalty.
         gap = abs(validation_score - public_score)
         r_robustness = (
             1.0 - min(gap * 5, 1.0)
@@ -344,7 +344,7 @@ class MetaEvaluatorAgent:
             else 1.0
         )
 
-
+        # Combined reward (weighted)
         weights = {
             "functional": 0.25,
             "performance": 0.40,
@@ -402,12 +402,12 @@ class MetaEvaluatorAgent:
         """
         print("\n   🎯 Generating refinement guidance...")
 
-
+        # Build context for LLM
         context = self._build_evaluation_context(
             state, failure_analysis, reward_signals
         )
 
-
+        # Generate guidance using superior model (GPT-5)
         prompt = self._build_refinement_prompt(context)
 
         messages = [
@@ -417,11 +417,11 @@ class MetaEvaluatorAgent:
 
         response = self.llm.invoke(messages)
 
-
+        # Parse guidance from response
         try:
             guidance = json.loads(response.content)
         except json.JSONDecodeError:
-
+            # Fallback if JSON parsing fails
             guidance = {
                 "planner_guidance": "Focus on high-impact components with proven track record.",
                 "developer_guidance": "Ensure code follows all requirements and outputs correct format.",
@@ -443,54 +443,54 @@ class MetaEvaluatorAgent:
         current_score = state.get("current_performance_score", 0.0)
         target_score = 0.9238
 
-        context = f"""
+        context = f"""# Iteration {current_iteration} Evaluation
 
-
+## Current Performance
 - Score: {current_score:.4f}
 - Target: {target_score:.4f}
 - Gap: {target_score - current_score:.4f}
 
-
+## Component Results
 - Total: {len(state.get("development_results", []))}
 - Successful: {len(failure_analysis["success_components"])}
 - Failed: {len(failure_analysis["failed_components"])}
 
-
+## Success Patterns
 {chr(10).join("- " + p for p in failure_analysis["success_patterns"])}
 
-
+## Error Patterns
 {chr(10).join("- " + p for p in failure_analysis["error_patterns"])}
 """
 
-
-        context += "\n
+        # FULL CODE AND PERFORMANCE ANALYSIS
+        context += "\n## Component Code and Performance Analysis\n"
 
         dev_results = state.get("development_results", [])
         import re
 
-
+        # Limit to 5 most recent components to reduce token usage
         recent_results = dev_results[-5:] if len(dev_results) > 5 else dev_results
         if len(dev_results) > 5:
             context += f"*(Showing 5 most recent components out of {len(dev_results)} total)*\n\n"
 
         for i, res in enumerate(recent_results):
-
+            # Extract score from stdout if possible
             score_match = re.search(
                 r"Final Validation Performance: (0\.\d+)", res.stdout
             )
             score = float(score_match.group(1)) if score_match else "N/A"
 
-
+            # Determine component name (heuristic)
             comp_name = f"Component_{i + 1}"
             if "class " in res.code:
-
+                # Try to find class name
                 class_match = re.search(r"class (\w+)", res.code)
                 if class_match:
                     comp_name = class_match.group(1)
 
             status = "✅ Success" if res.success else "❌ Failed"
 
-            context += f"\n
+            context += f"\n### {comp_name}\n"
             context += f"**Status**: {status}\n"
             context += f"**Score**: {score}\n"
             context += f"**Execution Time**: {res.execution_time:.2f}s\n"
@@ -498,18 +498,18 @@ class MetaEvaluatorAgent:
             if not res.success:
                 context += f"**Error**: {res.stderr[-200:] if res.stderr else 'Unknown Error'}\n"
 
-
+            # Send code summary instead of full code to reduce tokens
             code_lines = res.code.split("\n")
             context += "**Code Summary**:\n```python\n"
-            context += "\n".join(code_lines[:20])
+            context += "\n".join(code_lines[:20])  # First 20 lines
             if len(code_lines) > 30:
-                context += "\n
-                context += "\n".join(code_lines[-10:])
+                context += "\n# ... (middle section omitted) ...\n"
+                context += "\n".join(code_lines[-10:])  # Last 10 lines
             context += "\n```\n"
             context += f"**Total Lines**: {len(code_lines)}\n"
             context += "-" * 40 + "\n"
 
-        context += "\n
+        context += "\n## Reward Signals\n"
         for key, value in reward_signals.items():
             context += f"- {key}: {value:.3f}\n"
 
@@ -519,7 +519,7 @@ class MetaEvaluatorAgent:
         """Build prompt for refinement guidance generation."""
         return f"""{context}
 
-
+## Your Task
 Analyze the above results and provide strategic guidance for improving prompts in the next iteration.
 
 Return a JSON object with:
@@ -601,7 +601,7 @@ Focus on actionable, specific improvements based on error patterns and performan
         if not ablation_plan or not dev_results:
             return
 
-
+        # Collect planner example
         plan_quality_score = reward_signals["r_combined"]
 
         self.training_collector.add_example(
@@ -629,7 +629,7 @@ Focus on actionable, specific improvements based on error patterns and performan
             score=plan_quality_score,
         )
 
-
+        # Collect developer examples (one per component)
         for i, result in enumerate(dev_results):
             if i >= len(ablation_plan):
                 continue
@@ -642,7 +642,7 @@ Focus on actionable, specific improvements based on error patterns and performan
                 inputs={
                     "component_type": component.component_type,
                     "component_name": component.name,
-                    "code_outline": component.code,
+                    "code_outline": component.code,  # Use code outline as description
                 },
                 outputs={
                     "code": result.code,
@@ -653,9 +653,9 @@ Focus on actionable, specific improvements based on error patterns and performan
         print("   ✓ Collected training examples for Planner and Developer")
 
 
+# ==================== Prompts ====================
 
-
-META_EVALUATOR_SYSTEM_PROMPT = """
+META_EVALUATOR_SYSTEM_PROMPT = """# You are a Meta-Evaluator AI
 
 You are an expert meta-evaluator analyzing the performance of AI agents that solve Kaggle competitions.
 
@@ -680,7 +680,7 @@ Your output must be:
 Return structured JSON with clear guidance for each agent type."""
 
 
-
+# ==================== LangGraph Node Function ====================
 
 
 def meta_evaluator_node(state: KaggleState) -> Dict[str, Any]:

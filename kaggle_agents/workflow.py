@@ -23,14 +23,14 @@ from .agents import (
     robustness_agent_node,
 )
 from .agents.submission_agent import submission_agent_node
-from .agents.meta_evaluator_agent import meta_evaluator_node
+from .agents.meta_evaluator_agent import meta_evaluator_node  # Meta-Evaluator with RL
 from .agents.reporting_agent import reporting_agent_node
 from .agents import (
-    ensemble_agent_node,
+    ensemble_agent_node,  # Ensemble Strategy
 )
 
 
-
+# ==================== Agent Nodes ====================
 
 
 def data_download_node(state: KaggleState) -> Dict[str, Any]:
@@ -54,10 +54,10 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
     print(f"   Destination: {working_dir}")
 
     try:
-
+        # Initialize Kaggle API client
         kaggle_client = KaggleAPIClient()
 
-
+        # Download competition data
         data_files = kaggle_client.download_competition_data(
             competition=competition_info.name, path=str(working_dir), quiet=False
         )
@@ -65,11 +65,11 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
         print("\n✓ Download complete!")
         print(f"   Train: {data_files.get('train', 'N/A')}")
         print(f"   Test: {data_files.get('test', 'N/A')}")
-        target_col = "target"
+        target_col = "target"  # Default
         if data_files.get("sample_submission"):
             print(f"   Sample Submission: {data_files['sample_submission']}")
             try:
-
+                # Infer target column from sample submission (usually 2nd column)
                 sample_sub = pd.read_csv(data_files["sample_submission"])
                 if len(sample_sub.columns) >= 2:
                     target_col = sample_sub.columns[1]
@@ -77,7 +77,7 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
             except Exception as e:
                 print(f"   ⚠️ Could not read sample submission to infer target: {e}")
 
-
+        # GENERATE FIXED FOLDS (Consistent CV)
         if data_files.get("train"):
             try:
                 from .utils.cross_validation import generate_folds
@@ -104,7 +104,7 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
         }
 
     except RuntimeError as e:
-
+        # Authentication error
         error_msg = str(e)
         print("\n❌ Kaggle API Authentication Failed")
         print(f"   {error_msg}")
@@ -119,7 +119,7 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
         }
 
     except Exception as e:
-
+        # Download error
         error_msg = str(e)
         print("\n❌ Data Download Failed")
         print(f"   {error_msg}")
@@ -182,26 +182,26 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
     best_score = state.get("best_score", 0.0)
     target_percentile = state.get("target_percentile", 20.0)
 
-
+    # Increment iteration
     new_iteration = current_iteration + 1
 
     print(f"\nIteration: {new_iteration}/{max_iterations}")
     print(f"   Best Score: {best_score:.4f}")
     print(f"   Target: Top {target_percentile}%")
 
-
+    # Check if we should continue
     should_continue = new_iteration < max_iterations
 
-
-
-
+    # Check if goal achieved
+    # Note: In real scenario, would check actual percentile
+    # For now, continue until max iterations
 
     termination_reason = None
     if not should_continue:
         termination_reason = "max_iterations_reached"
 
-
-
+    # Reset component index for refinement iterations (iteration > 1)
+    # This ensures new components from refined plan are implemented
     updates = {
         "current_iteration": new_iteration,
         "should_continue": should_continue,
@@ -209,7 +209,7 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
         "last_updated": datetime.now(),
     }
 
-
+    # If this is a refinement iteration (> 1), reset component index
     if new_iteration > 1:
         print("   🔄 Starting refinement iteration - resetting component index")
         updates["current_component_index"] = 0
@@ -232,11 +232,11 @@ def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
     print("=" * 60)
 
     current_score = state.get("best_score", 0.0)
-    target_score = 0.9238
+    target_score = 0.9238  # Top 20% threshold
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
-
+    # Get submission results if available
     submissions = state.get("submissions", [])
     public_score = None
     if submissions:
@@ -244,14 +244,14 @@ def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
         public_score = latest_sub.public_score
         if public_score:
             print(f"\n📊 Public Score: {public_score:.4f}")
-
+            # Use public score if available
             current_score = max(current_score, public_score)
 
     print(f"\nCurrent Score: {current_score:.4f}")
     print(f"Target Score:  {target_score:.4f}")
     print(f"Gap:           {target_score - current_score:.4f}")
 
-
+    # Analyze component performance
     dev_results = state.get("development_results", [])
     successful_components = [r for r in dev_results if r.success]
 
@@ -261,7 +261,7 @@ def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
         else "\n📈 No components tested yet"
     )
 
-
+    # Decision: should we refine?
     needs_refinement = False
     refinement_reason = None
 
@@ -272,10 +272,10 @@ def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
         print(f"\n⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
         needs_refinement = False
     else:
-
+        # Check if we have room for improvement
         improvement_potential = target_score - current_score
 
-        if improvement_potential > 0.001:
+        if improvement_potential > 0.001:  # 0.1% gap
             print(f"\n🔄 Refinement needed (gap: {improvement_potential:.4f})")
             needs_refinement = True
             refinement_reason = "score_below_target"
@@ -291,7 +291,7 @@ def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
     }
 
 
-
+# ==================== Conditional Functions ====================
 
 
 def should_continue_workflow(state: KaggleState) -> Literal["continue", "end"]:
@@ -308,19 +308,19 @@ def should_continue_workflow(state: KaggleState) -> Literal["continue", "end"]:
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
-
+    # End conditions
     if not should_continue:
         return "end"
 
     if current_iteration >= max_iterations:
         return "end"
 
-
+    # Check if we have components to implement
     ablation_plan = state.get("ablation_plan", [])
     current_component_index = state.get("current_component_index", 0)
 
     if current_component_index >= len(ablation_plan):
-
+        # All components implemented, could iterate or end
         return "end"
 
     return "continue"
@@ -341,20 +341,20 @@ def should_retry_component(state: KaggleState) -> Literal["retry", "next"]:
     if not development_results:
         return "next"
 
-
+    # Check last result
     last_result = development_results[-1]
 
     if last_result.success:
         return "next"
 
-
+    # Check retry count
     code_retry_count = state.get("code_retry_count", 0)
-    max_retries = 3
+    max_retries = 3  # Max retries at workflow level
 
     if code_retry_count < max_retries:
         return "retry"
 
-
+    # Max retries reached, move to next component
     return "next"
 
 
@@ -368,10 +368,10 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     Returns:
         "iterate" to continue implementing components, or "end" if done
     """
-
+    # Check for critical errors (e.g., data download failed)
     errors = state.get("errors", [])
     if errors:
-
+        # Check if error is about missing data files
         for error in errors:
             if (
                 "Data download failed" in error
@@ -383,15 +383,15 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     ablation_plan = state.get("ablation_plan", [])
     current_component_index = state.get("current_component_index", 0)
 
-
+    # Check if more components to implement
     if current_component_index < len(ablation_plan):
-
+        # Check if we're stuck on the same component (prevent infinite loop)
         dev_results = state.get("development_results", [])
         if len(dev_results) >= 3:
-
+            # Check if last 3 results all failed on same component
             recent_failures = [r for r in dev_results[-3:] if not r.success]
             if len(recent_failures) == 3:
-
+                # Check if all have same error about data files
                 data_errors = [
                     r
                     for r in recent_failures
@@ -403,7 +403,7 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
 
         return "iterate"
 
-
+    # All components done
     return "end"
 
 
@@ -426,12 +426,12 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     print(f"   Max iterations: {max_iterations}")
     print(f"   Needs refinement: {needs_refinement}")
 
-
+    # Check termination conditions first
     if current_iteration >= max_iterations:
         print("   ➡️  Ending (max iterations reached)")
         return "end"
 
-
+    # Check if goal already achieved
     current_score = state.get("current_performance_score", 0.0)
     target_score = 0.9238
 
@@ -441,7 +441,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         )
         return "end"
 
-
+    # Decide based on refinement flag
     if needs_refinement and current_iteration > 0:
         print(f"   ➡️  Refining (iteration {current_iteration})")
         return "refine"
@@ -450,7 +450,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         return "end"
 
 
-
+# ==================== Workflow Construction ====================
 
 
 def create_workflow() -> StateGraph:
@@ -460,10 +460,10 @@ def create_workflow() -> StateGraph:
     Returns:
         Compiled StateGraph
     """
-
+    # Initialize graph
     workflow = StateGraph(KaggleState)
 
-
+    # Add nodes
     workflow.add_node("data_download", data_download_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
@@ -473,62 +473,62 @@ def create_workflow() -> StateGraph:
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
-    workflow.add_node("meta_evaluator", meta_evaluator_node)
+    workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("reporting", reporting_agent_node)
 
-
-
+    # Define edges
+    # Start → Data Download
     workflow.set_entry_point("data_download")
 
-
+    # Data Download → Domain Detection
     workflow.add_edge("data_download", "domain_detection")
 
-
+    # Domain Detection → Search
     workflow.add_edge("domain_detection", "search")
 
-
+    # Search → Planner
     workflow.add_edge("search", "planner")
 
-
+    # Planner → Developer
     workflow.add_edge("planner", "developer")
 
-
+    # Developer → Conditional (more components or done?)
     workflow.add_conditional_edges(
         "developer",
         route_after_developer,
         {
-            "iterate": "developer",
-            "end": "robustness",
+            "iterate": "developer",  # More components to implement
+            "end": "robustness",  # All components done → validate
         },
     )
 
-
+    # Robustness → Ensemble
     workflow.add_edge("robustness", "ensemble")
 
-
+    # Ensemble → Submission
     workflow.add_edge("ensemble", "submission")
 
-
+    # Submission → Performance Evaluation
     workflow.add_edge("submission", "performance_evaluation")
 
-
+    # Performance Evaluation → Meta-Evaluator (RL analysis)
     workflow.add_edge("performance_evaluation", "meta_evaluator")
 
-
+    # Meta-Evaluator → Iteration Control
     workflow.add_edge("meta_evaluator", "iteration_control")
 
-
+    # Iteration Control → Conditional (refine or done?)
     workflow.add_conditional_edges(
         "iteration_control",
         route_after_iteration_control,
         {
-            "refine": "planner",
-            "end": "reporting",
+            "refine": "planner",  # Start refinement cycle
+            "end": "reporting",  # Goal achieved or max iterations -> Explain
         },
     )
 
-
+    # Reporting → END
     workflow.add_edge("reporting", END)
 
     return workflow
@@ -554,7 +554,7 @@ def compile_workflow(checkpointer=None):
     return compiled
 
 
-
+# ==================== Workflow Execution ====================
 
 
 def run_workflow(
@@ -581,23 +581,23 @@ def run_workflow(
     print(f"KAGGLE AGENTS WORKFLOW: {competition_name}")
     print("=" * 70)
 
-
+    # Create initial state
     state = create_initial_state(competition_name, working_dir)
 
-
+    # Set competition info
     from .core.state import CompetitionInfo
 
     state["competition_info"] = CompetitionInfo(**competition_info)
 
-
+    # Set iteration config
     state["max_iterations"] = max_iterations
 
-
+    # Create workflow
     if use_checkpointing:
         checkpointer = MemorySaver()
         workflow = compile_workflow(checkpointer=checkpointer)
 
-
+        # Run with config for checkpointing
         config = {
             "configurable": {"thread_id": competition_name},
             "recursion_limit": 150,
@@ -624,7 +624,7 @@ def run_workflow(
     print("WORKFLOW COMPLETE")
     print("=" * 70)
 
-
+    # Print summary
     print("\n📊 Summary:")
     print(f"   Iterations: {final_state.get('current_iteration', 0)}")
     print(f"   SOTA Solutions: {len(final_state.get('sota_solutions', []))}")
@@ -633,7 +633,7 @@ def run_workflow(
         f"   Components Implemented: {len(final_state.get('development_results', []))}"
     )
 
-
+    # Success count
     dev_results = final_state.get("development_results", [])
     successful = sum(1 for r in dev_results if r.success)
     if dev_results:
@@ -641,12 +641,12 @@ def run_workflow(
             f"   Success Rate: {successful}/{len(dev_results)} ({successful / len(dev_results) * 100:.0f}%)"
         )
 
-
+    # Validation summary
     validation_score = final_state.get("overall_validation_score")
     if validation_score is not None:
         print(f"   Validation Score: {validation_score:.1%}")
 
-
+    # Submission summary
     submissions = final_state.get("submissions", [])
     if submissions:
         latest_sub = submissions[-1]
@@ -660,7 +660,7 @@ def run_workflow(
     return final_state
 
 
-
+# ==================== Simplified Workflow (for testing) ====================
 
 
 def create_simple_workflow() -> StateGraph:
@@ -672,14 +672,14 @@ def create_simple_workflow() -> StateGraph:
     """
     workflow = StateGraph(KaggleState)
 
-
+    # Add nodes
     workflow.add_node("data_download", data_download_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
 
-
+    # Linear flow
     workflow.set_entry_point("data_download")
     workflow.add_edge("data_download", "domain_detection")
     workflow.add_edge("domain_detection", "search")
@@ -710,14 +710,14 @@ def run_simple_workflow(
     print(f"SIMPLE WORKFLOW: {competition_name}")
     print("=" * 70)
 
-
+    # Create initial state
     state = create_initial_state(competition_name, working_dir)
 
     from .core.state import CompetitionInfo
 
     state["competition_info"] = CompetitionInfo(**competition_info)
 
-
+    # Run workflow
     workflow = create_simple_workflow()
     final_state = workflow.invoke(state)
 

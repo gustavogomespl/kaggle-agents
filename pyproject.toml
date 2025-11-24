@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Multi-agent framework for autonomous Kaggle competitions using LangGraph"
 requires-python = ">=3.10"
 dependencies = [
-
+    # LangGraph & LangChain Core
     "langgraph>=0.6.8",
     "langchain>=0.3.0",
     "langchain-openai>=0.2.0",
@@ -12,49 +12,49 @@ dependencies = [
     "langchain-anthropic>=0.3.0",
     "langchain-google-genai>=0.0.3",
 
-
+    # Prompt Optimization
     "dspy-ai>=2.4.0",
     "textgrad>=0.1.0",
 
-
+    # Vector Database & Embeddings
     "chromadb>=0.4.0",
     "sentence-transformers>=2.2.0",
 
-
+    # Kaggle Integration
     "kaggle>=1.6.0",
     "beautifulsoup4>=4.12.0",
     "lxml>=4.9.0",
 
-
+    # ML Core Libraries
     "pandas>=2.0.0",
     "numpy>=1.24.0",
     "scikit-learn>=1.3.0",
     "scipy>=1.10.0",
 
-
+    # Gradient Boosting
     "xgboost>=2.0.0",
     "lightgbm>=4.0.0",
     "catboost>=1.2.0",
 
-
+    # Hyperparameter Optimization
     "optuna>=3.0.0",
     "optuna-integration>=0.1.0",
 
-
+    # Feature Engineering
     "category-encoders>=2.6.0",
     "feature-engine>=1.6.0",
 
-
+    # Deep Learning (for CV & NLP domains)
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "transformers>=4.30.0",
     "timm>=0.9.0",
 
-
+    # Time Series
     "statsmodels>=0.14.0",
     "prophet>=1.1.0",
 
-
+    # Utilities
     "python-dotenv>=1.0.0",
     "requests>=2.31.0",
     "openai>=1.0.0",

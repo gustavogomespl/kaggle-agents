@@ -35,11 +35,11 @@ class PromptOptimizer:
 
     def _setup_dspy(self) -> None:
         """Configure DSPy with the appropriate language model."""
-
+        # Get safe max_tokens based on model
         model = self.config.llm.model
         max_tokens = self.config.llm.max_tokens
 
-
+        # Configure LM based on provider
         if self.config.llm.provider == "openai":
             lm = dspy.LM(
                 model=f"openai/{self.config.llm.model}",
@@ -48,7 +48,7 @@ class PromptOptimizer:
                 temperature=self.config.llm.temperature,
             )
         elif self.config.llm.provider == "anthropic":
-
+            # DSPy supports Anthropic via LiteLLM
             lm = dspy.LM(
                 model=f"anthropic/{self.config.llm.model}",
                 api_key=os.getenv("ANTHROPIC_API_KEY"),
@@ -56,7 +56,7 @@ class PromptOptimizer:
                 temperature=self.config.llm.temperature,
             )
         elif self.config.llm.provider == "gemini":
-
+            # DSPy supports Google Gemini via LiteLLM
             lm = dspy.LM(
                 model=f"gemini/{self.config.llm.model}",
                 api_key=os.getenv("GOOGLE_API_KEY"),
@@ -66,7 +66,7 @@ class PromptOptimizer:
         else:
             raise ValueError(f"Unsupported LLM provider: {self.config.llm.provider}")
 
-
+        # Configure DSPy
         dspy.settings.configure(lm=lm)
 
         print(
@@ -97,7 +97,7 @@ class PromptOptimizer:
         print(f"\n=' Optimizing prompts for {agent_name}...")
         print(f"   Training examples: {len(trainset)}")
 
-
+        # Choose optimizer based on config
         if self.config.dspy.optimizer == "MIPROv2":
             optimizer = MIPROv2(
                 metric=metric,
@@ -113,7 +113,7 @@ class PromptOptimizer:
         else:
             raise ValueError(f"Unsupported optimizer: {self.config.dspy.optimizer}")
 
-
+        # Compile (optimize) the module
         print(f"   Running {self.config.dspy.optimizer} optimizer...")
         optimized_module = optimizer.compile(
             module,
@@ -121,7 +121,7 @@ class PromptOptimizer:
             num_trials=self.config.dspy.max_iterations,
         )
 
-
+        # Save if path provided
         if save_path is None:
             save_path = (
                 self.config.paths.base_dir
@@ -244,7 +244,7 @@ class TrainingDataCollector:
             "score": score,
         }
 
-
+        # Load existing examples
         examples_file = self.storage_path / f"{agent_name}.json"
         examples = []
 
@@ -252,10 +252,10 @@ class TrainingDataCollector:
             with open(examples_file, "r") as f:
                 examples = json.load(f)
 
-
+        # Add new example
         examples.append(example)
 
-
+        # Save
         with open(examples_file, "w") as f:
             json.dump(examples, f, indent=2, default=str)
 
@@ -286,14 +286,14 @@ class TrainingDataCollector:
         with open(examples_file, "r") as f:
             examples = json.load(f)
 
-
+        # Filter by score
         if min_score is not None:
             examples = [ex for ex in examples if ex.get("score", 0) >= min_score]
 
-
+        # Sort by score (descending)
         examples.sort(key=lambda x: x.get("score", 0), reverse=True)
 
-
+        # Limit count
         if max_examples is not None:
             examples = examples[:max_examples]
 
@@ -328,7 +328,7 @@ class TrainingDataCollector:
         return dspy_examples
 
 
-
+# ==================== Convenience Functions ====================
 
 
 def create_optimizer() -> PromptOptimizer:
