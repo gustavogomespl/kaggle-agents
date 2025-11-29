@@ -1,0 +1,61 @@
+# Pre-commit hooks configuration for Kaggle Agents
+# See https://pre-commit.com for more information
+
+repos:
+  # Ruff - Fast Python linter (replaces flake8, isort, etc.)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.4
+    hooks:
+      # Run the linter
+      - id: ruff
+        args: [--fix]
+
+      # Run the formatter
+      - id: ruff-format
+
+  # Additional hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      # Prevent giant files from being committed
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+
+      # Check for files that would conflict in case-insensitive filesystems
+      - id: check-case-conflict
+
+      # Check for merge conflicts
+      - id: check-merge-conflict
+
+      # Check YAML files are valid
+      - id: check-yaml
+        args: ['--unsafe']  # Allow custom tags
+
+      # Check TOML files are valid
+      - id: check-toml
+
+      # Check JSON files are valid
+      - id: check-json
+
+      # Ensure files end with newline
+      - id: end-of-file-fixer
+
+      # Remove trailing whitespace
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+
+# Configuration
+default_language_version:
+  python: python3.10
+
+# Exclude certain files/directories
+exclude: |
+  (?x)^(
+      competitions/.*|
+      adk_example_inspiration/.*|
+      \.git/.*|
+      \.venv/.*|
+      venv/.*|
+      build/.*|
+      dist/.*
+  )$
