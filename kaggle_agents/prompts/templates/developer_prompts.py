@@ -378,7 +378,7 @@ start_time = time.time()
 step_times = {{}}
 
 def log_step(step_name, step_start):
-    """Log timing for a processing step."""
+    # Log timing for a processing step
     elapsed = time.time() - step_start
     step_times[step_name] = elapsed
     cumulative = time.time() - start_time
@@ -386,7 +386,7 @@ def log_step(step_name, step_start):
     return time.time()
 
 def print_performance_summary():
-    """Print final performance summary."""
+    # Print final performance summary
     print("\\n📊 Performance Summary:")
     for step, duration in step_times.items():
         print(f"  {{step}}: {{duration:.2f}}s")
