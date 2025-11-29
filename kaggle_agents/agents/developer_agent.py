@@ -1477,10 +1477,13 @@ class DeveloperAgent:
         working_dir: Path,
         max_iterations: int = 10,
     ) -> tuple[str, ExecutionResult, bool]:
-        """Debug code iteratively with loop-safety and shorter timeouts."""
+        """Debug code iteratively with loop-safety and configurable timeouts."""
         original_timeout = getattr(self.executor, "timeout", None)
+        # Use configurable debug_timeout (default 600s = 10 min) for Optuna tuning
+        debug_timeout = self.config.ablation.debug_timeout
         if original_timeout is not None:
-            self.executor.timeout = min(original_timeout, 180)
+            self.executor.timeout = min(original_timeout, debug_timeout)
+            print(f"   Debug timeout set to: {self.executor.timeout}s ({self.executor.timeout / 60:.1f} min)")
 
         last_error_sig = None
 

@@ -55,6 +55,50 @@ class CodeExecutor:
         self.config = get_config()
         self.timeout = timeout
 
+    def sanitize_code(self, code: str) -> Tuple[str, List[str]]:
+        """
+        Automatically sanitize code by removing/replacing prohibited patterns.
+
+        Args:
+            code: Python code to sanitize
+
+        Returns:
+            Tuple of (sanitized_code, list_of_fixes_applied)
+        """
+        fixes_applied = []
+
+        # Auto-fix sys.exit() calls
+        if "sys.exit(1)" in code:
+            code = code.replace("sys.exit(1)", 'raise ValueError("Missing required data or configuration")')
+            fixes_applied.append("Replaced sys.exit(1) with ValueError")
+
+        if "sys.exit(0)" in code:
+            code = code.replace("sys.exit(0)", "pass  # Replaced sys.exit(0)")
+            fixes_applied.append("Replaced sys.exit(0) with pass")
+
+        # Generic sys.exit() with variable
+        if "sys.exit(" in code:
+            code = re.sub(r'sys\.exit\([^)]*\)', 'raise RuntimeError("Execution terminated")', code)
+            fixes_applied.append("Replaced remaining sys.exit() calls with RuntimeError")
+
+        # Auto-fix other termination calls
+        if "exit()" in code and "sys.exit" not in code:
+            code = code.replace("exit()", "pass  # Replaced exit()")
+            fixes_applied.append("Replaced exit() with pass")
+
+        if "quit()" in code:
+            code = code.replace("quit()", "pass  # Replaced quit()")
+            fixes_applied.append("Replaced quit() with pass")
+
+        if "os._exit(" in code:
+            code = re.sub(r'os\._exit\([^)]*\)', 'raise RuntimeError("Forced exit")', code)
+            fixes_applied.append("Replaced os._exit() with RuntimeError")
+
+        if fixes_applied:
+            print(f"   🔧 Auto-sanitized code: {', '.join(fixes_applied)}")
+
+        return code, fixes_applied
+
     def validate_code_before_execution(self, code: str) -> Tuple[bool, str]:
         """
         Validates code meets requirements before execution (MLE-STAR pattern).
@@ -70,7 +114,8 @@ class CodeExecutor:
             return False, "Missing required output: 'Final Validation Performance: {score}'"
 
         # Check 2: No prohibited exit() calls (enhanced check)
-        prohibited_calls = ["exit()", "sys.exit(", "quit()", "raise SystemExit", "os._exit("]
+        # Note: These should have been sanitized by sanitize_code() before validation
+        prohibited_calls = ["sys.exit(", "quit()", "raise SystemExit", "os._exit("]
         for call in prohibited_calls:
             if call in code:
                 return False, f"Code contains prohibited termination call: {call}"
@@ -148,6 +193,9 @@ class CodeExecutor:
         Returns:
             ExecutionResult with execution details
         """
+        # AUTO-SANITIZE CODE (remove sys.exit, etc.)
+        code, fixes_applied = self.sanitize_code(code)
+
         # PRE-EXECUTION VALIDATION (MLE-STAR Pattern)
         is_valid, validation_msg = self.validate_code_before_execution(code)
         if not is_valid:
@@ -367,6 +415,37 @@ class CodeExecutor:
 
         return artifacts
 
+    def _filter_optuna_logs(self, output: str) -> str:
+        """
+        Filter out Optuna informational logs that are not errors.
+
+        Optuna logs like "[I 2025-11-24 ...] Trial 0 finished with value: ..."
+        are informational and should not be treated as errors.
+
+        Args:
+            output: stderr or stdout content
+
+        Returns:
+            Filtered output with Optuna info logs removed
+        """
+        # Pattern for Optuna info logs: [I YYYY-MM-DD HH:MM:SS,...]
+        optuna_info_pattern = r'\[I \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+\][^\n]*\n?'
+        filtered = re.sub(optuna_info_pattern, '', output)
+
+        # Also filter Optuna study creation messages
+        study_pattern = r'A new study created in memory with name:[^\n]*\n?'
+        filtered = re.sub(study_pattern, '', filtered)
+
+        # Filter Optuna trial completion messages
+        trial_pattern = r'Trial \d+ finished with value:[^\n]*\n?'
+        filtered = re.sub(trial_pattern, '', filtered)
+
+        # Filter Optuna sampler messages
+        sampler_pattern = r'\[I[^\]]*\].*?(?:Sampler|TPE|CMA|Grid)[^\n]*\n?'
+        filtered = re.sub(sampler_pattern, '', filtered)
+
+        return filtered.strip()
+
     def _parse_errors(self, stderr: str, stdout: str) -> List[str]:
         """
         Parse and categorize errors from output.
@@ -380,11 +459,14 @@ class CodeExecutor:
         """
         errors = []
 
+        # Filter out Optuna informational logs before parsing
+        stderr_filtered = self._filter_optuna_logs(stderr) if stderr else ""
+
         # Check stderr for Python exceptions
-        if stderr:
+        if stderr_filtered:
             # Extract traceback info
-            if "Traceback" in stderr:
-                lines = stderr.split('\n')
+            if "Traceback" in stderr_filtered:
+                lines = stderr_filtered.split('\n')
                 for i, line in enumerate(lines):
                     if line.startswith("Traceback"):
                         # Get the actual error (usually last line)
@@ -403,20 +485,23 @@ class CodeExecutor:
             ]
 
             for pattern, template in error_patterns:
-                match = re.search(pattern, stderr)
+                match = re.search(pattern, stderr_filtered)
                 if match:
                     if "{}" in template:
                         errors.append(template.format(match.group(1)))
                     else:
                         errors.append(template)
 
-            # If no specific error found, add generic stderr
-            if not errors and stderr.strip():
-                errors.append(f"Error: {stderr.strip()[:200]}")
+            # If no specific error found, add generic stderr (but not if only Optuna logs)
+            if not errors and stderr_filtered.strip():
+                # Double-check it's not just leftover Optuna formatting
+                if not re.match(r'^\s*\[.*?\]\s*$', stderr_filtered.strip()):
+                    errors.append(f"Error: {stderr_filtered.strip()[:200]}")
 
-        # Check stdout for warnings
-        if "Warning:" in stdout or "WARNING:" in stdout:
-            warnings = re.findall(r"(Warning:.*|WARNING:.*)", stdout)
+        # Check stdout for warnings (but not Optuna trial info)
+        stdout_filtered = self._filter_optuna_logs(stdout) if stdout else ""
+        if "Warning:" in stdout_filtered or "WARNING:" in stdout_filtered:
+            warnings = re.findall(r"(Warning:.*|WARNING:.*)", stdout_filtered)
             if warnings and len(errors) < 3:  # Limit warnings
                 errors.extend(warnings[:3])
 

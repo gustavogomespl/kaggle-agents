@@ -138,6 +138,60 @@ MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
 - The score must be the cross-validation performance metric
 - Example: print(f"Final Validation Performance: {cv_accuracy:.6f}")
 
+📊 MANDATORY PERFORMANCE LOGGING (CRITICAL FOR DEBUGGING):
+- Print timing for EACH major step using consistent format
+- Format: "⏱️ [STEP_NAME] completed in {time:.2f}s"
+- Track cumulative time from start
+- Example implementation:
+  ```python
+  import time
+  
+  start_time = time.time()
+  step_times = {}
+  
+  def log_step(step_name, start):
+      elapsed = time.time() - start
+      step_times[step_name] = elapsed
+      cumulative = time.time() - start_time
+      print(f"⏱️ [{step_name}] completed in {elapsed:.2f}s (cumulative: {cumulative:.2f}s)")
+      return time.time()
+  
+  # Usage:
+  step_start = time.time()
+  # ... load data ...
+  step_start = log_step("DATA_LOADING", step_start)
+  
+  # ... preprocess ...
+  step_start = log_step("PREPROCESSING", step_start)
+  
+  # ... train model ...
+  step_start = log_step("MODEL_TRAINING", step_start)
+  
+  # At the end, print summary:
+  print("\\n📊 Performance Summary:")
+  for step, duration in step_times.items():
+      print(f"  {step}: {duration:.2f}s")
+  print(f"  TOTAL: {time.time() - start_time:.2f}s")
+  ```
+- REQUIRED steps to log:
+  1. DATA_LOADING - Time to load train/test CSVs
+  2. PREPROCESSING - Time for encoding, imputation, feature engineering
+  3. CV_FOLD_N - Time for each cross-validation fold (N=1,2,3,4,5)
+  4. MODEL_TRAINING - Total training time across all folds
+  5. PREDICTION - Time to make test predictions
+  6. SUBMISSION_SAVE - Time to save submission file
+- For Optuna tuning, log each trial:
+  "⏱️ [OPTUNA_TRIAL_N] score={score:.4f} in {time:.2f}s"
+- Print memory usage after large operations (optional but recommended):
+  ```python
+  import psutil
+  process = psutil.Process()
+  mem_mb = process.memory_info().rss / 1024 / 1024
+  print(f"📈 Memory usage: {mem_mb:.1f} MB")
+  ```
+- Print intermediate scores during CV:
+  "📊 Fold {n}/5: score={fold_score:.4f} (running mean: {mean_score:.4f})"
+
 Your code should:
 - Import all necessary libraries
 - Load data from correct paths
@@ -146,7 +200,7 @@ Your code should:
 - Use cross-validation to estimate performance
 - Make probability predictions (not hard predictions)
 - Save outputs/models to correct locations
-- Print execution time and key metrics
+- Print execution time and key metrics with structured logging
 - Be a complete, executable single-file Python program
 """
 
@@ -308,17 +362,46 @@ from sklearn.model_selection import StratifiedKFold, cross_val_score
 import time
 # ... other imports
 
+# Silence Optuna logs (CRITICAL - prevents false error detection)
+try:
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+except ImportError:
+    pass
+
 # Configuration
 RANDOM_SEED = 42
 np.random.seed(RANDOM_SEED)
 
+# ========== PERFORMANCE LOGGING SETUP ==========
 start_time = time.time()
+step_times = {{}}
+
+def log_step(step_name, step_start):
+    """Log timing for a processing step."""
+    elapsed = time.time() - step_start
+    step_times[step_name] = elapsed
+    cumulative = time.time() - start_time
+    print(f"⏱️ [{{step_name}}] completed in {{elapsed:.2f}}s (cumulative: {{cumulative:.2f}}s)")
+    return time.time()
+
+def print_performance_summary():
+    """Print final performance summary."""
+    print("\\n📊 Performance Summary:")
+    for step, duration in step_times.items():
+        print(f"  {{step}}: {{duration:.2f}}s")
+    print(f"  TOTAL: {{time.time() - start_time:.2f}}s")
+# ================================================
+
+step_start = time.time()
 
 # Load data
 print("Loading data...")
 train_df = pd.read_csv('{train_data_path}')
 test_df = pd.read_csv('{test_data_path}')
 sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+step_start = log_step("DATA_LOADING", step_start)
+
 print(f"Train shape: {{train_df.shape}}, Test shape: {{test_df.shape}}")
 print(f"Train columns: {{train_df.columns.tolist()}}")
 print("Train dtypes:")
@@ -452,8 +535,12 @@ skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
 oof_predictions = np.zeros(len(X_train))
 cv_scores = []
 
+step_start = log_step("PREPROCESSING", step_start)
+
 print("\\nTraining with 5-fold cross-validation...")
+cv_start = time.time()
 for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
+    fold_start = time.time()
     print(f"  Fold {{fold}}/5...")
     X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
     y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
@@ -469,8 +556,13 @@ for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
     from sklearn.metrics import roc_auc_score
     fold_score = roc_auc_score(y_val, val_preds)
     cv_scores.append(fold_score)
-    print(f"    Fold {{fold}} score: {{fold_score:.4f}}")
+    fold_time = time.time() - fold_start
+    running_mean = np.mean(cv_scores)
+    print(f"    📊 Fold {{fold}}/5: score={{fold_score:.4f}} (running mean: {{running_mean:.4f}}) in {{fold_time:.2f}}s")
+    step_times[f"CV_FOLD_{{fold}}"] = fold_time
 
+step_times["MODEL_TRAINING"] = time.time() - cv_start
+print(f"⏱️ [MODEL_TRAINING] completed in {{step_times['MODEL_TRAINING']:.2f}}s")
 print(f"\\nCV Score (ROC-AUC): {{np.mean(cv_scores):.4f}} (+/- {{np.std(cv_scores):.4f}})")
 
 # CRITICAL: Save OOF predictions for stacking ensemble
@@ -479,8 +571,10 @@ np.save(oof_path, oof_predictions)
 print(f"✓ OOF predictions saved to: {{oof_path}}")
 
 # Make predictions (MUST use predict_proba for probabilities)
+step_start = time.time()
 predictions = model.predict_proba(X_test)[:, 1]  # Binary classification
 predictions = np.clip(predictions, 0, 1)
+step_start = log_step("PREDICTION", step_start)
 print(f"Prediction distribution: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
 
 # Save outputs
@@ -499,11 +593,16 @@ print(f"✓ Validation passed: columns={{submission.columns.tolist()}}, shape={{
 print("Submission head:")
 print(submission.head())
 print(f"Prediction stats: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
+step_start = time.time()
 submission.to_csv('{submission_path}', index=False)
+log_step("SUBMISSION_SAVE", step_start)
 print(f"✅ Submission saved: {{len(submission)}} rows to {{'{submission_path}'}}")
 
-elapsed_time = time.time() - start_time
-print(f"⏱️  Execution time: {{elapsed_time:.2f}}s")
+# Print performance summary
+print_performance_summary()
+
+# MANDATORY: Final validation performance output
+print(f"Final Validation Performance: {{np.mean(cv_scores):.6f}}")
 print("✅ Complete!")
 ```
 

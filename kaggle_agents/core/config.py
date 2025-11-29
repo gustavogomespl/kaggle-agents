@@ -52,7 +52,9 @@ class AblationConfig:
     impact_threshold: float = 0.01  # minimum impact to consider (1%)
     parallel_testing: bool = False  # test components in parallel
     # Default timeout per component (seconds). Increased to 2700s (45 minutes) to avoid premature failures on heavy training.
-    testing_timeout: int = 2700
+    testing_timeout: int = field(default_factory=lambda: int(os.getenv("TESTING_TIMEOUT", "3000")))
+    # Debug mode timeout (seconds). Default 600s (10 min) for Optuna tuning during debug iterations.
+    debug_timeout: int = field(default_factory=lambda: int(os.getenv("DEBUG_TIMEOUT", "600")))
     optuna_trials: int = 5  # default number of trials for hyperparameter tuning
     enable_code_preview: bool = True  # show code before execution
     save_generated_code: bool = True  # save generated code to files
