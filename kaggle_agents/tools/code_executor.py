@@ -9,13 +9,13 @@ This module provides sandboxed Python code execution with:
 - Resource monitoring
 """
 
-import sys
-import subprocess
-import time
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-from dataclasses import dataclass
 import re
+import subprocess
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 from ..core.config import get_config
 
@@ -29,8 +29,8 @@ class ExecutionResult:
     stderr: str
     execution_time: float
     exit_code: int
-    artifacts_created: List[str]
-    errors: List[str]
+    artifacts_created: list[str]
+    errors: list[str]
 
 
 class CodeExecutor:
@@ -55,7 +55,7 @@ class CodeExecutor:
         self.config = get_config()
         self.timeout = timeout
 
-    def sanitize_code(self, code: str) -> Tuple[str, List[str]]:
+    def sanitize_code(self, code: str) -> tuple[str, list[str]]:
         """
         Automatically sanitize code by removing/replacing prohibited patterns.
 
@@ -99,7 +99,7 @@ class CodeExecutor:
 
         return code, fixes_applied
 
-    def validate_code_before_execution(self, code: str) -> Tuple[bool, str]:
+    def validate_code_before_execution(self, code: str) -> tuple[bool, str]:
         """
         Validates code meets requirements before execution (MLE-STAR pattern).
 
@@ -148,13 +148,13 @@ class CodeExecutor:
             "CatBoost" in code
         )
 
-        if not has_categorical_check and "LGBMClassifier" in code or "XGBClassifier" in code:
+        if (not has_categorical_check and "LGBMClassifier" in code) or "XGBClassifier" in code:
             # This is just a warning, not a failure
             print("   ⚠️  Warning: LightGBM/XGBoost code without categorical encoding detected")
 
         return True, "Validation passed"
 
-    def extract_performance_metric(self, stdout: str) -> Optional[float]:
+    def extract_performance_metric(self, stdout: str) -> float | None:
         """
         Extracts validation performance score from code output (MLE-STAR pattern).
 
@@ -180,7 +180,7 @@ class CodeExecutor:
         self,
         code: str,
         working_dir: Path | str,
-        expected_artifacts: Optional[List[str]] = None,
+        expected_artifacts: list[str] | None = None,
     ) -> ExecutionResult:
         """
         Execute Python code in a subprocess.
@@ -194,7 +194,7 @@ class CodeExecutor:
             ExecutionResult with execution details
         """
         # AUTO-SANITIZE CODE (remove sys.exit, etc.)
-        code, fixes_applied = self.sanitize_code(code)
+        code, _fixes_applied = self.sanitize_code(code)
 
         # PRE-EXECUTION VALIDATION (MLE-STAR Pattern)
         is_valid, validation_msg = self.validate_code_before_execution(code)
@@ -334,7 +334,7 @@ class CodeExecutor:
                 execution_time=0.0,
                 exit_code=-1,
                 artifacts_created=[],
-                errors=[f"Execution error: {str(e)}"],
+                errors=[f"Execution error: {e!s}"],
             )
 
         finally:
@@ -347,8 +347,8 @@ class CodeExecutor:
         code: str,
         working_dir: Path | str,
         max_retries: int = 3,
-        expected_artifacts: Optional[List[str]] = None,
-    ) -> Tuple[ExecutionResult, int]:
+        expected_artifacts: list[str] | None = None,
+    ) -> tuple[ExecutionResult, int]:
         """
         Execute code with automatic retry on failure.
 
@@ -374,7 +374,7 @@ class CodeExecutor:
 
         return result, max_retries
 
-    def validate_syntax(self, code: str) -> Tuple[bool, Optional[str]]:
+    def validate_syntax(self, code: str) -> tuple[bool, str | None]:
         """
         Validate Python syntax without executing.
 
@@ -391,7 +391,7 @@ class CodeExecutor:
             error_msg = f"Syntax error at line {e.lineno}: {e.msg}"
             return False, error_msg
 
-    def _get_artifacts(self, directory: Path) -> List[str]:
+    def _get_artifacts(self, directory: Path) -> list[str]:
         """
         Get list of files in directory (relative paths).
 
@@ -446,7 +446,7 @@ class CodeExecutor:
 
         return filtered.strip()
 
-    def _parse_errors(self, stderr: str, stdout: str) -> List[str]:
+    def _parse_errors(self, stderr: str, stdout: str) -> list[str]:
         """
         Parse and categorize errors from output.
 
@@ -467,7 +467,7 @@ class CodeExecutor:
             # Extract traceback info
             if "Traceback" in stderr_filtered:
                 lines = stderr_filtered.split('\n')
-                for i, line in enumerate(lines):
+                for _i, line in enumerate(lines):
                     if line.startswith("Traceback"):
                         # Get the actual error (usually last line)
                         error_line = lines[-2] if len(lines) > 1 else line
@@ -523,7 +523,7 @@ class ArtifactValidator:
         """Initialize artifact validator."""
         pass
 
-    def validate_model_artifacts(self, working_dir: Path | str) -> Dict[str, Any]:
+    def validate_model_artifacts(self, working_dir: Path | str) -> dict[str, Any]:
         """
         Validate that model artifacts were created correctly.
 
@@ -561,8 +561,8 @@ class ArtifactValidator:
     def validate_submission_artifact(
         self,
         working_dir: Path | str,
-        expected_columns: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        expected_columns: list[str] | None = None,
+    ) -> dict[str, Any]:
         """
         Validate submission file.
 
@@ -620,7 +620,7 @@ class ArtifactValidator:
             results["valid"] = True
 
         except Exception as e:
-            results["issues"].append(f"Error reading submission: {str(e)}")
+            results["issues"].append(f"Error reading submission: {e!s}")
 
         return results
 
@@ -647,7 +647,7 @@ def execute_code(
     return executor.execute(code, working_dir)
 
 
-def validate_code_syntax(code: str) -> Tuple[bool, Optional[str]]:
+def validate_code_syntax(code: str) -> tuple[bool, str | None]:
     """
     Convenience function to validate syntax.
 

@@ -6,10 +6,10 @@ the LangGraph workflow, containing all data needed for autonomous
 Kaggle competition solving.
 """
 
-from typing import TypedDict, Annotated, Literal, Any, Optional
-from operator import add
 from dataclasses import dataclass, field
 from datetime import datetime
+from operator import add
+from typing import Annotated, Any, Literal, TypedDict
 
 
 # ==================== Domain Types ====================
@@ -25,10 +25,10 @@ class CompetitionInfo:
     description: str
     evaluation_metric: str
     problem_type: str  # classification, regression, ranking, etc.
-    domain: Optional[DomainType] = None
+    domain: DomainType | None = None
     data_files: list[str] = field(default_factory=list)
     submission_format: dict[str, Any] = field(default_factory=dict)
-    deadline: Optional[datetime] = None
+    deadline: datetime | None = None
 
 
 @dataclass
@@ -43,7 +43,7 @@ class SOTASolution:
     strategies: list[str] = field(default_factory=list)
     models_used: list[str] = field(default_factory=list)
     feature_engineering: list[str] = field(default_factory=list)
-    ensemble_approach: Optional[str] = None
+    ensemble_approach: str | None = None
 
 
 @dataclass
@@ -55,7 +55,7 @@ class AblationComponent:
     code: str
     estimated_impact: float = 0.0
     tested: bool = False
-    actual_impact: Optional[float] = None
+    actual_impact: float | None = None
 
 
 @dataclass
@@ -87,11 +87,11 @@ class ValidationResult:
 class SubmissionResult:
     """Result from Kaggle submission."""
 
-    submission_id: Optional[str]
-    public_score: Optional[float]
-    private_score: Optional[float] = None
-    percentile: Optional[float] = None
-    cv_score: Optional[float] = None
+    submission_id: str | None
+    public_score: float | None
+    private_score: float | None = None
+    percentile: float | None = None
+    cv_score: float | None = None
     submitted_at: datetime = field(default_factory=datetime.now)
 
 
@@ -121,11 +121,11 @@ class KaggleState(TypedDict):
     # Competition Context
     competition_info: CompetitionInfo
     working_directory: str
-    current_train_path: Optional[str]
-    current_test_path: Optional[str]
+    current_train_path: str | None
+    current_test_path: str | None
 
     # Domain Detection
-    domain_detected: Optional[DomainType]
+    domain_detected: DomainType | None
     domain_confidence: float
 
     # Search Phase
@@ -148,22 +148,22 @@ class KaggleState(TypedDict):
     critical_issues: Annotated[list[str], add]
 
     # Ensemble Phase
-    ensemble_strategy: Optional[str]
+    ensemble_strategy: str | None
     ensemble_weights: dict[str, float]
 
     # Submission Phase
     submissions: Annotated[list[SubmissionResult], add]
     best_score: float
     target_percentile: float  # goal: 20th percentile (top 20%)
-    best_single_model_score: Optional[float]
-    best_single_model_name: Optional[str]
+    best_single_model_score: float | None
+    best_single_model_name: str | None
 
     # Iteration Control
     current_iteration: int
     max_iterations: int
     should_continue: bool
     needs_refinement: bool
-    termination_reason: Optional[str]
+    termination_reason: str | None
 
     # Memory & Learning
     iteration_memory: Annotated[list[IterationMemory], add]
@@ -190,13 +190,13 @@ def merge_dict(existing: dict, new: dict) -> dict:
     return {**existing, **new}
 
 
-def merge_competition_info(existing: Optional[CompetitionInfo], new: CompetitionInfo) -> CompetitionInfo:
+def merge_competition_info(existing: CompetitionInfo | None, new: CompetitionInfo) -> CompetitionInfo:
     """Merge competition info, preferring new values when provided."""
     if existing is None:
         return new
 
     # Update existing with new non-None values
-    updated = CompetitionInfo(
+    return CompetitionInfo(
         name=new.name if new.name else existing.name,
         description=new.description if new.description else existing.description,
         evaluation_metric=new.evaluation_metric if new.evaluation_metric else existing.evaluation_metric,
@@ -206,7 +206,6 @@ def merge_competition_info(existing: Optional[CompetitionInfo], new: Competition
         submission_format=new.submission_format if new.submission_format else existing.submission_format,
         deadline=new.deadline if new.deadline is not None else existing.deadline,
     )
-    return updated
 
 
 # ==================== State Initialization ====================

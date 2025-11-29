@@ -5,14 +5,14 @@ This agent implements the "Search-First Strategy" from Google ADK,
 retrieving and analyzing state-of-the-art solutions before generating code.
 """
 
-from typing import List, Dict, Any
 from datetime import datetime
+from typing import Any
 
-from langchain_openai import ChatOpenAI
 from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
 
-from ..core.state import KaggleState, SOTASolution
 from ..core.config import get_config
+from ..core.state import KaggleState, SOTASolution
 from ..tools.kaggle_search import search_competition_notebooks
 
 
@@ -50,7 +50,7 @@ class SearchAgent:
                 temperature=self.config.llm.temperature,
             )
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute the search agent.
 
@@ -65,7 +65,7 @@ class SearchAgent:
         print("="*60)
 
         competition_name = state["competition_info"].name
-        domain = state.get("domain_detected", "tabular")
+        state.get("domain_detected", "tabular")
 
         # 1. Generate search queries
         search_queries = self._generate_search_queries(state)
@@ -97,7 +97,7 @@ class SearchAgent:
             "last_updated": datetime.now(),
         }
 
-    def _generate_search_queries(self, state: KaggleState) -> List[str]:
+    def _generate_search_queries(self, state: KaggleState) -> list[str]:
         """
         Generate search queries based on competition info and domain.
 
@@ -146,9 +146,9 @@ class SearchAgent:
 
     def _rank_solutions(
         self,
-        solutions: List[SOTASolution],
+        solutions: list[SOTASolution],
         state: KaggleState,
-    ) -> List[SOTASolution]:
+    ) -> list[SOTASolution]:
         """
         Rank solutions by relevance and quality.
 
@@ -195,9 +195,9 @@ class SearchAgent:
 
     def _enhance_with_llm_analysis(
         self,
-        solutions: List[SOTASolution],
+        solutions: list[SOTASolution],
         state: KaggleState,
-    ) -> List[SOTASolution]:
+    ) -> list[SOTASolution]:
         """
         Use LLM to analyze and enhance solution descriptions.
 
@@ -215,7 +215,7 @@ class SearchAgent:
         # In future, can use LLM to summarize code snippets into strategies
         return solutions
 
-    def _print_summary(self, solutions: List[SOTASolution]) -> None:
+    def _print_summary(self, solutions: list[SOTASolution]) -> None:
         """
         Print a summary of found solutions.
 
@@ -242,7 +242,7 @@ class SearchAgent:
 
 # ==================== LangGraph Node Function ====================
 
-def search_agent_node(state: KaggleState) -> Dict[str, Any]:
+def search_agent_node(state: KaggleState) -> dict[str, Any]:
     """
     LangGraph node function for the search agent.
 

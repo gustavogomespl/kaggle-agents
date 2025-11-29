@@ -1,7 +1,8 @@
 """Data collection agent for Kaggle competitions."""
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
 from ..tools.kaggle_api import KaggleAPIClient
 from ..utils.config import Config
 from ..utils.state import KaggleState
@@ -58,11 +59,8 @@ class DataCollectorAgent:
                     train_df = pd.read_csv(state["train_data_path"], nrows=1)
                     # Heuristic: last column or column with 'target' in name
                     target_candidates = [c for c in train_df.columns if c.lower() in ['target', 'label', 'class', 'loan_paid_back', 'survived', 'price', 'sales']]
-                    if target_candidates:
-                        target_col = target_candidates[0]
-                    else:
-                        target_col = train_df.columns[-1]
-                
+                    target_col = target_candidates[0] if target_candidates else train_df.columns[-1]
+
                 print(f"Data Collector: Detected target column: '{target_col}'")
                 state["target_col"] = target_col
             except Exception as e:
@@ -95,10 +93,10 @@ What are the key characteristics of this competition and what should we focus on
             print(f"Data Collector: Downloaded data to {Config.DATA_DIR}/{competition}")
 
         except Exception as e:
-            error_msg = f"Data collection failed: {str(e)}"
+            error_msg = f"Data collection failed: {e!s}"
             print(f"Data Collector ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": errors + [error_msg]}
+            return {"errors": [*errors, error_msg]}
 
         return state

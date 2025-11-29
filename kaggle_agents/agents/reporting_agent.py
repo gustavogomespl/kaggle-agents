@@ -5,13 +5,15 @@ This agent analyzes the final state of the workflow and generates a comprehensiv
 report (report.md) with insights, feature importance, and model performance.
 """
 
-from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
-from ..core.state import KaggleState
-from ..core.config import get_config, get_llm_for_role
 from langchain_core.messages import HumanMessage, SystemMessage
+
+from ..core.config import get_config, get_llm_for_role
+from ..core.state import KaggleState
+
 
 class ReportingAgent:
     """
@@ -22,7 +24,7 @@ class ReportingAgent:
         self.config = get_config()
         self.llm = get_llm_for_role(role="developer") # Use developer role for now
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Generate the report.
         """
@@ -56,7 +58,7 @@ class ReportingAgent:
         best_score = state.get("best_score", 0.0)
         submissions = state.get("submissions", [])
         dev_results = state.get("development_results", [])
-        
+
         # Get best submission based on metric direction
         best_sub = None
         is_minimization = False
@@ -94,7 +96,7 @@ Best Percentile: {best_sub.percentile if best_sub else 'N/A'}%
 
     def _generate_report_content(self, context: str) -> str:
         """Generate report markdown using LLM."""
-        
+
         system_prompt = """You are an expert Data Science Communicator.
 Your goal is to write a clear, insightful, and educational report about the machine learning solution developed.
 The report should be in Markdown format.
@@ -126,6 +128,6 @@ Structure:
         response = self.llm.invoke(messages)
         return response.content
 
-def reporting_agent_node(state: KaggleState) -> Dict[str, Any]:
+def reporting_agent_node(state: KaggleState) -> dict[str, Any]:
     agent = ReportingAgent()
     return agent(state)

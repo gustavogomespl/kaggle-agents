@@ -1,7 +1,8 @@
 """Leaderboard monitoring agent."""
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
 from ..tools.kaggle_api import KaggleAPIClient
 from ..utils.config import Config
 from ..utils.state import KaggleState
@@ -159,11 +160,10 @@ Analyze performance and recommend next steps."""
                 print(f"SUCCESS: Achieved Top {percentile:.1f}%")
             elif iteration + 1 >= max_iterations:
                 print(f"Reached max iterations. Final rank: Top {percentile:.1f}%")
+            elif overfitting_detected:
+                print("Iterating to address overfitting and improve to top 20%")
             else:
-                if overfitting_detected:
-                    print("Iterating to address overfitting and improve to top 20%")
-                else:
-                    print(f"Iterating to improve from Top {percentile:.1f}% to top 20%")
+                print(f"Iterating to improve from Top {percentile:.1f}% to top 20%")
 
             return {
                 "messages": [HumanMessage(
@@ -179,8 +179,8 @@ Analyze performance and recommend next steps."""
             }
 
         except Exception as e:
-            error_msg = f"Leaderboard monitoring failed: {str(e)}"
+            error_msg = f"Leaderboard monitoring failed: {e!s}"
             print(f"Leaderboard Monitor ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": errors + [error_msg]}
+            return {"errors": [*errors, error_msg]}

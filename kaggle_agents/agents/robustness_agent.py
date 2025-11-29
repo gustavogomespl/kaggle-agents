@@ -6,14 +6,14 @@ ensuring code quality and preventing common ML mistakes.
 """
 
 import re
-from typing import Dict, Any
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
-from ..core.state import KaggleState, ValidationResult
 from ..core.config import get_config
+from ..core.state import KaggleState, ValidationResult
 
 
 class RobustnessAgent:
@@ -31,7 +31,7 @@ class RobustnessAgent:
         """Initialize the robustness agent."""
         self.config = get_config()
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute robustness validation.
 
@@ -51,7 +51,7 @@ class RobustnessAgent:
         if not dev_results:
             print("  No development results to validate")
             return {}
-            
+
         # Initialize LLM (supports OpenAI and Anthropic)
         from ..core.config import get_llm
         self.llm = get_llm()
@@ -165,8 +165,9 @@ class RobustnessAgent:
         code = dev_result.code
 
         # LLM-based Leakage Check (Enhanced with ADK-style structured output)
-        from langchain_core.messages import HumanMessage
         import json
+
+        from langchain_core.messages import HumanMessage
 
         prompt = f"""You are a data science expert reviewing code for data leakage.
 
@@ -387,7 +388,7 @@ IMPORTANT:
                     score *= 0.7
 
         except Exception as e:
-            issues.append(f"Error reading submission: {str(e)}")
+            issues.append(f"Error reading submission: {e!s}")
             score = 0.0
 
         passed = score >= 0.7
@@ -418,7 +419,7 @@ IMPORTANT:
 
 # ==================== LangGraph Node Function ====================
 
-def robustness_agent_node(state: KaggleState) -> Dict[str, Any]:
+def robustness_agent_node(state: KaggleState) -> dict[str, Any]:
     """
     LangGraph node function for the robustness agent.
 

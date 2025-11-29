@@ -1,13 +1,14 @@
 """Code executor with sandboxing and error handling."""
 
-import sys
 import io
-import traceback
-import subprocess
-from typing import Dict, Any, Optional, Tuple
-from pathlib import Path
-from contextlib import redirect_stdout, redirect_stderr
 import logging
+import subprocess
+import sys
+import traceback
+from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
+from typing import Any
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,7 @@ class ExecutionError(Exception):
 class CodeExecutor:
     """Execute Python code with error capture and output validation."""
 
-    def __init__(self, working_dir: Optional[Path] = None):
+    def __init__(self, working_dir: Path | None = None):
         """Initialize code executor.
 
         Args:
@@ -45,7 +46,7 @@ class CodeExecutor:
         code: str,
         timeout: int = 300,
         capture_output: bool = True
-    ) -> Tuple[bool, str, str]:
+    ) -> tuple[bool, str, str]:
         """Execute Python code and capture results.
 
         Args:
@@ -66,7 +67,7 @@ class CodeExecutor:
             # Use just the filename since cwd is already set to working_dir
             result = subprocess.run(
                 [sys.executable, code_file.name],
-                cwd=str(self.working_dir),
+                check=False, cwd=str(self.working_dir),
                 capture_output=capture_output,
                 text=True,
                 timeout=timeout
@@ -89,7 +90,7 @@ class CodeExecutor:
             return False, "", error_msg
 
         except Exception as e:
-            error_msg = f"Execution error: {str(e)}\n{traceback.format_exc()}"
+            error_msg = f"Execution error: {e!s}\n{traceback.format_exc()}"
             logger.error(error_msg)
             return False, "", error_msg
 
@@ -101,9 +102,9 @@ class CodeExecutor:
     def execute_in_memory(
         self,
         code: str,
-        globals_dict: Optional[Dict[str, Any]] = None,
-        locals_dict: Optional[Dict[str, Any]] = None
-    ) -> Tuple[bool, str, str, Dict[str, Any]]:
+        globals_dict: dict[str, Any] | None = None,
+        locals_dict: dict[str, Any] | None = None
+    ) -> tuple[bool, str, str, dict[str, Any]]:
         """Execute code in memory without subprocess (faster but less isolated).
 
         Args:
@@ -135,7 +136,7 @@ class CodeExecutor:
             return True, stdout, stderr, locals_dict
 
         except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
+            f"{type(e).__name__}: {e!s}"
             traceback_str = traceback.format_exc()
             stderr = stderr_capture.getvalue() + "\n" + traceback_str
 
@@ -145,8 +146,8 @@ class CodeExecutor:
     def execute_notebook_cell(
         self,
         code: str,
-        notebook_globals: Dict[str, Any]
-    ) -> Tuple[bool, str, str]:
+        notebook_globals: dict[str, Any]
+    ) -> tuple[bool, str, str]:
         """Execute code as if it were a notebook cell (maintains state).
 
         Args:
@@ -170,7 +171,7 @@ class CodeExecutor:
             return True, stdout, stderr
 
         except Exception as e:
-            error_msg = f"{type(e).__name__}: {str(e)}"
+            f"{type(e).__name__}: {e!s}"
             traceback_str = traceback.format_exc()
             stderr = stderr_capture.getvalue() + "\n" + traceback_str
 
@@ -180,9 +181,9 @@ class CodeExecutor:
     def run_python_file(
         self,
         filepath: Path,
-        args: Optional[list] = None,
+        args: list | None = None,
         timeout: int = 300
-    ) -> Tuple[bool, str, str]:
+    ) -> tuple[bool, str, str]:
         """Run a Python file with optional arguments.
 
         Args:
@@ -203,7 +204,7 @@ class CodeExecutor:
         try:
             result = subprocess.run(
                 cmd,
-                cwd=str(filepath.parent),
+                check=False, cwd=str(filepath.parent),
                 capture_output=True,
                 text=True,
                 timeout=timeout
@@ -218,11 +219,11 @@ class CodeExecutor:
             return False, "", error_msg
 
         except Exception as e:
-            error_msg = f"Execution error: {str(e)}"
+            error_msg = f"Execution error: {e!s}"
             logger.error(error_msg)
             return False, "", error_msg
 
-    def validate_code_syntax(self, code: str) -> Tuple[bool, str]:
+    def validate_code_syntax(self, code: str) -> tuple[bool, str]:
         """Validate Python code syntax without executing.
 
         Args:
@@ -238,10 +239,10 @@ class CodeExecutor:
             error_msg = f"Syntax error at line {e.lineno}: {e.msg}"
             return False, error_msg
         except Exception as e:
-            error_msg = f"Validation error: {str(e)}"
+            error_msg = f"Validation error: {e!s}"
             return False, error_msg
 
-    def parse_error_message(self, stderr: str) -> Dict[str, Any]:
+    def parse_error_message(self, stderr: str) -> dict[str, Any]:
         """Parse error message to extract useful information.
 
         Args:

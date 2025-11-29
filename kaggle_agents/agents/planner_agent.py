@@ -6,21 +6,22 @@ identifying high-impact components for systematic improvement.
 """
 
 import json
-from typing import List, Dict, Any
 from datetime import datetime
+from typing import Any
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
-from ..core.state import KaggleState, AblationComponent, DevelopmentResult, SOTASolution
+
 from ..core.config import get_config, get_llm_for_role
+from ..core.state import AblationComponent, DevelopmentResult, KaggleState, SOTASolution
+from ..optimization import create_optimizer
 from ..prompts.templates.planner_prompts import (
-    PLANNER_SYSTEM_PROMPT,
-    CREATE_ABLATION_PLAN_PROMPT,
-    REFINE_ABLATION_PLAN_PROMPT,
     ANALYZE_SOTA_PROMPT,
+    CREATE_ABLATION_PLAN_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+    REFINE_ABLATION_PLAN_PROMPT,
     get_domain_guidance,
 )
-from ..optimization import create_optimizer
 
 
 # ==================== DSPy Signatures ====================
@@ -60,13 +61,12 @@ class AblationPlannerModule(dspy.Module):
 
     def forward(self, competition_info, domain, sota_summary, domain_guidance):
         """Generate ablation plan."""
-        result = self.generate_plan(
+        return self.generate_plan(
             competition_info=competition_info,
             domain=domain,
             sota_summary=sota_summary,
             domain_guidance=domain_guidance,
         )
-        return result
 
 
 class SOTAAnalyzerModule(dspy.Module):
@@ -78,8 +78,7 @@ class SOTAAnalyzerModule(dspy.Module):
 
     def forward(self, sota_solutions):
         """Analyze SOTA solutions."""
-        result = self.analyze(sota_solutions=sota_solutions)
-        return result
+        return self.analyze(sota_solutions=sota_solutions)
 
 
 # ==================== Planner Agent ====================
@@ -129,7 +128,7 @@ class PlannerAgent:
                 max_tokens=self.config.llm.max_tokens,
             )
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute the planner agent.
 
@@ -177,7 +176,7 @@ class PlannerAgent:
             "last_updated": datetime.now(),
         }
 
-    def _analyze_sota_solutions(self, state: KaggleState) -> Dict[str, Any]:
+    def _analyze_sota_solutions(self, state: KaggleState) -> dict[str, Any]:
         """
         Analyze SOTA solutions to extract patterns.
 
@@ -317,8 +316,8 @@ class PlannerAgent:
     def _generate_ablation_plan(
         self,
         state: KaggleState,
-        sota_analysis: Dict[str, Any],
-    ) -> List[AblationComponent]:
+        sota_analysis: dict[str, Any],
+    ) -> list[AblationComponent]:
         """
         Generate ablation plan based on competition info and SOTA analysis.
 
@@ -380,7 +379,7 @@ IMPORTANT: Use the curriculum insights above to:
 
 Generate a plan that leverages proven successful strategies and avoids known pitfalls."""
 
-            messages = [
+            [
                 SystemMessage(content=PLANNER_SYSTEM_PROMPT + "\n\n" + domain_guidance),
                 HumanMessage(content=enhanced_prompt),
             ]
@@ -423,8 +422,8 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         return components
 
     def _refine_ablation_plan(
-        self, state: KaggleState, sota_analysis: Dict[str, Any]
-    ) -> List[AblationComponent]:
+        self, state: KaggleState, sota_analysis: dict[str, Any]
+    ) -> list[AblationComponent]:
         """
         Refine the ablation plan based on previous results using RL prompts.
 
@@ -484,13 +483,13 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             if "planner_guidance" in refinement_guidance:
                 guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
 
-            if "priority_fixes" in refinement_guidance and refinement_guidance["priority_fixes"]:
+            if refinement_guidance.get("priority_fixes"):
                 guidance_text += "**Priority Error Fixes:**\n"
                 for error in refinement_guidance["priority_fixes"]:
                     guidance_text += f"- Avoid components that cause: {error}\n"
                 guidance_text += "\n"
 
-            if "success_amplification" in refinement_guidance and refinement_guidance["success_amplification"]:
+            if refinement_guidance.get("success_amplification"):
                 guidance_text += "**Amplify These Successes:**\n"
                 for success in refinement_guidance["success_amplification"]:
                     guidance_text += f"- {success}\n"
@@ -518,7 +517,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 )
             else:
                 # Use LLM with refinement prompt
-                from langchain.schema import SystemMessage, HumanMessage
+                from langchain.schema import HumanMessage, SystemMessage
 
                 messages = [
                     SystemMessage(content="You are a Kaggle Grandmaster expert at refining ML solutions based on test results."),
@@ -538,7 +537,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 plan_data = json.loads(plan_text)
 
         except Exception as e:
-            print(f"  ⚠️  Refinement failed: {str(e)}")
+            print(f"  ⚠️  Refinement failed: {e!s}")
             print("  🔧 Using enhanced fallback with refinement logic")
             plan_data = self._create_refined_fallback_plan(
                 state,
@@ -570,11 +569,11 @@ Generate a plan that leverages proven successful strategies and avoids known pit
     def _create_refined_fallback_plan(
         self,
         state: KaggleState,
-        sota_analysis: Dict[str, Any],
-        test_results: List[Dict],
-        previous_plan: List[AblationComponent],
-        dev_results: List[DevelopmentResult],
-    ) -> List[Dict[str, Any]]:
+        sota_analysis: dict[str, Any],
+        test_results: list[dict],
+        previous_plan: list[AblationComponent],
+        dev_results: list[DevelopmentResult],
+    ) -> list[dict[str, Any]]:
         """
         Create a refined fallback plan based on what worked in previous iteration.
 
@@ -682,7 +681,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 return None
         return None
 
-    def _validate_plan(self, plan: List[AblationComponent]) -> List[AblationComponent]:
+    def _validate_plan(self, plan: list[AblationComponent]) -> list[AblationComponent]:
         """
         Validate and enhance the ablation plan.
 
@@ -763,9 +762,9 @@ Generate a plan that leverages proven successful strategies and avoids known pit
     def _create_fallback_plan(
         self,
         domain: str,
-        sota_analysis: Dict[str, Any],
+        sota_analysis: dict[str, Any],
         curriculum_insights: str = "",
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Create a fallback plan when LLM parsing fails.
 
@@ -841,7 +840,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
 
         return plan
 
-    def _format_sota_solutions(self, solutions: List[SOTASolution]) -> str:
+    def _format_sota_solutions(self, solutions: list[SOTASolution]) -> str:
         """Format SOTA solutions for prompts."""
         formatted = []
         for sol in solutions[:5]:  # Top 5
@@ -854,7 +853,7 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
 """)
         return "\n---\n".join(formatted)
 
-    def _print_summary(self, plan: List[AblationComponent]) -> None:
+    def _print_summary(self, plan: list[AblationComponent]) -> None:
         """Print plan summary."""
         print(f"\n= Ablation Plan Created: {len(plan)} components")
         print("-" * 60)
@@ -870,7 +869,7 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
 
 # ==================== LangGraph Node Function ====================
 
-def planner_agent_node(state: KaggleState) -> Dict[str, Any]:
+def planner_agent_node(state: KaggleState) -> dict[str, Any]:
     """
     LangGraph node function for the planner agent.
 

@@ -7,10 +7,10 @@ This module analyzes Kaggle competitions to automatically detect:
 - Data information (shapes, target column, etc.)
 """
 
-from typing import Dict, Any, Tuple
-from pathlib import Path
 import tempfile
 import zipfile
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from kaggle.api.kaggle_api_extended import KaggleApi
@@ -26,11 +26,11 @@ class CompetitionAnalyzer:
             self.api.authenticate()
         except Exception as e:
             raise RuntimeError(
-                f"Kaggle API authentication failed: {str(e)}\n"
+                f"Kaggle API authentication failed: {e!s}\n"
                 "Ensure KAGGLE_USERNAME and KAGGLE_KEY are set."
             )
 
-    def analyze(self, competition_name: str) -> Dict[str, Any]:
+    def analyze(self, competition_name: str) -> dict[str, Any]:
         """
         Analyze competition and auto-detect configuration.
 
@@ -84,7 +84,7 @@ class CompetitionAnalyzer:
                     )
 
             except Exception as e:
-                print(f"   ⚠️  Sample download failed: {str(e)}")
+                print(f"   ⚠️  Sample download failed: {e!s}")
                 print("   → Using metadata-only inference")
                 problem_type, metric, reasoning = self._infer_from_metadata(
                     competition_info
@@ -102,7 +102,7 @@ class CompetitionAnalyzer:
             "data_info": data_info,
         }
 
-    def _get_competition_info(self, competition_name: str) -> Dict[str, Any]:
+    def _get_competition_info(self, competition_name: str) -> dict[str, Any]:
         """Get competition metadata from Kaggle API."""
         try:
             # Search for competition
@@ -133,11 +133,11 @@ class CompetitionAnalyzer:
             }
 
         except Exception as e:
-            raise Exception(f"Failed to get competition info: {str(e)}")
+            raise Exception(f"Failed to get competition info: {e!s}")
 
     def _analyze_sample_submission(
-        self, filepath: Path, competition_info: Dict[str, Any]
-    ) -> Tuple[str, str, Dict[str, Any]]:
+        self, filepath: Path, competition_info: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any]]:
         """Analyze sample_submission.csv to detect problem type and metric."""
         df = pd.read_csv(filepath)
 
@@ -175,45 +175,41 @@ class CompetitionAnalyzer:
             reasoning["confidence"] = 0.90
 
             # Map metric
-            if "log" in official_metric:
-                metric = "logloss"
+            metric = "logloss" if "log" in official_metric else "accuracy"
+
+        # Regression or many-class classification
+        elif df[target_col].dtype in ["float64", "float32"]:
+            # Regression
+            problem_type = "regression"
+            reasoning["problem_type"] = f"Target is continuous (dtype: {df[target_col].dtype})"
+            reasoning["confidence"] = 0.85
+
+            # Map metric
+            if "rmse" in official_metric or "root mean" in official_metric:
+                metric = "rmse"
+            elif "mae" in official_metric or "absolute" in official_metric:
+                metric = "mae"
+            elif "r2" in official_metric or "r-squared" in official_metric:
+                metric = "r2"
+            elif "mape" in official_metric:
+                metric = "mape"
             else:
-                metric = "accuracy"
+                metric = "rmse"  # Default
 
         else:
-            # Regression or many-class classification
-            if df[target_col].dtype in ["float64", "float32"]:
-                # Regression
-                problem_type = "regression"
-                reasoning["problem_type"] = f"Target is continuous (dtype: {df[target_col].dtype})"
-                reasoning["confidence"] = 0.85
-
-                # Map metric
-                if "rmse" in official_metric or "root mean" in official_metric:
-                    metric = "rmse"
-                elif "mae" in official_metric or "absolute" in official_metric:
-                    metric = "mae"
-                elif "r2" in official_metric or "r-squared" in official_metric:
-                    metric = "r2"
-                elif "mape" in official_metric:
-                    metric = "mape"
-                else:
-                    metric = "rmse"  # Default
-
-            else:
-                # Many-class classification
-                problem_type = "multiclass_classification"
-                reasoning["problem_type"] = f"Target has {unique_values} classes (many-class)"
-                reasoning["confidence"] = 0.75
-                metric = "accuracy"
+            # Many-class classification
+            problem_type = "multiclass_classification"
+            reasoning["problem_type"] = f"Target has {unique_values} classes (many-class)"
+            reasoning["confidence"] = 0.75
+            metric = "accuracy"
 
         reasoning["metric"] = f"Official Kaggle metric: {competition_info.get('evaluationMetric', 'unknown')}"
 
         return problem_type, metric, reasoning
 
     def _infer_from_metadata(
-        self, competition_info: Dict[str, Any]
-    ) -> Tuple[str, str, Dict[str, Any]]:
+        self, competition_info: dict[str, Any]
+    ) -> tuple[str, str, dict[str, Any]]:
         """Infer problem type and metric from competition metadata only."""
         official_metric = competition_info.get("evaluationMetric", "").lower()
         description = competition_info.get("description", "").lower()
@@ -265,7 +261,7 @@ class CompetitionAnalyzer:
 
         return problem_type, metric, reasoning
 
-    def _get_data_info(self, competition_name: str) -> Dict[str, Any]:
+    def _get_data_info(self, competition_name: str) -> dict[str, Any]:
         """Get information about competition data files."""
         try:
             # List data files
@@ -305,7 +301,7 @@ class CompetitionAnalyzer:
 
 
 # Convenience function
-def auto_detect_competition_config(competition_name: str) -> Dict[str, Any]:
+def auto_detect_competition_config(competition_name: str) -> dict[str, Any]:
     """
     Auto-detect competition configuration.
 

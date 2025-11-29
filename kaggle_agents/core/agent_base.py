@@ -1,22 +1,24 @@
 """Base class for all agents with common functionality."""
 
 import json
-import re
 import logging
-from typing import Dict, Any, Tuple, List, Optional
+import re
 from pathlib import Path
+from typing import Any
+
 import pandas as pd
 
-from .api_handler import APIHandler, APISettings
-from .state import EnhancedKaggleState, get_restore_dir, get_dir_name
 from ..prompts.prompt_base import (
     AGENT_ROLE_TEMPLATE,
     PROMPT_DATA_PREVIEW,
-    PROMPT_FEATURE_INFO,
     PROMPT_EACH_EXPERIENCE_WITH_SUGGESTION,
-    PROMPT_REORGANIZE_JSON,
+    PROMPT_FEATURE_INFO,
     PROMPT_REORGANIZE_EXTRACT_TOOLS,
+    PROMPT_REORGANIZE_JSON,
 )
+from .api_handler import APIHandler, APISettings
+from .state import EnhancedKaggleState, get_dir_name, get_restore_dir
+
 
 # LangSmith tracing
 try:
@@ -51,10 +53,10 @@ class Agent:
     def generate(
         self,
         prompt: str,
-        history: Optional[List[Dict[str, str]]] = None,
+        history: list[dict[str, str]] | None = None,
         max_completion_tokens: int = 16000,
-        temperature: Optional[float] = None
-    ) -> Tuple[str, List[Dict[str, str]]]:
+        temperature: float | None = None
+    ) -> tuple[str, list[dict[str, str]]]:
         """Generate response from LLM.
 
         Args:
@@ -69,7 +71,7 @@ class Agent:
         if history is None:
             history = []
 
-        messages = history + [{'role': 'user', 'content': prompt}]
+        messages = [*history, {'role': 'user', 'content': prompt}]
 
         # Use temperature from config if not specified
         if temperature is None:
@@ -130,11 +132,11 @@ class Agent:
                 not_pass_file = restore_dir / f"{dir_name}_not_pass_information.txt"
 
                 if error_file.exists():
-                    with open(error_file, 'r') as f:
+                    with open(error_file) as f:
                         error_message = f.read()
                     experience_with_suggestion += f"\n<ERROR MESSAGE>\n{error_message}\n</ERROR MESSAGE>\n"
                 elif not_pass_file.exists():
-                    with open(not_pass_file, 'r') as f:
+                    with open(not_pass_file) as f:
                         not_pass_info = f.read()
                     experience_with_suggestion += f"\n<NOT PASS INFORMATION>\n{not_pass_info}\n</NOT PASS INFORMATION>\n"
 
@@ -153,7 +155,7 @@ class Agent:
         def read_sample(file_path: Path, num_lines: int) -> str:
             """Read first num_lines from a file."""
             sample_lines = []
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(file_path, encoding='utf-8') as f:
                 for i, line in enumerate(f):
                     if i >= num_lines:
                         break
@@ -226,7 +228,7 @@ class Agent:
 
         return data_preview
 
-    def _parse_json(self, raw_reply: str) -> Dict[str, Any]:
+    def _parse_json(self, raw_reply: str) -> dict[str, Any]:
         """Parse JSON from LLM response with fallback reorganization.
 
         Args:
@@ -235,7 +237,7 @@ class Agent:
         Returns:
             Parsed dictionary
         """
-        def try_json_loads(data: str) -> Optional[Dict[str, Any]]:
+        def try_json_loads(data: str) -> dict[str, Any] | None:
             try:
                 return json.loads(data)
             except json.JSONDecodeError as e:
@@ -303,8 +305,7 @@ class Agent:
             logger.debug("Found generic ``` block")
             content = generic_match.group(1).strip()
             # Remove language identifier if present at the start
-            content = re.sub(r'^[a-z]+\n', '', content)
-            return content
+            return re.sub(r'^[a-z]+\n', '', content)
 
         # If no code blocks, return as-is (LLM might have returned plain text)
         logger.debug(f"No markdown code blocks found. Reply preview: {raw_reply[:200]}...")
@@ -340,8 +341,7 @@ class Agent:
             logger.debug("Found generic ``` block, assuming Python code")
             content = generic_match.group(1).strip()
             # Remove language identifier if present at the start
-            content = re.sub(r'^(python|py)\s*\n', '', content)
-            return content
+            return re.sub(r'^(python|py)\s*\n', '', content)
 
         # Check if raw_reply starts with ``` (malformed markdown)
         if raw_reply.startswith('```'):
@@ -384,7 +384,7 @@ class Agent:
 
         # Read datasets
         before_train_df = pd.read_csv(competition_dir / before_train)
-        before_test_df = pd.read_csv(competition_dir / before_test)
+        pd.read_csv(competition_dir / before_test)
         after_train_df = pd.read_csv(competition_dir / after_train)
         after_test_df = pd.read_csv(competition_dir / after_test)
 
@@ -410,7 +410,7 @@ class Agent:
         )
 
     @traceable(name="Agent_Action", run_type="chain")
-    def action(self, state: EnhancedKaggleState) -> Dict[str, Any]:
+    def action(self, state: EnhancedKaggleState) -> dict[str, Any]:
         """Execute agent action (to be implemented by subclasses).
 
         Args:
@@ -423,7 +423,7 @@ class Agent:
         role_prompt = AGENT_ROLE_TEMPLATE.format(agent_role=self.role)
         return self._execute(state, role_prompt)
 
-    def _execute(self, state: EnhancedKaggleState, role_prompt: str) -> Dict[str, Any]:
+    def _execute(self, state: EnhancedKaggleState, role_prompt: str) -> dict[str, Any]:
         """Execute agent-specific logic (must be implemented by subclasses).
 
         Args:

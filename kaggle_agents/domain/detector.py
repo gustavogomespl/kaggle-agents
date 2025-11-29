@@ -6,10 +6,10 @@ based on data files, competition description, and data analysis.
 """
 
 from pathlib import Path
-from typing import Tuple
+
 import pandas as pd
 
-from ..core.state import DomainType, CompetitionInfo
+from ..core.state import CompetitionInfo, DomainType
 
 
 class DomainDetector:
@@ -61,7 +61,7 @@ class DomainDetector:
         self,
         competition_info: CompetitionInfo,
         data_directory: Path | str,
-    ) -> Tuple[DomainType, float]:
+    ) -> tuple[DomainType, float]:
         """
         Detect the domain type of a competition.
 
@@ -236,7 +236,7 @@ class DomainDetector:
 def detect_competition_domain(
     competition_info: CompetitionInfo,
     data_directory: Path | str,
-) -> Tuple[DomainType, float]:
+) -> tuple[DomainType, float]:
     """
     Convenience function to detect competition domain.
 

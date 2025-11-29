@@ -6,15 +6,15 @@ and score-based iteration decisions.
 """
 
 import time
-from typing import Dict, Any, Optional
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 from kaggle.api.kaggle_api_extended import KaggleApi
 
+from ..core.config import compare_scores, get_config
 from ..core.state import KaggleState, SubmissionResult
-from ..core.config import get_config, compare_scores
 
 
 class SubmissionAgent:
@@ -41,7 +41,7 @@ class SubmissionAgent:
         except Exception:
             self.authenticated = False
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute submission upload and monitoring.
 
@@ -129,7 +129,7 @@ class SubmissionAgent:
             "last_updated": datetime.now(),
         }
 
-    def _find_submission_file(self, working_dir: Path) -> Optional[Path]:
+    def _find_submission_file(self, working_dir: Path) -> Path | None:
         """Find submission file in working directory."""
         # Check standard location
         submission_path = working_dir / "submission.csv"
@@ -146,8 +146,8 @@ class SubmissionAgent:
     def _validate_submission(
         self,
         submission_path: Path,
-        sample_submission_path: Optional[Path],
-        problem_type: Optional[str] = None,
+        sample_submission_path: Path | None,
+        problem_type: str | None = None,
     ) -> tuple[bool, str]:
         """
         Validate submission file format.
@@ -184,7 +184,7 @@ class SubmissionAgent:
                     if "id" in df.columns and not df["id"].equals(sample_sub["id"]):
                         return False, "ID column does not match sample_submission"
                 except Exception as e:
-                    return False, f"Failed to compare with sample_submission: {str(e)}"
+                    return False, f"Failed to compare with sample_submission: {e!s}"
 
             # Prediction sanity checks
             problem_lower = (problem_type or "").lower()
@@ -206,7 +206,7 @@ class SubmissionAgent:
             return True, "Valid"
 
         except Exception as e:
-            return False, f"Error reading submission: {str(e)}"
+            return False, f"Error reading submission: {e!s}"
 
     def _upload_to_kaggle(
         self,
@@ -275,7 +275,7 @@ class SubmissionAgent:
                     "-f", str(submission_path),
                     "-m", message
                 ]
-                result_cli = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                result_cli = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
 
                 if result_cli.returncode == 0:
                     print("✅ Uploaded successfully via CLI!")
@@ -319,7 +319,7 @@ class SubmissionAgent:
             )
 
         except Exception as e:
-            print(f"❌ Upload failed: {str(e)}")
+            print(f"❌ Upload failed: {e!s}")
 
             return SubmissionResult(
                 submission_id=None,
@@ -330,7 +330,7 @@ class SubmissionAgent:
                 submitted_at=datetime.now(),
             )
 
-    def _fetch_score(self, competition_name: str) -> tuple[Optional[float], Optional[float]]:
+    def _fetch_score(self, competition_name: str) -> tuple[float | None, float | None]:
         """
         Fetch latest submission score from leaderboard.
 
@@ -356,10 +356,10 @@ class SubmissionAgent:
             return public_score, percentile
 
         except Exception as e:
-            print(f"⚠️  Could not fetch score: {str(e)}")
+            print(f"⚠️  Could not fetch score: {e!s}")
             return None, None
 
-    def _calculate_percentile(self, competition_name: str, score: float) -> Optional[float]:
+    def _calculate_percentile(self, competition_name: str, score: float) -> float | None:
         """
         Calculate percentile rank on leaderboard.
 
@@ -381,9 +381,8 @@ class SubmissionAgent:
             better_count = sum(1 for entry in leaderboard if entry["score"] > score)
             total_count = len(leaderboard)
 
-            percentile = (better_count / total_count) * 100
+            return (better_count / total_count) * 100
 
-            return percentile
 
         except Exception:
             # Fallback: estimate based on submissions
@@ -413,7 +412,7 @@ class SubmissionAgent:
 
 # ==================== LangGraph Node Function ====================
 
-def submission_agent_node(state: KaggleState) -> Dict[str, Any]:
+def submission_agent_node(state: KaggleState) -> dict[str, Any]:
     """
     LangGraph node function for the submission agent.
 

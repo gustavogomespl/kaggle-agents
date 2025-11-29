@@ -8,16 +8,16 @@ solutions from Kaggle competitions via the official API and web scraping.
 import json
 import re
 import time
-from pathlib import Path
-from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
 from kaggle.api.kaggle_api_extended import KaggleApi
 
-from ..core.state import SOTASolution
 from ..core.config import get_config
+from ..core.state import SOTASolution
 
 
 @dataclass
@@ -28,7 +28,7 @@ class NotebookMetadata:
     title: str
     author: str
     total_votes: int
-    medal_type: Optional[str]  # gold, silver, bronze
+    medal_type: str | None  # gold, silver, bronze
     language: str  # python, r
     competition: str
     url: str
@@ -43,7 +43,7 @@ class DiscussionMetadata:
     author: str
     total_votes: int
     total_comments: int
-    tags: List[str]
+    tags: list[str]
     url: str
 
 
@@ -70,7 +70,7 @@ class KaggleSearcher:
         sort_by: str = "voteCount",
         page_size: int = 20,
         language: str = "python",
-    ) -> List[NotebookMetadata]:
+    ) -> list[NotebookMetadata]:
         """
         Search for notebooks in a competition.
 
@@ -117,7 +117,7 @@ class KaggleSearcher:
         self,
         notebook_ref: str,
         output_dir: Path | str,
-    ) -> Optional[Path]:
+    ) -> Path | None:
         """
         Download notebook source code.
 
@@ -149,7 +149,7 @@ class KaggleSearcher:
             print(f"  Error downloading notebook {notebook_ref}: {e}")
             return None
 
-    def extract_code_from_notebook(self, notebook_path: Path) -> List[str]:
+    def extract_code_from_notebook(self, notebook_path: Path) -> list[str]:
         """
         Extract code cells from a Jupyter notebook.
 
@@ -160,17 +160,14 @@ class KaggleSearcher:
             List of code snippets
         """
         try:
-            with open(notebook_path, 'r', encoding='utf-8') as f:
+            with open(notebook_path, encoding='utf-8') as f:
                 notebook_data = json.load(f)
 
             code_snippets = []
             for cell in notebook_data.get('cells', []):
                 if cell.get('cell_type') == 'code':
                     source = cell.get('source', [])
-                    if isinstance(source, list):
-                        code = ''.join(source)
-                    else:
-                        code = source
+                    code = ''.join(source) if isinstance(source, list) else source
 
                     # Skip empty cells and magic commands
                     if code.strip() and not code.strip().startswith('%'):
@@ -182,7 +179,7 @@ class KaggleSearcher:
             print(f"  Error extracting code from {notebook_path}: {e}")
             return []
 
-    def extract_code_from_script(self, script_path: Path) -> List[str]:
+    def extract_code_from_script(self, script_path: Path) -> list[str]:
         """
         Extract code sections from a Python script.
 
@@ -193,22 +190,21 @@ class KaggleSearcher:
             List of code snippets (split by major sections)
         """
         try:
-            with open(script_path, 'r', encoding='utf-8') as f:
+            with open(script_path, encoding='utf-8') as f:
                 content = f.read()
 
             # Split by major comments (### or more #)
             sections = re.split(r'\n#{3,}.*?\n', content)
 
             # Filter out empty sections
-            code_snippets = [s.strip() for s in sections if s.strip()]
+            return [s.strip() for s in sections if s.strip()]
 
-            return code_snippets
 
         except Exception as e:
             print(f"  Error extracting code from {script_path}: {e}")
             return []
 
-    def analyze_notebook_strategies(self, code_snippets: List[str]) -> Dict[str, Any]:
+    def analyze_notebook_strategies(self, code_snippets: list[str]) -> dict[str, Any]:
         """
         Analyze code to extract ML strategies and approaches.
 
@@ -271,7 +267,7 @@ class KaggleSearcher:
         self,
         competition: str,
         max_results: int = 10,
-    ) -> List[DiscussionMetadata]:
+    ) -> list[DiscussionMetadata]:
         """
         Search for discussions in a competition.
 
@@ -331,8 +327,8 @@ class KaggleSearcher:
     def create_sota_solution(
         self,
         notebook_metadata: NotebookMetadata,
-        code_snippets: List[str],
-        strategies: Dict[str, Any],
+        code_snippets: list[str],
+        strategies: dict[str, Any],
     ) -> SOTASolution:
         """
         Create a SOTASolution object from notebook data.
@@ -364,7 +360,7 @@ def search_competition_notebooks(
     competition: str,
     max_notebooks: int = 10,
     min_votes: int = 5,
-) -> List[SOTASolution]:
+) -> list[SOTASolution]:
     """
     Search and analyze top notebooks for a competition.
 

@@ -1,12 +1,13 @@
 """Feature engineering agent with advanced techniques."""
 
-import pandas as pd
 import numpy as np
-from langchain_openai import ChatOpenAI
+import pandas as pd
 from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+
 from ..utils.config import Config
-from ..utils.state import KaggleState
 from ..utils.feature_engineering import AdvancedFeatureEngineer
+from ..utils.state import KaggleState
 
 
 class FeatureEngineeringAgent:
@@ -158,8 +159,8 @@ class FeatureEngineeringAgent:
             }
 
         except Exception as e:
-            error_msg = f"Feature engineering failed: {str(e)}"
+            error_msg = f"Feature engineering failed: {e!s}"
             print(f"Feature Engineering Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": errors + [error_msg]}
+            return {"errors": [*errors, error_msg]}

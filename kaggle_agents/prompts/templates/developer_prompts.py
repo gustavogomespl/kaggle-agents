@@ -5,7 +5,7 @@ These templates guide code generation for implementing
 ablation components with retry and debug capabilities.
 """
 
-from typing import Dict
+
 
 # Base system prompt for the developer
 DEVELOPER_SYSTEM_PROMPT = """You are a Kaggle Grandmaster and expert Python developer specializing in winning Machine Learning competitions.
@@ -72,7 +72,7 @@ Optuna Dependencies (CRITICAL):
   ```python
   import optuna
   optuna.logging.set_verbosity(optuna.logging.WARNING)  # SILENCE OPTUNA
-  
+
   try:
       from optuna.integration import OptunaSearchCV
       USE_OPTUNA_INTEGRATION = True
@@ -111,7 +111,7 @@ Optuna Dependencies (CRITICAL):
       xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
   else:
       xgb_params = {'tree_method': 'hist'}
-  
+
   # ROBUST FALLBACK: Wrap fit in try-except to handle GPU failures
   try:
       model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
@@ -145,28 +145,28 @@ MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
 - Example implementation:
   ```python
   import time
-  
+
   start_time = time.time()
   step_times = {}
-  
+
   def log_step(step_name, start):
       elapsed = time.time() - start
       step_times[step_name] = elapsed
       cumulative = time.time() - start_time
       print(f"⏱️ [{step_name}] completed in {elapsed:.2f}s (cumulative: {cumulative:.2f}s)")
       return time.time()
-  
+
   # Usage:
   step_start = time.time()
   # ... load data ...
   step_start = log_step("DATA_LOADING", step_start)
-  
+
   # ... preprocess ...
   step_start = log_step("PREPROCESSING", step_start)
-  
+
   # ... train model ...
   step_start = log_step("MODEL_TRAINING", step_start)
-  
+
   # At the end, print summary:
   print("\\n📊 Performance Summary:")
   for step, duration in step_times.items():
@@ -1449,7 +1449,7 @@ Description: {component.code}
 """
 
 
-def format_error_info(error: str) -> Dict[str, str]:
+def format_error_info(error: str) -> dict[str, str]:
     """
     Categorize and format error information.
 

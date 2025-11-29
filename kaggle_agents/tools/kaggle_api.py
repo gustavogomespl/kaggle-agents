@@ -5,7 +5,8 @@ https://github.com/Kaggle/kaggle-api
 """
 
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
+
 from kaggle.api.kaggle_api_extended import KaggleApi
 
 
@@ -26,14 +27,14 @@ class KaggleAPIClient:
             self.api.authenticate()
         except Exception as e:
             raise RuntimeError(
-                f"Kaggle API authentication failed: {str(e)}\n"
+                f"Kaggle API authentication failed: {e!s}\n"
                 "Ensure KAGGLE_USERNAME and KAGGLE_KEY are set, "
                 "or ~/.kaggle/kaggle.json exists with credentials."
             )
 
     def download_competition_data(
         self, competition: str, path: str = "./data", quiet: bool = False
-    ) -> Dict[str, str]:
+    ) -> dict[str, str]:
         """Download competition data files.
 
         Uses: api.competition_download_files(competition, path, force, quiet)
@@ -63,7 +64,7 @@ class KaggleAPIClient:
             )
         except Exception as e:
             raise Exception(
-                f"Failed to download competition '{competition}': {str(e)}\n"
+                f"Failed to download competition '{competition}': {e!s}\n"
                 f"Ensure competition exists and you have accepted the rules."
             )
 
@@ -98,7 +99,7 @@ class KaggleAPIClient:
 
         return files
 
-    def get_competition_info(self, competition: str) -> Dict[str, Any]:
+    def get_competition_info(self, competition: str) -> dict[str, Any]:
         """Get competition metadata.
 
         Uses: api.competitions_list(search=competition) to find competition details.
@@ -150,12 +151,12 @@ class KaggleAPIClient:
             }
         except Exception as e:
             raise Exception(
-                f"Failed to get info for competition '{competition}': {str(e)}"
+                f"Failed to get info for competition '{competition}': {e!s}"
             )
 
     def submit_prediction(
         self, competition: str, file_path: str, message: str, quiet: bool = False
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Submit predictions to competition.
 
         Uses: api.competition_submit(file_name, message, competition, quiet)
@@ -181,7 +182,7 @@ class KaggleAPIClient:
         try:
             # API signature: competition_submit(file_name, message, competition, quiet=False)
             # Note: API returns submission result object
-            result = self.api.competition_submit(
+            self.api.competition_submit(
                 file_path,
                 message,
                 competition,
@@ -196,13 +197,13 @@ class KaggleAPIClient:
             }
         except Exception as e:
             raise Exception(
-                f"Failed to submit to competition '{competition}': {str(e)}\n"
+                f"Failed to submit to competition '{competition}': {e!s}\n"
                 f"Ensure you have accepted competition rules and file format is correct."
             )
 
     def get_leaderboard(
         self, competition: str, top_n: int = 100
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get competition leaderboard.
 
         Uses: api.competition_leaderboard_view(id)
@@ -241,11 +242,11 @@ class KaggleAPIClient:
             return entries
         except Exception as e:
             raise Exception(
-                f"Failed to get leaderboard for '{competition}': {str(e)}\n"
+                f"Failed to get leaderboard for '{competition}': {e!s}\n"
                 f"Leaderboard may be private or competition may not exist."
             )
 
-    def get_my_submissions(self, competition: str) -> List[Dict[str, Any]]:
+    def get_my_submissions(self, competition: str) -> list[dict[str, Any]]:
         """Get user's submissions for a competition.
 
         Uses: api.competition_submissions(id)
@@ -284,7 +285,7 @@ class KaggleAPIClient:
             return result
         except Exception as e:
             raise Exception(
-                f"Failed to get submissions for '{competition}': {str(e)}\n"
+                f"Failed to get submissions for '{competition}': {e!s}\n"
                 f"Ensure you have made at least one submission to this competition."
             )
 
@@ -294,8 +295,8 @@ class KaggleAPIClient:
         category: str = "all",
         sort_by: str = "latestDeadline",
         page: int = 1,
-        search: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        search: str | None = None
+    ) -> list[dict[str, Any]]:
         """List Kaggle competitions.
 
         Uses: api.competitions_list(group, category, sort_by, page, search)
@@ -338,4 +339,4 @@ class KaggleAPIClient:
 
             return result
         except Exception as e:
-            raise Exception(f"Failed to list competitions: {str(e)}")
+            raise Exception(f"Failed to list competitions: {e!s}")

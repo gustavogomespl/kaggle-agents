@@ -6,7 +6,6 @@ Implements PREFACE pattern for error-guided prompt repair.
 """
 
 import re
-from typing import Dict, Optional
 from dataclasses import dataclass
 
 
@@ -15,8 +14,8 @@ class ParsedError:
     """Structured error information."""
     error_type: str
     error_category: str
-    line_number: Optional[int]
-    function_name: Optional[str]
+    line_number: int | None
+    function_name: str | None
     error_message: str
     suggested_fix: str
     severity: str  # "critical", "high", "medium", "low"
@@ -105,16 +104,15 @@ class ErrorParser:
         # Fallback patterns
         if "import" in error_msg.lower():
             return "ImportError"
-        elif "file not found" in error_msg.lower() or "no such file" in error_msg.lower():
+        if "file not found" in error_msg.lower() or "no such file" in error_msg.lower():
             return "FileNotFoundError"
-        elif "key" in error_msg.lower() and "not found" in error_msg.lower():
+        if "key" in error_msg.lower() and "not found" in error_msg.lower():
             return "KeyError"
-        elif "validation" in error_msg.lower():
+        if "validation" in error_msg.lower():
             return "validation_failed"
-        elif "timeout" in error_msg.lower():
+        if "timeout" in error_msg.lower():
             return "TimeoutError"
-        else:
-            return "RuntimeError"
+        return "RuntimeError"
 
     def _categorize_error(self, error_type: str) -> str:
         """Categorize error into high-level category."""
@@ -123,7 +121,7 @@ class ErrorParser:
                 return category
         return "runtime"
 
-    def _extract_line_number(self, text: str) -> Optional[int]:
+    def _extract_line_number(self, text: str) -> int | None:
         """Extract line number from traceback."""
         # Pattern: "line 42"
         match = re.search(r'line (\d+)', text, re.IGNORECASE)
@@ -131,7 +129,7 @@ class ErrorParser:
             return int(match.group(1))
         return None
 
-    def _extract_function_name(self, text: str) -> Optional[str]:
+    def _extract_function_name(self, text: str) -> str | None:
         """Extract function name from traceback."""
         # Pattern: "in function_name"
         match = re.search(r'in (\w+)', text)
@@ -161,14 +159,13 @@ class ErrorParser:
 
         if error_category in critical_categories:
             return "critical"
-        elif error_category in high_categories:
+        if error_category in high_categories:
             return "high"
-        elif error_category in medium_categories:
+        if error_category in medium_categories:
             return "medium"
-        else:
-            return "low"
+        return "low"
 
-    def extract_execution_trace(self, stdout: str, stderr: str) -> Dict[str, Any]:
+    def extract_execution_trace(self, stdout: str, stderr: str) -> dict[str, Any]:
         """
         Extract execution trace for semantic alignment (CodeRL+ pattern).
 

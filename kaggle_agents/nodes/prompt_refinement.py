@@ -5,13 +5,13 @@ Uses DSPy MIPROv2 to optimize prompts based on collected training data.
 Implements RLPrompt pattern for discrete prompt optimization.
 """
 
-from typing import Dict, Any
+from typing import Any
 
 from ..core.state import KaggleState
 from ..optimization import create_optimizer, create_training_collector
 from ..optimization.reward_model import (
-    create_planner_metric,
     create_developer_metric,
+    create_planner_metric,
 )
 
 
@@ -41,7 +41,7 @@ class PromptRefinementDecider:
         self.min_training_examples = min_training_examples
         self.training_collector = create_training_collector()
 
-    def should_optimize(self, state: KaggleState) -> Dict[str, bool]:
+    def should_optimize(self, state: KaggleState) -> dict[str, bool]:
         """
         Decide which agents should have prompts optimized.
 
@@ -141,9 +141,8 @@ class PromptOptimizer:
                 self.optimizer.save_optimized_prompt(optimized_module, "planner")
                 print("   ✅ Planner prompt optimized and saved")
                 return True
-            else:
-                print("   ❌ Optimization failed")
-                return False
+            print("   ❌ Optimization failed")
+            return False
 
         except Exception as e:
             print(f"   ❌ Error optimizing planner: {e}")
@@ -190,9 +189,8 @@ class PromptOptimizer:
                 self.optimizer.save_optimized_prompt(optimized_module, "developer_generator")
                 print("   ✅ Developer prompt optimized and saved")
                 return True
-            else:
-                print("   ❌ Optimization failed")
-                return False
+            print("   ❌ Optimization failed")
+            return False
 
         except Exception as e:
             print(f"   ❌ Error optimizing developer: {e}")
@@ -201,7 +199,7 @@ class PromptOptimizer:
 
 # ==================== Node Function ====================
 
-def prompt_refinement_node(state: KaggleState) -> Dict[str, Any]:
+def prompt_refinement_node(state: KaggleState) -> dict[str, Any]:
     """
     Check if prompts should be refined and optimize if needed.
 

@@ -5,34 +5,32 @@ This module defines the complete agent workflow using LangGraph's StateGraph,
 implementing the full pipeline from SOTA search to submission.
 """
 
-from typing import Dict, Any, Literal
 from datetime import datetime
 from pathlib import Path
+from typing import Any, Literal
+
 import pandas as pd
-
-from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 
+from .agents import (
+    developer_agent_node,
+    ensemble_agent_node,  # Ensemble Strategy
+    planner_agent_node,
+    robustness_agent_node,
+    search_agent_node,
+)
+from .agents.meta_evaluator_agent import meta_evaluator_node  # Meta-Evaluator with RL
+from .agents.reporting_agent import reporting_agent_node
+from .agents.submission_agent import submission_agent_node
 from .core.state import KaggleState, create_initial_state
 from .domain import detect_competition_domain
 from .tools.kaggle_api import KaggleAPIClient
-from .agents import (
-    search_agent_node,
-    planner_agent_node,
-    developer_agent_node,
-    robustness_agent_node,
-)
-from .agents.submission_agent import submission_agent_node
-from .agents.meta_evaluator_agent import meta_evaluator_node  # Meta-Evaluator with RL
-from .agents.reporting_agent import reporting_agent_node
-from .agents import (
-    ensemble_agent_node,  # Ensemble Strategy
-    )
 
 
 # ==================== Agent Nodes ====================
 
-def data_download_node(state: KaggleState) -> Dict[str, Any]:
+def data_download_node(state: KaggleState) -> dict[str, Any]:
     """
     Download competition data from Kaggle.
 
@@ -134,7 +132,7 @@ def data_download_node(state: KaggleState) -> Dict[str, Any]:
         }
 
 
-def domain_detection_node(state: KaggleState) -> Dict[str, Any]:
+def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     """
     Detect competition domain.
 
@@ -163,7 +161,7 @@ def domain_detection_node(state: KaggleState) -> Dict[str, Any]:
     }
 
 
-def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
+def iteration_control_node(state: KaggleState) -> dict[str, Any]:
     """
     Control iteration and check termination conditions.
 
@@ -217,7 +215,7 @@ def iteration_control_node(state: KaggleState) -> Dict[str, Any]:
     return updates
 
 
-def performance_evaluation_node(state: KaggleState) -> Dict[str, Any]:
+def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     """
     Evaluate performance and decide if refinement is needed.
 
@@ -431,9 +429,8 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     if needs_refinement and current_iteration > 0:
         print(f"   ➡️  Refining (iteration {current_iteration})")
         return "refine"
-    else:
-        print("   ➡️  Ending (no refinement needed or first iteration)")
-        return "end"
+    print("   ➡️  Ending (no refinement needed or first iteration)")
+    return "end"
 
 
 # ==================== Workflow Construction ====================
@@ -531,12 +528,8 @@ def compile_workflow(checkpointer=None):
     """
     workflow = create_workflow()
 
-    if checkpointer:
-        compiled = workflow.compile(checkpointer=checkpointer)
-    else:
-        compiled = workflow.compile()
+    return workflow.compile(checkpointer=checkpointer) if checkpointer else workflow.compile()
 
-    return compiled
 
 
 # ==================== Workflow Execution ====================
@@ -544,7 +537,7 @@ def compile_workflow(checkpointer=None):
 def run_workflow(
     competition_name: str,
     working_dir: str,
-    competition_info: Dict[str, Any],
+    competition_info: dict[str, Any],
     max_iterations: int = 5,
     use_checkpointing: bool = False,
 ) -> KaggleState:
@@ -671,7 +664,7 @@ def create_simple_workflow() -> StateGraph:
 def run_simple_workflow(
     competition_name: str,
     working_dir: str,
-    competition_info: Dict[str, Any],
+    competition_info: dict[str, Any],
 ) -> KaggleState:
     """
     Run simplified workflow (one pass, no iterations).

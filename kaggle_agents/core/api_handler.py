@@ -1,15 +1,16 @@
 """API Handler atualizado para Responses API + gpt-5-mini, com retry robusto."""
 
+import logging
 import os
 import time
-import logging
-from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import httpx
 import openai
 from openai import OpenAI
+
 
 # LangSmith tracing (opcional)
 try:
@@ -34,18 +35,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 class APISettings:
     """Configurações padrão para geração."""
     max_completion_tokens: int
-    temperature: Optional[float] = 0.7  # pode ser ignorado por alguns modelos
-    top_p: Optional[float] = 1.0
-    frequency_penalty: Optional[float] = 0.0
-    presence_penalty: Optional[float] = 0.0
-    stop: Optional[List[str]] = None
+    temperature: float | None = 0.7  # pode ser ignorado por alguns modelos
+    top_p: float | None = 1.0
+    frequency_penalty: float | None = 0.0
+    presence_penalty: float | None = 0.0
+    stop: list[str] | None = None
 
     @property
     def timeout(self) -> int:
         return (self.max_completion_tokens // 1000 + 1) * 30
 
 
-def load_api_config() -> Tuple[str, Optional[str]]:
+def load_api_config() -> tuple[str, str | None]:
     """Carrega OPENAI_API_KEY e OPENAI_BASE_URL do ambiente ou de api_key.txt."""
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL")
@@ -55,7 +56,7 @@ def load_api_config() -> Tuple[str, Optional[str]]:
 
     api_key_file = Path(__file__).parent.parent.parent / "api_key.txt"
     if api_key_file.exists():
-        with open(api_key_file, "r", encoding="utf-8") as f:
+        with open(api_key_file, encoding="utf-8") as f:
             lines = [ln.strip() for ln in f.readlines() if ln.strip()]
         api_key = lines[0] if lines else None
         base_url = lines[1] if len(lines) > 1 else None
@@ -67,7 +68,7 @@ def load_api_config() -> Tuple[str, Optional[str]]:
     )
 
 
-def _to_responses_messages(messages: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+def _to_responses_messages(messages: list[dict[str, str]]) -> list[dict[str, Any]]:
     """
     Converte mensagens no formato chat clássico para o formato da Responses API:
     [{"role": "user"|"system"|"assistant", "content": [{"type":"input_text"|"output_text","text":"..."}]}]
@@ -93,7 +94,7 @@ def _to_responses_messages(messages: List[Dict[str, str]]) -> List[Dict[str, Any
 def generate_response(
     client: OpenAI,
     model: str,
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     settings: APISettings,
     response_type: str = "text",
 ) -> Any:
@@ -173,7 +174,7 @@ class APIHandler:
             http_client=http_client,
         )
 
-    def _save_long_message(self, messages: List[Dict[str, str]], save_dir: Optional[Path] = None):
+    def _save_long_message(self, messages: list[dict[str, str]], save_dir: Path | None = None):
         save_dir = Path(save_dir) if save_dir else Path.cwd()
         save_dir.mkdir(parents=True, exist_ok=True)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -183,7 +184,7 @@ class APIHandler:
                 f.write(f"Role: {m.get('role')}\nContent: {m.get('content')}\n\n")
         logger.info(f"Mensagem longa salva em {filename}")
 
-    def _truncate_messages(self, messages: List[Dict[str, str]], max_length: int = DEFAULT_MAX_LENGTH) -> List[Dict[str, str]]:
+    def _truncate_messages(self, messages: list[dict[str, str]], max_length: int = DEFAULT_MAX_LENGTH) -> list[dict[str, str]]:
         total_len = sum(len(str(m.get("content", ""))) for m in messages)
         if total_len <= max_length:
             return messages
@@ -201,7 +202,7 @@ class APIHandler:
             logger.warning("Sem espaço útil para incluir a última mensagem truncada.")
         return truncated
 
-    def _extract_text(self, response: Any) -> Optional[str]:
+    def _extract_text(self, response: Any) -> str | None:
         """
         Extrai texto do objeto de resposta:
         - Responses API: response.output_text (preferido)
@@ -239,10 +240,10 @@ class APIHandler:
 
     def get_output(
         self,
-        messages: List[Dict[str, str]],
+        messages: list[dict[str, str]],
         settings: APISettings,
         response_type: str = "text",
-        save_dir: Optional[Path] = None,
+        save_dir: Path | None = None,
     ) -> str:
         last_error = None
         for attempt in range(1, MAX_ATTEMPTS + 1):

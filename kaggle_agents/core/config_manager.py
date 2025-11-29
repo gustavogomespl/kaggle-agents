@@ -2,8 +2,9 @@
 
 import json
 import logging
-from typing import Dict, Any, List, Optional
 from pathlib import Path
+from typing import Any
+
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,7 @@ logger = logging.getLogger(__name__)
 class ConfigManager:
     """Manage configuration for the enhanced Kaggle agents workflow."""
 
-    def __init__(self, config_path: Optional[Path] = None):
+    def __init__(self, config_path: Path | None = None):
         """Initialize configuration manager.
 
         Args:
@@ -22,7 +23,7 @@ class ConfigManager:
             config_path = Path(__file__).parent.parent.parent / "config.json"
 
         self.config_path = Path(config_path)
-        self.config: Dict[str, Any] = {}
+        self.config: dict[str, Any] = {}
 
         self.load()
 
@@ -35,7 +36,7 @@ class ConfigManager:
             return
 
         try:
-            with open(self.config_path, 'r') as f:
+            with open(self.config_path) as f:
                 self.config = json.load(f)
             logger.info(f"Configuration loaded from {self.config_path}")
         except Exception as e:
@@ -43,7 +44,7 @@ class ConfigManager:
             logger.info("Using default configuration")
             self.config = self._get_default_config()
 
-    def save(self, output_path: Optional[Path] = None):
+    def save(self, output_path: Path | None = None):
         """Save configuration to file.
 
         Args:
@@ -101,7 +102,7 @@ class ConfigManager:
         config[keys[-1]] = value
 
     # Phase configuration
-    def get_phases(self) -> List[str]:
+    def get_phases(self) -> list[str]:
         """Get list of workflow phases."""
         return self.get('phases', [])
 
@@ -109,11 +110,11 @@ class ConfigManager:
         """Get directory name for a phase."""
         return self.get('phase_to_directory', {}).get(phase, 'unknown')
 
-    def get_phase_agents(self, phase: str) -> List[str]:
+    def get_phase_agents(self, phase: str) -> list[str]:
         """Get list of agents for a phase."""
         return self.get('phase_to_agents', {}).get(phase, [])
 
-    def get_phase_tools(self, phase: str) -> List[str]:
+    def get_phase_tools(self, phase: str) -> list[str]:
         """Get list of ML tools available for a phase."""
         return self.get('phase_to_ml_tools', {}).get(phase, [])
 
@@ -150,11 +151,11 @@ class ConfigManager:
     def get_temperature(self) -> float:
         """Get LLM temperature setting."""
         model = self.get('model_settings.default_model', 'gpt-5-mini')
-        
+
         # gpt-5-mini only supports default temperature (1.0)
         if model == 'gpt-5-mini':
             return 1.0
-        
+
         return self.get('model_settings.temperature', 0.7)
 
     def get_max_tokens(self) -> int:
@@ -207,7 +208,7 @@ class ConfigManager:
         """Check if memory system is enabled."""
         return self.get('workflow_mode.enable_memory', True)
 
-    def _get_default_config(self) -> Dict[str, Any]:
+    def _get_default_config(self) -> dict[str, Any]:
         """Get default configuration."""
         return {
             "phases": [
@@ -251,7 +252,7 @@ class ConfigManager:
 
 
 # Global config instance
-_config_instance: Optional[ConfigManager] = None
+_config_instance: ConfigManager | None = None
 
 
 def get_config() -> ConfigManager:

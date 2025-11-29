@@ -5,10 +5,9 @@ Implements CodeRL+ pattern for multi-faceted reward calculation.
 Based on execution semantics alignment and performance metrics.
 """
 
-from typing import Dict, List
 from dataclasses import dataclass
 
-from .state import KaggleState, DevelopmentResult
+from .state import DevelopmentResult, KaggleState
 
 
 @dataclass
@@ -34,7 +33,7 @@ class RewardCalculator:
 
     def __init__(
         self,
-        weights: Dict[str, float] = None,
+        weights: dict[str, float] | None = None,
         target_score: float = 0.9238,
     ):
         """
@@ -88,7 +87,7 @@ class RewardCalculator:
             combined=r_combined,
         )
 
-    def _calculate_functional(self, dev_results: List[DevelopmentResult]) -> float:
+    def _calculate_functional(self, dev_results: list[DevelopmentResult]) -> float:
         """
         Calculate functional correctness reward.
 
@@ -149,7 +148,7 @@ class RewardCalculator:
         # Assume 0.01 improvement = full reward
         return min(improvement / 0.01, 1.0)
 
-    def _calculate_semantics(self, dev_results: List[DevelopmentResult]) -> float:
+    def _calculate_semantics(self, dev_results: list[DevelopmentResult]) -> float:
         """
         Calculate execution semantics reward (CodeRL+ pattern).
 
@@ -189,7 +188,7 @@ class RewardCalculator:
 
         return sum(semantics_scores) / len(semantics_scores)
 
-    def to_dict(self, components: RewardComponents) -> Dict[str, float]:
+    def to_dict(self, components: RewardComponents) -> dict[str, float]:
         """Convert RewardComponents to dictionary."""
         return {
             "r_functional": components.functional,
@@ -226,7 +225,7 @@ class RewardNormalizer:
         """
         self.window_size = window_size
         self.clip_range = clip_range
-        self.reward_history: List[float] = []
+        self.reward_history: list[float] = []
 
     def normalize(self, reward: float) -> float:
         """
@@ -275,8 +274,8 @@ class PiecewiseReward:
 
     def __init__(
         self,
-        thresholds: List[float] = None,
-        rewards: List[float] = None,
+        thresholds: list[float] | None = None,
+        rewards: list[float] | None = None,
     ):
         """
         Initialize piecewise reward.

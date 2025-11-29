@@ -5,32 +5,33 @@ This agent generates Python code to implement ablation components,
 with automatic retry and debugging capabilities.
 """
 
-from typing import Dict, Any, Optional
+import os
+import shutil
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-import shutil
-import os
+from typing import Any
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
-from ..core.state import KaggleState, AblationComponent, DevelopmentResult
+
 from ..core.config import (
+    calculate_score_improvement,
     get_config,
     get_llm_for_role,
-    calculate_score_improvement,
     is_metric_minimization,
 )
-from ..tools.code_executor import CodeExecutor, ArtifactValidator, ExecutionResult
+from ..core.state import AblationComponent, DevelopmentResult, KaggleState
+from ..optimization import create_optimizer
 from ..prompts.templates.developer_prompts import (
-    DEVELOPER_SYSTEM_PROMPT,
-    GENERATE_CODE_PROMPT,
-    FIX_CODE_PROMPT,
     DEBUG_CODE_PROMPT,
+    DEVELOPER_SYSTEM_PROMPT,
+    FIX_CODE_PROMPT,
+    GENERATE_CODE_PROMPT,
     format_component_details,
     format_error_info,
 )
-from ..optimization import create_optimizer
+from ..tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
 
 
 # ==================== DSPy Signatures ====================
@@ -71,13 +72,12 @@ class CodeGeneratorModule(dspy.Module):
 
     def forward(self, component_details, competition_context, data_paths, requirements):
         """Generate code."""
-        result = self.generate(
+        return self.generate(
             component_details=component_details,
             competition_context=competition_context,
             data_paths=data_paths,
             requirements=requirements,
         )
-        return result
 
 
 class CodeFixerModule(dspy.Module):
@@ -89,8 +89,7 @@ class CodeFixerModule(dspy.Module):
 
     def forward(self, code, error, error_type):
         """Fix code."""
-        result = self.fix(code=code, error=error, error_type=error_type)
-        return result
+        return self.fix(code=code, error=error, error_type=error_type)
 
 
 # ==================== Developer Agent ====================
@@ -148,7 +147,7 @@ class DeveloperAgent:
                 print("Using base (unoptimized) fixer module")
                 self.fixer_module = CodeFixerModule()
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute the developer agent.
 
@@ -312,7 +311,6 @@ class DeveloperAgent:
                     Suggest a modification to IMPROVE the score.
                     Return the full updated code.
                     """
-                    refine_component = component
 
                     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -534,7 +532,7 @@ class DeveloperAgent:
             errors=exec_result.errors,
         )
 
-    def _extract_cv_score(self, stdout: str) -> Optional[float]:
+    def _extract_cv_score(self, stdout: str) -> float | None:
         """
         Extract cross-validation score from stdout using regex patterns.
 
@@ -560,8 +558,7 @@ class DeveloperAgent:
             match = re.search(pattern, stdout, re.IGNORECASE)
             if match:
                 try:
-                    score = float(match.group(1))
-                    return score
+                    return float(match.group(1))
                 except ValueError:
                     continue
 
@@ -572,7 +569,7 @@ class DeveloperAgent:
         component: AblationComponent,
         exec_result: ExecutionResult,
         state: KaggleState,
-    ) -> tuple[bool, Optional[float]]:
+    ) -> tuple[bool, float | None]:
         """
         Validate if component improves score using Hill Climbing strategy.
 
@@ -695,7 +692,7 @@ class DeveloperAgent:
         self,
         component: AblationComponent,
         state: KaggleState,
-    ) -> Optional[DevelopmentResult]:
+    ) -> DevelopmentResult | None:
         """
         Check if component should be skipped (MLE-STAR pattern).
 
@@ -761,14 +758,13 @@ class DeveloperAgent:
         else:
             simplified_desc = f"Simplified version of {component.name}"
 
-        simplified_component = replace(
+        return replace(
             component,
             name=f"{component.name}_simplified",
             code=simplified_desc,
             estimated_impact=component.estimated_impact * 0.7,  # Lower expected impact
         )
 
-        return simplified_component
 
     def _build_dynamic_instructions(
         self,
@@ -830,7 +826,7 @@ class DeveloperAgent:
                 instructions.append(
                     "\n✅ SUCCESSFUL PATTERNS FROM PREVIOUS COMPONENTS:"
                 )
-                for i, result in enumerate(successful_components[-2:], 1):
+                for _i, result in enumerate(successful_components[-2:], 1):
                     if "LightGBM" in result.code:
                         instructions.append("  - LightGBM implementation worked well")
                     if "StratifiedKFold" in result.code:
@@ -844,7 +840,7 @@ class DeveloperAgent:
 
             if failed_components:
                 instructions.append("\nAVOID THESE ERRORS FROM PREVIOUS ATTEMPTS:")
-                for i, result in enumerate(failed_components[-2:], 1):
+                for _i, result in enumerate(failed_components[-2:], 1):
                     if result.errors:
                         error_msg = result.errors[0][:300]
                         instructions.append(f"  - {error_msg}")
@@ -1293,7 +1289,7 @@ class DeveloperAgent:
             ]
             categorical_cols = [c for c, dtype in dtypes.items() if dtype == "object"]
 
-            info = f"""
+            return f"""
             **CRITICAL**: Use these EXACT column names from the dataset:
 
             Target Column: {target_col}
@@ -1306,10 +1302,9 @@ class DeveloperAgent:
 
             IMPORTANT: Always use target_col='{target_col}' in your code!
             """
-            return info
 
         except Exception as e:
-            return f"Dataset info not available (error: {str(e)})"
+            return f"Dataset info not available (error: {e!s})"
 
     def _generate_code(
         self,
@@ -1440,7 +1435,7 @@ class DeveloperAgent:
             response = self.llm.invoke(messages)
             return response.content.strip()
         except Exception as e:
-            return f"Meta-feedback unavailable: {str(e)}"
+            return f"Meta-feedback unavailable: {e!s}"
 
     def _fix_code_error(self, code: str, error: str) -> str:
         """Fix code based on error."""
@@ -1561,7 +1556,7 @@ class DeveloperAgent:
 # ==================== LangGraph Node Function ====================
 
 
-def developer_agent_node(state: KaggleState) -> Dict[str, Any]:
+def developer_agent_node(state: KaggleState) -> dict[str, Any]:
     """
     LangGraph node function for the developer agent.
 

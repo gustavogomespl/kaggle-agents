@@ -8,8 +8,10 @@ best practices with environment variable support and validation.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional
+from typing import Literal
+
 from dotenv import load_dotenv
+
 
 # Load environment variables
 load_dotenv()
@@ -22,12 +24,12 @@ class LLMConfig:
     provider: Literal["openai", "anthropic", "gemini"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
     # Optional per-role overrides to balance cost/quality across agents
-    planner_model: Optional[str] = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
-    planner_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
-    developer_model: Optional[str] = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
-    developer_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
-    evaluator_model: Optional[str] = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
-    evaluator_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
+    planner_model: str | None = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
+    planner_provider: Literal["openai", "anthropic", "gemini"] | None = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
+    developer_model: str | None = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
+    developer_provider: Literal["openai", "anthropic", "gemini"] | None = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
+    evaluator_model: str | None = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
+    evaluator_provider: Literal["openai", "anthropic", "gemini"] | None = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192")))  # Safe default
     timeout: int = 120  # seconds
@@ -238,7 +240,7 @@ class AgentConfig:
         return issues
 
     @classmethod
-    def from_env(cls, overrides: Optional[dict] = None) -> "AgentConfig":
+    def from_env(cls, overrides: dict | None = None) -> "AgentConfig":
         """
         Create configuration from environment variables with optional overrides.
 
@@ -260,7 +262,7 @@ class AgentConfig:
 
 # ==================== Global Config Instance ====================
 
-_global_config: Optional[AgentConfig] = None
+_global_config: AgentConfig | None = None
 
 
 def get_config() -> AgentConfig:
@@ -304,7 +306,7 @@ def reset_config() -> None:
 
 # ==================== Convenience Functions ====================
 
-def get_llm(temperature: float = None, max_tokens: int = None):
+def get_llm(temperature: float | None = None, max_tokens: int | None = None):
     """
     Get the configured LLM instance (OpenAI or Anthropic).
 
@@ -317,8 +319,8 @@ def get_llm(temperature: float = None, max_tokens: int = None):
     Returns:
         ChatOpenAI or ChatAnthropic instance
     """
-    from langchain_openai import ChatOpenAI
     from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
 
     config = get_config()
 
@@ -331,34 +333,33 @@ def get_llm(temperature: float = None, max_tokens: int = None):
             temperature=temp,
             max_tokens=tokens,
         )
-    elif config.llm.provider == "gemini":
+    if config.llm.provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             model=config.llm.model,
             temperature=temp,
             max_output_tokens=tokens,
         )
-    else:
-        # Default to OpenAI
-        return ChatOpenAI(
-            model=config.llm.model,
-            temperature=temp,
-            max_tokens=tokens,
-        )
+    # Default to OpenAI
+    return ChatOpenAI(
+        model=config.llm.model,
+        temperature=temp,
+        max_tokens=tokens,
+    )
 
 
 def get_llm_for_role(
     role: str,
-    temperature: float = None,
-    max_tokens: int = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ):
     """
     Return an LLM configured for a specific agent role (planner/developer/evaluator).
 
     Falls back to the global provider/model when a role-specific override is not set.
     """
-    from langchain_openai import ChatOpenAI
     from langchain_anthropic import ChatAnthropic
+    from langchain_openai import ChatOpenAI
 
     config = get_config()
     temp = temperature if temperature is not None else config.llm.temperature
@@ -387,7 +388,7 @@ def get_llm_for_role(
             temperature=temp,
             max_tokens=tokens,
         )
-    elif provider == "gemini":
+    if provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
             model=model,
@@ -521,9 +522,8 @@ def calculate_score_improvement(
     if is_minimize:
         # For minimize metrics: lower new_score is better
         return baseline_score - new_score
-    else:
-        # For maximize metrics: higher new_score is better
-        return new_score - baseline_score
+    # For maximize metrics: higher new_score is better
+    return new_score - baseline_score
 
 
 def compare_scores(
@@ -552,5 +552,4 @@ def compare_scores(
 
     if is_minimize:
         return min(score1, score2)
-    else:
-        return max(score1, score2)
+    return max(score1, score2)

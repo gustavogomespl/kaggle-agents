@@ -6,8 +6,8 @@ Clean, simple, and efficient logging with file rotation and structured output.
 
 import logging
 from datetime import datetime
-from pathlib import Path
 from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from typing import Optional
 
 from rich.logging import RichHandler
@@ -233,4 +233,4 @@ def log_metric(logger: logging.Logger, name: str, value: any):
 
 def log_error_with_context(logger: logging.Logger, error: Exception, context: str):
     """Log error with additional context."""
-    logger.error(f"Error in {context}: {str(error)}", exc_info=True)
+    logger.error(f"Error in {context}: {error!s}", exc_info=True)

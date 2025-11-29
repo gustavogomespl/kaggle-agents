@@ -1,23 +1,19 @@
 """Standard Operating Procedure (SOP) - Workflow orchestrator for enhanced agents."""
 
 import logging
-from typing import Tuple, Dict, Any
 from pathlib import Path
+from typing import Any
 
-from .state import (
-    EnhancedKaggleState,
-    should_retry_phase,
-    increment_retry_count,
-    reset_retry_count
+from ..enhanced_agents import (
+    DeveloperAgent,
+    PlannerAgent,
+    ReaderAgent,
+    ReviewerAgent,
+    SummarizerAgent,
 )
 from .config_manager import get_config
-from ..enhanced_agents import (
-    ReaderAgent,
-    PlannerAgent,
-    DeveloperAgent,
-    ReviewerAgent,
-    SummarizerAgent
-)
+from .state import EnhancedKaggleState, increment_retry_count, reset_retry_count, should_retry_phase
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +44,7 @@ class SOP:
 
         logger.info(f"SOP initialized for competition: {competition_name}")
 
-    def step(self, state: EnhancedKaggleState) -> Tuple[str, EnhancedKaggleState]:
+    def step(self, state: EnhancedKaggleState) -> tuple[str, EnhancedKaggleState]:
         """Execute one step of the workflow.
 
         Args:
@@ -122,7 +118,7 @@ class SOP:
                 phase_results[agent_role] = {
                     "role": agent_role,
                     "error": str(e),
-                    "result": f"Agent failed with error: {str(e)}"
+                    "result": f"Agent failed with error: {e!s}"
                 }
                 # Update memory entry with error
                 state["memory"][current_phase_index][agent_role] = phase_results[agent_role]
@@ -140,7 +136,7 @@ class SOP:
     def _evaluate_phase_results(
         self,
         state: EnhancedKaggleState,
-        phase_results: Dict[str, Any]
+        phase_results: dict[str, Any]
     ) -> str:
         """Evaluate phase results and determine next action.
 
@@ -167,23 +163,20 @@ class SOP:
                 # Don't change phase here - let workflow routing handle it
                 # Just return "Continue" to signal success
                 return "Continue"
-            else:
-                # Phase needs retry
-                if should_retry_phase(state):
-                    logger.warning(f"🔄 EVALUATION - Phase needs retry. Retry count: {state.get('retry_count', 0) + 1}/{state.get('max_phase_retries', 3)}")
-                    increment_retry_count(state)
-                    return "Retry"
-                else:
-                    logger.error("❌ EVALUATION - Max retries reached for phase")
-                    return "Fail"
+            # Phase needs retry
+            if should_retry_phase(state):
+                logger.warning(f"🔄 EVALUATION - Phase needs retry. Retry count: {state.get('retry_count', 0) + 1}/{state.get('max_phase_retries', 3)}")
+                increment_retry_count(state)
+                return "Retry"
+            logger.error("❌ EVALUATION - Max retries reached for phase")
+            return "Fail"
 
-        else:
-            # No reviewer (e.g., first phase), assume success
-            logger.info("✅ EVALUATION - No reviewer in phase, assuming success")
-            reset_retry_count(state)
+        # No reviewer (e.g., first phase), assume success
+        logger.info("✅ EVALUATION - No reviewer in phase, assuming success")
+        reset_retry_count(state)
 
-            # Don't change phase - let workflow handle it
-            return "Continue"
+        # Don't change phase - let workflow handle it
+        return "Continue"
 
     def run(self, initial_state: EnhancedKaggleState, max_steps: int = 100) -> EnhancedKaggleState:
         """Run the complete workflow.
@@ -218,21 +211,20 @@ class SOP:
                 logger.info("Workflow completed successfully!")
                 break
 
-            elif status == "Fail":
+            if status == "Fail":
                 logger.error("Workflow failed!")
                 break
 
-            elif status == "Retry":
+            if status == "Retry":
                 logger.info("Retrying current phase...")
                 continue
 
-            elif status == "Continue":
+            if status == "Continue":
                 logger.info(f"Moving to next phase: {state.phase}")
                 continue
 
-            else:
-                logger.error(f"Unknown status: {status}")
-                break
+            logger.error(f"Unknown status: {status}")
+            break
 
         if step_count >= max_steps:
             logger.warning(f"Reached maximum steps ({max_steps})")

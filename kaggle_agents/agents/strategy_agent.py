@@ -1,10 +1,12 @@
 """Strategy agent for high-level decision making."""
 
+from typing import Any
+
 import pandas as pd
-from typing import Dict, Any, List
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
 from pydantic import BaseModel, Field
+
 from ..utils.config import Config
 from ..utils.state import KaggleState
 
@@ -12,13 +14,13 @@ from ..utils.state import KaggleState
 class CompetitionStrategy(BaseModel):
     """Strategy recommendations for the competition."""
 
-    problem_characteristics: List[str] = Field(
+    problem_characteristics: list[str] = Field(
         description="Key characteristics of the problem (e.g., 'high cardinality categoricals', 'time series', 'imbalanced classes')"
     )
-    recommended_models: List[str] = Field(
+    recommended_models: list[str] = Field(
         description="Recommended models to prioritize (e.g., 'LightGBM', 'CatBoost', 'XGBoost')"
     )
-    feature_engineering_priorities: List[str] = Field(
+    feature_engineering_priorities: list[str] = Field(
         description="Specific feature engineering techniques to apply (e.g., 'target encoding', 'polynomial features', 'date extraction')"
     )
     validation_strategy: str = Field(
@@ -49,7 +51,7 @@ class StrategyAgent:
             model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
         )
 
-    def analyze_data_characteristics(self, train_df: pd.DataFrame) -> Dict[str, Any]:
+    def analyze_data_characteristics(self, train_df: pd.DataFrame) -> dict[str, Any]:
         """Analyze dataset characteristics for strategy formulation.
 
         Args:
@@ -221,8 +223,8 @@ Based on this information, provide a comprehensive strategy including:
             return {"eda_summary": {"strategy": strategy_dict}}
 
         except Exception as e:
-            error_msg = f"Strategy formulation failed: {str(e)}"
+            error_msg = f"Strategy formulation failed: {e!s}"
             print(f"Strategy Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": errors + [error_msg]}
+            return {"errors": [*errors, error_msg]}

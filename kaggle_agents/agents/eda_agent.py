@@ -1,10 +1,12 @@
 """Exploratory Data Analysis (EDA) agent."""
 
-import pandas as pd
+from typing import Any
+
 import numpy as np
-from typing import Dict, Any
-from langchain_openai import ChatOpenAI
+import pandas as pd
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+
 from ..utils.config import Config
 from ..utils.state import KaggleState
 
@@ -18,7 +20,7 @@ class EDAAgent:
             model=Config.LLM_MODEL, temperature=Config.TEMPERATURE
         )
 
-    def analyze_dataframe(self, df: pd.DataFrame, name: str) -> Dict[str, Any]:
+    def analyze_dataframe(self, df: pd.DataFrame, name: str) -> dict[str, Any]:
         """Analyze a dataframe and extract key statistics.
 
         Args:
@@ -128,10 +130,10 @@ Provide 5-7 key insights about this data and what we should focus on."""
             state["messages"] = messages
 
         except Exception as e:
-            error_msg = f"EDA failed: {str(e)}"
+            error_msg = f"EDA failed: {e!s}"
             print(f"EDA Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": errors + [error_msg]}
+            return {"errors": [*errors, error_msg]}
 
         return state

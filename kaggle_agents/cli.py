@@ -5,14 +5,14 @@ Simple, clean, and efficient command-line interface with Rich output.
 """
 
 import sys
-from typing import Optional
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from .core import solve_competition, get_config
+from .core import get_config, solve_competition
+
 
 console = Console()
 
@@ -45,7 +45,7 @@ def print_info(message: str):
 
 def start_competition(
     competition_name: str,
-    description: Optional[str] = None,
+    description: str | None = None,
     problem_type: str = "binary_classification",
     evaluation_metric: str = "accuracy",
     max_iterations: int = 3,
@@ -93,7 +93,7 @@ def start_competition(
         print_error("Interrupted by user")
         sys.exit(1)
     except Exception as e:
-        print_error(f"Failed to run competition: {str(e)}")
+        print_error(f"Failed to run competition: {e!s}")
         sys.exit(1)
 
 

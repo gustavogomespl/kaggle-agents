@@ -6,12 +6,14 @@ didactic report explaining WHY certain decisions were made, suitable for
 educational purposes and TCC documentation.
 """
 
-from typing import Dict, Any
 from datetime import datetime
+from typing import Any
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..core.state import KaggleState
 from ..core.config import get_config, get_llm
+from ..core.state import KaggleState
+
 
 class ExplainabilityAgent:
     """
@@ -23,7 +25,7 @@ class ExplainabilityAgent:
         # Using configured LLM for explanations (supports OpenAI and Anthropic)
         self.llm = get_llm()
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Generate explanation report.
 
@@ -63,7 +65,7 @@ class ExplainabilityAgent:
 
     def _build_context(self, competition_info, domain, ablation_plan, dev_results, ensemble, meta_eval) -> str:
         """Build context for the LLM."""
-        
+
         # Format ablation plan
         plan_str = ""
         for comp in ablation_plan:
@@ -80,17 +82,17 @@ class ExplainabilityAgent:
         Competition: {competition_info.name if competition_info else 'Unknown'}
         Domain: {domain}
         Problem Type: {competition_info.problem_type if competition_info else 'Unknown'}
-        
+
         ## Strategy Plan
         {plan_str}
-        
+
         ## Execution Results
         {results_str}
-        
+
         ## Ensemble Strategy
         Model: {ensemble.get('name', 'None')}
         Score: {ensemble.get('mean_cv_score', 'N/A')}
-        
+
         ## Meta-Evaluation (Self-Correction)
         Success Patterns: {', '.join(meta_eval.get('success_patterns', []))}
         Error Patterns: {', '.join(meta_eval.get('error_patterns', []))}
@@ -98,17 +100,17 @@ class ExplainabilityAgent:
 
     def _generate_report(self, context: str) -> str:
         """Generate the didactic report using LLM."""
-        
+
         system_prompt = """You are an expert Data Science Professor explaining an automated solution.
         Your goal is to write a DIDACTIC REPORT explaining the decisions made by the AI system.
-        
+
         Structure your report as follows:
         1. **Problem Analysis**: Why did the system classify this as {domain}? What are the challenges?
         2. **Strategy Selection**: Why were these specific models/techniques chosen in the plan?
         3. **Execution & Challenges**: What went wrong? How did the system correct itself? (Refer to Meta-Evaluation)
         4. **Final Solution**: Explain the final ensemble strategy. Why is it better than single models?
         5. **Key Takeaways**: What can a human learn from this automated run?
-        
+
         Tone: Academic, insightful, encouraging. Use markdown formatting."""
 
         messages = [
@@ -127,7 +129,7 @@ class ExplainabilityAgent:
             f.write(report)
         print(f"\n📝 Report saved to: {path}")
 
-def explainability_agent_node(state: KaggleState) -> Dict[str, Any]:
+def explainability_agent_node(state: KaggleState) -> dict[str, Any]:
     """LangGraph node for explainability agent."""
     agent = ExplainabilityAgent()
     return agent(state)

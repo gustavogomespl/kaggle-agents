@@ -2,9 +2,10 @@
 
 import json
 import logging
-from typing import Dict, Any, List, Optional
-from pathlib import Path
 from datetime import datetime
+from pathlib import Path
+from typing import Any
+
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ class Memory:
         """
         self.competition_dir = Path(competition_dir)
         self.memory_file = self.competition_dir / "memory.json"
-        self.experiences: List[Dict[str, Any]] = []
+        self.experiences: list[dict[str, Any]] = []
 
         # Load existing memory if available
         self.load()
@@ -29,7 +30,7 @@ class Memory:
         self,
         phase: str,
         agent_role: str,
-        experience: Dict[str, Any]
+        experience: dict[str, Any]
     ):
         """Add an agent experience to memory.
 
@@ -51,8 +52,8 @@ class Memory:
     def get_experiences_by_agent(
         self,
         agent_role: str,
-        phase: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        phase: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get all experiences for a specific agent.
 
         Args:
@@ -75,7 +76,7 @@ class Memory:
 
         return experiences
 
-    def get_experiences_by_phase(self, phase: str) -> List[Dict[str, Any]]:
+    def get_experiences_by_phase(self, phase: str) -> list[dict[str, Any]]:
         """Get all experiences for a specific phase.
 
         Args:
@@ -92,8 +93,8 @@ class Memory:
     def get_last_experience(
         self,
         agent_role: str,
-        phase: Optional[str] = None
-    ) -> Optional[Dict[str, Any]]:
+        phase: str | None = None
+    ) -> dict[str, Any] | None:
         """Get the most recent experience for an agent.
 
         Args:
@@ -112,8 +113,8 @@ class Memory:
     def get_feedback_for_agent(
         self,
         agent_role: str,
-        phase: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
+        phase: str | None = None
+    ) -> list[dict[str, Any]]:
         """Get all reviewer feedback for an agent.
 
         Args:
@@ -140,7 +141,7 @@ class Memory:
         self,
         agent_role: str,
         min_score: float = 3.0
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get experiences that received good scores.
 
         Args:
@@ -179,7 +180,7 @@ class Memory:
         """Load memory from disk."""
         if self.memory_file.exists():
             try:
-                with open(self.memory_file, 'r') as f:
+                with open(self.memory_file) as f:
                     self.experiences = json.load(f)
 
                 logger.info(f"Loaded {len(self.experiences)} experiences from memory")
@@ -198,7 +199,7 @@ class Memory:
             self.memory_file.unlink()
         logger.info("Memory cleared")
 
-    def get_statistics(self) -> Dict[str, Any]:
+    def get_statistics(self) -> dict[str, Any]:
         """Get statistics about stored experiences.
 
         Returns:
@@ -211,8 +212,8 @@ class Memory:
                 "phases": []
             }
 
-        agents = list(set(exp['agent_role'] for exp in self.experiences))
-        phases = list(set(exp['phase'] for exp in self.experiences))
+        agents = list({exp['agent_role'] for exp in self.experiences})
+        phases = list({exp['phase'] for exp in self.experiences})
 
         # Calculate average scores by agent
         agent_scores = {}
@@ -243,7 +244,7 @@ class Memory:
             }
         }
 
-    def export_summary(self, output_file: Optional[Path] = None) -> str:
+    def export_summary(self, output_file: Path | None = None) -> str:
         """Export a human-readable summary of memory.
 
         Args:

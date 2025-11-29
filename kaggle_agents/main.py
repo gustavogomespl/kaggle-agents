@@ -3,6 +3,7 @@
 import os
 import sys
 
+
 # Fix matplotlib backend for Google Colab and other environments
 # This must be set before any imports that use matplotlib (e.g., LightGBM)
 if 'MPLBACKEND' in os.environ:
@@ -15,11 +16,13 @@ else:
 import argparse
 import logging
 from pathlib import Path
+
 from langchain_core.messages import HumanMessage
-from .workflows.kaggle_workflow import create_kaggle_workflow
-from .workflows.enhanced_workflow import create_enhanced_workflow
+
 from .utils.config import Config
 from .utils.state import KaggleState
+from .workflows.enhanced_workflow import create_enhanced_workflow
+from .workflows.kaggle_workflow import create_kaggle_workflow
 
 
 def initialize_state(competition: str, max_iterations: int = 5) -> KaggleState:
@@ -265,7 +268,7 @@ def main():
     except KeyboardInterrupt:
         print("\n\nWorkflow interrupted by user")
     except Exception as e:
-        print(f"\n\nWorkflow failed: {str(e)}")
+        print(f"\n\nWorkflow failed: {e!s}")
         import traceback
         traceback.print_exc()
 

@@ -12,13 +12,13 @@ Based on:
 """
 
 import json
-from typing import Dict, Any
 from datetime import datetime
+from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..core.state import KaggleState, IterationMemory
-from ..core.config import get_config, get_llm_for_role, calculate_score_improvement
+from ..core.config import calculate_score_improvement, get_config, get_llm_for_role
+from ..core.state import IterationMemory, KaggleState
 from ..optimization import create_training_collector
 
 
@@ -51,7 +51,7 @@ class MetaEvaluatorAgent:
         # Training data collector for RL
         self.training_collector = create_training_collector()
 
-    def __call__(self, state: KaggleState) -> Dict[str, Any]:
+    def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute meta-evaluation after performance evaluation.
 
@@ -96,7 +96,7 @@ class MetaEvaluatorAgent:
             "last_updated": datetime.now(),
         }
 
-    def _analyze_failures(self, state: KaggleState) -> Dict[str, Any]:
+    def _analyze_failures(self, state: KaggleState) -> dict[str, Any]:
         """
         Analyze component failures and extract patterns (PREFACE pattern).
 
@@ -217,40 +217,39 @@ class MetaEvaluatorAgent:
         # Common error patterns
         if "importerror" in error_lower or "modulenotfounderror" in error_lower:
             return "import_error"
-        elif "filenotfounderror" in error_lower or "no such file" in error_lower:
+        if "filenotfounderror" in error_lower or "no such file" in error_lower:
             return "file_not_found"
-        elif "keyerror" in error_lower:
+        if "keyerror" in error_lower:
             return "key_error"
-        elif "valueerror" in error_lower:
+        if "valueerror" in error_lower:
             if "shape" in error_lower or "dimension" in error_lower:
                 return "dimension_mismatch"
             if "nan" in error_lower or "infinity" in error_lower:
                 return "data_contains_nans"
             return "value_error"
-        elif "typeerror" in error_lower:
+        if "typeerror" in error_lower:
             return "type_error"
-        elif "memoryerror" in error_lower or "out of memory" in error_lower:
+        if "memoryerror" in error_lower or "out of memory" in error_lower:
             return "memory_error"
-        elif "timeout" in error_lower or "timed out" in error_lower:
+        if "timeout" in error_lower or "timed out" in error_lower:
             return "timeout_error"
-        elif "syntaxerror" in error_lower:
+        if "syntaxerror" in error_lower:
             return "syntax_error"
-        elif "attributeerror" in error_lower:
+        if "attributeerror" in error_lower:
             return "attribute_error"
-        elif "indexerror" in error_lower:
+        if "indexerror" in error_lower:
             return "index_error"
-        elif "validation failed" in error_lower:
+        if "validation failed" in error_lower:
             return "validation_error"
-        elif "final validation performance" in error_lower:
+        if "final validation performance" in error_lower:
             return "missing_output_format"
-        else:
-            return "runtime_error"
+        return "runtime_error"
 
     def _calculate_reward_signals(
         self,
         state: KaggleState,
-        failure_analysis: Dict[str, Any],
-    ) -> Dict[str, float]:
+        failure_analysis: dict[str, Any],
+    ) -> dict[str, float]:
         """
         Calculate reward signals for RL optimization (CodeRL+ pattern).
 
@@ -296,9 +295,9 @@ class MetaEvaluatorAgent:
         avg_execution_time = sum(r.execution_time for r in dev_results) / total_components if total_components > 0 else 0.0
         r_semantics = 1.0 - min(avg_execution_time / 300.0, 1.0)  # Normalize by 5min timeout
 
-        # Reward 5: Diversity 
+        # Reward 5: Diversity
         # Encourages trying different types of components (e.g. not just 5 XGBoosts)
-        unique_types = len(set(c.get("type", "unknown") for c in failure_analysis["success_components"]))
+        unique_types = len({c.get("type", "unknown") for c in failure_analysis["success_components"]})
         r_diversity = min(unique_types / 3.0, 1.0)  # Target: at least 3 different types working
 
         # Reward 6: Robustness/Overfitting Penalty
@@ -307,7 +306,7 @@ class MetaEvaluatorAgent:
         public_score = 0.0
         if submissions:
             public_score = submissions[-1].public_score or 0.0
-        
+
         # If we have both scores, check gap. If gap > 0.1, heavy penalty.
         gap = abs(validation_score - public_score)
         r_robustness = 1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
@@ -318,8 +317,8 @@ class MetaEvaluatorAgent:
             "performance": 0.40,
             "improvement": 0.1,
             "semantics": 0.05,
-            "diversity": 0.1,    
-            "robustness": 0.1,   
+            "diversity": 0.1,
+            "robustness": 0.1,
         }
 
         r_combined = (
@@ -349,9 +348,9 @@ class MetaEvaluatorAgent:
     def _generate_refinement_guidance(
         self,
         state: KaggleState,
-        failure_analysis: Dict[str, Any],
-        reward_signals: Dict[str, float],
-    ) -> Dict[str, str]:
+        failure_analysis: dict[str, Any],
+        reward_signals: dict[str, float],
+    ) -> dict[str, str]:
         """
         Generate refinement guidance for prompt optimization (PREFACE pattern).
 
@@ -399,8 +398,8 @@ class MetaEvaluatorAgent:
     def _build_evaluation_context(
         self,
         state: KaggleState,
-        failure_analysis: Dict[str, Any],
-        reward_signals: Dict[str, float],
+        failure_analysis: dict[str, Any],
+        reward_signals: dict[str, float],
     ) -> str:
         """Build context string for LLM evaluation."""
         current_iteration = state.get("current_iteration", 0)
@@ -441,7 +440,7 @@ class MetaEvaluatorAgent:
             # Extract score from stdout if possible
             score_match = re.search(r"Final Validation Performance: (0\.\d+)", res.stdout)
             score = float(score_match.group(1)) if score_match else "N/A"
-            
+
             # Determine component name (heuristic)
             comp_name = f"Component_{i+1}"
             if "class " in res.code:
@@ -449,14 +448,14 @@ class MetaEvaluatorAgent:
                 class_match = re.search(r"class (\w+)", res.code)
                 if class_match:
                     comp_name = class_match.group(1)
-            
+
             status = "✅ Success" if res.success else "❌ Failed"
-            
+
             context += f"\n### {comp_name}\n"
             context += f"**Status**: {status}\n"
             context += f"**Score**: {score}\n"
             context += f"**Execution Time**: {res.execution_time:.2f}s\n"
-            
+
             if not res.success:
                 context += f"**Error**: {res.stderr[-200:] if res.stderr else 'Unknown Error'}\n"
 
@@ -503,8 +502,8 @@ Focus on actionable, specific improvements based on error patterns and performan
     def _create_iteration_memory(
         self,
         state: KaggleState,
-        failure_analysis: Dict[str, Any],
-        reward_signals: Dict[str, float],
+        failure_analysis: dict[str, Any],
+        reward_signals: dict[str, float],
     ) -> IterationMemory:
         """
         Create iteration memory for learning history.
@@ -541,8 +540,8 @@ Focus on actionable, specific improvements based on error patterns and performan
     def _collect_training_data(
         self,
         state: KaggleState,
-        failure_analysis: Dict[str, Any],
-        reward_signals: Dict[str, float],
+        failure_analysis: dict[str, Any],
+        reward_signals: dict[str, float],
     ) -> None:
         """
         Collect training data for DSPy optimization.
@@ -640,7 +639,7 @@ Return structured JSON with clear guidance for each agent type."""
 
 # ==================== LangGraph Node Function ====================
 
-def meta_evaluator_node(state: KaggleState) -> Dict[str, Any]:
+def meta_evaluator_node(state: KaggleState) -> dict[str, Any]:
     """
     LangGraph node function for meta-evaluation.
 

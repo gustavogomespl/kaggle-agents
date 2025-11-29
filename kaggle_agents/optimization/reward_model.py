@@ -10,7 +10,6 @@ import re
 import dspy
 
 
-
 class PlannerRewardModel:
     """
     Reward model for the Planner Agent.
@@ -58,13 +57,12 @@ class PlannerRewardModel:
         completeness_score = self._evaluate_completeness(plan, example)
 
         # Weighted average
-        total_score = (
+        return (
             self.weight_diversity * diversity_score +
             self.weight_impact * impact_score +
             self.weight_completeness * completeness_score
         )
 
-        return total_score
 
     def _evaluate_diversity(self, plan: list) -> float:
         """
@@ -95,9 +93,8 @@ class PlannerRewardModel:
             plan_types.add(comp_type)
 
         # Diversity = proportion of expected types covered
-        diversity = len(plan_types & expected_types) / len(expected_types)
+        return len(plan_types & expected_types) / len(expected_types)
 
-        return diversity
 
     def _evaluate_impact_estimates(self, plan: list) -> float:
         """
@@ -153,8 +150,7 @@ class PlannerRewardModel:
 
         if len(plan) >= min_components:
             return 1.0
-        else:
-            return len(plan) / min_components
+        return len(plan) / min_components
 
 
 class DeveloperRewardModel:
@@ -189,9 +185,8 @@ class DeveloperRewardModel:
         structure_score = self._evaluate_structure(code)
 
         # Average
-        total_score = (syntax_score + structure_score) / 2
+        return (syntax_score + structure_score) / 2
 
-        return total_score
 
     def _check_syntax(self, code: str) -> float:
         """
@@ -273,15 +268,14 @@ class ValidationRewardModel:
             return 0.0
 
         # Pass rate
-        pass_rate = passed_count / total_count
+        return passed_count / total_count
 
-        return pass_rate
 
     def _get_passed(self, result) -> bool:
         """Extract 'passed' field from result."""
         if isinstance(result, dict):
             return result.get("passed", False)
-        elif hasattr(result, "passed"):
+        if hasattr(result, "passed"):
             return result.passed
         return False
 
@@ -339,9 +333,8 @@ class KaggleScoreRewardModel:
         # Linear scaling below that
         if percentile <= self.target_percentile:
             return 1.0
-        else:
-            # Scale from 1.0 at target to 0.0 at 100%
-            return max(0.0, 1.0 - (percentile - self.target_percentile) / (100 - self.target_percentile))
+        # Scale from 1.0 at target to 0.0 at 100%
+        return max(0.0, 1.0 - (percentile - self.target_percentile) / (100 - self.target_percentile))
 
 
 class CombinedRewardModel:
@@ -401,13 +394,12 @@ class CombinedRewardModel:
             cv_score = min(prediction.cv_score, 1.0)
 
         # Weighted combination
-        total_score = (
+        return (
             self.weight_kaggle * kaggle_score +
             self.weight_quality * quality_score +
             self.weight_cv * cv_score
         )
 
-        return total_score
 
 
 # ==================== Convenience Functions ====================

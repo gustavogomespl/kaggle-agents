@@ -6,16 +6,16 @@ the complete agent pipeline with progress tracking and control.
 """
 
 import time
-from typing import Dict, Any, Optional
 from dataclasses import dataclass
+from typing import Any
 
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
+from ..workflow import run_simple_workflow, run_workflow
+from .config import get_competition_dir, get_config
 from .state import KaggleState
-from .config import get_config, get_competition_dir
-from ..workflow import run_workflow, run_simple_workflow
 
 
 console = Console()
@@ -121,7 +121,7 @@ class KaggleOrchestrator:
             return results
 
         except Exception as e:
-            console.print(f"\n[red]L Workflow failed: {str(e)}[/red]")
+            console.print(f"\n[red]L Workflow failed: {e!s}[/red]")
             raise
 
     def _create_results(
@@ -137,7 +137,7 @@ class KaggleOrchestrator:
 
         return WorkflowResults(
             competition_name=competition_name,
-            success=final_state.get("should_continue", False) == False,
+            success=not final_state.get("should_continue", False),
             iterations=final_state.get("current_iteration", 0),
             sota_solutions_found=len(final_state.get("sota_solutions", [])),
             components_planned=len(final_state.get("ablation_plan", [])),
@@ -185,7 +185,7 @@ class KaggleOrchestrator:
         else:
             console.print("\n[bold yellow]  Workflow incomplete[/bold yellow]")
 
-    def get_workflow_status(self, competition_name: str) -> Optional[Dict[str, Any]]:
+    def get_workflow_status(self, competition_name: str) -> dict[str, Any] | None:
         """
         Get status of a running or completed workflow.
 

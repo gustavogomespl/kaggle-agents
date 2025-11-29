@@ -5,14 +5,15 @@ This module provides automatic prompt optimization using DSPy's MIPROv2
 optimizer and custom reward models based on Kaggle competition scores.
 """
 
-import os
-from typing import List, Dict, Any, Optional, Callable
-from pathlib import Path
 import json
+import os
 import pickle
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import dspy
-from dspy.teleprompt import MIPROv2, BootstrapFewShot
+from dspy.teleprompt import BootstrapFewShot, MIPROv2
 
 from ..core.config import get_config
 
@@ -36,7 +37,6 @@ class PromptOptimizer:
     def _setup_dspy(self) -> None:
         """Configure DSPy with the appropriate language model."""
         # Get safe max_tokens based on model
-        model = self.config.llm.model
         max_tokens = self.config.llm.max_tokens
 
         # Configure LM based on provider
@@ -74,10 +74,10 @@ class PromptOptimizer:
     def optimize_prompt(
         self,
         module: dspy.Module,
-        trainset: List[dspy.Example],
+        trainset: list[dspy.Example],
         metric: Callable,
         agent_name: str,
-        save_path: Optional[Path] = None,
+        save_path: Path | None = None,
     ) -> dspy.Module:
         """
         Optimize prompts for a DSPy module using MIPROv2.
@@ -135,8 +135,8 @@ class PromptOptimizer:
     def load_optimized_prompt(
         self,
         agent_name: str,
-        load_path: Optional[Path] = None,
-    ) -> Optional[dspy.Module]:
+        load_path: Path | None = None,
+    ) -> dspy.Module | None:
         """
         Load previously optimized prompts for an agent.
 
@@ -166,7 +166,7 @@ class PromptOptimizer:
     def evaluate_prompt(
         self,
         module: dspy.Module,
-        testset: List[dspy.Example],
+        testset: list[dspy.Example],
         metric: Callable,
     ) -> float:
         """
@@ -190,8 +190,7 @@ class PromptOptimizer:
                 print(f"  Evaluation error: {e}")
                 scores.append(0.0)
 
-        avg_score = sum(scores) / len(scores) if scores else 0.0
-        return avg_score
+        return sum(scores) / len(scores) if scores else 0.0
 
 
 class TrainingDataCollector:
@@ -213,8 +212,8 @@ class TrainingDataCollector:
     def add_example(
         self,
         agent_name: str,
-        inputs: Dict[str, Any],
-        outputs: Dict[str, Any],
+        inputs: dict[str, Any],
+        outputs: dict[str, Any],
         score: float,
     ) -> None:
         """
@@ -237,7 +236,7 @@ class TrainingDataCollector:
         examples = []
 
         if examples_file.exists():
-            with open(examples_file, 'r') as f:
+            with open(examples_file) as f:
                 examples = json.load(f)
 
         # Add new example
@@ -252,9 +251,9 @@ class TrainingDataCollector:
     def get_examples(
         self,
         agent_name: str,
-        min_score: Optional[float] = None,
-        max_examples: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
+        min_score: float | None = None,
+        max_examples: int | None = None,
+    ) -> list[dict[str, Any]]:
         """
         Retrieve training examples for an agent.
 
@@ -271,7 +270,7 @@ class TrainingDataCollector:
         if not examples_file.exists():
             return []
 
-        with open(examples_file, 'r') as f:
+        with open(examples_file) as f:
             examples = json.load(f)
 
         # Filter by score
@@ -290,8 +289,8 @@ class TrainingDataCollector:
     def convert_to_dspy_examples(
         self,
         agent_name: str,
-        min_score: Optional[float] = None,
-    ) -> List[dspy.Example]:
+        min_score: float | None = None,
+    ) -> list[dspy.Example]:
         """
         Convert stored examples to DSPy Example format.
 

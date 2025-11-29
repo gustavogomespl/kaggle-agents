@@ -2,6 +2,7 @@
 
 import os
 
+
 # Fix matplotlib backend for Google Colab compatibility
 # Must be set before importing lightgbm
 if 'MPLBACKEND' in os.environ:
@@ -9,21 +10,23 @@ if 'MPLBACKEND' in os.environ:
         # Colab sets this inline backend which causes issues with some versions
         os.environ['MPLBACKEND'] = 'Agg'
 
-import pandas as pd
-import joblib
 from pathlib import Path
-from typing import Dict, Any, List
-from sklearn.model_selection import cross_val_score
+from typing import Any
+
+import joblib
+import pandas as pd
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_openai import ChatOpenAI
+from lightgbm import LGBMClassifier, LGBMRegressor
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.model_selection import cross_val_score
 from xgboost import XGBClassifier, XGBRegressor
-from lightgbm import LGBMClassifier, LGBMRegressor
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+
 from ..utils.config import Config
-from ..utils.state import KaggleState
 from ..utils.cross_validation import AdaptiveCrossValidator
 from ..utils.hyperparameter_tuning import HyperparameterOptimizer
+from ..utils.state import KaggleState
 
 
 class ModelTrainingAgent:
@@ -69,7 +72,7 @@ class ModelTrainingAgent:
 
         return "classification"
 
-    def get_models(self, problem_type: str) -> Dict[str, Any]:
+    def get_models(self, problem_type: str) -> dict[str, Any]:
         """Get appropriate models for problem type.
 
         Args:
@@ -91,23 +94,22 @@ class ModelTrainingAgent:
                 ),
                 "logistic": LogisticRegression(random_state=42, max_iter=1000),
             }
-        else:
-            return {
-                "random_forest": RandomForestRegressor(
-                    n_estimators=100, random_state=42, n_jobs=-1
-                ),
-                "xgboost": XGBRegressor(
-                    n_estimators=100, random_state=42, n_jobs=-1
-                ),
-                "lightgbm": LGBMRegressor(
-                    n_estimators=100, random_state=42, n_jobs=-1, verbose=-1
-                ),
-                "ridge": Ridge(random_state=42),
-            }
+        return {
+            "random_forest": RandomForestRegressor(
+                n_estimators=100, random_state=42, n_jobs=-1
+            ),
+            "xgboost": XGBRegressor(
+                n_estimators=100, random_state=42, n_jobs=-1
+            ),
+            "lightgbm": LGBMRegressor(
+                n_estimators=100, random_state=42, n_jobs=-1, verbose=-1
+            ),
+            "ridge": Ridge(random_state=42),
+        }
 
     def train_and_evaluate(
         self, X: pd.DataFrame, y: pd.Series, problem_type: str
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Train multiple models and evaluate with cross-validation.
 
         Args:
@@ -139,7 +141,7 @@ class ModelTrainingAgent:
                 feature_importance = {}
                 if hasattr(model, "feature_importances_"):
                     feature_importance = dict(
-                        zip(X.columns, model.feature_importances_)
+                        zip(X.columns, model.feature_importances_, strict=False)
                     )
 
                 results.append(
@@ -156,7 +158,7 @@ class ModelTrainingAgent:
                 print(f"    {name}: CV Score = {cv_scores.mean():.4f} (+/- {cv_scores.std():.4f})")
 
             except Exception as e:
-                print(f"    Failed to train {name}: {str(e)}")
+                print(f"    Failed to train {name}: {e!s}")
                 continue
 
         return results
@@ -259,10 +261,10 @@ Provide analysis and next steps recommendations."""
             print(f"Model Training Agent: Best model is {best_result['name']} with CV score {best_result['mean_cv_score']:.4f}")
 
         except Exception as e:
-            error_msg = f"Model training failed: {str(e)}"
+            error_msg = f"Model training failed: {e!s}"
             print(f"Model Training Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
             errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": errors + [error_msg]}
+            return {"errors": [*errors, error_msg]}
 
         return state
