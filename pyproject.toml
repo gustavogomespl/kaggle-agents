@@ -70,6 +70,8 @@ dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",
     "pytest-asyncio>=0.21.0",
+    "ruff>=0.8.0",
+    "pre-commit>=3.0.0",
 ]
 
 [project.scripts]
@@ -78,3 +80,95 @@ kaggle-agents = "kaggle_agents.cli:main"
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+# ==================== Ruff Configuration ====================
+[tool.ruff]
+# Excluir diretórios da análise
+exclude = [
+    ".git",
+    ".venv",
+    "venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "*.egg-info",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    "competitions/",  # Diretórios gerados
+    "adk_example_inspiration/",  # Exemplos de referência
+]
+
+# Linha máxima (padrão: 88, mas pode ajustar)
+line-length = 100
+
+# Python version target
+target-version = "py310"
+
+[tool.ruff.lint]
+# Regras a serem checadas
+# Veja: https://docs.astral.sh/ruff/rules/
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort (import sorting)
+    "N",      # pep8-naming
+    "UP",     # pyupgrade (modernize code)
+    "B",      # flake8-bugbear (detect common bugs)
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "RET",    # flake8-return
+    "ARG",    # flake8-unused-arguments
+    "PTH",    # flake8-use-pathlib
+    "ERA",    # eradicate (commented out code)
+    "PL",     # pylint
+    "RUF",    # Ruff-specific rules
+]
+
+# Regras a ignorar
+ignore = [
+    "E501",   # Line too long (handled by formatter)
+    "B008",   # Do not perform function call in argument defaults (common in FastAPI/Pydantic)
+    "PLR0913", # Too many arguments to function call
+    "PLR2004", # Magic value used in comparison
+    "ARG001", # Unused function argument (comum em callbacks LangGraph)
+    "ARG002", # Unused method argument
+    "N806",   # Variable in function should be lowercase (sklearn usa X, y)
+    "N803",   # Argument name should be lowercase
+    "ERA001", # Commented out code (às vezes é útil manter)
+]
+
+# Permitir autofix para estas regras
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+# Ignorar regras específicas em testes
+"tests/**/*.py" = [
+    "PLR2004",  # Magic values ok in tests
+    "S101",     # Assert ok in tests
+]
+
+# Ignorar em exemplos
+"adk_example_inspiration/**/*.py" = ["ALL"]
+
+[tool.ruff.lint.isort]
+# Configuração de import sorting
+known-first-party = ["kaggle_agents"]
+force-single-line = false
+lines-after-imports = 2
+
+[tool.ruff.lint.mccabe]
+# Complexidade ciclomática máxima
+max-complexity = 15
+
+[tool.ruff.format]
+# Usar aspas duplas
+quote-style = "double"
+
+# Indentação com espaços
+indent-style = "space"
+
+# Usar trailing commas
+skip-magic-trailing-comma = false
