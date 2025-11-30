@@ -193,6 +193,154 @@ MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
 - Print intermediate scores during CV:
   "📊 Fold {n}/5: score={fold_score:.4f} (running mean: {mean_score:.4f})"
 
+🔧 MANDATORY STRUCTURED LOGGING (FOR AUTOMATED FEEDBACK LOOP):
+The system uses your logs to provide feedback for model improvement. You MUST use these exact formats:
+
+**Required Structured Log Formats** (parseable by the feedback system):
+```python
+# 1. FOLD LOGGING - Log after each CV fold completes
+print(f"[LOG:FOLD] fold={fold_num} score={score:.6f} time={elapsed:.2f}")
+# Example: [LOG:FOLD] fold=1 score=0.873245 time=45.23
+
+# 2. OPTUNA TRIAL LOGGING - Log after each Optuna trial
+print(f"[LOG:OPTUNA] trial={trial_num} score={score:.6f} time={elapsed:.2f} params={params}")
+# Example: [LOG:OPTUNA] trial=3 score=0.8650 time=30.5 params={'learning_rate': 0.05, 'max_depth': 6}
+
+# 3. TIMING LOGGING - Log timing for each step
+print(f"[LOG:TIMING] step={step_name} time={elapsed:.2f} cumulative={cumulative:.2f}")
+# Example: [LOG:TIMING] step=PREPROCESSING time=12.50 cumulative=15.20
+
+# 4. FEATURE IMPORTANCE LOGGING - Log after training (top 20 features)
+print(f"[LOG:FEATURES] top={list(top_features)} importances={list(importances)}")
+# Example: [LOG:FEATURES] top=['feat1', 'feat2', 'feat3'] importances=[0.15, 0.12, 0.08]
+
+# 5. MEMORY LOGGING - Log memory usage periodically
+print(f"[LOG:MEMORY] current_mb={current:.1f} peak_mb={peak:.1f}")
+# Example: [LOG:MEMORY] current_mb=1250.5 peak_mb=1800.2
+
+# 6. HYPERPARAMETERS LOGGING - Log final hyperparameters used
+print(f"[LOG:HYPERPARAMS] params={final_params}")
+# Example: [LOG:HYPERPARAMS] params={'n_estimators': 1000, 'learning_rate': 0.05, 'max_depth': 7}
+
+# 7. CV SUMMARY LOGGING - Log CV summary at end
+print(f"[LOG:CV_SUMMARY] mean={mean:.6f} std={std:.6f} scores={list(scores)}")
+# Example: [LOG:CV_SUMMARY] mean=0.8732 std=0.0085 scores=[0.871, 0.875, 0.872, 0.874, 0.873]
+
+# 8. WARNING LOGGING - Log any warnings detected
+print(f"[LOG:WARNING] message={warning_message}")
+# Example: [LOG:WARNING] message=High variance detected across folds (std > 0.02)
+
+# 9. ERROR LOGGING - Log any errors encountered
+print(f"[LOG:ERROR] message={error_message}")
+# Example: [LOG:ERROR] message=GPU memory exhausted, falling back to CPU
+```
+
+**Complete Structured Logging Template** (COPY THIS INTO YOUR CODE):
+```python
+import time
+import psutil
+import numpy as np
+
+# Initialize logging
+start_time = time.time()
+step_times = {}
+fold_scores = []
+optuna_trials = []
+feature_importances = {}
+warnings_list = []
+
+def log_timing(step_name, step_start):
+    elapsed = time.time() - step_start
+    cumulative = time.time() - start_time
+    step_times[step_name] = elapsed
+    print(f"[LOG:TIMING] step={step_name} time={elapsed:.2f} cumulative={cumulative:.2f}")
+    return time.time()
+
+def log_memory():
+    try:
+        process = psutil.Process()
+        current = process.memory_info().rss / 1024 / 1024
+        # Peak memory estimation (current as approximation)
+        print(f"[LOG:MEMORY] current_mb={current:.1f} peak_mb={current:.1f}")
+    except:
+        pass
+
+def log_fold(fold_num, score, elapsed):
+    fold_scores.append(score)
+    running_mean = np.mean(fold_scores)
+    print(f"[LOG:FOLD] fold={fold_num} score={score:.6f} time={elapsed:.2f}")
+    print(f"📊 Fold {fold_num}/5: score={score:.4f} (running mean: {running_mean:.4f})")
+
+def log_optuna_trial(trial_num, score, elapsed, params):
+    optuna_trials.append({'trial': trial_num, 'score': score, 'params': params})
+    print(f"[LOG:OPTUNA] trial={trial_num} score={score:.6f} time={elapsed:.2f} params={params}")
+
+def log_features(model, feature_names, top_n=20):
+    try:
+        if hasattr(model, 'feature_importances_'):
+            importances = model.feature_importances_
+        elif hasattr(model, 'feature_importance'):
+            importances = model.feature_importance()
+        else:
+            return
+        # Get top N features
+        indices = np.argsort(importances)[::-1][:top_n]
+        top_features = [feature_names[i] for i in indices]
+        top_importances = [float(importances[i]) for i in indices]
+        print(f"[LOG:FEATURES] top={top_features} importances={top_importances}")
+    except Exception as e:
+        print(f"[LOG:WARNING] message=Could not extract feature importances: {e}")
+
+def log_hyperparams(params):
+    print(f"[LOG:HYPERPARAMS] params={params}")
+
+def log_cv_summary(scores):
+    mean_score = np.mean(scores)
+    std_score = np.std(scores)
+    print(f"[LOG:CV_SUMMARY] mean={mean_score:.6f} std={std_score:.6f} scores={list(scores)}")
+    # Auto-detect issues
+    if std_score > 0.02:
+        print(f"[LOG:WARNING] message=High variance across folds (std={std_score:.4f} > 0.02) - possible overfitting")
+    if mean_score < 0.5:
+        print(f"[LOG:WARNING] message=Low CV score ({mean_score:.4f}) - model may be underfitting")
+
+def log_warning(message):
+    warnings_list.append(message)
+    print(f"[LOG:WARNING] message={message}")
+
+def log_error(message):
+    print(f"[LOG:ERROR] message={message}")
+```
+
+**Usage Example in Training Loop**:
+```python
+step_start = time.time()
+# Load data...
+step_start = log_timing("DATA_LOADING", step_start)
+log_memory()
+
+# Preprocessing...
+step_start = log_timing("PREPROCESSING", step_start)
+
+# Optuna tuning
+for trial_num, trial in enumerate(study.trials, 1):
+    trial_start = time.time()
+    # ... trial code ...
+    log_optuna_trial(trial_num, trial.value, time.time() - trial_start, trial.params)
+
+# CV Training
+for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+    fold_start = time.time()
+    # ... training code ...
+    log_fold(fold, fold_score, time.time() - fold_start)
+
+# After training
+log_features(model, feature_names)
+log_hyperparams(best_params)
+log_cv_summary(fold_scores)
+log_memory()
+```
+
 Your code should:
 - Import all necessary libraries
 - Load data from correct paths
@@ -801,6 +949,69 @@ INTEGRATE_COMPONENT_PROMPT = """Integrate the following component into the exist
 4. Maintain existing functionality
 
 Generate the integrated code below:
+"""
+
+# Template for refinement with training feedback
+REFINEMENT_WITH_FEEDBACK_PROMPT = """You are refining a machine learning model based on training feedback.
+
+## Current Performance
+- CV Score: {current_score}
+
+## Training Results Analysis
+{training_feedback}
+
+## Current Code
+```python
+{current_code}
+```
+
+## Improvement Task
+Based on the training results above, improve the model to achieve a HIGHER CV score.
+
+**Improvement Guidelines** (apply what's relevant based on the feedback):
+1. **High CV variance (std > 0.02)**: 
+   - Increase regularization (reg_alpha, reg_lambda)
+   - Reduce max_depth or num_leaves
+   - Add early stopping
+   - Increase min_child_samples
+
+2. **Overfitting detected** (train >> val score):
+   - Increase regularization parameters
+   - Reduce n_estimators
+   - Increase subsample/colsample_bytree
+   - Add dropout for neural networks
+
+3. **Underfitting detected** (low score, stable CV):
+   - Decrease regularization
+   - Increase model complexity (depth, estimators)
+   - Add more features or feature interactions
+   - Try a more complex model architecture
+
+4. **Optuna best params available**:
+   - Use them as the starting hyperparameters
+   - Consider expanding search range around best values
+
+5. **Zero-importance features found**:
+   - Remove them to reduce noise and training time
+   - Focus on top features for interactions
+
+6. **High memory usage**:
+   - Use float32 instead of float64
+   - Reduce batch size
+   - Process data in chunks
+
+7. **Slow training**:
+   - Reduce n_estimators for tuning phase
+   - Use GPU if available
+   - Subsample data for hyperparameter search
+
+**CRITICAL Requirements**:
+- Keep the SAME structured logging format ([LOG:FOLD], [LOG:OPTUNA], etc.)
+- Keep the same CV scheme (StratifiedKFold, same splits)
+- Return the COMPLETE updated Python code
+- Focus on the MOST IMPACTFUL change based on the feedback
+
+Generate the improved code below:
 """
 
 # Domain-specific code templates

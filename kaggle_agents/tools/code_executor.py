@@ -7,14 +7,17 @@ This module provides sandboxed Python code execution with:
 - Error parsing and categorization
 - Artifact validation
 - Resource monitoring
+- Real-time stdout streaming for training logs
 """
 
 import re
 import subprocess
 import sys
 import time
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from queue import Queue, Empty
 from typing import Any
 
 from ..core.config import get_config
@@ -224,27 +227,117 @@ class CodeExecutor:
             with open(script_file, 'w', encoding='utf-8') as f:
                 f.write(code)
 
-            # Execute in subprocess with progress monitoring
+            # Execute in subprocess with REAL-TIME STREAMING
             start_time = time.time()
 
-            # Start process
+            # Start process with line-buffered output for real-time streaming
             process = subprocess.Popen(
-                [sys.executable, str(script_file)],
+                [sys.executable, "-u", str(script_file)],  # -u for unbuffered output
                 cwd=str(working_path),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                bufsize=1,  # Line buffered
             )
 
-            # Monitor progress with timeout
+            # Queues for collecting output from threads
+            stdout_queue: Queue = Queue()
+            stderr_queue: Queue = Queue()
+            stdout_lines: list[str] = []
+            stderr_lines: list[str] = []
+
+            def read_stream(stream, queue, prefix=""):
+                """Read from stream and put lines in queue."""
+                try:
+                    for line in iter(stream.readline, ''):
+                        if line:
+                            queue.put((prefix, line))
+                except Exception:
+                    pass
+                finally:
+                    stream.close()
+
+            # Start reader threads
+            stdout_thread = threading.Thread(
+                target=read_stream, 
+                args=(process.stdout, stdout_queue, "")
+            )
+            stderr_thread = threading.Thread(
+                target=read_stream, 
+                args=(process.stderr, stderr_queue, "⚠️ ")
+            )
+            stdout_thread.daemon = True
+            stderr_thread.daemon = True
+            stdout_thread.start()
+            stderr_thread.start()
+
+            # Monitor progress with timeout and stream output in real-time
             progress_interval = 30  # Print progress every 30s
             last_progress_time = start_time
+            last_output_time = start_time
 
             while True:
                 # Check if process completed
                 poll_result = process.poll()
+
+                # Process any queued output (real-time streaming)
+                output_printed = False
+                while True:
+                    try:
+                        prefix, line = stdout_queue.get_nowait()
+                        line_stripped = line.rstrip('\n\r')
+                        stdout_lines.append(line)
+                        # Print structured logs with special formatting
+                        if line_stripped.startswith("[LOG:"):
+                            print(f"      📋 {line_stripped}")
+                        elif "Fold" in line_stripped and "score" in line_stripped.lower():
+                            print(f"      📊 {line_stripped}")
+                        elif "Trial" in line_stripped or "trial" in line_stripped:
+                            print(f"      🔬 {line_stripped}")
+                        elif "✓" in line_stripped or "✅" in line_stripped:
+                            print(f"      {line_stripped}")
+                        elif "⏱️" in line_stripped or "time" in line_stripped.lower():
+                            print(f"      {line_stripped}")
+                        elif "Final Validation Performance" in line_stripped:
+                            print(f"      🎯 {line_stripped}")
+                        else:
+                            # Regular output - only print important lines
+                            if any(kw in line_stripped.lower() for kw in 
+                                   ['loading', 'training', 'fold', 'score', 'accuracy', 
+                                    'auc', 'error', 'warning', 'saved', 'complete']):
+                                print(f"      {prefix}{line_stripped}")
+                        output_printed = True
+                        last_output_time = time.time()
+                    except Empty:
+                        break
+
+                while True:
+                    try:
+                        prefix, line = stderr_queue.get_nowait()
+                        line_stripped = line.rstrip('\n\r')
+                        stderr_lines.append(line)
+                        # Only print non-Optuna stderr
+                        if not re.match(r'\[I \d{4}-\d{2}-\d{2}', line_stripped):
+                            print(f"      {prefix}{line_stripped}")
+                        output_printed = True
+                    except Empty:
+                        break
+
                 if poll_result is not None:
-                    # Process finished
+                    # Process finished - drain remaining output
+                    time.sleep(0.1)  # Brief pause to collect any remaining output
+                    while not stdout_queue.empty():
+                        try:
+                            _, line = stdout_queue.get_nowait()
+                            stdout_lines.append(line)
+                        except Empty:
+                            break
+                    while not stderr_queue.empty():
+                        try:
+                            _, line = stderr_queue.get_nowait()
+                            stderr_lines.append(line)
+                        except Empty:
+                            break
                     break
 
                 # Check timeout
@@ -254,17 +347,23 @@ class CodeExecutor:
                     process.wait()
                     raise subprocess.TimeoutExpired(process.args, self.timeout)
 
-                # Print progress update
-                if elapsed - (last_progress_time - start_time) >= progress_interval:
+                # Print progress update if no output for a while
+                time_since_output = time.time() - last_output_time
+                if time_since_output >= progress_interval:
                     remaining = self.timeout - elapsed
                     print(f"      ⏳ Execution in progress... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)")
-                    last_progress_time = time.time()
+                    last_output_time = time.time()
 
                 # Sleep briefly before next check
-                time.sleep(1)
+                time.sleep(0.1)
 
-            # Get output
-            stdout, stderr = process.communicate()
+            # Wait for threads to finish
+            stdout_thread.join(timeout=1)
+            stderr_thread.join(timeout=1)
+
+            # Combine collected output
+            stdout = ''.join(stdout_lines)
+            stderr = ''.join(stderr_lines)
             execution_time = time.time() - start_time
 
             # Create result object compatible with subprocess.run

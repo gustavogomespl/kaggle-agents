@@ -32,6 +32,7 @@ from ..prompts.templates.developer_prompts import (
     format_error_info,
 )
 from ..tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
+from ..utils.log_parser import parse_training_logs, format_feedback_for_llm
 
 
 # ==================== DSPy Signatures ====================
@@ -302,15 +303,57 @@ class DeveloperAgent:
                 print("\nADK Refinement Loop: Trying to improve score...")
                 best_code = result.code
                 best_score = new_cv_score if new_cv_score is not None else 0.0
+                best_stdout = result.stdout
 
                 for i in range(2):
                     print(f"Refinement Iteration {i + 1}/2")
+
+                    # Parse training logs for structured feedback
+                    training_feedback = parse_training_logs(best_stdout)
+                    formatted_feedback = ""
+
+                    if training_feedback.has_data():
+                        formatted_feedback = format_feedback_for_llm(training_feedback)
+                        print("📊 Training feedback extracted from logs")
+
+                        # Show key insights
+                        if training_feedback.fold_scores:
+                            print(f"   CV: {training_feedback.cv_mean:.4f} ± {training_feedback.cv_std:.4f}")
+                        if training_feedback.best_optuna_trial:
+                            print(f"   Best Optuna trial: {training_feedback.best_optuna_trial.get('score', 0):.4f}")
+                        if training_feedback.slowest_step:
+                            print(f"   Slowest step: {training_feedback.slowest_step}")
+
+                        # Get improvement suggestions
+                        suggestions = training_feedback.get_improvement_suggestions()
+                        if suggestions:
+                            print("   Suggestions:")
+                            for s in suggestions[:3]:
+                                print(f"   - {s[:80]}...")
+
+                    # Build refinement prompt with structured feedback
                     refine_prompt = f"""
-                    Current code achieved CV Score: {best_score}.
-                    Analyze the hyperparameters and architecture.
-                    Suggest a modification to IMPROVE the score.
-                    Return the full updated code.
-                    """
+## Current Performance
+- CV Score: {best_score:.6f}
+
+{formatted_feedback if formatted_feedback else "No structured training logs available."}
+
+## Improvement Task
+Based on the training results above, improve the model to achieve a HIGHER CV score.
+
+**Improvement Guidelines**:
+1. If CV std > 0.02: Add regularization or reduce model complexity
+2. If overfitting detected: Increase reg_alpha/reg_lambda, reduce max_depth, add dropout
+3. If underfitting detected: Increase model complexity, add features, reduce regularization
+4. If Optuna best params available: Use them as starting point
+5. If zero-importance features found: Remove them
+6. If training is slow: Optimize hyperparameters for speed
+
+**IMPORTANT**: 
+- Keep the same logging format ([LOG:FOLD], [LOG:OPTUNA], etc.) for the next iteration
+- Return the complete updated Python code
+- Focus on the most impactful change based on the feedback above
+"""
 
                     from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -340,17 +383,18 @@ class DeveloperAgent:
                                 )
                                 if improvement > 0:
                                     print(
-                                        f"🚀 Improvement found: {refined_score} (was {best_score})"
+                                        f"🚀 Improvement found: {refined_score:.6f} (was {best_score:.6f})"
                                     )
                                     best_score = refined_score
                                     best_code = refined_code
+                                    best_stdout = refined_exec.stdout
                                     result.code = best_code
                                     result.stdout = refined_exec.stdout
                                     state_updates["current_code"] = best_code
                                     state_updates["baseline_cv_score"] = best_score
                                 else:
                                     print(
-                                        f"No improvement ({refined_score} vs {best_score})"
+                                        f"No improvement ({refined_score:.6f} vs {best_score:.6f})"
                                     )
                             else:
                                 print("Could not extract score from refined code")
