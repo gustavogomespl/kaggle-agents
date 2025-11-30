@@ -22,6 +22,7 @@ You are known for:
 7. **Submission Safety**: Match sample_submission exactly (columns/order/id) and clamp probabilities to [0,1]
 8. **Schema Awareness**: Detect target column reliably (prefer sample_submission second column; fallback to known names or last non-id col) and log schema (shapes, columns, dtypes)
 9. **Leak-Free Pipelines**: Always use Pipeline/ColumnTransformer with SimpleImputer+OneHotEncoder for categoricals and SimpleImputer for numerics; fit inside CV only
+10. **Advanced Ensemble Techniques**: Stacking with OOF predictions, weighted blending, and **Boosting Over Residuals** (train Stage 1 on original data → convert to logits → train Stage 2 regressor on residuals → combine in logit space) - especially effective for Playground competitions with synthetic data
 
 CRITICAL RULES (Never Break):
 - ALWAYS use predict_proba() for probability predictions (NOT predict())
@@ -326,6 +327,114 @@ Submission Path: {submission_path}
   - Train meta-model (LogisticRegression/Ridge) on stacked OOF: `meta_model.fit(oof_stack, y_train)`
   - Load test predictions from each model and stack them
   - Use meta-model to predict on stacked test: `final_predictions = meta_model.predict_proba(test_stack)[:, 1]`
+- **🔥 ADVANCED: Boosting Over Residuals** (HIGHLY EFFECTIVE for Kaggle Playground competitions)
+  
+  **Core Insight**: Playground competitions use SYNTHETIC DATA generated from an original real dataset.
+  The key is to train Stage 1 on the ORIGINAL DATA ONLY, then use Stage 2 to correct its errors on the synthetic competition data.
+  
+  **Why This Works So Well**:
+  1. Stage 1 captures the "true" underlying patterns from real-world original data
+  2. Stage 2 learns to correct the distributional shift between original and synthetic data
+  3. The residual approach prevents Stage 2 from overfitting to synthetic noise
+  4. Works for classification by operating in **logit space** (unbounded, symmetric)
+  
+  - **Stage 1**: Train a STRONG model on ORIGINAL DATA ONLY (NOT competition data!)
+  - **Stage 2**: Convert Stage 1 predictions to logits → create residual target → train Stage 2 (regression) to boost over residuals
+  
+  - **Implementation for Classification** (COMPLETE PATTERN):
+    ```python
+    import numpy as np
+    import pandas as pd
+    from scipy.special import logit, expit
+    import lightgbm as lgb
+    
+    epsilon = 1e-7  # Avoid log(0) or log(1)
+    
+    # =====================================================
+    # STEP 1: Train Stage 1 on ORIGINAL DATA ONLY
+    # =====================================================
+    # CRITICAL: Use the original dataset, NOT competition data!
+    # Check competition "Data" tab or description for source dataset
+    original_train = pd.read_csv('path/to/original_data.csv')
+    X_original = original_train.drop('target', axis=1)
+    y_original = original_train['target']
+    
+    stage1_model = lgb.LGBMClassifier(n_estimators=500, max_depth=7, random_state=42)
+    stage1_model.fit(X_original, y_original)
+    print("✓ Stage 1 trained on ORIGINAL data only")
+    
+    # =====================================================
+    # STEP 2: Get Stage 1 predictions on COMPETITION data
+    # =====================================================
+    comp_train = pd.read_csv('train.csv')  # Competition's synthetic train
+    comp_test = pd.read_csv('test.csv')    # Competition's synthetic test
+    X_comp = comp_train.drop('target', axis=1)
+    y_comp = comp_train['target']
+    
+    pred0_train = stage1_model.predict_proba(X_comp)[:, 1]
+    pred0_test = stage1_model.predict_proba(comp_test)[:, 1]
+    
+    # =====================================================
+    # STEP 3: Convert to logits (CRITICAL for classification!)
+    # =====================================================
+    # Probabilities [0,1] are bounded → bad for residuals
+    # Logits (-∞, +∞) are unbounded → perfect for residuals
+    pred0_train = np.clip(pred0_train, epsilon, 1 - epsilon)
+    pred0_test = np.clip(pred0_test, epsilon, 1 - epsilon)
+    logits0_train = logit(pred0_train)  # log(p/(1-p))
+    logits0_test = logit(pred0_test)
+    
+    # Convert 0/1 target to logits (0→very negative, 1→very positive)
+    target_logits = logit(np.clip(y_comp.values.astype(float), epsilon, 1 - epsilon))
+    
+    # =====================================================
+    # STEP 4: Create residual target
+    # =====================================================
+    # residual = Stage 1 prediction - truth (in logit space)
+    # Stage 2 will learn to predict this error
+    residual_target = logits0_train - target_logits
+    print(f"Residual stats: mean={residual_target.mean():.4f}, std={residual_target.std():.4f}")
+    
+    # =====================================================
+    # STEP 5: Train Stage 2 to predict RESIDUALS (Regression!)
+    # =====================================================
+    # IMPORTANT: This is REGRESSION, not classification!
+    stage2_model = lgb.LGBMRegressor(n_estimators=300, max_depth=5, random_state=42)
+    stage2_model.fit(X_comp, residual_target)
+    print("✓ Stage 2 trained to predict residuals (logit space)")
+    
+    residual_pred_test = stage2_model.predict(comp_test)
+    
+    # =====================================================
+    # STEP 6: Combine predictions (boosting in logit space)
+    # =====================================================
+    # new_logits = original_logits - predicted_residual
+    new_logits_test = logits0_test - residual_pred_test
+    
+    # =====================================================
+    # STEP 7: Convert back to probabilities
+    # =====================================================
+    final_predictions = expit(new_logits_test)  # sigmoid
+    final_predictions = np.clip(final_predictions, 0, 1)
+    
+    print(f"Final: min={final_predictions.min():.4f}, max={final_predictions.max():.4f}")
+    ```
+  
+  - **Key Best Practices**:
+    - **Stage 1 MUST be trained on ORIGINAL data only** (this is the whole point of the technique!)
+    - Stage 1 should be a strong model: XGBoost, LightGBM, Neural Network, or ensemble
+    - Stage 2 is simpler/faster - it just corrects Stage 1's errors (LightGBM recommended)
+    - **ALWAYS use logits** for classification residuals (probabilities don't work!)
+    - **ALWAYS clip before logit()** to avoid log(0)=-∞ or log(1)=+∞
+    - Use proper CV for Stage 2 to prevent overfitting to residuals
+    - Can iterate: Stage 2 → Stage 3 → ... (each boosting over previous residuals)
+    - Combine with stacking: use boosting-over-residuals as one base model in ensemble
+  
+  - **Finding Original Data**:
+    - Check competition "Data" tab for source dataset link
+    - Search Kaggle datasets for the original (e.g., "loan default UCI")
+    - Competition description often mentions the source
+    - If unavailable, skip this technique or use competition data subset for Stage 1
 - **FALLBACK: Weighted Average** (if OOF files missing)
   - Load submission files from each model
   - Calculate weights based on CV scores or use equal weights
@@ -1412,6 +1521,244 @@ X_test.to_csv('{models_dir}/test_engineered.csv', index=False)
 elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
 print("✅ Advanced feature engineering complete!")
+""",
+
+    "boosting_over_residuals_classification": """
+# 🔥 Boosting Over Residuals Template for Classification
+# HIGHLY EFFECTIVE for Kaggle Playground competitions with synthetic data
+#
+# Core Idea: Train Stage 1 on ORIGINAL data → predict on competition data →
+# Train Stage 2 to correct Stage 1's errors using residuals in logit space
+import pandas as pd
+import numpy as np
+from scipy.special import logit, expit
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score
+import lightgbm as lgb
+import time
+
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
+start_time = time.time()
+epsilon = 1e-7  # Avoid log(0) or log(1)
+
+print("=" * 60)
+print("🔥 BOOSTING OVER RESIDUALS - Classification")
+print("=" * 60)
+
+# =====================================================
+# STEP 1: Load ORIGINAL data (NOT competition data!)
+# =====================================================
+print("\\n📁 Loading ORIGINAL dataset...")
+# CRITICAL: Replace with path to the ORIGINAL real-world dataset
+# Check competition "Data" tab or description for source
+original_train = pd.read_csv('{original_data_path}')  # e.g., 'original_loan_data.csv'
+
+# Detect target column in original data
+target_col = '{target_col}'
+X_original = original_train.drop(target_col, axis=1, errors='ignore')
+y_original = original_train[target_col]
+
+# Remove ID column if exists
+id_cols = [c for c in X_original.columns if 'id' in c.lower()]
+if id_cols:
+    X_original = X_original.drop(columns=id_cols)
+
+print(f"Original data shape: {{X_original.shape}}")
+print(f"Original target distribution: {{y_original.value_counts().to_dict()}}")
+
+# Handle missing values and categorical features for Stage 1
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import LabelEncoder
+
+numeric_cols = X_original.select_dtypes(include=['int64', 'float64']).columns.tolist()
+cat_cols = X_original.select_dtypes(include=['object', 'category']).columns.tolist()
+
+# Impute numerics
+if numeric_cols:
+    num_imputer = SimpleImputer(strategy='median')
+    X_original[numeric_cols] = num_imputer.fit_transform(X_original[numeric_cols])
+
+# Encode categoricals
+label_encoders = {{}}
+for col in cat_cols:
+    le = LabelEncoder()
+    X_original[col] = X_original[col].fillna('__MISSING__').astype(str)
+    X_original[col] = le.fit_transform(X_original[col])
+    label_encoders[col] = le
+
+# GPU Detection
+import torch
+use_gpu = torch.cuda.is_available()
+print(f"\\nGPU Available: {{use_gpu}}")
+lgb_params = {{'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}} if use_gpu else {{'device': 'cpu'}}
+if use_gpu:
+    print("✅ GPU ENABLED for training")
+else:
+    print("⚠️  Running on CPU (slower)")
+
+# =====================================================
+# STEP 2: Train Stage 1 on ORIGINAL data ONLY
+# =====================================================
+print("\\n🎯 Training Stage 1 model on ORIGINAL data only...")
+stage1_model = lgb.LGBMClassifier(
+    n_estimators=500,
+    max_depth=7,
+    num_leaves=63,
+    learning_rate=0.05,
+    random_state=RANDOM_SEED,
+    verbose=-1,
+    n_jobs=-1,
+    **lgb_params
+)
+stage1_model.fit(X_original, y_original)
+print("✓ Stage 1 trained on ORIGINAL data")
+
+# =====================================================
+# STEP 3: Load COMPETITION data (synthetic)
+# =====================================================
+print("\\n📁 Loading COMPETITION dataset (synthetic)...")
+comp_train = pd.read_csv('{train_data_path}')
+comp_test = pd.read_csv('{test_data_path}')
+
+X_comp = comp_train.drop(target_col, axis=1, errors='ignore')
+y_comp = comp_train[target_col]
+X_test = comp_test.copy()
+
+# Save test IDs for submission
+test_ids = X_test['id'] if 'id' in X_test.columns else np.arange(len(X_test))
+
+# Remove ID columns
+for df in [X_comp, X_test]:
+    id_cols = [c for c in df.columns if 'id' in c.lower()]
+    if id_cols:
+        df.drop(columns=id_cols, inplace=True)
+
+print(f"Competition train shape: {{X_comp.shape}}")
+print(f"Competition test shape: {{X_test.shape}}")
+
+# Apply same preprocessing as original data
+if numeric_cols:
+    X_comp[numeric_cols] = num_imputer.transform(X_comp[numeric_cols])
+    X_test[numeric_cols] = num_imputer.transform(X_test[numeric_cols])
+
+for col in cat_cols:
+    if col in X_comp.columns:
+        le = label_encoders[col]
+        X_comp[col] = X_comp[col].fillna('__MISSING__').astype(str)
+        X_test[col] = X_test[col].fillna('__MISSING__').astype(str)
+        # Handle unseen categories
+        X_comp[col] = X_comp[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
+        X_test[col] = X_test[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
+        X_comp[col] = le.transform(X_comp[col])
+        X_test[col] = le.transform(X_test[col])
+
+# =====================================================
+# STEP 4: Get Stage 1 predictions on COMPETITION data
+# =====================================================
+print("\\n📊 Getting Stage 1 predictions on competition data...")
+pred0_train = stage1_model.predict_proba(X_comp)[:, 1]
+pred0_test = stage1_model.predict_proba(X_test)[:, 1]
+
+# =====================================================
+# STEP 5: Convert to LOGITS (CRITICAL for classification!)
+# =====================================================
+print("\\n🔄 Converting to logit space...")
+pred0_train = np.clip(pred0_train, epsilon, 1 - epsilon)
+pred0_test = np.clip(pred0_test, epsilon, 1 - epsilon)
+logits0_train = logit(pred0_train)  # log(p/(1-p))
+logits0_test = logit(pred0_test)
+
+# Convert 0/1 target to logits
+target_logits = logit(np.clip(y_comp.values.astype(float), epsilon, 1 - epsilon))
+
+# =====================================================
+# STEP 6: Create RESIDUAL target
+# =====================================================
+residual_target = logits0_train - target_logits
+print(f"Residual target stats: mean={{residual_target.mean():.4f}}, std={{residual_target.std():.4f}}")
+
+# =====================================================
+# STEP 7: Train Stage 2 to predict RESIDUALS (Regression!)
+# =====================================================
+print("\\n🎯 Training Stage 2 model on residuals (REGRESSION)...")
+
+# Use cross-validation for Stage 2 to prevent overfitting
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+stage2_oof = np.zeros(len(X_comp))
+stage2_test_preds = np.zeros(len(X_test))
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(X_comp, y_comp), 1):
+    X_tr, X_val = X_comp.iloc[train_idx], X_comp.iloc[val_idx]
+    res_tr, res_val = residual_target[train_idx], residual_target[val_idx]
+    
+    stage2_model = lgb.LGBMRegressor(
+        n_estimators=300,
+        max_depth=5,
+        num_leaves=31,
+        learning_rate=0.05,
+        random_state=RANDOM_SEED,
+        verbose=-1,
+        n_jobs=-1,
+        **lgb_params
+    )
+    stage2_model.fit(X_tr, res_tr)
+    
+    stage2_oof[val_idx] = stage2_model.predict(X_val)
+    stage2_test_preds += stage2_model.predict(X_test) / 5
+    
+    print(f"  Fold {{fold}}/5 complete")
+
+print("✓ Stage 2 trained to predict residuals")
+
+# =====================================================
+# STEP 8: Combine predictions (BOOSTING in logit space)
+# =====================================================
+print("\\n🎯 Combining predictions (boosting over residuals)...")
+# new_logits = original_logits - predicted_residual
+new_logits_train = logits0_train - stage2_oof
+new_logits_test = logits0_test - stage2_test_preds
+
+# =====================================================
+# STEP 9: Convert back to PROBABILITIES
+# =====================================================
+final_train_probs = expit(new_logits_train)  # sigmoid
+final_test_probs = expit(new_logits_test)
+final_test_probs = np.clip(final_test_probs, 0, 1)
+
+# Evaluate on training data (OOF)
+train_auc_before = roc_auc_score(y_comp, pred0_train)
+train_auc_after = roc_auc_score(y_comp, final_train_probs)
+print(f"\\n📊 Training AUC (OOF):")
+print(f"  Stage 1 only:                 {{train_auc_before:.6f}}")
+print(f"  After boosting over residuals: {{train_auc_after:.6f}}")
+print(f"  Improvement:                  {{(train_auc_after - train_auc_before)*100:.4f}}%")
+
+# =====================================================
+# STEP 10: Save submission
+# =====================================================
+print("\\n💾 Saving submission...")
+sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+submission = sample_sub.copy()
+target_submission_col = sample_sub.columns[1]
+submission[target_submission_col] = final_test_probs
+
+# Validation
+assert submission.shape == sample_sub.shape
+assert submission.columns.tolist() == sample_sub.columns.tolist()
+print(f"✓ Submission validated: columns={{submission.columns.tolist()}}")
+
+submission.to_csv('{submission_path}', index=False)
+print(f"✅ Submission saved: {{len(submission)}} rows")
+
+print(f"\\nPrediction stats: min={{final_test_probs.min():.4f}}, max={{final_test_probs.max():.4f}}, mean={{final_test_probs.mean():.4f}}")
+
+elapsed_time = time.time() - start_time
+print(f"\\n⏱️  Total execution time: {{elapsed_time:.2f}}s")
+print("\\n" + "=" * 60)
+print(f"Final Validation Performance: {{train_auc_after:.6f}}")
+print("=" * 60)
+print("✅ Boosting Over Residuals complete!")
 """,
 }
 
