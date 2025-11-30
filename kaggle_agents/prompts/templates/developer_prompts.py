@@ -665,25 +665,46 @@ print("Train dtypes:")
 print(train_df.dtypes)
 
 # CRITICAL: Detect target column (MUST match sample_submission)
-# Priority 1: Use sample_submission.columns[1] (most reliable)
-# Priority 2: Use common target names if they exist
-# Priority 3: Last non-id column
-candidate_target = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
-fallback_targets = ['target', 'label', 'loan_paid_back', 'survived', 'price', 'sales']
-target_col = candidate_target if candidate_target and candidate_target in train_df.columns else None
+# Priority 1: Environment variable TARGET_COL (explicit override)
+# Priority 2: sample_submission.columns[1] (most reliable for Kaggle)
+# Priority 3: Common target names
+# Priority 4: Last non-id column
+import os
+target_col = None
+
+# Priority 1: Environment variable
+env_target = os.environ.get('TARGET_COL')
+if env_target and env_target in train_df.columns:
+    target_col = env_target
+    print(f"✓ Target from env var TARGET_COL: '{{target_col}}'")
+
+# Priority 2: sample_submission second column
 if target_col is None:
+    candidate_target = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
+    if candidate_target and candidate_target in train_df.columns:
+        target_col = candidate_target
+        print(f"✓ Target from sample_submission: '{{target_col}}'")
+
+# Priority 3: Common target names
+if target_col is None:
+    fallback_targets = ['target', 'label', 'y', 'loan_paid_back', 'survived', 'price', 'sales', 'class', 'outcome']
     for t in fallback_targets:
         if t in train_df.columns:
             target_col = t
+            print(f"✓ Target from common names: '{{target_col}}'")
             break
+
+# Priority 4: Last non-id column (heuristic)
 if target_col is None:
-    non_id_cols = [c for c in train_df.columns if c.lower() != 'id']
-    target_col = non_id_cols[-1] if non_id_cols else 'target'
+    non_id_cols = [c for c in train_df.columns if 'id' not in c.lower()]
+    if non_id_cols:
+        target_col = non_id_cols[-1]
+        print(f"⚠️  Target inferred (last non-id col): '{{target_col}}'")
 
 # Validate target column exists
-assert target_col in train_df.columns, f"Target column '{{target_col}}' not found in train data. Available: {{train_df.columns.tolist()}}"
-print(f"✓ Target column detected: '{{target_col}}'")
-print(f"  NOTE: This MUST match the submission column name from sample_submission")
+assert target_col is not None and target_col in train_df.columns, \\
+    f"Target column could not be detected. Available: {{train_df.columns.tolist()}}. Set TARGET_COL env var."
+print(f"✓ Target column: '{{target_col}}' (verified in train_df)")
 
 # Separate X/y
 y_train = train_df[target_col]
@@ -715,28 +736,42 @@ print("Implementing {component_name}...")
 n_rows = train_df.shape[0]
 n_features = X_train.shape[1]
 
-# Adjust n_estimators based on dataset size
+# Adjust hyperparameters based on dataset size (ADAPTIVE)
 if n_rows < 5_000:
     n_estimators = 1000
     max_depth = 8
     learning_rate = 0.05
+    reg_alpha = 0.01      # Less regularization for small datasets
+    reg_lambda = 0.01
+    min_child_samples = 10
 elif n_rows < 20_000:
     n_estimators = 800
     max_depth = 7
     learning_rate = 0.04
+    reg_alpha = 0.05
+    reg_lambda = 0.05
+    min_child_samples = 15
 elif n_rows < 100_000:
     n_estimators = 600
     max_depth = 6
     learning_rate = 0.03
+    reg_alpha = 0.1       # Moderate regularization
+    reg_lambda = 0.1
+    min_child_samples = 20
 else:
     n_estimators = 400
     max_depth = 5
     learning_rate = 0.03
+    reg_alpha = 0.2       # More regularization for large datasets
+    reg_lambda = 0.2
+    min_child_samples = max(30, int(n_rows * 0.0001))  # 0.01% of dataset
 
-print(f"📊 Dataset-adaptive hyperparameters:")
-print(f"  n_estimators: {{n_estimators}} (based on {{n_rows:,}} rows)")
+print(f"📊 Dataset-adaptive hyperparameters ({{n_rows:,}} rows):")
+print(f"  n_estimators: {{n_estimators}}")
 print(f"  max_depth: {{max_depth}}")
 print(f"  learning_rate: {{learning_rate}}")
+print(f"  reg_alpha/reg_lambda: {{reg_alpha}}/{{reg_lambda}} (L1/L2 regularization)")
+print(f"  min_child_samples: {{min_child_samples}}")
 
 # ... your code here
 
@@ -830,7 +865,18 @@ print(f"✓ OOF predictions saved to: {{oof_path}}")
 # Make predictions (MUST use predict_proba for probabilities)
 step_start = time.time()
 predictions = model.predict_proba(X_test)[:, 1]  # Binary classification
-predictions = np.clip(predictions, 0, 1)
+
+# CRITICAL: Validate and clamp predictions to [0, 1]
+if predictions.min() < 0 or predictions.max() > 1:
+    print(f"⚠️  Predictions out of range: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}")
+predictions = np.clip(predictions, 0.0, 1.0)
+
+# Validate predictions
+assert not np.isnan(predictions).any(), "NaN values detected in predictions!"
+assert not np.isinf(predictions).any(), "Inf values detected in predictions!"
+assert predictions.min() >= 0 and predictions.max() <= 1, "Predictions still out of range after clipping!"
+print(f"✓ Predictions validated: range=[{{predictions.min():.4f}}, {{predictions.max():.4f}}]")
+
 step_start = log_step("PREDICTION", step_start)
 print(f"Prediction distribution: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
 
@@ -1288,6 +1334,14 @@ print(f"CV Score (ROC-AUC): {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}
 print("\\nMaking predictions...")
 predictions = stacking_clf.predict_proba(X_test_imputed)[:, 1]
 
+# CRITICAL: Validate and clamp predictions to [0, 1]
+if predictions.min() < 0 or predictions.max() > 1:
+    print(f"⚠️  Predictions out of range: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}")
+predictions = np.clip(predictions, 0.0, 1.0)
+assert not np.isnan(predictions).any(), "NaN values in predictions!"
+assert not np.isinf(predictions).any(), "Inf values in predictions!"
+print(f"✓ Predictions validated: range=[{{predictions.min():.4f}}, {{predictions.max():.4f}}]")
+
 # Save submission
 # Load sample_submission to get correct column names
 sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
@@ -1302,6 +1356,7 @@ submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print(f"Final Validation Performance: {{cv_scores.mean():.6f}}")
 print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
 """,
 
@@ -1478,6 +1533,11 @@ print(f"\\nCV RMSE: {{np.mean(cv_rmses):.6f}} (+/- {{np.std(cv_rmses):.6f}})")
 print("\\nMaking test predictions...")
 predictions = stacking_reg.predict(X_test_combined)
 
+# CRITICAL: Validate predictions (no NaN/Inf)
+assert not np.isnan(predictions).any(), "NaN values in predictions!"
+assert not np.isinf(predictions).any(), "Inf values in predictions!"
+print(f"✓ Predictions validated (no NaN/Inf)")
+
 print(f"Prediction distribution:")
 print(f"  Min: {{predictions.min():.6f}}")
 print(f"  Max: {{predictions.max():.6f}}")
@@ -1498,6 +1558,7 @@ submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print(f"Final Validation Performance: {{np.mean(cv_rmses):.6f}}")
 print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
 """,
 
@@ -1605,6 +1666,14 @@ print(f"\\nCV Score (ROC-AUC): {{np.mean(cv_scores):.4f}} (+/- {{np.std(cv_score
 print("\\nMaking predictions...")
 predictions = model.predict_proba(test_pool)[:, 1]
 
+# CRITICAL: Validate and clamp predictions to [0, 1]
+if predictions.min() < 0 or predictions.max() > 1:
+    print(f"⚠️  Predictions out of range: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}")
+predictions = np.clip(predictions, 0.0, 1.0)
+assert not np.isnan(predictions).any(), "NaN values in predictions!"
+assert not np.isinf(predictions).any(), "Inf values in predictions!"
+print(f"✓ Predictions validated: range=[{{predictions.min():.4f}}, {{predictions.max():.4f}}]")
+
 print(f"Prediction distribution:")
 print(f"  Min: {{predictions.min():.4f}}")
 print(f"  Max: {{predictions.max():.4f}}")
@@ -1624,6 +1693,7 @@ submission.to_csv('{submission_path}', index=False)
 
 elapsed_time = time.time() - start_time
 print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
+print(f"Final Validation Performance: {{np.mean(cv_scores):.6f}}")
 print(f"✅ CatBoost model complete! Submission saved with {{len(submission)}} rows")
 """,
 
@@ -1740,12 +1810,17 @@ print("✅ Advanced feature engineering complete!")
 #
 # Core Idea: Train Stage 1 on ORIGINAL data → predict on competition data →
 # Train Stage 2 to correct Stage 1's errors using residuals in logit space
+#
+# IMPORTANT: This technique ONLY works when original_data_path is different from train_data_path
+# If they are the same, we fallback to a standard weighted ensemble
 import pandas as pd
 import numpy as np
+import os
 from scipy.special import logit, expit
 from sklearn.model_selection import StratifiedKFold
 from sklearn.metrics import roc_auc_score
 import lightgbm as lgb
+import xgboost as xgb
 import time
 
 RANDOM_SEED = 42
@@ -1753,223 +1828,416 @@ np.random.seed(RANDOM_SEED)
 start_time = time.time()
 epsilon = 1e-7  # Avoid log(0) or log(1)
 
-print("=" * 60)
-print("🔥 BOOSTING OVER RESIDUALS - Classification")
-print("=" * 60)
-
 # =====================================================
-# STEP 1: Load ORIGINAL data (NOT competition data!)
+# CHECK: Do we have separate original data?
 # =====================================================
-print("\\n📁 Loading ORIGINAL dataset...")
-# CRITICAL: Replace with path to the ORIGINAL real-world dataset
-# Check competition "Data" tab or description for source
-original_train = pd.read_csv('{original_data_path}')  # e.g., 'original_loan_data.csv'
+original_data_path = '{original_data_path}'
+train_data_path = '{train_data_path}'
 
-# Detect target column in original data
-target_col = '{target_col}'
-X_original = original_train.drop(target_col, axis=1, errors='ignore')
-y_original = original_train[target_col]
-
-# Remove ID column if exists
-id_cols = [c for c in X_original.columns if 'id' in c.lower()]
-if id_cols:
-    X_original = X_original.drop(columns=id_cols)
-
-print(f"Original data shape: {{X_original.shape}}")
-print(f"Original target distribution: {{y_original.value_counts().to_dict()}}")
-
-# Handle missing values and categorical features for Stage 1
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import LabelEncoder
-
-numeric_cols = X_original.select_dtypes(include=['int64', 'float64']).columns.tolist()
-cat_cols = X_original.select_dtypes(include=['object', 'category']).columns.tolist()
-
-# Impute numerics
-if numeric_cols:
-    num_imputer = SimpleImputer(strategy='median')
-    X_original[numeric_cols] = num_imputer.fit_transform(X_original[numeric_cols])
-
-# Encode categoricals
-label_encoders = {{}}
-for col in cat_cols:
-    le = LabelEncoder()
-    X_original[col] = X_original[col].fillna('__MISSING__').astype(str)
-    X_original[col] = le.fit_transform(X_original[col])
-    label_encoders[col] = le
-
-# GPU Detection
-import torch
-use_gpu = torch.cuda.is_available()
-print(f"\\nGPU Available: {{use_gpu}}")
-lgb_params = {{'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}} if use_gpu else {{'device': 'cpu'}}
-if use_gpu:
-    print("✅ GPU ENABLED for training")
-else:
-    print("⚠️  Running on CPU (slower)")
-
-# =====================================================
-# STEP 2: Train Stage 1 on ORIGINAL data ONLY
-# =====================================================
-print("\\n🎯 Training Stage 1 model on ORIGINAL data only...")
-stage1_model = lgb.LGBMClassifier(
-    n_estimators=500,
-    max_depth=7,
-    num_leaves=63,
-    learning_rate=0.05,
-    random_state=RANDOM_SEED,
-    verbose=-1,
-    n_jobs=-1,
-    **lgb_params
+# Determine if we can use boosting over residuals
+use_boosting_residuals = (
+    original_data_path != train_data_path and 
+    original_data_path and 
+    os.path.exists(original_data_path)
 )
-stage1_model.fit(X_original, y_original)
-print("✓ Stage 1 trained on ORIGINAL data")
 
-# =====================================================
-# STEP 3: Load COMPETITION data (synthetic)
-# =====================================================
-print("\\n📁 Loading COMPETITION dataset (synthetic)...")
-comp_train = pd.read_csv('{train_data_path}')
-comp_test = pd.read_csv('{test_data_path}')
-
-X_comp = comp_train.drop(target_col, axis=1, errors='ignore')
-y_comp = comp_train[target_col]
-X_test = comp_test.copy()
-
-# Save test IDs for submission
-test_ids = X_test['id'] if 'id' in X_test.columns else np.arange(len(X_test))
-
-# Remove ID columns
-for df in [X_comp, X_test]:
-    id_cols = [c for c in df.columns if 'id' in c.lower()]
-    if id_cols:
-        df.drop(columns=id_cols, inplace=True)
-
-print(f"Competition train shape: {{X_comp.shape}}")
-print(f"Competition test shape: {{X_test.shape}}")
-
-# Apply same preprocessing as original data
-if numeric_cols:
-    X_comp[numeric_cols] = num_imputer.transform(X_comp[numeric_cols])
-    X_test[numeric_cols] = num_imputer.transform(X_test[numeric_cols])
-
-for col in cat_cols:
-    if col in X_comp.columns:
-        le = label_encoders[col]
-        X_comp[col] = X_comp[col].fillna('__MISSING__').astype(str)
-        X_test[col] = X_test[col].fillna('__MISSING__').astype(str)
-        # Handle unseen categories
-        X_comp[col] = X_comp[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
-        X_test[col] = X_test[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
-        X_comp[col] = le.transform(X_comp[col])
-        X_test[col] = le.transform(X_test[col])
-
-# =====================================================
-# STEP 4: Get Stage 1 predictions on COMPETITION data
-# =====================================================
-print("\\n📊 Getting Stage 1 predictions on competition data...")
-pred0_train = stage1_model.predict_proba(X_comp)[:, 1]
-pred0_test = stage1_model.predict_proba(X_test)[:, 1]
-
-# =====================================================
-# STEP 5: Convert to LOGITS (CRITICAL for classification!)
-# =====================================================
-print("\\n🔄 Converting to logit space...")
-pred0_train = np.clip(pred0_train, epsilon, 1 - epsilon)
-pred0_test = np.clip(pred0_test, epsilon, 1 - epsilon)
-logits0_train = logit(pred0_train)  # log(p/(1-p))
-logits0_test = logit(pred0_test)
-
-# Convert 0/1 target to logits
-target_logits = logit(np.clip(y_comp.values.astype(float), epsilon, 1 - epsilon))
-
-# =====================================================
-# STEP 6: Create RESIDUAL target
-# =====================================================
-residual_target = logits0_train - target_logits
-print(f"Residual target stats: mean={{residual_target.mean():.4f}}, std={{residual_target.std():.4f}}")
-
-# =====================================================
-# STEP 7: Train Stage 2 to predict RESIDUALS (Regression!)
-# =====================================================
-print("\\n🎯 Training Stage 2 model on residuals (REGRESSION)...")
-
-# Use cross-validation for Stage 2 to prevent overfitting
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-stage2_oof = np.zeros(len(X_comp))
-stage2_test_preds = np.zeros(len(X_test))
-
-for fold, (train_idx, val_idx) in enumerate(skf.split(X_comp, y_comp), 1):
-    X_tr, X_val = X_comp.iloc[train_idx], X_comp.iloc[val_idx]
-    res_tr, res_val = residual_target[train_idx], residual_target[val_idx]
+if use_boosting_residuals:
+    print("=" * 60)
+    print("🔥 BOOSTING OVER RESIDUALS - Classification")
+    print("=" * 60)
+    print(f"✓ Original data available: {{original_data_path}}")
     
-    stage2_model = lgb.LGBMRegressor(
-        n_estimators=300,
-        max_depth=5,
-        num_leaves=31,
+    # =====================================================
+    # STEP 1: Load ORIGINAL data (NOT competition data!)
+    # =====================================================
+    print("\\n📁 Loading ORIGINAL dataset...")
+    original_train = pd.read_csv(original_data_path)
+else:
+    print("=" * 60)
+    print("📊 WEIGHTED ENSEMBLE - Classification (Fallback)")
+    print("=" * 60)
+    print("⚠️  Original data NOT available - using standard ensemble")
+    print(f"   original_data_path: {{original_data_path}}")
+    print(f"   train_data_path: {{train_data_path}}")
+    print("   Tip: For Playground competitions, find the original dataset on Kaggle")
+    
+    # Load competition data only for standard ensemble
+    pass
+
+# =====================================================
+# MAIN LOGIC: Either Boosting Over Residuals or Standard Ensemble
+# =====================================================
+
+target_col = '{target_col}'
+
+if use_boosting_residuals:
+    # =====================================================
+    # BOOSTING OVER RESIDUALS PATH
+    # =====================================================
+    X_original = original_train.drop(target_col, axis=1, errors='ignore')
+    y_original = original_train[target_col]
+    
+    # Remove ID column if exists
+    id_cols = [c for c in X_original.columns if 'id' in c.lower()]
+    if id_cols:
+        X_original = X_original.drop(columns=id_cols)
+    
+    print(f"Original data shape: {{X_original.shape}}")
+    print(f"Original target distribution: {{y_original.value_counts().to_dict()}}")
+    
+    # Handle missing values and categorical features for Stage 1
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import LabelEncoder
+    
+    numeric_cols = X_original.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = X_original.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    # Impute numerics
+    if numeric_cols:
+        num_imputer = SimpleImputer(strategy='median')
+        X_original[numeric_cols] = num_imputer.fit_transform(X_original[numeric_cols])
+    
+    # Encode categoricals
+    label_encoders = {{}}
+    for col in cat_cols:
+        le = LabelEncoder()
+        X_original[col] = X_original[col].fillna('__MISSING__').astype(str)
+        X_original[col] = le.fit_transform(X_original[col])
+        label_encoders[col] = le
+    
+    # GPU Detection
+    import torch
+    use_gpu = torch.cuda.is_available()
+    print(f"\\nGPU Available: {{use_gpu}}")
+    lgb_params = {{'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}} if use_gpu else {{'device': 'cpu'}}
+    if use_gpu:
+        print("✅ GPU ENABLED for training")
+    else:
+        print("⚠️  Running on CPU (slower)")
+
+    # =====================================================
+    # STEP 2: Train Stage 1 on ORIGINAL data ONLY
+    # =====================================================
+    print("\\n🎯 Training Stage 1 model on ORIGINAL data only...")
+    stage1_model = lgb.LGBMClassifier(
+        n_estimators=500,
+        max_depth=7,
+        num_leaves=63,
         learning_rate=0.05,
         random_state=RANDOM_SEED,
         verbose=-1,
         n_jobs=-1,
         **lgb_params
     )
-    stage2_model.fit(X_tr, res_tr)
+    stage1_model.fit(X_original, y_original)
+    print("✓ Stage 1 trained on ORIGINAL data")
     
-    stage2_oof[val_idx] = stage2_model.predict(X_val)
-    stage2_test_preds += stage2_model.predict(X_test) / 5
+    # =====================================================
+    # STEP 3: Load COMPETITION data (synthetic)
+    # =====================================================
+    print("\\n📁 Loading COMPETITION dataset (synthetic)...")
+    comp_train = pd.read_csv('{train_data_path}')
+    comp_test = pd.read_csv('{test_data_path}')
     
-    print(f"  Fold {{fold}}/5 complete")
+    X_comp = comp_train.drop(target_col, axis=1, errors='ignore')
+    y_comp = comp_train[target_col]
+    X_test = comp_test.copy()
+    
+    # Save test IDs for submission
+    test_ids = X_test['id'] if 'id' in X_test.columns else np.arange(len(X_test))
+    
+    # Remove ID columns
+    for df in [X_comp, X_test]:
+        id_cols = [c for c in df.columns if 'id' in c.lower()]
+        if id_cols:
+            df.drop(columns=id_cols, inplace=True)
+    
+    print(f"Competition train shape: {{X_comp.shape}}")
+    print(f"Competition test shape: {{X_test.shape}}")
+    
+    # Apply same preprocessing as original data
+    if numeric_cols:
+        X_comp[numeric_cols] = num_imputer.transform(X_comp[numeric_cols])
+        X_test[numeric_cols] = num_imputer.transform(X_test[numeric_cols])
+    
+    for col in cat_cols:
+        if col in X_comp.columns:
+            le = label_encoders[col]
+            X_comp[col] = X_comp[col].fillna('__MISSING__').astype(str)
+            X_test[col] = X_test[col].fillna('__MISSING__').astype(str)
+            # Handle unseen categories
+            X_comp[col] = X_comp[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
+            X_test[col] = X_test[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
+            X_comp[col] = le.transform(X_comp[col])
+            X_test[col] = le.transform(X_test[col])
 
-print("✓ Stage 2 trained to predict residuals")
+    # =====================================================
+    # STEP 4: Get Stage 1 predictions on COMPETITION data
+    # =====================================================
+    print("\\n📊 Getting Stage 1 predictions on competition data...")
+    pred0_train = stage1_model.predict_proba(X_comp)[:, 1]
+    pred0_test = stage1_model.predict_proba(X_test)[:, 1]
+    
+    # =====================================================
+    # STEP 5: Convert to LOGITS (CRITICAL for classification!)
+    # =====================================================
+    print("\\n🔄 Converting to logit space...")
+    pred0_train = np.clip(pred0_train, epsilon, 1 - epsilon)
+    pred0_test = np.clip(pred0_test, epsilon, 1 - epsilon)
+    logits0_train = logit(pred0_train)  # log(p/(1-p))
+    logits0_test = logit(pred0_test)
+    
+    # Convert 0/1 target to logits
+    target_logits = logit(np.clip(y_comp.values.astype(float), epsilon, 1 - epsilon))
+    
+    # =====================================================
+    # STEP 6: Create RESIDUAL target
+    # =====================================================
+    residual_target = logits0_train - target_logits
+    print(f"Residual target stats: mean={{residual_target.mean():.4f}}, std={{residual_target.std():.4f}}")
+    
+    # =====================================================
+    # STEP 7: Train Stage 2 to predict RESIDUALS (Regression!)
+    # =====================================================
+    print("\\n🎯 Training Stage 2 model on residuals (REGRESSION)...")
+    
+    # Use cross-validation for Stage 2 to prevent overfitting
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+    stage2_oof = np.zeros(len(X_comp))
+    stage2_test_preds = np.zeros(len(X_test))
+    
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_comp, y_comp), 1):
+        X_tr, X_val = X_comp.iloc[train_idx], X_comp.iloc[val_idx]
+        res_tr, res_val = residual_target[train_idx], residual_target[val_idx]
+        
+        stage2_model = lgb.LGBMRegressor(
+            n_estimators=300,
+            max_depth=5,
+            num_leaves=31,
+            learning_rate=0.05,
+            random_state=RANDOM_SEED,
+            verbose=-1,
+            n_jobs=-1,
+            **lgb_params
+        )
+        stage2_model.fit(X_tr, res_tr)
+        
+        stage2_oof[val_idx] = stage2_model.predict(X_val)
+        stage2_test_preds += stage2_model.predict(X_test) / 5
+        
+        print(f"  Fold {{fold}}/5 complete")
+    
+    print("✓ Stage 2 trained to predict residuals")
+    
+    # =====================================================
+    # STEP 8: Combine predictions (BOOSTING in logit space)
+    # =====================================================
+    print("\\n🎯 Combining predictions (boosting over residuals)...")
+    # new_logits = original_logits - predicted_residual
+    new_logits_train = logits0_train - stage2_oof
+    new_logits_test = logits0_test - stage2_test_preds
+    
+    # =====================================================
+    # STEP 9: Convert back to PROBABILITIES
+    # =====================================================
+    final_train_probs = expit(new_logits_train)  # sigmoid
+    final_test_probs = expit(new_logits_test)
+    final_test_probs = np.clip(final_test_probs, 0, 1)
+    
+    # Validate predictions
+    assert not np.isnan(final_test_probs).any(), "NaN in predictions!"
+    assert final_test_probs.min() >= 0 and final_test_probs.max() <= 1, "Predictions out of range!"
+    
+    # Evaluate on training data (OOF)
+    train_auc_before = roc_auc_score(y_comp, pred0_train)
+    train_auc_after = roc_auc_score(y_comp, final_train_probs)
+    print(f"\\n📊 Training AUC (OOF):")
+    print(f"  Stage 1 only:                 {{train_auc_before:.6f}}")
+    print(f"  After boosting over residuals: {{train_auc_after:.6f}}")
+    print(f"  Improvement:                  {{(train_auc_after - train_auc_before)*100:.4f}}%")
+    
+    # =====================================================
+    # STEP 10: Save submission
+    # =====================================================
+    print("\\n💾 Saving submission...")
+    sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+    submission = sample_sub.copy()
+    target_submission_col = sample_sub.columns[1]
+    submission[target_submission_col] = final_test_probs
+    
+    # Validation
+    assert submission.shape == sample_sub.shape
+    assert submission.columns.tolist() == sample_sub.columns.tolist()
+    print(f"✓ Submission validated: columns={{submission.columns.tolist()}}")
+    
+    submission.to_csv('{submission_path}', index=False)
+    print(f"✅ Submission saved: {{len(submission)}} rows")
+    
+    print(f"\\nPrediction stats: min={{final_test_probs.min():.4f}}, max={{final_test_probs.max():.4f}}, mean={{final_test_probs.mean():.4f}}")
 
-# =====================================================
-# STEP 8: Combine predictions (BOOSTING in logit space)
-# =====================================================
-print("\\n🎯 Combining predictions (boosting over residuals)...")
-# new_logits = original_logits - predicted_residual
-new_logits_train = logits0_train - stage2_oof
-new_logits_test = logits0_test - stage2_test_preds
+    elapsed_time = time.time() - start_time
+    print(f"\\n⏱️  Total execution time: {{elapsed_time:.2f}}s")
+    print("\\n" + "=" * 60)
+    print(f"Final Validation Performance: {{train_auc_after:.6f}}")
+    print("=" * 60)
+    print("✅ Boosting Over Residuals complete!")
 
-# =====================================================
-# STEP 9: Convert back to PROBABILITIES
-# =====================================================
-final_train_probs = expit(new_logits_train)  # sigmoid
-final_test_probs = expit(new_logits_test)
-final_test_probs = np.clip(final_test_probs, 0, 1)
-
-# Evaluate on training data (OOF)
-train_auc_before = roc_auc_score(y_comp, pred0_train)
-train_auc_after = roc_auc_score(y_comp, final_train_probs)
-print(f"\\n📊 Training AUC (OOF):")
-print(f"  Stage 1 only:                 {{train_auc_before:.6f}}")
-print(f"  After boosting over residuals: {{train_auc_after:.6f}}")
-print(f"  Improvement:                  {{(train_auc_after - train_auc_before)*100:.4f}}%")
-
-# =====================================================
-# STEP 10: Save submission
-# =====================================================
-print("\\n💾 Saving submission...")
-sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-submission = sample_sub.copy()
-target_submission_col = sample_sub.columns[1]
-submission[target_submission_col] = final_test_probs
-
-# Validation
-assert submission.shape == sample_sub.shape
-assert submission.columns.tolist() == sample_sub.columns.tolist()
-print(f"✓ Submission validated: columns={{submission.columns.tolist()}}")
-
-submission.to_csv('{submission_path}', index=False)
-print(f"✅ Submission saved: {{len(submission)}} rows")
-
-print(f"\\nPrediction stats: min={{final_test_probs.min():.4f}}, max={{final_test_probs.max():.4f}}, mean={{final_test_probs.mean():.4f}}")
-
-elapsed_time = time.time() - start_time
-print(f"\\n⏱️  Total execution time: {{elapsed_time:.2f}}s")
-print("\\n" + "=" * 60)
-print(f"Final Validation Performance: {{train_auc_after:.6f}}")
-print("=" * 60)
-print("✅ Boosting Over Residuals complete!")
+else:
+    # =====================================================
+    # STANDARD WEIGHTED ENSEMBLE PATH (Fallback)
+    # =====================================================
+    print("\\n📁 Loading COMPETITION dataset...")
+    comp_train = pd.read_csv(train_data_path)
+    comp_test = pd.read_csv('{test_data_path}')
+    sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
+    
+    # Detect target column
+    if target_col not in comp_train.columns:
+        target_col = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
+        if target_col is None or target_col not in comp_train.columns:
+            # Fallback: last non-id column
+            non_id = [c for c in comp_train.columns if 'id' not in c.lower()]
+            target_col = non_id[-1] if non_id else None
+    
+    assert target_col and target_col in comp_train.columns, f"Target column not found: {{target_col}}"
+    print(f"✓ Target column: {{target_col}}")
+    
+    X_train = comp_train.drop(target_col, axis=1, errors='ignore')
+    y_train = comp_train[target_col]
+    X_test = comp_test.copy()
+    
+    # Remove ID columns
+    id_col = None
+    for col in X_train.columns:
+        if 'id' in col.lower():
+            id_col = col
+            break
+    if id_col:
+        X_train = X_train.drop(columns=[id_col])
+        if id_col in X_test.columns:
+            test_ids = X_test[id_col]
+            X_test = X_test.drop(columns=[id_col])
+        else:
+            test_ids = np.arange(len(X_test))
+    else:
+        test_ids = np.arange(len(X_test))
+    
+    print(f"Train shape: {{X_train.shape}}, Test shape: {{X_test.shape}}")
+    
+    # Preprocessing
+    from sklearn.impute import SimpleImputer
+    from sklearn.preprocessing import LabelEncoder
+    
+    numeric_cols = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
+    cat_cols = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
+    
+    # Impute numerics
+    if numeric_cols:
+        num_imputer = SimpleImputer(strategy='median')
+        X_train[numeric_cols] = num_imputer.fit_transform(X_train[numeric_cols])
+        X_test[numeric_cols] = num_imputer.transform(X_test[numeric_cols])
+    
+    # Encode categoricals
+    for col in cat_cols:
+        le = LabelEncoder()
+        combined = pd.concat([X_train[col].astype(str), X_test[col].astype(str)])
+        le.fit(combined.fillna('__MISSING__'))
+        X_train[col] = le.transform(X_train[col].astype(str).fillna('__MISSING__'))
+        X_test[col] = le.transform(X_test[col].astype(str).fillna('__MISSING__'))
+    
+    # GPU Detection
+    import torch
+    use_gpu = torch.cuda.is_available()
+    print(f"\\nGPU Available: {{use_gpu}}")
+    lgb_params = {{'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}} if use_gpu else {{'device': 'cpu'}}
+    xgb_params = {{'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}} if use_gpu else {{'tree_method': 'hist'}}
+    
+    # Train multiple models with CV
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
+    
+    # Store OOF predictions for each model
+    lgb_oof = np.zeros(len(X_train))
+    xgb_oof = np.zeros(len(X_train))
+    lgb_test = np.zeros(len(X_test))
+    xgb_test = np.zeros(len(X_test))
+    lgb_scores = []
+    xgb_scores = []
+    
+    print("\\n🎯 Training LightGBM and XGBoost with CV...")
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
+        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+        y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+        
+        # LightGBM
+        lgb_model = lgb.LGBMClassifier(
+            n_estimators=500, max_depth=6, learning_rate=0.03,
+            reg_alpha=0.1, reg_lambda=0.1, min_child_samples=20,
+            random_state=RANDOM_SEED, verbose=-1, n_jobs=-1, **lgb_params
+        )
+        lgb_model.fit(X_tr, y_tr)
+        lgb_oof[val_idx] = lgb_model.predict_proba(X_val)[:, 1]
+        lgb_test += lgb_model.predict_proba(X_test)[:, 1] / 5
+        lgb_scores.append(roc_auc_score(y_val, lgb_oof[val_idx]))
+        
+        # XGBoost
+        xgb_model = xgb.XGBClassifier(
+            n_estimators=500, max_depth=6, learning_rate=0.03,
+            reg_alpha=0.1, reg_lambda=0.1, min_child_weight=20,
+            random_state=RANDOM_SEED, verbosity=0, n_jobs=-1, **xgb_params
+        )
+        xgb_model.fit(X_tr, y_tr)
+        xgb_oof[val_idx] = xgb_model.predict_proba(X_val)[:, 1]
+        xgb_test += xgb_model.predict_proba(X_test)[:, 1] / 5
+        xgb_scores.append(roc_auc_score(y_val, xgb_oof[val_idx]))
+        
+        print(f"  Fold {{fold}}/5: LGB={{lgb_scores[-1]:.4f}}, XGB={{xgb_scores[-1]:.4f}}")
+    
+    # Calculate dynamic weights based on CV scores
+    lgb_cv_mean = np.mean(lgb_scores)
+    xgb_cv_mean = np.mean(xgb_scores)
+    total_score = lgb_cv_mean + xgb_cv_mean
+    lgb_weight = lgb_cv_mean / total_score
+    xgb_weight = xgb_cv_mean / total_score
+    
+    print(f"\\n📊 CV Results:")
+    print(f"  LightGBM: {{lgb_cv_mean:.4f}} (weight: {{lgb_weight:.2f}})")
+    print(f"  XGBoost:  {{xgb_cv_mean:.4f}} (weight: {{xgb_weight:.2f}})")
+    
+    # Combine with dynamic weights
+    final_oof = lgb_weight * lgb_oof + xgb_weight * xgb_oof
+    final_test_probs = lgb_weight * lgb_test + xgb_weight * xgb_test
+    final_test_probs = np.clip(final_test_probs, 0.0, 1.0)
+    
+    # Validate predictions
+    assert not np.isnan(final_test_probs).any(), "NaN in predictions!"
+    assert final_test_probs.min() >= 0 and final_test_probs.max() <= 1, "Predictions out of range!"
+    
+    # Ensemble CV score
+    ensemble_cv = roc_auc_score(y_train, final_oof)
+    print(f"  Ensemble: {{ensemble_cv:.4f}} (dynamic weighted)")
+    
+    # Save submission
+    print("\\n💾 Saving submission...")
+    submission = sample_sub.copy()
+    target_submission_col = sample_sub.columns[1]
+    submission[target_submission_col] = final_test_probs
+    
+    # Validation
+    assert submission.shape == sample_sub.shape
+    assert submission.columns.tolist() == sample_sub.columns.tolist()
+    print(f"✓ Submission validated: columns={{submission.columns.tolist()}}")
+    
+    submission.to_csv('{submission_path}', index=False)
+    print(f"✅ Submission saved: {{len(submission)}} rows")
+    
+    print(f"\\nPrediction stats: min={{final_test_probs.min():.4f}}, max={{final_test_probs.max():.4f}}, mean={{final_test_probs.mean():.4f}}")
+    
+    elapsed_time = time.time() - start_time
+    print(f"\\n⏱️  Total execution time: {{elapsed_time:.2f}}s")
+    print("\\n" + "=" * 60)
+    print(f"Final Validation Performance: {{ensemble_cv:.6f}}")
+    print("=" * 60)
+    print("✅ Standard Weighted Ensemble complete!")
 """,
 }
 
