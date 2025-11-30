@@ -1974,6 +1974,265 @@ print("✅ Boosting Over Residuals complete!")
 }
 
 
+# ==============================================================================
+# ABLATION STUDY PROMPTS (ADK Pattern)
+# ==============================================================================
+# These prompts implement the ablation study pattern from the ADK example,
+# which systematically identifies which parts of the code contribute most
+# to model performance.
+# ==============================================================================
+
+ABLATION_STUDY_PROMPT = """# Introduction
+You are a Kaggle Grandmaster performing an ablation study to understand which parts of the solution contribute most to performance.
+
+# Current Python Solution
+```python
+{code}
+```
+
+# Current Performance
+- CV Score: {cv_score}
+- CV Std: {cv_std}
+
+# Instructions
+Generate Python code that performs an ablation study by:
+1. Creating variations that disable or modify 2-3 key components one at a time
+2. Measuring the performance impact of each ablation
+3. Printing clear results showing which components matter most
+
+## Components to Consider Ablating:
+- Feature engineering (remove specific feature groups)
+- Preprocessing steps (change encoding, normalization)
+- Model hyperparameters (change key params to baseline)
+- CV strategy (different fold strategies)
+- Ensemble weights (if applicable)
+
+# Response Format
+- Output ONLY valid Python code (no markdown, no explanations)
+- Include clear print statements for each ablation result
+- Format output as:
+  ```
+  [ABLATION:component_name] baseline=X.XXXX modified=X.XXXX delta=X.XXXX
+  ```
+- End with a summary ranking components by impact
+
+# Example Output Pattern
+```python
+# Ablation 1: Remove feature engineering
+print("[ABLATION:feature_engineering] baseline=0.8500 modified=0.8200 delta=-0.0300")
+
+# Ablation 2: Use default hyperparameters
+print("[ABLATION:hyperparameter_tuning] baseline=0.8500 modified=0.8350 delta=-0.0150")
+
+# Summary
+print("[ABLATION:SUMMARY] Most impactful: feature_engineering (-0.0300)")
+```
+"""
+
+ABLATION_STUDY_SEQUENTIAL_PROMPT = """# Introduction
+You are a Kaggle Grandmaster performing an ablation study to understand which parts of the solution contribute most to performance.
+
+You have already performed previous ablation studies. Focus on NEW components not yet tested.
+
+# Current Python Solution
+```python
+{code}
+```
+
+# Current Performance
+- CV Score: {cv_score}
+- CV Std: {cv_std}
+
+# Previous Ablation Results
+{prev_ablations}
+
+# Instructions
+Generate Python code that performs an ablation study on DIFFERENT components than before:
+1. Choose 2-3 components NOT covered in previous ablations
+2. Create variations that disable or modify each component
+3. Measure and print the performance impact
+
+## Already Tested (DO NOT repeat):
+{tested_components}
+
+## Components Still Available:
+- Different feature groups (if not fully tested)
+- Alternative preprocessing approaches
+- Different model architectures
+- Post-processing techniques
+- Threshold tuning
+
+# Response Format
+- Output ONLY valid Python code
+- Include clear print statements:
+  ```
+  [ABLATION:component_name] baseline=X.XXXX modified=X.XXXX delta=X.XXXX
+  ```
+- End with updated summary
+
+CRITICAL: Do NOT repeat ablations from previous rounds!
+"""
+
+SUMMARIZE_ABLATION_PROMPT = """# Your Ablation Study Code
+```python
+{code}
+```
+
+# Ablation Study Results
+{results}
+
+# Task
+Summarize the ablation study results in a structured format:
+
+1. **Component Rankings** (ordered by impact):
+   - List each component with its score delta
+   
+2. **Key Insights**:
+   - Which components are critical (removing them hurts score significantly)?
+   - Which components can be simplified or removed?
+   - Are there interactions between components?
+
+3. **Recommended Actions**:
+   - What should be improved first?
+   - What can be removed to simplify the solution?
+   - What new components might help based on the analysis?
+
+Format your response as a clear, actionable summary.
+"""
+
+EXTRACT_IMPROVEMENT_PLAN_PROMPT = """# Introduction
+Based on the ablation study, extract a focused improvement plan targeting the most impactful code block.
+
+# Current Python Solution
+```python
+{code}
+```
+
+# Ablation Study Results
+{ablation_results}
+
+# Task
+1. Identify the code block that has the highest potential for improvement
+2. Propose a specific plan to improve that code block
+3. Extract the exact code block from the solution
+
+# Requirements
+- The plan should be 3-5 sentences describing the improvement
+- The plan should be concrete and implementable
+- Avoid plans that significantly increase runtime
+- Focus on high-impact, low-risk improvements
+
+# Response Format (JSON)
+```json
+[{{
+    "code_block": "```python\n# The exact code to improve\n...code...\n```",
+    "plan": "Description of the improvement plan...",
+    "expected_impact": 0.01,
+    "risk_level": "low|medium|high"
+}}]
+```
+"""
+
+EXTRACT_IMPROVEMENT_PLAN_SEQUENTIAL_PROMPT = """# Introduction
+Based on the ablation study, extract a focused improvement plan targeting a code block NOT yet improved.
+
+# Current Python Solution
+```python
+{code}
+```
+
+# Ablation Study Results
+{ablation_results}
+
+# Previously Improved Code Blocks
+{prev_code_blocks}
+
+# Task
+1. Identify a NEW code block (different from previous) with high improvement potential
+2. Propose a specific plan for this block
+3. Extract the exact code block
+
+# Requirements
+- DO NOT select code blocks already improved before
+- The plan should be 3-5 sentences
+- Avoid plans that increase runtime significantly
+- Focus on high-impact improvements
+
+# Response Format (JSON)
+```json
+[{{
+    "code_block": "```python\n# The exact code to improve\n...code...\n```",
+    "plan": "Description of the improvement plan...",
+    "expected_impact": 0.01,
+    "risk_level": "low|medium|high"
+}}]
+```
+"""
+
+PLAN_REFINEMENT_PROMPT = """# Introduction
+You are refining an improvement plan based on previous attempts and their outcomes.
+
+# Code Block Being Improved
+```python
+{code_block}
+```
+
+# Previous Plans and Their Results
+{prev_plan_summary}
+
+# Task
+Suggest a BETTER plan than the previous attempts:
+1. Analyze why previous plans did or didn't work
+2. Propose a novel approach or refinement
+3. Be specific about the changes needed
+
+# Requirements
+- The plan MUST be different from previous attempts
+- Learn from what worked and what didn't
+- Aim for higher impact with acceptable risk
+- Avoid increasing runtime significantly
+
+# Response Format
+Write a brief 3-5 sentence plan describing:
+- What specific change to make
+- Why it should improve performance
+- How it differs from previous attempts
+"""
+
+IMPLEMENT_PLAN_PROMPT = """# Introduction
+Implement the improvement plan on the specified code block.
+
+# Original Code Block
+```python
+{code_block}
+```
+
+# Improvement Plan
+{plan}
+
+# Full Solution Context (for reference)
+```python
+{full_code}
+```
+
+# Task
+Rewrite the code block implementing the improvement plan.
+
+# Requirements
+- Keep the same function/variable interfaces
+- Do not change code outside this block
+- Maintain all existing imports and dependencies
+- Add comments only where clarification is needed
+- Test edge cases if relevant
+
+# Response Format
+Output ONLY the improved code block wrapped in triple backticks:
+```python
+# Improved code here...
+```
+"""
+
+
 def get_domain_template(domain: str, **kwargs) -> str:
     """
     Get domain-specific code template.
