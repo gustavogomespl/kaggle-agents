@@ -14,7 +14,33 @@ from typing import Annotated, Any, Literal, TypedDict
 
 # ==================== Domain Types ====================
 
-DomainType = Literal["tabular", "computer_vision", "nlp", "time_series", "multi_modal"]
+DomainType = Literal[
+    # Image-based
+    "image_classification",
+    "image_regression",
+    "image_to_image",
+    "image_segmentation",
+    "object_detection",
+    # Text-based
+    "text_classification",
+    "seq_to_seq",
+    "text_regression",
+    # Audio-based
+    "audio_classification",
+    "audio_regression",
+    # Tabular
+    "tabular_classification",
+    "tabular_regression",
+    # Time series
+    "time_series_forecasting",
+    # Multi-modal
+    "multi_modal",
+    # Legacy (for backwards compatibility)
+    "tabular",
+    "computer_vision",
+    "nlp",
+    "time_series",
+]
 
 
 @dataclass
