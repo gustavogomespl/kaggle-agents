@@ -2565,3 +2565,388 @@ def format_error_info(error: str) -> dict[str, str]:
         "error_type": error_type,
         "error": error,
     }
+
+
+# ==================== Domain-Specific Code Templates ====================
+
+
+IMAGE_CLASSIFICATION_TEMPLATE = """
+CRITICAL: Use PyTorch DataLoader (NOT sklearn feature extraction)
+
+Standard approach for image classification/regression:
+
+1. Dataset class with PIL Image loading:
+```python
+from torch.utils.data import Dataset, DataLoader
+from PIL import Image
+from pathlib import Path
+import pandas as pd
+
+class ImageDataset(Dataset):
+    def __init__(self, image_dir, labels_df=None, transform=None):
+        self.image_dir = Path(image_dir)
+        self.labels_df = labels_df
+        self.transform = transform
+        # If labels_df provided, use it; otherwise load all images
+        if labels_df is not None:
+            self.image_paths = [self.image_dir / fname for fname in labels_df['id']]
+            self.labels = labels_df['target'].values
+        else:
+            self.image_paths = list(self.image_dir.glob("*.jpg")) + list(self.image_dir.glob("*.png"))
+            self.labels = None
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        image = Image.open(self.image_paths[idx]).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        if self.labels is not None:
+            return image, self.labels[idx]
+        return image
+```
+
+2. Data augmentation with torchvision transforms:
+```python
+from torchvision import transforms
+
+train_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(degrees=15),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+test_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+```
+
+3. Model fine-tuning with transfer learning:
+```python
+import torch
+import torch.nn as nn
+from torchvision import models
+
+# Load pre-trained model
+model = models.efficientnet_b0(pretrained=True)
+
+# Replace classifier for your number of classes
+num_classes = 2  # Adjust based on problem
+model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model = model.to(device)
+```
+
+4. Training with cross-validation:
+```python
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+
+# Setup
+n_folds = 5
+skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+oof_preds = np.zeros((len(train_df), num_classes))
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(train_df, train_df['target'])):
+    print(f"Training Fold {fold+1}/{n_folds}")
+
+    # Create datasets
+    train_dataset = ImageDataset(train_dir, train_df.iloc[train_idx], train_transforms)
+    val_dataset = ImageDataset(train_dir, train_df.iloc[val_idx], test_transforms)
+
+    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4)
+
+    # Initialize model
+    model = models.efficientnet_b0(pretrained=True)
+    model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+    model = model.to(device)
+
+    # Training loop
+    criterion = nn.CrossEntropyLoss()  # or nn.MSELoss() for regression
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+
+    for epoch in range(10):  # Adjust epochs
+        model.train()
+        for images, labels in train_loader:
+            images, labels = images.to(device), labels.to(device)
+            optimizer.zero_grad()
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+    # Validation and OOF predictions
+    model.eval()
+    with torch.no_grad():
+        for i, (images, _) in enumerate(val_loader):
+            outputs = model(images.to(device))
+            oof_preds[val_idx[i*64:(i+1)*64]] = outputs.cpu().numpy()
+
+    # Save model
+    torch.save(model.state_dict(), f'model_fold{fold}.pth')
+
+# Generate submission
+test_dataset = ImageDataset(test_dir, None, test_transforms)
+test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
+# ... predict and create submission.csv
+```
+
+DIRECTORY STRUCTURES:
+- Flat: train/img_001.jpg + train.csv with columns [id, target]
+- ImageFolder: train/class_0/img_001.jpg (use torchvision.datasets.ImageFolder)
+"""
+
+
+NLP_CLASSIFICATION_TEMPLATE = """
+CRITICAL: Use HuggingFace transformers (RoBERTa, BERT, DistilBERT, T5)
+
+Standard approach for text classification/seq2seq:
+
+1. Load data and tokenizer:
+```python
+import pandas as pd
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
+from datasets import Dataset
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+
+# Load data
+train_df = pd.read_csv('train.csv')
+test_df = pd.read_csv('test.csv')
+
+# Model selection
+model_name = 'roberta-base'  # or 'distilbert-base-uncased', 't5-base'
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+# Identify text column (common names: 'text', 'comment', 'sentence', 'content')
+text_col = 'text'  # Adjust based on data
+label_col = 'target'  # or 'label'
+
+# Tokenization function
+def tokenize(examples):
+    return tokenizer(
+        examples[text_col],
+        padding='max_length',
+        truncation=True,
+        max_length=128  # Adjust based on text length
+    )
+```
+
+2. Cross-validation setup:
+```python
+n_folds = 5
+skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+num_labels = train_df[label_col].nunique()
+oof_preds = np.zeros((len(train_df), num_labels))
+
+for fold, (train_idx, val_idx) in enumerate(skf.split(train_df, train_df[label_col])):
+    print(f"Training Fold {fold+1}/{n_folds}")
+
+    # Create HuggingFace datasets
+    train_dataset = Dataset.from_pandas(train_df.iloc[train_idx])
+    val_dataset = Dataset.from_pandas(train_df.iloc[val_idx])
+
+    # Tokenize
+    train_dataset = train_dataset.map(tokenize, batched=True)
+    val_dataset = val_dataset.map(tokenize, batched=True)
+
+    # Rename label column if needed
+    train_dataset = train_dataset.rename_column(label_col, "labels")
+    val_dataset = val_dataset.rename_column(label_col, "labels")
+
+    # Set format for PyTorch
+    train_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
+    val_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
+```
+
+3. Model training with Trainer API:
+```python
+    # Load model
+    model = AutoModelForSequenceClassification.from_pretrained(
+        model_name,
+        num_labels=num_labels
+    )
+
+    # Training arguments
+    training_args = TrainingArguments(
+        output_dir=f'./results_fold{fold}',
+        num_train_epochs=3,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=32,
+        learning_rate=2e-5,
+        warmup_steps=500,
+        weight_decay=0.01,
+        logging_steps=100,
+        eval_strategy='epoch',
+        save_strategy='epoch',
+        load_best_model_at_end=True,
+        metric_for_best_model='eval_loss',
+    )
+
+    # Initialize Trainer
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+    )
+
+    # Train
+    trainer.train()
+
+    # OOF predictions
+    predictions = trainer.predict(val_dataset)
+    oof_preds[val_idx] = predictions.predictions
+
+    # Save model
+    model.save_pretrained(f'model_fold{fold}')
+```
+
+4. Generate submission:
+```python
+# Prepare test data
+test_dataset = Dataset.from_pandas(test_df)
+test_dataset = test_dataset.map(tokenize, batched=True)
+test_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
+
+# Average predictions across folds
+test_preds = np.zeros((len(test_df), num_labels))
+for fold in range(n_folds):
+    model = AutoModelForSequenceClassification.from_pretrained(f'model_fold{fold}')
+    trainer = Trainer(model=model)
+    predictions = trainer.predict(test_dataset)
+    test_preds += predictions.predictions / n_folds
+
+# Create submission
+submission = pd.DataFrame({
+    'id': test_df['id'],
+    'target': test_preds.argmax(axis=1)  # or test_preds[:,1] for probabilities
+})
+submission.to_csv('submission.csv', index=False)
+```
+
+FOR SEQ2SEQ (translation, text normalization):
+Use T5:
+```python
+from transformers import T5ForConditionalGeneration, T5Tokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments
+
+model = T5ForConditionalGeneration.from_pretrained('t5-base')
+tokenizer = T5Tokenizer.from_pretrained('t5-base')
+
+# Tokenize with labels for seq2seq
+def tokenize_seq2seq(examples):
+    inputs = tokenizer(examples['input_text'], padding='max_length', truncation=True, max_length=128)
+    labels = tokenizer(examples['target_text'], padding='max_length', truncation=True, max_length=128)
+    inputs['labels'] = labels['input_ids']
+    return inputs
+```
+"""
+
+
+AUDIO_CLASSIFICATION_TEMPLATE = """
+CRITICAL: Convert audio to mel-spectrograms, then use CNN (treat as image problem)
+
+Standard approach for audio classification/regression:
+
+1. Audio to mel-spectrogram conversion:
+```python
+import librosa
+import librosa.display
+import numpy as np
+from PIL import Image
+from pathlib import Path
+import pandas as pd
+
+def audio_to_melspectrogram(audio_path, output_path, sr=22050, n_mels=128):
+    '''
+    Convert audio file to mel-spectrogram and save as PNG image.
+
+    Args:
+        audio_path: Path to audio file (.wav, .mp3, .flac)
+        output_path: Path to save spectrogram image (.png)
+        sr: Sample rate (22050 is standard)
+        n_mels: Number of mel bands (128 is standard)
+    '''
+    # Load audio
+    y, sr = librosa.load(audio_path, sr=sr)
+
+    # Compute mel-spectrogram
+    mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels)
+
+    # Convert to dB scale
+    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
+
+    # Normalize to [0, 255]
+    mel_norm = ((mel_spec_db - mel_spec_db.min()) /
+                (mel_spec_db.max() - mel_spec_db.min()) * 255).astype(np.uint8)
+
+    # Convert to 3-channel RGB image (required for pre-trained CNNs)
+    mel_rgb = np.stack([mel_norm, mel_norm, mel_norm], axis=-1)
+
+    # Transpose to match image format (H, W, C)
+    mel_rgb = np.transpose(mel_rgb, (1, 0, 2))
+
+    # Save as PNG
+    Image.fromarray(mel_rgb).save(output_path)
+
+# Convert all training audio files
+train_spectrograms_dir = Path('train_spectrograms')
+train_spectrograms_dir.mkdir(exist_ok=True)
+
+train_df = pd.read_csv('train.csv')
+for idx, row in train_df.iterrows():
+    audio_path = f"train/{row['audio_id']}.wav"  # Adjust extension
+    output_path = train_spectrograms_dir / f"{row['audio_id']}.png"
+    audio_to_melspectrogram(audio_path, output_path)
+
+# Convert test audio
+test_spectrograms_dir = Path('test_spectrograms')
+test_spectrograms_dir.mkdir(exist_ok=True)
+
+test_df = pd.read_csv('test.csv')
+for idx, row in test_df.iterrows():
+    audio_path = f"test/{row['audio_id']}.wav"
+    output_path = test_spectrograms_dir / f"{row['audio_id']}.png"
+    audio_to_melspectrogram(audio_path, output_path)
+```
+
+2. Now use standard image classification pipeline:
+After converting audio to spectrograms, follow the IMAGE_CLASSIFICATION_TEMPLATE approach:
+- Use PyTorch DataLoader with the spectrogram PNG files
+- Use torchvision.models (EfficientNet, ResNet, etc.)
+- Apply transfer learning from ImageNet
+- Use data augmentation on spectrograms (rotation, flip)
+- Train with cross-validation
+- Generate submission.csv
+
+Example:
+```python
+from torchvision import transforms, models
+import torch.nn as nn
+
+# Data loading for spectrograms
+train_transforms = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# Model
+model = models.efficientnet_b0(pretrained=True)
+num_classes = train_df['target'].nunique()
+model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
+
+# Then follow standard image classification training loop
+```
+
+Key insight: Mel-spectrograms are 2D time-frequency representations, perfect for CNNs. This converts the audio problem into a computer vision problem, allowing use of powerful pre-trained image models.
+"""

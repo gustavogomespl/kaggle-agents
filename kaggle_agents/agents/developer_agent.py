@@ -1350,6 +1350,41 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         except Exception as e:
             return f"Dataset info not available (error: {e!s})"
 
+    def _get_domain_template(self, domain: str, component_type: str) -> str:
+        """Get domain-specific code template.
+
+        Args:
+            domain: Competition domain (e.g., 'image_classification', 'text_classification')
+            component_type: Component type (e.g., 'model', 'preprocessing')
+
+        Returns:
+            Domain-specific code template string
+        """
+        from ..prompts.templates.developer_prompts import (
+            IMAGE_CLASSIFICATION_TEMPLATE,
+            NLP_CLASSIFICATION_TEMPLATE,
+            AUDIO_CLASSIFICATION_TEMPLATE,
+        )
+
+        # Image domains
+        if domain.startswith("image_") and component_type == "model":
+            return IMAGE_CLASSIFICATION_TEMPLATE
+
+        # Text/NLP domains
+        elif (domain.startswith("text_") or domain == "seq_to_seq") and component_type == "model":
+            return NLP_CLASSIFICATION_TEMPLATE
+
+        # Audio domains
+        elif domain.startswith("audio_"):
+            if component_type == "preprocessing":
+                return AUDIO_CLASSIFICATION_TEMPLATE
+            elif component_type == "model":
+                # After preprocessing, audio becomes images (spectrograms)
+                return IMAGE_CLASSIFICATION_TEMPLATE
+
+        # Tabular or other domains - no special template
+        return ""
+
     def _generate_code(
         self,
         component: AblationComponent,
@@ -1362,6 +1397,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         component_details = format_component_details(component)
 
         dataset_info = self._get_dataset_info(working_dir, state)
+
+        # Get domain-specific code template
+        domain_template = self._get_domain_template(domain, component.component_type)
 
         competition_context = f"""
         Name: {competition_info.name}
@@ -1420,6 +1458,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 dataset_info=dataset_info,
                 component_name=component.name,
             )
+
+            # Append domain-specific template if available
+            if domain_template:
+                prompt += f"\n\n## Domain-Specific Implementation Guide\n\n{domain_template}"
 
             messages = [
                 SystemMessage(content=DEVELOPER_SYSTEM_PROMPT),

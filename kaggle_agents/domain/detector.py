@@ -65,6 +65,12 @@ Competition Name: {name}
 Description: {description}
 Data Files: {files}
 
+IMPORTANT CLUES FOR DETECTION:
+- Directories ending with "/" containing .jpg/.png files → image_* domain
+- Directories with .wav/.mp3 files → audio_* domain
+- Directories with .txt files → text_* domain
+- Only .csv/.parquet files with no directories → tabular_* domain
+
 Respond with ONLY the category name, nothing else. Example: image_classification"""
 
     DESCRIPTIONS = {
@@ -113,9 +119,58 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 
         data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
 
+        # Heuristic fast-path: Use metadata from data pipeline if available
+        metadata_type = None
+        if hasattr(competition_info, 'data_files_metadata'):
+            metadata_type = competition_info.data_files_metadata.get('data_type')
+
+        if metadata_type == "image":
+            desc_lower = (competition_info.description or "").lower()
+            if "segment" in desc_lower:
+                return "image_segmentation", 0.95
+            elif "detect" in desc_lower or "object" in desc_lower:
+                return "object_detection", 0.95
+            elif "regression" in desc_lower:
+                return "image_regression", 0.90
+            else:
+                return "image_classification", 0.90
+
+        elif metadata_type == "audio":
+            desc_lower = (competition_info.description or "").lower()
+            if "regression" in desc_lower:
+                return "audio_regression", 0.90
+            else:
+                return "audio_classification", 0.90
+
+        elif metadata_type == "text":
+            desc_lower = (competition_info.description or "").lower()
+            if "translate" in desc_lower or "normalize" in desc_lower or "summarize" in desc_lower:
+                return "seq_to_seq", 0.90
+            elif "regression" in desc_lower:
+                return "text_regression", 0.90
+            else:
+                return "text_classification", 0.90
+
+        # No fast-path match, continue with LLM detection
+
+        # Scan both files AND directories to get full picture
         files = []
         if data_dir.exists():
-            files = [f.name for f in data_dir.glob("*") if f.is_file()][:20]
+            for path in data_dir.glob("*"):
+                if path.is_file():
+                    files.append(path.name)
+                elif path.is_dir():
+                    # Analyze directory contents
+                    contents = list(path.glob("*"))[:100]
+                    if contents:
+                        extensions: dict[str, int] = {}
+                        for item in contents:
+                            ext = item.suffix.lower()
+                            extensions[ext] = extensions.get(ext, 0) + 1
+                        if extensions:
+                            dominant = max(extensions.items(), key=lambda x: x[1])
+                            files.append(f"{path.name}/ ({len(contents)} files, mostly {dominant[0]})")
+            files = files[:20]  # Limit to 20 entries
 
         prompt = self.PROMPT.format(
             name=competition_info.name,

@@ -32,6 +32,112 @@ class KaggleAPIClient:
                 "or ~/.kaggle/kaggle.json exists with credentials."
             )
 
+    def _analyze_directory(self, dir_path: Path) -> tuple[str, dict[str, Any]]:
+        """Analyze directory contents to determine data type.
+
+        Args:
+            dir_path: Path to directory to analyze
+
+        Returns:
+            Tuple of (data_type, metadata_dict) where:
+                - data_type: 'image', 'audio', 'text', or 'unknown'
+                - metadata_dict: Contains 'count', 'extensions', 'dominant_extension'
+        """
+        file_extensions: dict[str, int] = {}
+        total_files = 0
+
+        # Sample up to 1000 files for performance
+        for i, file_path in enumerate(dir_path.rglob("*")):
+            if i >= 1000:
+                break
+            if file_path.is_file():
+                ext = file_path.suffix.lower()
+                file_extensions[ext] = file_extensions.get(ext, 0) + 1
+                total_files += 1
+
+        if not file_extensions:
+            return "unknown", {"count": 0, "extensions": {}, "dominant_extension": ""}
+
+        dominant_ext = max(file_extensions.items(), key=lambda x: x[1])[0]
+
+        metadata = {
+            "count": total_files,
+            "extensions": file_extensions,
+            "dominant_extension": dominant_ext,
+        }
+
+        # Classify by dominant extension
+        if dominant_ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff']:
+            return "image", metadata
+        elif dominant_ext in ['.wav', '.mp3', '.flac', '.ogg', '.m4a']:
+            return "audio", metadata
+        elif dominant_ext in ['.txt', '.json']:
+            return "text", metadata
+        else:
+            return "unknown", metadata
+
+    def _identify_data_assets(self, download_path: Path) -> dict[str, Any]:
+        """Identify all data assets including files and directories.
+
+        Scans both CSV/Parquet files and data directories (images, audio, text).
+        Returns comprehensive metadata about the competition data structure.
+
+        Args:
+            download_path: Path to competition data directory
+
+        Returns:
+            Dictionary with paths and metadata:
+                - train: Path to train data (file or directory)
+                - test: Path to test data (file or directory)
+                - sample_submission: Path to sample submission file
+                - data_type: 'image', 'audio', 'text', or 'tabular'
+                - train_count: Number of training files (for directories)
+                - test_count: Number of test files (for directories)
+                - train_extensions: File extensions in train directory
+                - test_extensions: File extensions in test directory
+        """
+        assets: dict[str, Any] = {}
+
+        # First pass: Scan for CSV/Parquet files
+        for file_path in download_path.glob("*"):
+            if file_path.is_file() and file_path.suffix in ['.csv', '.parquet']:
+                filename_lower = file_path.name.lower()
+                if "train" in filename_lower:
+                    assets["train_csv"] = str(file_path)
+                elif "test" in filename_lower:
+                    assets["test_csv"] = str(file_path)
+                elif "sample_submission" in filename_lower or "samplesubmission" in filename_lower:
+                    assets["sample_submission"] = str(file_path)
+
+        # Second pass: Scan for data directories
+        for dir_path in download_path.glob("*"):
+            if dir_path.is_dir():
+                dir_name = dir_path.name.lower()
+                if "train" in dir_name:
+                    data_type, metadata = self._analyze_directory(dir_path)
+                    assets["train"] = str(dir_path)
+                    assets["data_type"] = data_type
+                    assets["train_count"] = metadata["count"]
+                    assets["train_extensions"] = metadata["extensions"]
+                elif "test" in dir_name:
+                    data_type, metadata = self._analyze_directory(dir_path)
+                    assets["test"] = str(dir_path)
+                    # Only set data_type if not already set by train directory
+                    if "data_type" not in assets:
+                        assets["data_type"] = data_type
+                    assets["test_count"] = metadata["count"]
+                    assets["test_extensions"] = metadata["extensions"]
+
+        # Fallback logic: If no directories found, use CSV/Parquet files
+        if "data_type" not in assets:
+            assets["data_type"] = "tabular"
+            if "train_csv" in assets:
+                assets["train"] = assets.pop("train_csv")
+            if "test_csv" in assets:
+                assets["test"] = assets.pop("test_csv")
+
+        return assets
+
     def download_competition_data(
         self, competition: str, path: str = "./data", quiet: bool = False
     ) -> dict[str, str]:
@@ -79,17 +185,8 @@ class KaggleAPIClient:
             except zipfile.BadZipFile:
                 print(f"Warning: {zip_file.name} is not a valid zip file, skipping")
 
-        # Identify key files
-        files = {}
-        for file_path in download_path.glob("*"):
-            if file_path.is_file():
-                filename_lower = file_path.name.lower()
-                if "train" in filename_lower and filename_lower.endswith((".csv", ".parquet")):
-                    files["train"] = str(file_path)
-                elif "test" in filename_lower and filename_lower.endswith((".csv", ".parquet")):
-                    files["test"] = str(file_path)
-                elif "sample_submission" in filename_lower or "samplesubmission" in filename_lower:
-                    files["sample_submission"] = str(file_path)
+        # Identify key files and directories using new comprehensive method
+        files = self._identify_data_assets(download_path)
 
         if not files.get("train") or not files.get("test"):
             raise Exception(

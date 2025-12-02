@@ -766,9 +766,39 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         curriculum_insights: str = "",
     ) -> list[dict[str, Any]]:
         """
-        Create a fallback plan when LLM parsing fails.
+        Create domain-specific fallback plan when LLM parsing fails.
 
-        Incorporates curriculum learning insights to prioritize proven strategies.
+        Routes to appropriate domain-specific fallback method based on domain type.
+
+        Args:
+            domain: Competition domain (e.g., 'image_classification', 'text_classification', 'tabular')
+            sota_analysis: SOTA analysis results
+            curriculum_insights: Insights from previous iterations (optional)
+
+        Returns:
+            List of component dictionaries (3-5 components depending on domain)
+        """
+        # Route to domain-specific fallback method
+        if domain.startswith("image_"):
+            return self._create_image_fallback_plan(domain, sota_analysis)
+        elif domain.startswith("text_") or domain == "seq_to_seq":
+            return self._create_text_fallback_plan(domain, sota_analysis)
+        elif domain.startswith("audio_"):
+            return self._create_audio_fallback_plan(domain, sota_analysis)
+        else:
+            # Tabular (existing logic)
+            return self._create_tabular_fallback_plan(domain, sota_analysis, curriculum_insights)
+
+    def _create_tabular_fallback_plan(
+        self,
+        domain: str,
+        sota_analysis: dict[str, Any],
+        curriculum_insights: str = "",
+    ) -> list[dict[str, Any]]:
+        """
+        Create fallback plan for tabular competitions (classification/regression).
+
+        Uses tree-based models (LightGBM, XGBoost, CatBoost) with ensemble.
 
         Args:
             domain: Competition domain
@@ -776,7 +806,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             curriculum_insights: Insights from previous iterations (optional)
 
         Returns:
-            List of component dictionaries (always 4-5 components)
+            List of component dictionaries (5 components: 1 FE + 4 models + 1 ensemble)
         """
         # Note: Curriculum insights are logged but fallback uses fixed plan
         # In future iterations, could use insights to reorder components
@@ -839,6 +869,161 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         })
 
         return plan
+
+    def _create_image_fallback_plan(
+        self,
+        domain: str,
+        sota_analysis: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Create fallback plan for image competitions (PyTorch/TensorFlow DataLoaders).
+
+        Uses transfer learning with pre-trained CNNs (EfficientNet, ResNet).
+
+        Args:
+            domain: Competition domain (image_classification, image_regression, etc.)
+            sota_analysis: SOTA analysis results
+
+        Returns:
+            List of component dictionaries (3 components: 2 models + 1 ensemble)
+        """
+        is_regression = "regression" in domain
+        task = "regression" if is_regression else "classification"
+
+        return [
+            {
+                "name": f"efficientnet_b0_{task}",
+                "component_type": "model",
+                "description": f"EfficientNet-B0 pre-trained fine-tuned for {task}. PyTorch DataLoader with ImageFolder or custom Dataset. Data augmentation (rotation, flip, color jitter). Use transfer learning from ImageNet weights.",
+                "estimated_impact": 0.28,
+                "rationale": "EfficientNet achieves SOTA on ImageNet with excellent efficiency. Transfer learning transfers learned features. Data augmentation prevents overfitting on small datasets.",
+                "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, 5-fold StratifiedKFold CV, save OOF predictions for ensemble"
+            },
+            {
+                "name": f"resnet50_{task}",
+                "component_type": "model",
+                "description": f"ResNet50 fine-tuned with different augmentation strategy (Cutout, Mixup) for architectural diversity in ensemble.",
+                "estimated_impact": 0.24,
+                "rationale": "ResNet provides different feature extraction than EfficientNet (residual connections vs compound scaling). Ensemble benefits from architectural diversity. Different augmentation adds robustness.",
+                "code_outline": "torchvision.models.resnet50(pretrained=True), replace fc layer, Cutout + Mixup augmentation, AdamW optimizer with cosine annealing, 5-fold CV"
+            },
+            {
+                "name": "tta_ensemble",
+                "component_type": "ensemble",
+                "description": "Test-time augmentation (TTA) + weighted ensemble of EfficientNet and ResNet predictions. Apply multiple transforms to test images and average predictions.",
+                "estimated_impact": 0.15,
+                "rationale": "TTA averages predictions over multiple augmented views of each test image, reducing variance. Weighted ensemble (by CV score) combines different architectures. Typical +2-5% improvement.",
+                "code_outline": "For each test image: apply 5 transforms (original, hflip, vflip, rotate90, rotate270), get predictions from each model, average TTA predictions per model, then weighted average models by CV score"
+            }
+        ]
+
+    def _create_text_fallback_plan(
+        self,
+        domain: str,
+        sota_analysis: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Create fallback plan for text/NLP competitions (HuggingFace transformers).
+
+        Uses pre-trained language models (RoBERTa, DistilBERT, or T5 for seq2seq).
+
+        Args:
+            domain: Competition domain (text_classification, seq_to_seq, etc.)
+            sota_analysis: SOTA analysis results
+
+        Returns:
+            List of component dictionaries (3 components for classification, 1 for seq2seq)
+        """
+        if domain == "seq_to_seq":
+            # Sequence-to-sequence tasks (translation, text normalization, summarization)
+            return [{
+                "name": "t5_base_seq2seq",
+                "component_type": "model",
+                "description": "T5-base fine-tuned for seq2seq task using HuggingFace Trainer API. T5 is designed for text-to-text tasks.",
+                "estimated_impact": 0.30,
+                "rationale": "T5 (Text-to-Text Transfer Transformer) is specifically designed for seq2seq tasks. Achieves SOTA on translation, summarization, and text normalization benchmarks.",
+                "code_outline": "transformers.T5ForConditionalGeneration.from_pretrained('t5-base'), T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, train with learning_rate=1e-4, evaluate with BLEU/ROUGE metrics"
+            }]
+        else:
+            # Classification or regression tasks
+            return [
+                {
+                    "name": "roberta_classifier",
+                    "component_type": "model",
+                    "description": "RoBERTa-base fine-tuned for text classification with learning rate warmup and linear decay schedule.",
+                    "estimated_impact": 0.28,
+                    "rationale": "RoBERTa improves on BERT with dynamic masking and larger training corpus. Achieves SOTA on GLUE, SuperGLUE, and many NLP benchmarks. Warmup stabilizes training.",
+                    "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with TrainingArguments, AdamW optimizer with warmup_steps=500, 5-fold StratifiedKFold CV, save OOF predictions"
+                },
+                {
+                    "name": "distilbert_classifier",
+                    "component_type": "model",
+                    "description": "DistilBERT fine-tuned (60% faster than BERT, lighter for ensemble diversity).",
+                    "estimated_impact": 0.22,
+                    "rationale": "DistilBERT is 60% faster and 40% smaller than BERT while retaining 97% of performance through knowledge distillation. Provides architectural diversity for ensemble while being computationally efficient.",
+                    "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'), similar training setup to RoBERTa, 5-fold CV"
+                },
+                {
+                    "name": "transformer_ensemble",
+                    "component_type": "ensemble",
+                    "description": "Weighted average of RoBERTa and DistilBERT predictions using CV scores as weights.",
+                    "estimated_impact": 0.12,
+                    "rationale": "Different architectures (RoBERTa vs DistilBERT) capture different linguistic patterns. Ensemble reduces variance and overfitting to specific model biases.",
+                    "code_outline": "Load OOF predictions from both models, compute optimal weights via Ridge regression on validation fold, apply weighted average to test predictions"
+                }
+            ]
+
+    def _create_audio_fallback_plan(
+        self,
+        domain: str,
+        sota_analysis: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Create fallback plan for audio competitions (mel-spectrograms + CNNs).
+
+        Converts audio to spectrograms, then uses image models.
+
+        Args:
+            domain: Competition domain (audio_classification, audio_regression)
+            sota_analysis: SOTA analysis results
+
+        Returns:
+            List of component dictionaries (4 components: 1 preprocessing + 2 models + 1 ensemble)
+        """
+        return [
+            {
+                "name": "mel_spectrogram_preprocessing",
+                "component_type": "preprocessing",
+                "description": "Convert audio files to mel-spectrograms using librosa. Save as PNG images for CNN input.",
+                "estimated_impact": 0.20,
+                "rationale": "Mel-spectrograms are the standard time-frequency representation for audio. Convert audio problem to computer vision problem, enabling use of powerful pre-trained image models.",
+                "code_outline": "Use librosa.feature.melspectrogram(y=audio, sr=22050, n_mels=128), convert to dB scale with librosa.power_to_db(), normalize to [0, 255], save as 3-channel PNG to spectrograms/ directory"
+            },
+            {
+                "name": "efficientnet_audio",
+                "component_type": "model",
+                "description": "EfficientNet-B0 trained on mel-spectrogram images. Transfer learning from ImageNet.",
+                "estimated_impact": 0.25,
+                "rationale": "CNNs excel at recognizing patterns in spectrograms (frequency bands, temporal patterns). EfficientNet provides excellent accuracy with computational efficiency.",
+                "code_outline": "Load mel-spectrogram images with PyTorch DataLoader, torchvision.models.efficientnet_b0(pretrained=True), replace classifier, train with data augmentation on spectrograms"
+            },
+            {
+                "name": "resnet_audio",
+                "component_type": "model",
+                "description": "ResNet50 for architectural diversity in ensemble.",
+                "estimated_impact": 0.20,
+                "rationale": "ResNet learns different features than EfficientNet due to different architecture (residual connections). Ensemble benefits from this diversity.",
+                "code_outline": "Similar pipeline to EfficientNet but with torchvision.models.resnet50(pretrained=True)"
+            },
+            {
+                "name": "audio_ensemble",
+                "component_type": "ensemble",
+                "description": "Weighted average of EfficientNet and ResNet predictions.",
+                "estimated_impact": 0.12,
+                "rationale": "Ensemble reduces overfitting to specific architecture biases and improves generalization.",
+                "code_outline": "Load OOF predictions, compute weights by CV score, weighted average for test predictions"
+            }
+        ]
 
     def _format_sota_solutions(self, solutions: list[SOTASolution]) -> str:
         """Format SOTA solutions for prompts."""
