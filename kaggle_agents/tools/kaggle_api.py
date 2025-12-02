@@ -77,39 +77,29 @@ class KaggleAPIClient:
             return "unknown", metadata
 
     def _identify_data_assets(self, download_path: Path) -> dict[str, Any]:
-        """Identify all data assets including files and directories.
-
-        Scans both CSV/Parquet files and data directories (images, audio, text).
-        Returns comprehensive metadata about the competition data structure.
-
-        Args:
-            download_path: Path to competition data directory
-
-        Returns:
-            Dictionary with paths and metadata:
-                - train: Path to train data (file or directory)
-                - test: Path to test data (file or directory)
-                - sample_submission: Path to sample submission file
-                - data_type: 'image', 'audio', 'text', or 'tabular'
-                - train_count: Number of training files (for directories)
-                - test_count: Number of test files (for directories)
-                - train_extensions: File extensions in train directory
-                - test_extensions: File extensions in test directory
-        """
         assets: dict[str, Any] = {}
 
-        # First pass: Scan for CSV/Parquet files
+        # Detect key files (csv/parquet and zip)
         for file_path in download_path.glob("*"):
-            if file_path.is_file() and file_path.suffix in ['.csv', '.parquet']:
-                filename_lower = file_path.name.lower()
-                if "train" in filename_lower:
-                    assets["train_csv"] = str(file_path)
-                elif "test" in filename_lower:
-                    assets["test_csv"] = str(file_path)
-                elif "sample_submission" in filename_lower or "samplesubmission" in filename_lower:
-                    assets["sample_submission"] = str(file_path)
+            if file_path.is_file():
+                suffix = file_path.suffix.lower()
+                name_lower = file_path.name.lower()
+                # CSV/Parquet
+                if suffix in ['.csv', '.parquet']:
+                    if "train" in name_lower:
+                        assets["train_csv"] = str(file_path)
+                    elif "test" in name_lower:
+                        assets["test_csv"] = str(file_path)
+                    elif "sample_submission" in name_lower or "samplesubmission" in name_lower:
+                        assets["sample_submission"] = str(file_path)
+                # ZIP
+                elif suffix == '.zip':
+                    if "train" in name_lower:
+                        assets["train_zip"] = str(file_path)
+                    elif "test" in name_lower:
+                        assets["test_zip"] = str(file_path)
 
-        # Second pass: Scan for data directories
+        # Extract directories with data
         for dir_path in download_path.glob("*"):
             if dir_path.is_dir():
                 dir_name = dir_path.name.lower()
@@ -122,19 +112,29 @@ class KaggleAPIClient:
                 elif "test" in dir_name:
                     data_type, metadata = self._analyze_directory(dir_path)
                     assets["test"] = str(dir_path)
-                    # Only set data_type if not already set by train directory
                     if "data_type" not in assets:
                         assets["data_type"] = data_type
                     assets["test_count"] = metadata["count"]
                     assets["test_extensions"] = metadata["extensions"]
 
-        # Fallback logic: If no directories found, use CSV/Parquet files
+        # Fall back to tabular if no directory detected
         if "data_type" not in assets:
             assets["data_type"] = "tabular"
-            if "train_csv" in assets:
+            # If zipped dataset, point at the zip file instead of just CSV
+            if "train_zip" in assets:
+                assets["train"] = assets.pop("train_zip")
+            elif "train_csv" in assets:
                 assets["train"] = assets.pop("train_csv")
-            if "test_csv" in assets:
+            if "test_zip" in assets:
+                assets["test"] = assets.pop("test_zip")
+            elif "test_csv" in assets:
                 assets["test"] = assets.pop("test_csv")
+
+        # If both csv and zip for the same file, prefer zip
+        if "train_zip" in assets and "train" not in assets and "train_csv" in assets:
+            assets["train"] = assets.pop("train_zip")
+        if "test_zip" in assets and "test" not in assets and "test_csv" in assets:
+            assets["test"] = assets.pop("test_zip")
 
         return assets
 
@@ -160,12 +160,10 @@ class KaggleAPIClient:
         download_path.mkdir(parents=True, exist_ok=True)
 
         try:
-            # Download all competition files
-            # API signature: competition_download_files(competition, path=None, force=False, quiet=False)
             self.api.competition_download_files(
                 competition,
                 path=str(download_path),
-                force=False,  # Don't re-download existing files
+                force=False,
                 quiet=quiet
             )
         except Exception as e:
@@ -174,18 +172,16 @@ class KaggleAPIClient:
                 f"Ensure competition exists and you have accepted the rules."
             )
 
-        # Unzip downloaded files
         import zipfile
 
         for zip_file in download_path.glob("*.zip"):
             try:
                 with zipfile.ZipFile(zip_file, "r") as zip_ref:
                     zip_ref.extractall(download_path)
-                zip_file.unlink()  # Remove zip after extraction
+                zip_file.unlink()
             except zipfile.BadZipFile:
                 print(f"Warning: {zip_file.name} is not a valid zip file, skipping")
 
-        # Identify key files and directories using new comprehensive method
         files = self._identify_data_assets(download_path)
 
         if not files.get("train") or not files.get("test"):
