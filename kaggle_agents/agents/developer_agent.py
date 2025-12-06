@@ -255,8 +255,16 @@ class DeveloperAgent:
                 print(f"Expected: {oof_file.name}")
                 print("Stacking will fail for this model.")
 
-            submission_path = working_dir / "submission.csv"
-            if submission_path.exists():
+            submission_candidates = [
+                Path(state.get("sample_submission_path")) if state.get("sample_submission_path") else None,
+                working_dir / "submission.csv",
+                working_dir / "sample_submission.csv",
+            ]
+            submission_path = next(
+                (p for p in submission_candidates if p is not None and p.exists()),
+                None,
+            )
+            if submission_path:
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
                 shutil.copy(submission_path, backup_path)
@@ -1414,6 +1422,28 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         # Get domain-specific code template
         domain_template = self._get_domain_template(domain, component.component_type)
 
+        # Resolve key paths from state (preferring downloaded locations)
+        resolved_train_path = Path(
+            state.get("current_train_path")
+            if state and state.get("current_train_path")
+            else state.get("train_data_path")
+            if state and state.get("train_data_path")
+            else working_dir / "train.csv"
+        )
+        resolved_test_path = Path(
+            state.get("current_test_path")
+            if state and state.get("current_test_path")
+            else state.get("test_data_path")
+            if state and state.get("test_data_path")
+            else working_dir / "test.csv"
+        )
+        sample_submission_path = Path(
+            state.get("sample_submission_path")
+            if state and state.get("sample_submission_path")
+            else working_dir / "sample_submission.csv"
+        )
+        models_dir = working_dir / "models"
+
         competition_context = f"""
         Name: {competition_info.name}
         Domain: {domain}
@@ -1421,26 +1451,12 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         Metric: {competition_info.evaluation_metric}
         """
 
-        train_path = (
-            state.get("current_train_path")
-            if state and state.get("current_train_path")
-            else state.get("train_data_path")
-            if state and state.get("train_data_path")
-            else working_dir / "train.csv"
-        )
-        test_path = (
-            state.get("current_test_path")
-            if state and state.get("current_test_path")
-            else state.get("test_data_path")
-            if state and state.get("test_data_path")
-            else working_dir / "test.csv"
-        )
-
         data_paths = f"""
-        Train: {train_path}
-        Test: {test_path}
-        Models: {working_dir / "models"}
-        Submission: {working_dir / "submission.csv"}
+        Train: {resolved_train_path}
+        Test: {resolved_test_path}
+        Models: {models_dir}
+        Sample Submission: {sample_submission_path}
+        Submission Output: {sample_submission_path}
         """
 
         if state is not None:
@@ -1468,10 +1484,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 domain=domain,
                 problem_type=competition_info.problem_type,
                 metric=competition_info.evaluation_metric,
-                train_data_path=str(working_dir / "train.csv"),
-                test_data_path=str(working_dir / "test.csv"),
-                models_dir=str(working_dir / "models"),
-                submission_path=str(working_dir / "submission.csv"),
+                train_data_path=str(resolved_train_path),
+                test_data_path=str(resolved_test_path),
+                models_dir=str(models_dir),
+                submission_path=str(sample_submission_path),
                 dataset_info=dataset_info,
                 component_name=component.name,
             )
