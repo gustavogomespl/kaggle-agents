@@ -437,10 +437,23 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         working_dir = Path(state["working_directory"])
         domain = state.get("domain_detected", "tabular")
 
-        train_path = working_dir / "train.csv"
-        test_path = working_dir / "test.csv"
+        # Prefer paths discovered during data download/previous steps
+        train_path = Path(
+            state.get("current_train_path")
+            or state.get("train_data_path")
+            or working_dir / "train.csv"
+        )
+        test_path = Path(
+            state.get("current_test_path")
+            or state.get("test_data_path")
+            or working_dir / "test.csv"
+        )
 
-        if not train_path.exists() or not test_path.exists():
+        train_exists = train_path.exists()
+        test_exists = test_path.exists()
+
+        # For image/audio domains we only need the asset (dir/zip) to exist; test.csv may not be present
+        if not train_exists or not test_exists:
             error_msg = f"Data files not found in {working_dir}\n"
             error_msg += f"Expected: {train_path.name}, {test_path.name}\n"
 
@@ -1411,11 +1424,15 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         train_path = (
             state.get("current_train_path")
             if state and state.get("current_train_path")
+            else state.get("train_data_path")
+            if state and state.get("train_data_path")
             else working_dir / "train.csv"
         )
         test_path = (
             state.get("current_test_path")
             if state and state.get("current_test_path")
+            else state.get("test_data_path")
+            if state and state.get("test_data_path")
             else working_dir / "test.csv"
         )
 

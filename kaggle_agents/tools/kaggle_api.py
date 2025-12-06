@@ -174,13 +174,18 @@ class KaggleAPIClient:
 
         import zipfile
 
-        for zip_file in download_path.glob("*.zip"):
-            try:
-                with zipfile.ZipFile(zip_file, "r") as zip_ref:
-                    zip_ref.extractall(download_path)
-                zip_file.unlink()
-            except zipfile.BadZipFile:
-                print(f"Warning: {zip_file.name} is not a valid zip file, skipping")
+        # Recursively extract all zip files (outer bundle + inner train/test archives)
+        extracted_zip = True
+        while extracted_zip:
+            extracted_zip = False
+            for zip_file in list(download_path.glob("*.zip")):
+                try:
+                    with zipfile.ZipFile(zip_file, "r") as zip_ref:
+                        zip_ref.extractall(download_path)
+                    zip_file.unlink()
+                    extracted_zip = True
+                except zipfile.BadZipFile:
+                    print(f"Warning: {zip_file.name} is not a valid zip file, skipping")
 
         files = self._identify_data_assets(download_path)
 

@@ -149,6 +149,11 @@ class KaggleState(TypedDict):
     working_directory: str
     current_train_path: Optional[str]
     current_test_path: Optional[str]
+    train_data_path: str
+    test_data_path: str
+    sample_submission_path: str
+    target_col: str
+    data_files: dict[str, Any]
 
     # Domain Detection
     domain_detected: Optional[DomainType]
@@ -260,6 +265,11 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         working_directory=working_dir,
         current_train_path=None,
         current_test_path=None,
+        train_data_path="",
+        test_data_path="",
+        sample_submission_path="",
+        target_col="",
+        data_files={},
 
         # Domain Detection
         domain_detected=None,

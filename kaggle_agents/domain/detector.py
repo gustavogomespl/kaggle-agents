@@ -99,6 +99,78 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         """
         self.llm = llm
 
+    def _detect_from_structure(
+        self, competition_info: CompetitionInfo, data_dir: Path
+    ) -> tuple[DomainType, float]:
+        """Heuristic detection from local files when no LLM is available."""
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+        text_exts = {".txt", ".json"}
+        tabular_exts = {".csv", ".parquet"}
+
+        def classify(counts: dict[str, int], total: int) -> tuple[DomainType, float] | None:
+            if total == 0:
+                return None
+
+            image_ratio = sum(counts.get(ext, 0) for ext in image_exts) / total
+            audio_ratio = sum(counts.get(ext, 0) for ext in audio_exts) / total
+            text_ratio = sum(counts.get(ext, 0) for ext in text_exts) / total
+            tabular_ratio = sum(counts.get(ext, 0) for ext in tabular_exts) / total
+
+            if image_ratio >= 0.3:
+                return ("image_classification", 0.90)
+            if audio_ratio >= 0.3:
+                return ("audio_classification", 0.85)
+            if text_ratio >= 0.3:
+                # Use regression hint if problem_type mentions it
+                if "regression" in (competition_info.problem_type or "").lower():
+                    return ("text_regression", 0.80)
+                return ("text_classification", 0.80)
+            if tabular_ratio >= 0.5:
+                if "regression" in (competition_info.problem_type or "").lower():
+                    return ("tabular_regression", 0.80)
+                return ("tabular_classification", 0.80)
+
+            return None
+
+        def analyze_dir(dir_path: Path) -> tuple[dict[str, int], int]:
+            counts: dict[str, int] = {}
+            total = 0
+            for i, file_path in enumerate(dir_path.rglob("*")):
+                if i >= 600:
+                    break
+                if file_path.is_file():
+                    ext = file_path.suffix.lower()
+                    if ext:
+                        counts[ext] = counts.get(ext, 0) + 1
+                        total += 1
+            return counts, total
+
+        # Prefer train/test folders if present
+        candidate_dirs = [
+            p
+            for p in data_dir.iterdir()
+            if p.is_dir() and p.name.lower().startswith(("train", "test"))
+        ] if data_dir.exists() else []
+
+        for dir_path in candidate_dirs:
+            counts, total = analyze_dir(dir_path)
+            result = classify(counts, total)
+            if result:
+                return result
+
+        # Fall back to scanning the whole directory tree
+        if data_dir.exists():
+            counts, total = analyze_dir(data_dir)
+            result = classify(counts, total)
+            if result:
+                return result
+
+        # Default tabular guess
+        if "regression" in (competition_info.problem_type or "").lower():
+            return ("tabular_regression", 0.50)
+        return ("tabular_classification", 0.50)
+
     def detect(
         self,
         competition_info: CompetitionInfo,
@@ -114,10 +186,12 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         Returns:
             Tuple of (detected_domain, confidence_score)
         """
-        if self.llm is None:
-            return "tabular_classification", 0.5
-
         data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
+
+        # Heuristic detection works even without LLM
+        heuristic_domain, heuristic_conf = self._detect_from_structure(competition_info, data_dir)
+        if self.llm is None or heuristic_conf >= 0.8:
+            return heuristic_domain, heuristic_conf
 
         # Heuristic fast-path: Use metadata from data pipeline if available
         metadata_type = None
