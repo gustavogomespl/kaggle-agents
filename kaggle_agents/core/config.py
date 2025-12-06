@@ -8,7 +8,7 @@ best practices with environment variable support and validation.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Optional
 
 from dotenv import load_dotenv
 
@@ -24,12 +24,12 @@ class LLMConfig:
     provider: Literal["openai", "anthropic", "gemini"] = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "openai"))
     model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "gpt-4o-mini"))
     # Optional per-role overrides to balance cost/quality across agents
-    planner_model: str | None = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
-    planner_provider: Literal["openai", "anthropic", "gemini"] | None = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
-    developer_model: str | None = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
-    developer_provider: Literal["openai", "anthropic", "gemini"] | None = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
-    evaluator_model: str | None = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
-    evaluator_provider: Literal["openai", "anthropic", "gemini"] | None = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
+    planner_model: Optional[str] = field(default_factory=lambda: os.getenv("PLANNER_MODEL"))
+    planner_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("PLANNER_PROVIDER"))
+    developer_model: Optional[str] = field(default_factory=lambda: os.getenv("DEVELOPER_MODEL"))
+    developer_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("DEVELOPER_PROVIDER"))
+    evaluator_model: Optional[str] = field(default_factory=lambda: os.getenv("EVALUATOR_MODEL"))
+    evaluator_provider: Optional[Literal["openai", "anthropic", "gemini"]] = field(default_factory=lambda: os.getenv("EVALUATOR_PROVIDER"))
     temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
     max_tokens: int = field(default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192")))  # Safe default
     timeout: int = 120  # seconds
@@ -240,7 +240,7 @@ class AgentConfig:
         return issues
 
     @classmethod
-    def from_env(cls, overrides: dict | None = None) -> "AgentConfig":
+    def from_env(cls, overrides: Optional[dict] = None) -> "AgentConfig":
         """
         Create configuration from environment variables with optional overrides.
 
@@ -262,7 +262,7 @@ class AgentConfig:
 
 # ==================== Global Config Instance ====================
 
-_global_config: AgentConfig | None = None
+_global_config: Optional[AgentConfig] = None
 
 
 def get_config() -> AgentConfig:
@@ -306,7 +306,7 @@ def reset_config() -> None:
 
 # ==================== Convenience Functions ====================
 
-def get_llm(temperature: float | None = None, max_tokens: int | None = None):
+def get_llm(temperature: Optional[float] = None, max_tokens: Optional[int] = None):
     """
     Get the configured LLM instance (OpenAI or Anthropic).
 
@@ -350,8 +350,8 @@ def get_llm(temperature: float | None = None, max_tokens: int | None = None):
 
 def get_llm_for_role(
     role: str,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
 ):
     """
     Return an LLM configured for a specific agent role (planner/developer/evaluator).
@@ -535,7 +535,7 @@ def compare_scores(
     Compare two scores and return the better one.
 
     Args:
-        score1: First score to compare
+        search: Optional[str] = None
         score2: Second score to compare
         metric_name: Name of the evaluation metric
 

@@ -19,7 +19,7 @@ Log Format:
 import re
 import ast
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 
 @dataclass
@@ -33,7 +33,7 @@ class TrainingFeedback:
 
     # Optuna Trials
     optuna_trials: list[dict[str, Any]] = field(default_factory=list)
-    best_optuna_trial: dict[str, Any] | None = None
+    best_optuna_trial: Optional[dict[str, Any]] = None
 
     # Feature Importances
     top_features: list[str] = field(default_factory=list)

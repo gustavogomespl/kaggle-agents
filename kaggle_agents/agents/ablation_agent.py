@@ -13,7 +13,7 @@ This agent follows the inner/outer loop pattern from the ADK example.
 import re
 import json
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -64,10 +64,10 @@ class ImprovementPlan:
     
     code_block: str
     plan: str
-    expected_impact: float = 0.0
+    actual_impact: Optional[float] = None
     risk_level: str = "medium"
     implemented: bool = False
-    result_score: float | None = None
+    result_score: Optional[float] = None
 
 
 @dataclass
@@ -371,7 +371,7 @@ class AblationStudyAgent:
         self,
         state: AblationState,
         ablation_summary: AblationSummary,
-    ) -> ImprovementPlan | None:
+    ) -> Optional[ImprovementPlan]:
         """Extract improvement plan from ablation results."""
         
         # Format ablation results
@@ -433,7 +433,7 @@ class AblationStudyAgent:
         state: AblationState,
         plan: ImprovementPlan,
         competition_dir: str,
-    ) -> tuple[str, TrainingFeedback | None]:
+    ) -> tuple[str, Optional[TrainingFeedback]]:
         """Implement the improvement plan and test it."""
         
         prompt = IMPLEMENT_PLAN_PROMPT.format(
@@ -488,7 +488,7 @@ class AblationStudyAgent:
         self,
         state: AblationState,
         current_plan: ImprovementPlan,
-        last_result: TrainingFeedback | None,
+        last_result: Optional[TrainingFeedback],
     ) -> ImprovementPlan:
         """Refine the improvement plan based on results."""
         

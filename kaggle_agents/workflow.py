@@ -81,8 +81,11 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
             try:
                 from .utils.cross_validation import generate_folds
                 folds_path = str(working_dir / "folds.csv")
+                # Use train_csv if available (for image competitions where 'train' is a dir/zip)
+                train_path_for_folds = data_files.get('train_csv', data_files['train'])
+                
                 generate_folds(
-                    train_path=data_files['train'],
+                    train_path=train_path_for_folds,
                     target_col=target_col,
                     output_path=folds_path,
                     n_folds=5,

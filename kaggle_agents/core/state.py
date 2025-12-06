@@ -9,7 +9,7 @@ Kaggle competition solving.
 from dataclasses import dataclass, field
 from datetime import datetime
 from operator import add
-from typing import Annotated, Any, Literal, TypedDict
+from typing import Annotated, Any, Literal, Optional, TypedDict
 
 
 # ==================== Domain Types ====================
@@ -51,10 +51,10 @@ class CompetitionInfo:
     description: str
     evaluation_metric: str
     problem_type: str  # classification, regression, ranking, etc.
-    domain: DomainType | None = None
+    domain: Optional[DomainType] = None
     data_files: list[str] = field(default_factory=list)
     submission_format: dict[str, Any] = field(default_factory=dict)
-    deadline: datetime | None = None
+    deadline: Optional[datetime] = None
 
 
 @dataclass
@@ -69,7 +69,7 @@ class SOTASolution:
     strategies: list[str] = field(default_factory=list)
     models_used: list[str] = field(default_factory=list)
     feature_engineering: list[str] = field(default_factory=list)
-    ensemble_approach: str | None = None
+    ensemble_approach: Optional[str] = None
 
 
 @dataclass
@@ -81,7 +81,7 @@ class AblationComponent:
     code: str
     estimated_impact: float = 0.0
     tested: bool = False
-    actual_impact: float | None = None
+    actual_impact: Optional[float] = None
 
 
 @dataclass
@@ -113,11 +113,11 @@ class ValidationResult:
 class SubmissionResult:
     """Result from Kaggle submission."""
 
-    submission_id: str | None
-    public_score: float | None
-    private_score: float | None = None
-    percentile: float | None = None
-    cv_score: float | None = None
+    submission_id: Optional[str]
+    public_score: Optional[float]
+    private_score: Optional[float] = None
+    percentile: Optional[float] = None
+    cv_score: Optional[float] = None
     submitted_at: datetime = field(default_factory=datetime.now)
 
 
@@ -147,11 +147,11 @@ class KaggleState(TypedDict):
     # Competition Context
     competition_info: CompetitionInfo
     working_directory: str
-    current_train_path: str | None
-    current_test_path: str | None
+    current_train_path: Optional[str]
+    current_test_path: Optional[str]
 
     # Domain Detection
-    domain_detected: DomainType | None
+    domain_detected: Optional[DomainType]
     domain_confidence: float
 
     # Search Phase
@@ -174,22 +174,22 @@ class KaggleState(TypedDict):
     critical_issues: Annotated[list[str], add]
 
     # Ensemble Phase
-    ensemble_strategy: str | None
+    ensemble_strategy: Optional[str]
     ensemble_weights: dict[str, float]
 
     # Submission Phase
     submissions: Annotated[list[SubmissionResult], add]
     best_score: float
     target_percentile: float  # goal: 20th percentile (top 20%)
-    best_single_model_score: float | None
-    best_single_model_name: str | None
+    best_single_model_score: Optional[float]
+    best_single_model_name: Optional[str]
 
     # Iteration Control
     current_iteration: int
     max_iterations: int
     should_continue: bool
     needs_refinement: bool
-    termination_reason: str | None
+    termination_reason: Optional[str]
 
     # Memory & Learning
     iteration_memory: Annotated[list[IterationMemory], add]
@@ -216,7 +216,7 @@ def merge_dict(existing: dict, new: dict) -> dict:
     return {**existing, **new}
 
 
-def merge_competition_info(existing: CompetitionInfo | None, new: CompetitionInfo) -> CompetitionInfo:
+def merge_competition_info(existing: Optional[CompetitionInfo], new: CompetitionInfo) -> CompetitionInfo:
     """Merge competition info, preferring new values when provided."""
     if existing is None:
         return new
