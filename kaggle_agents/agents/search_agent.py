@@ -37,6 +37,7 @@ class SearchAgent:
             self.llm = ChatOpenAI(
                 model=self.config.llm.model,
                 temperature=self.config.llm.temperature,
+                use_responses_api=self.config.llm.use_responses_api,
             )
         elif self.config.llm.provider == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI

@@ -25,9 +25,11 @@ from ..core.state import AblationComponent, DevelopmentResult, KaggleState
 from ..optimization import create_optimizer
 from ..prompts.templates.developer_prompts import (
     DEBUG_CODE_PROMPT,
-    DEVELOPER_SYSTEM_PROMPT,
+    DEVELOPER_CORE_IDENTITY,
     FIX_CODE_PROMPT,
-    GENERATE_CODE_PROMPT,
+    HARD_CONSTRAINTS,
+    build_context,
+    compose_generate_prompt,
     format_component_details,
     format_error_info,
 )
@@ -365,8 +367,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
                     from langchain_core.messages import HumanMessage, SystemMessage
 
+                    # Use DEVELOPER_CORE_IDENTITY + HARD_CONSTRAINTS as system context
+                    system_prompt = f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}"
                     refine_messages = [
-                        SystemMessage(content=DEVELOPER_SYSTEM_PROMPT),
+                        SystemMessage(content=system_prompt),
                         HumanMessage(
                             content=f"Here is the current working code:\n```python\n{best_code}\n```\n\n{refine_prompt}"
                         ),
@@ -1379,31 +1383,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             component_type: Component type (e.g., 'model', 'preprocessing')
 
         Returns:
-            Domain-specific code template string
+            Domain-specific code template string (empty - templates removed in refactoring)
         """
-        from ..prompts.templates.developer_prompts import (
-            IMAGE_CLASSIFICATION_TEMPLATE,
-            NLP_CLASSIFICATION_TEMPLATE,
-            AUDIO_CLASSIFICATION_TEMPLATE,
-        )
-
-        # Image domains
-        if domain.startswith("image_") and component_type == "model":
-            return IMAGE_CLASSIFICATION_TEMPLATE
-
-        # Text/NLP domains
-        elif (domain.startswith("text_") or domain == "seq_to_seq") and component_type == "model":
-            return NLP_CLASSIFICATION_TEMPLATE
-
-        # Audio domains
-        elif domain.startswith("audio_"):
-            if component_type == "preprocessing":
-                return AUDIO_CLASSIFICATION_TEMPLATE
-            elif component_type == "model":
-                # After preprocessing, audio becomes images (spectrograms)
-                return IMAGE_CLASSIFICATION_TEMPLATE
-
-        # Tabular or other domains - no special template
+        # Domain-specific templates removed in favor of agentic approach
+        # Agent uses SOTA solutions and feedback instead of hardcoded templates
         return ""
 
     def _generate_code(
@@ -1469,6 +1452,17 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             4. Handle errors gracefully
             """
 
+        # Build dynamic context from state (SOTA, feedback, rewards)
+        context = build_context(state) if state else build_context({})
+
+        # Prepare paths dictionary
+        paths = {
+            "train": str(resolved_train_path),
+            "test": str(resolved_test_path),
+            "models": str(models_dir),
+            "submission": str(sample_submission_path),
+        }
+
         if self.use_dspy:
             result = self.generator_module(
                 component_details=component_details,
@@ -1478,26 +1472,15 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             )
             code = self._extract_code_from_response(result.code)
         else:
-            prompt = GENERATE_CODE_PROMPT.format(
-                component_details=component_details,
-                competition_name=competition_info.name,
-                domain=domain,
-                problem_type=competition_info.problem_type,
-                metric=competition_info.evaluation_metric,
-                train_data_path=str(resolved_train_path),
-                test_data_path=str(resolved_test_path),
-                models_dir=str(models_dir),
-                submission_path=str(sample_submission_path),
-                dataset_info=dataset_info,
-                component_name=component.name,
+            # Use new compose_generate_prompt with dynamic context
+            prompt = compose_generate_prompt(
+                component=component,
+                competition_info=competition_info,
+                paths=paths,
+                context=context,
             )
 
-            # Append domain-specific template if available
-            if domain_template:
-                prompt += f"\n\n## Domain-Specific Implementation Guide\n\n{domain_template}"
-
             messages = [
-                SystemMessage(content=DEVELOPER_SYSTEM_PROMPT),
                 HumanMessage(content=prompt),
             ]
 
@@ -1574,8 +1557,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 error_type=error_info["error_type"],
             )
 
+            # Use DEVELOPER_CORE_IDENTITY + HARD_CONSTRAINTS as system context
+            system_prompt = f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}"
             messages = [
-                SystemMessage(content=DEVELOPER_SYSTEM_PROMPT),
+                SystemMessage(content=system_prompt),
                 HumanMessage(content=prompt),
             ]
 
@@ -1613,11 +1598,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 stderr=exec_result.stderr[-2000:] if exec_result.stderr else "",
             )
 
+            # Use DEVELOPER_CORE_IDENTITY + HARD_CONSTRAINTS as system context
+            debug_system_prompt = f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}\n\nYou are in DEBUG MODE. Fix the code carefully."
             messages = [
-                SystemMessage(
-                    content=DEVELOPER_SYSTEM_PROMPT
-                    + "\n\nYou are in DEBUG MODE. Fix the code carefully."
-                ),
+                SystemMessage(content=debug_system_prompt),
                 HumanMessage(content=prompt),
             ]
 

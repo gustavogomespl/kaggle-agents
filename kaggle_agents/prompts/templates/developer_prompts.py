@@ -1,921 +1,325 @@
 """
 Prompt templates for the Developer Agent.
 
-These templates guide code generation for implementing
-ablation components with retry and debug capabilities.
+Refactored to be agentic, feedback-driven, and RL-friendly.
+Inspired by Claude Code's concise style.
 """
 
+from dataclasses import dataclass, field
+from typing import Any, Optional
+
+# ==================== Core Identity ====================
+
+DEVELOPER_CORE_IDENTITY = """You are a Kaggle Grandmaster implementing ML components.
+
+Style:
+- Write minimal, working code - no unnecessary abstractions
+- No comments unless logic is non-obvious
+- Use proven patterns from SOTA solutions when provided
+- Print structured logs for the feedback loop
+
+Output: A single Python code block. No explanations outside the code."""
 
 
-# Base system prompt for the developer
-DEVELOPER_SYSTEM_PROMPT = """You are a Kaggle Grandmaster and expert Python developer specializing in winning Machine Learning competitions.
+# ==================== Hard Constraints ====================
 
-Your role is to write PRODUCTION-READY, HIGH-PERFORMANCE code that implements machine learning components that achieve top leaderboard scores.
+HARD_CONSTRAINTS = """## MUST (violations cause failures):
+1. predict_proba() for classification (NOT predict())
+2. StratifiedKFold(n_splits=5, shuffle=True, random_state=42) for CV
+3. Pipeline/ColumnTransformer for preprocessing - fit INSIDE CV folds only
+4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
+5. Clamp predictions: np.clip(predictions, 0, 1) before saving
+6. Match sample_submission.csv exactly: columns, IDs, shape
+7. Print "Final Validation Performance: {score:.6f}" at the end
+8. Set random_state=42 everywhere for reproducibility
 
-You are known for:
-1. **Kaggle Best Practices**: Class imbalance handling, proper CV, probability predictions, no data leakage
-2. **Clean Code**: Well-structured, readable, minimal comments (code should be self-explanatory)
-3. **Reproducibility**: Always set random_state=42, use StratifiedKFold for CV
-4. **Feature Engineering Excellence**: Create impactful features (polynomial, interactions, target encoding)
-5. **Model Selection**: Use proven winners (LightGBM, XGBoost, CatBoost) with proper hyperparameters
-6. **Efficiency**: Vectorized operations, fast execution (<60s for models, <10s for preprocessing)
-7. **Submission Safety**: Match sample_submission exactly (columns/order/id) and clamp probabilities to [0,1]
-8. **Schema Awareness**: Detect target column reliably (prefer sample_submission second column; fallback to known names or last non-id col) and log schema (shapes, columns, dtypes)
-9. **Leak-Free Pipelines**: Always use Pipeline/ColumnTransformer with SimpleImputer+OneHotEncoder for categoricals and SimpleImputer for numerics; fit inside CV only
-10. **Advanced Ensemble Techniques**: Stacking with OOF predictions, weighted blending, and **Boosting Over Residuals** (train Stage 1 on original data → convert to logits → train Stage 2 regressor on residuals → combine in logit space) - especially effective for Playground competitions with synthetic data
+## MUST NOT:
+- sys.exit(), exit(), quit(), raise SystemExit, os._exit()
+- try-except blocks that swallow errors (let them surface)
+- early_stopping_rounds as direct fit() parameter (use callbacks)
+- Subsample training data (use all available data)
 
-CRITICAL RULES (Never Break):
-- ALWAYS use predict_proba() for probability predictions (NOT predict())
-- ALWAYS check class distribution and apply class weights if imbalanced (ratio > 2:1)
-- ALWAYS use StratifiedKFold(n_splits=5) for cross-validation
-- ALWAYS print CV scores, class distribution, prediction distribution
-- ALWAYS fit all preprocessing (imputer/encoder/scaler) INSIDE a Pipeline/ColumnTransformer that is fit per CV fold (no global median/mean before split)
-- ALWAYS validate submission against sample_submission (shape, columns, id order) before saving; clamp probs to [0,1] if needed
-- ALWAYS print informative logs: shapes, column list, dtypes, class distribution, per-fold scores, prediction stats
-- NEVER use try-except to hide errors (let them surface for debugging)
-- NEVER subsample training data (use all available data)
-- NEVER use sys.exit(), exit(), quit(), raise SystemExit, os._exit(), or ANY termination commands
-- ALWAYS save submission.csv with probabilities (0.0-1.0), NOT binary predictions (0/1)
+## API Gotchas:
+- OneHotEncoder: sparse_output=False (NOT sparse=False) for sklearn 1.2+
+- pd.concat() instead of .append() for pandas 2.0+
+- Optuna: set_verbosity(WARNING), n_trials <= 5, timeout=60 for validation
+- LightGBM callbacks: lgb.early_stopping(100), not early_stopping_rounds param
+- XGBoost callbacks: xgb.callback.EarlyStopping(rounds=100)"""
 
-CRITICAL API USAGE (Common Mistakes to Avoid):
-LightGBM/XGBoost Early Stopping:
-- ❌ WRONG: model.fit(X, y, early_stopping_rounds=100)  # This will fail!
-- ✅ CORRECT: model.fit(X, y, eval_set=[(X_val, y_val)], callbacks=[lgb.early_stopping(100)])
-- ✅ ALTERNATIVE: Don't use early stopping and just set n_estimators appropriately
-- For LightGBM: Use lgb.early_stopping(stopping_rounds=100) in callbacks parameter
-- For XGBoost: Use xgb.callback.EarlyStopping(rounds=100) in callbacks parameter
-- NEVER pass early_stopping_rounds as a direct parameter to fit()
 
-Categorical Features (MANDATORY - WILL FAIL WITHOUT THIS):
-- ❌ CRITICAL ERROR: Training LightGBM/XGBoost/sklearn models on unencoded categorical features WILL FAIL
-- ✅ REQUIRED: ALWAYS encode categorical columns before training (except CatBoost which handles them natively)
-- ✅ MUST use ColumnTransformer with OneHotEncoder for categorical features (object/category dtypes)
-- ✅ Pipeline structure: ColumnTransformer([('num', SimpleImputer(), numeric_cols), ('cat', Pipeline([SimpleImputer(), OneHotEncoder(sparse_output=False)]), categorical_cols)])
-- Check for 'object' or 'category' dtypes - if they exist, they MUST be encoded
-- Never pass raw categorical strings to LightGBM/XGBoost/sklearn models
+# ==================== Logging Format ====================
 
-sklearn/pandas Version Compatibility (CRITICAL):
-- ❌ WRONG: OneHotEncoder(sparse=False)  # Deprecated in sklearn 1.2+
-- ✅ CORRECT: OneHotEncoder(sparse_output=False)  # Use this for sklearn 1.2+
-- ❌ WRONG: df.append(other_df)  # Removed in pandas 2.0+
-- ✅ CORRECT: pd.concat([df, other_df], ignore_index=True)  # Use this for pandas 2.0+
-- ❌ WRONG: series.append(other_series)  # Removed in pandas 2.0+
-- ✅ CORRECT: pd.concat([series, other_series], ignore_index=True)  # Use this for pandas 2.0+
-- ALWAYS use sparse_output parameter (not sparse) in OneHotEncoder
-- ALWAYS use pd.concat() instead of .append() for combining DataFrames/Series
+LOGGING_FORMAT = """## Structured Logs (required for feedback loop):
+[LOG:FOLD] fold={n} score={score:.6f} time={time:.2f}
+[LOG:CV_SUMMARY] mean={mean:.6f} std={std:.6f} scores={list}
+[LOG:OPTUNA] trial={n} score={score:.6f} time={time:.2f} params={dict}
+[LOG:TIMING] step={name} time={time:.2f} cumulative={cumulative:.2f}
+[LOG:FEATURES] top={list[:20]} importances={list[:20]}
+[LOG:WARNING] message={str}
+[LOG:ERROR] message={str}"""
 
-Optuna Dependencies (CRITICAL):
-- ❌ WRONG: from optuna.integration import OptunaSearchCV  # May not be installed
-- ✅ CORRECT: Use try/except to check if optuna-integration is available
-- ✅ SILENCE OPTUNA: ALWAYS set optuna.logging.set_verbosity(optuna.logging.WARNING) to prevent "False Positive Error Detection"
-- ✅ LIMIT TUNING: For validation, use n_trials=2 or timeout=60 to prevent timeouts.
-- ✅ Example:
-  ```python
-  import optuna
-  optuna.logging.set_verbosity(optuna.logging.WARNING)  # SILENCE OPTUNA
 
-  try:
-      from optuna.integration import OptunaSearchCV
-      USE_OPTUNA_INTEGRATION = True
-  except ImportError:
-      USE_OPTUNA_INTEGRATION = False
-      print("optuna-integration not available, using manual Optuna tuning")
-  ```
-- If optuna-integration is missing, use manual Optuna with study.optimize()
-- NEVER fail because a dependency is missing - always have a fallback
+# ==================== Dynamic Context ====================
 
-🚀 GPU ACCELERATION (CRITICAL - ALWAYS ENABLE):
-- **ALWAYS check for GPU availability at the start of code**
-- **ALWAYS enable GPU for LightGBM, XGBoost, and CatBoost models**
-- GPU acceleration is **MANDATORY** for competitive training speed
-- Detection pattern (REQUIRED in ALL model code):
-  ```python
-  import torch
-  use_gpu = torch.cuda.is_available()
-  print(f"GPU Available: {use_gpu}")
-  if use_gpu:
-      print("✅ GPU acceleration ENABLED")
-  else:
-      print("⚠️  Running on CPU (slower)")
-  ```
-- **LightGBM GPU params (REQUIRED if GPU available)**:
-  ```python
-  if use_gpu:
-      lgb_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}
-  else:
-      lgb_params = {'device': 'cpu'}
-  model = lgb.LGBMClassifier(**lgb_params, n_estimators=..., ...)
-  ```
-- **XGBoost GPU params (REQUIRED if GPU available)**:
-  ```python
-  if use_gpu:
-      xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
-  else:
-      xgb_params = {'tree_method': 'hist'}
+@dataclass
+class DynamicContext:
+    """Context injected into prompts based on current workflow state."""
 
-  # ROBUST FALLBACK: Wrap fit in try-except to handle GPU failures
-  try:
-      model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
-      model.fit(X, y)
-  except Exception as e:
-      print(f"⚠️  GPU Training failed: {e}. Falling back to CPU...")
-      xgb_params['tree_method'] = 'hist'
-      xgb_params.pop('predictor', None)
-      model = xgb.XGBClassifier(**xgb_params, n_estimators=..., ...)
-      model.fit(X, y)
-  ```
-- **CatBoost GPU params (REQUIRED if GPU available)**:
-  ```python
-  task_type = "GPU" if use_gpu else "CPU"
-  model = CatBoostClassifier(task_type=task_type, iterations=..., ...)
-  ```
-- **NEVER skip GPU configuration** - it's the difference between 30s and 5min training time
-- **ALWAYS print GPU status** so users know if GPU is being used
+    sota_patterns: str = ""
+    previous_feedback: str = ""
+    reward_guidance: str = ""
+    iteration_num: int = 0
+    what_worked: list[str] = field(default_factory=list)
+    what_failed: list[str] = field(default_factory=list)
+    best_score: Optional[float] = None
+    target_score: Optional[float] = None
 
-MANDATORY OUTPUT FORMAT (MLE-STAR Pattern):
-- Your response must contain ONLY a single Python code block
-- No additional text, explanations, or markdown outside the code block
-- The code MUST print 'Final Validation Performance: {score}' at the end
-- The score must be the cross-validation performance metric
-- Example: print(f"Final Validation Performance: {cv_accuracy:.6f}")
 
-📊 MANDATORY PERFORMANCE LOGGING (CRITICAL FOR DEBUGGING):
-- Print timing for EACH major step using consistent format
-- Format: "⏱️ [STEP_NAME] completed in {time:.2f}s"
-- Track cumulative time from start
-- Example implementation:
-  ```python
-  import time
+def build_context(state: dict[str, Any]) -> DynamicContext:
+    """
+    Build dynamic context from KaggleState for prompt injection.
 
-  start_time = time.time()
-  step_times = {}
+    Extracts:
+    - SOTA solutions → sota_patterns
+    - Previous execution results → previous_feedback
+    - Meta-evaluator guidance → reward_guidance
+    - Iteration memory → what_worked, what_failed
 
-  def log_step(step_name, start):
-      elapsed = time.time() - start
-      step_times[step_name] = elapsed
-      cumulative = time.time() - start_time
-      print(f"⏱️ [{step_name}] completed in {elapsed:.2f}s (cumulative: {cumulative:.2f}s)")
-      return time.time()
+    Args:
+        state: KaggleState dictionary
 
-  # Usage:
-  step_start = time.time()
-  # ... load data ...
-  step_start = log_step("DATA_LOADING", step_start)
+    Returns:
+        DynamicContext with extracted information
+    """
+    from ..utils.log_parser import parse_training_logs, format_feedback_for_llm
 
-  # ... preprocess ...
-  step_start = log_step("PREPROCESSING", step_start)
+    context = DynamicContext()
+    context.iteration_num = state.get("current_iteration", 0)
+    context.best_score = state.get("best_score")
+    context.target_score = state.get("target_percentile")
 
-  # ... train model ...
-  step_start = log_step("MODEL_TRAINING", step_start)
+    # Extract SOTA patterns from search results
+    sota_solutions = state.get("sota_solutions", [])
+    if sota_solutions:
+        context.sota_patterns = _format_sota_for_prompt(sota_solutions)
 
-  # At the end, print summary:
-  print("\\n📊 Performance Summary:")
-  for step, duration in step_times.items():
-      print(f"  {step}: {duration:.2f}s")
-  print(f"  TOTAL: {time.time() - start_time:.2f}s")
-  ```
-- REQUIRED steps to log:
-  1. DATA_LOADING - Time to load train/test CSVs
-  2. PREPROCESSING - Time for encoding, imputation, feature engineering
-  3. CV_FOLD_N - Time for each cross-validation fold (N=1,2,3,4,5)
-  4. MODEL_TRAINING - Total training time across all folds
-  5. PREDICTION - Time to make test predictions
-  6. SUBMISSION_SAVE - Time to save submission file
-- For Optuna tuning, log each trial:
-  "⏱️ [OPTUNA_TRIAL_N] score={score:.4f} in {time:.2f}s"
-- Print memory usage after large operations (optional but recommended):
-  ```python
-  import psutil
-  process = psutil.Process()
-  mem_mb = process.memory_info().rss / 1024 / 1024
-  print(f"📈 Memory usage: {mem_mb:.1f} MB")
-  ```
-- Print intermediate scores during CV:
-  "📊 Fold {n}/5: score={fold_score:.4f} (running mean: {mean_score:.4f})"
+    # Extract feedback from previous development results
+    dev_results = state.get("development_results", [])
+    if dev_results:
+        last_result = dev_results[-1]
+        if hasattr(last_result, "stdout") and last_result.stdout:
+            training_feedback = parse_training_logs(last_result.stdout)
+            if training_feedback:
+                context.previous_feedback = format_feedback_for_llm(training_feedback)
 
-🔧 MANDATORY STRUCTURED LOGGING (FOR AUTOMATED FEEDBACK LOOP):
-The system uses your logs to provide feedback for model improvement. You MUST use these exact formats:
+    # Extract meta-evaluator guidance
+    refinement_guidance = state.get("refinement_guidance", {})
+    reward_signals = state.get("reward_signals", {})
 
-**Required Structured Log Formats** (parseable by the feedback system):
-```python
-# 1. FOLD LOGGING - Log after each CV fold completes
-print(f"[LOG:FOLD] fold={fold_num} score={score:.6f} time={elapsed:.2f}")
-# Example: [LOG:FOLD] fold=1 score=0.873245 time=45.23
+    guidance_parts = []
+    if refinement_guidance.get("developer_guidance"):
+        guidance_parts.append(refinement_guidance["developer_guidance"])
 
-# 2. OPTUNA TRIAL LOGGING - Log after each Optuna trial
-print(f"[LOG:OPTUNA] trial={trial_num} score={score:.6f} time={elapsed:.2f} params={params}")
-# Example: [LOG:OPTUNA] trial=3 score=0.8650 time=30.5 params={'learning_rate': 0.05, 'max_depth': 6}
+    if refinement_guidance.get("priority_fixes"):
+        fixes = refinement_guidance["priority_fixes"]
+        if fixes:
+            guidance_parts.append(f"Priority fixes: {', '.join(fixes[:3])}")
 
-# 3. TIMING LOGGING - Log timing for each step
-print(f"[LOG:TIMING] step={step_name} time={elapsed:.2f} cumulative={cumulative:.2f}")
-# Example: [LOG:TIMING] step=PREPROCESSING time=12.50 cumulative=15.20
+    if reward_signals:
+        r_combined = reward_signals.get("r_combined", 0)
+        r_performance = reward_signals.get("r_performance", 0)
+        guidance_parts.append(f"Reward: r_combined={r_combined:.3f}, r_performance={r_performance:.3f}")
 
-# 4. FEATURE IMPORTANCE LOGGING - Log after training (top 20 features)
-print(f"[LOG:FEATURES] top={list(top_features)} importances={list(importances)}")
-# Example: [LOG:FEATURES] top=['feat1', 'feat2', 'feat3'] importances=[0.15, 0.12, 0.08]
+    if guidance_parts:
+        context.reward_guidance = "\n".join(guidance_parts)
 
-# 5. MEMORY LOGGING - Log memory usage periodically
-print(f"[LOG:MEMORY] current_mb={current:.1f} peak_mb={peak:.1f}")
-# Example: [LOG:MEMORY] current_mb=1250.5 peak_mb=1800.2
+    # Extract what worked/failed from iteration memory
+    iteration_memory = state.get("iteration_memory", [])
+    if iteration_memory:
+        latest = iteration_memory[-1]
+        if hasattr(latest, "what_worked"):
+            context.what_worked = latest.what_worked or []
+        if hasattr(latest, "what_failed"):
+            context.what_failed = latest.what_failed or []
 
-# 6. HYPERPARAMETERS LOGGING - Log final hyperparameters used
-print(f"[LOG:HYPERPARAMS] params={final_params}")
-# Example: [LOG:HYPERPARAMS] params={'n_estimators': 1000, 'learning_rate': 0.05, 'max_depth': 7}
+    return context
 
-# 7. CV SUMMARY LOGGING - Log CV summary at end
-print(f"[LOG:CV_SUMMARY] mean={mean:.6f} std={std:.6f} scores={list(scores)}")
-# Example: [LOG:CV_SUMMARY] mean=0.8732 std=0.0085 scores=[0.871, 0.875, 0.872, 0.874, 0.873]
 
-# 8. WARNING LOGGING - Log any warnings detected
-print(f"[LOG:WARNING] message={warning_message}")
-# Example: [LOG:WARNING] message=High variance detected across folds (std > 0.02)
+def _format_sota_for_prompt(solutions: list, max_solutions: int = 3) -> str:
+    """Format SOTA solutions into prompt-friendly text."""
+    lines = []
+    for i, sol in enumerate(solutions[:max_solutions], 1):
+        title = getattr(sol, "title", "Unknown")
+        score = getattr(sol, "score", 0)
+        lines.append(f"### Solution {i}: {title} (Score: {score})")
 
-# 9. ERROR LOGGING - Log any errors encountered
-print(f"[LOG:ERROR] message={error_message}")
-# Example: [LOG:ERROR] message=GPU memory exhausted, falling back to CPU
-```
+        models = getattr(sol, "models_used", [])
+        if models:
+            lines.append(f"Models: {', '.join(models[:5])}")
 
-**Complete Structured Logging Template** (COPY THIS INTO YOUR CODE):
-```python
-import time
-import psutil
-import numpy as np
+        strategies = getattr(sol, "strategies", [])
+        if strategies:
+            lines.append(f"Strategies: {'; '.join(strategies[:3])}")
 
-# Initialize logging
-start_time = time.time()
-step_times = {}
-fold_scores = []
-optuna_trials = []
-feature_importances = {}
-warnings_list = []
+        snippets = getattr(sol, "code_snippets", [])
+        if snippets:
+            snippet = snippets[0][:800] if len(snippets[0]) > 800 else snippets[0]
+            lines.append(f"```python\n{snippet}\n```")
 
-def log_timing(step_name, step_start):
-    elapsed = time.time() - step_start
-    cumulative = time.time() - start_time
-    step_times[step_name] = elapsed
-    print(f"[LOG:TIMING] step={step_name} time={elapsed:.2f} cumulative={cumulative:.2f}")
-    return time.time()
+        lines.append("")
 
-def log_memory():
-    try:
-        process = psutil.Process()
-        current = process.memory_info().rss / 1024 / 1024
-        # Peak memory estimation (current as approximation)
-        print(f"[LOG:MEMORY] current_mb={current:.1f} peak_mb={current:.1f}")
-    except:
-        pass
+    return "\n".join(lines)
 
-def log_fold(fold_num, score, elapsed):
-    fold_scores.append(score)
-    running_mean = np.mean(fold_scores)
-    print(f"[LOG:FOLD] fold={fold_num} score={score:.6f} time={elapsed:.2f}")
-    print(f"📊 Fold {fold_num}/5: score={score:.4f} (running mean: {running_mean:.4f})")
 
-def log_optuna_trial(trial_num, score, elapsed, params):
-    optuna_trials.append({'trial': trial_num, 'score': score, 'params': params})
-    print(f"[LOG:OPTUNA] trial={trial_num} score={score:.6f} time={elapsed:.2f} params={params}")
+# ==================== Prompt Composition ====================
 
-def log_features(model, feature_names, top_n=20):
-    try:
-        if hasattr(model, 'feature_importances_'):
-            importances = model.feature_importances_
-        elif hasattr(model, 'feature_importance'):
-            importances = model.feature_importance()
-        else:
-            return
-        # Get top N features
-        indices = np.argsort(importances)[::-1][:top_n]
-        top_features = [feature_names[i] for i in indices]
-        top_importances = [float(importances[i]) for i in indices]
-        print(f"[LOG:FEATURES] top={top_features} importances={top_importances}")
-    except Exception as e:
-        print(f"[LOG:WARNING] message=Could not extract feature importances: {e}")
+def compose_generate_prompt(
+    component,
+    competition_info,
+    paths: dict[str, str],
+    context: DynamicContext,
+) -> str:
+    """
+    Compose a dynamic, context-aware code generation prompt.
 
-def log_hyperparams(params):
-    print(f"[LOG:HYPERPARAMS] params={params}")
+    Adaptive injection based on iteration:
+    - Iteration 0: SOTA-heavy (learn from winners)
+    - Later iterations: Feedback-heavy + truncated SOTA reference
 
-def log_cv_summary(scores):
-    mean_score = np.mean(scores)
-    std_score = np.std(scores)
-    print(f"[LOG:CV_SUMMARY] mean={mean_score:.6f} std={std_score:.6f} scores={list(scores)}")
-    # Auto-detect issues
-    if std_score > 0.02:
-        print(f"[LOG:WARNING] message=High variance across folds (std={std_score:.4f} > 0.02) - possible overfitting")
-    if mean_score < 0.5:
-        print(f"[LOG:WARNING] message=Low CV score ({mean_score:.4f}) - model may be underfitting")
+    Args:
+        component: AblationComponent to implement
+        competition_info: CompetitionInfo with metadata
+        paths: Dictionary with train, test, submission, models paths
+        context: DynamicContext with SOTA, feedback, rewards
 
-def log_warning(message):
-    warnings_list.append(message)
-    print(f"[LOG:WARNING] message={message}")
+    Returns:
+        Composed prompt string
+    """
+    parts = [
+        DEVELOPER_CORE_IDENTITY,
+        "",
+        HARD_CONSTRAINTS,
+        "",
+        LOGGING_FORMAT,
+        "",
+        _format_task(component, competition_info, paths),
+    ]
 
-def log_error(message):
-    print(f"[LOG:ERROR] message={message}")
-```
+    # ADAPTIVE: First iteration = SOTA heavy
+    if context.iteration_num == 0:
+        if context.sota_patterns:
+            parts.append("")
+            parts.append("## SOTA Patterns (Learn from top solutions):")
+            parts.append(context.sota_patterns)
 
-**Usage Example in Training Loop**:
-```python
-step_start = time.time()
-# Load data...
-step_start = log_timing("DATA_LOADING", step_start)
-log_memory()
+    # ADAPTIVE: Later iterations = Feedback heavy
+    else:
+        if context.previous_feedback:
+            parts.append("")
+            parts.append("## Previous Attempt Feedback:")
+            parts.append(context.previous_feedback)
 
-# Preprocessing...
-step_start = log_timing("PREPROCESSING", step_start)
+        if context.what_worked:
+            parts.append("")
+            parts.append("## What Worked (Keep these approaches):")
+            parts.append("\n".join(f"- {w}" for w in context.what_worked[:5]))
 
-# Optuna tuning
-for trial_num, trial in enumerate(study.trials, 1):
-    trial_start = time.time()
-    # ... trial code ...
-    log_optuna_trial(trial_num, trial.value, time.time() - trial_start, trial.params)
+        if context.what_failed:
+            parts.append("")
+            parts.append("## What Failed (Avoid these):")
+            parts.append("\n".join(f"- {f}" for f in context.what_failed[:5]))
 
-# CV Training
-for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
-    fold_start = time.time()
-    # ... training code ...
-    log_fold(fold, fold_score, time.time() - fold_start)
+        if context.reward_guidance:
+            parts.append("")
+            parts.append("## Meta-Evaluator Guidance:")
+            parts.append(context.reward_guidance)
 
-# After training
-log_features(model, feature_names)
-log_hyperparams(best_params)
-log_cv_summary(fold_scores)
-log_memory()
-```
+        # Still include truncated SOTA as reference
+        if context.sota_patterns:
+            parts.append("")
+            parts.append("## SOTA Reference (condensed):")
+            parts.append(context.sota_patterns[:1000])
 
-Your code should:
-- Import all necessary libraries
-- Load data from correct paths
-- Check for class imbalance and handle appropriately
-- Implement the specified component with best practices
-- Use cross-validation to estimate performance
-- Make probability predictions (not hard predictions)
-- Save outputs/models to correct locations
-- Print execution time and key metrics with structured logging
-- Be a complete, executable single-file Python program
-"""
+    # Component-specific minimal guidance
+    guidance = _get_component_guidance(component.component_type)
+    if guidance:
+        parts.append("")
+        parts.append(guidance)
 
-# Template for generating code from ablation component
-GENERATE_CODE_PROMPT = """Generate complete, production-ready Python code for the following component.
+    return "\n".join(parts)
 
-## Component Details
-{component_details}
 
-## Competition Context
-Competition: {competition_name}
+def _format_task(component, competition_info, paths: dict[str, str]) -> str:
+    """Format the task specification section."""
+    component_type = getattr(component, "component_type", "model")
+    component_name = getattr(component, "name", "component")
+    component_code = getattr(component, "code", "")
+    estimated_impact = getattr(component, "estimated_impact", 0.0)
+
+    name = getattr(competition_info, "name", "competition")
+    domain = getattr(competition_info, "domain", "tabular")
+    problem_type = getattr(competition_info, "problem_type", "classification")
+    metric = getattr(competition_info, "evaluation_metric", "accuracy")
+
+    return f"""## Task
+Component: {component_type} - {component_name}
+Goal: {component_code}
+Estimated Impact: {estimated_impact:.1%}
+
+## Competition
+Name: {name}
 Domain: {domain}
 Problem Type: {problem_type}
 Metric: {metric}
 
-## Data Paths
-Train Data: {train_data_path}
-Test Data: {test_data_path}
-Models Directory: {models_dir}
-Submission Path: {submission_path}
+## Paths
+Train: {paths.get('train', 'train.csv')}
+Test: {paths.get('test', 'test.csv')}
+Models: {paths.get('models', 'models/')}
+Submission: {paths.get('submission', 'submission.csv')}"""
 
-## Dataset Information
-{dataset_info}
 
-## CRITICAL TYPE-SPECIFIC REQUIREMENTS
+def _get_component_guidance(component_type: str) -> str:
+    """Get minimal, type-specific guidance."""
+    guidance = {
+        "model": """## Model Component Requirements
+- Train model with 5-fold StratifiedKFold CV
+- Save OOF predictions to models/oof_{name}.npy for stacking
+- Handle class imbalance if ratio > 2:1 (class_weight or scale_pos_weight)
+- Print per-fold scores: [LOG:FOLD] fold={n} score={s:.6f}
+- Use GPU if available (check torch.cuda.is_available())
+- Create submission.csv with probabilities [0,1]""",
 
-### If component_type == "preprocessing" or "feature_engineering":
-- **DO NOT train any models** (no fit(), no GridSearch, no model training)
-- ONLY clean data, handle missing values, scale features, or create new features
-- Must execute in **under 10 seconds** (keep it simple and fast)
-- Can save processed data to models directory for later use
-- **MUST print "Final Validation Performance: 1.0" at the end** (placeholder for successful completion)
-- Example: print("Final Validation Performance: 1.0  # Feature engineering complete")
+        "feature_engineering": """## Feature Engineering Requirements
+- Transform train and test consistently
+- NO model training in this component
+- Save to train_engineered.csv, test_engineered.csv if creating new files
+- Fast execution (<30 seconds)
+- Print "Final Validation Performance: 1.0" on completion""",
 
-### If component_type == "model":
-- **MUST train a model** (LightGBM, XGBoost, or CatBoost recommended for best performance)
-- **For classification**: use **predict_proba()** to get probabilities (NOT predict() for hard predictions)
-- **For regression**: use **predict()** to get continuous values
-- **MUST create submission.csv** at {submission_path} with predictions
-- **MUST load sample_submission.csv** (if available) and use it as template: same shape/columns/id ordering
-- **MUST detect target_col** reliably: prefer `target_col = sample_sub.columns[1]` if present; else use common names (`target`, `label`, `loan_paid_back`) or last non-id column; assert existence in train df
-- **CRITICAL: MUST save Out-of-Fold (OOF) predictions** for stacking ensemble:
-  - During CV, collect predictions on validation folds (oof_predictions array, same length as train)
-  - Save to: `{models_dir}/oof_{{component_name}}.npy` using `np.save()`
-  - This enables proper stacking ensemble later (train meta-model on OOF predictions)
-  - Print: "OOF predictions saved to {{oof_path}}"
-- Use **dataset-adaptive hyperparameters** (automatically calculated):
-  - Variables `n_estimators`, `max_depth`, `learning_rate` are set based on dataset size
-  - Small datasets (<5k): More trees, deeper (n_estimators=1000, max_depth=8)
-  - Large datasets (>100k): Fewer trees, shallower (n_estimators=400, max_depth=5)
-  - **num_leaves** (LightGBM): Use `2^max_depth - 1` for consistency
+        "ensemble": """## Ensemble Requirements
+- Load OOF predictions from models/oof_*.npy files
+- Preferred: Stacking with LogisticRegression/Ridge meta-learner
+- Fallback: Weighted average if OOF files missing
+- Can use correlation analysis to select diverse models
+- Create submission.csv with final ensemble predictions""",
 
-🚀 **GPU ACCELERATION (CRITICAL - MANDATORY)**:
-  - **STEP 1**: ALWAYS detect GPU at the start of your code:
-    ```python
-    import torch
-    use_gpu = torch.cuda.is_available()
-    print(f"GPU Available: {use_gpu}")
-    ```
-  - **STEP 2**: Configure model params based on GPU availability:
-    - **LightGBM**: Add `'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0` if GPU available
-    - **XGBoost**: Add `'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'` if GPU available
-    - **CatBoost**: Set `task_type="GPU"` if GPU available (otherwise "CPU")
-  - **STEP 3**: Print GPU status so users can verify:
-    ```python
-    if use_gpu:
-        print("✅ GPU ENABLED for training (fast)")
-    else:
-        print("⚠️  CPU mode (slower)")
-    ```
-  - **Example for LightGBM**:
-    ```python
-    lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0} if use_gpu else {'device': 'cpu'}
-    model = lgb.LGBMClassifier(**lgb_gpu_params, n_estimators=n_estimators, max_depth=max_depth, ...)
-    ```
-  - **Example for XGBoost (ROBUST FALLBACK REQUIRED)**:
-    ```python
-    try:
-        model = xgb.XGBClassifier(**xgb_params, ...)
-        model.fit(X_train, y_train)
-    except Exception as e:
-        print(f"⚠️ GPU failed: {e}. Retrying with CPU...")
-        xgb_params['tree_method'] = 'hist' # Fallback
-        model = xgb.XGBClassifier(**xgb_params, ...)
-        model.fit(X_train, y_train)
-    ```
-  - **This is NOT optional** - GPU reduces training time from minutes to seconds
+        "preprocessing": """## Preprocessing Requirements
+- Clean data, handle missing values, encode categoricals
+- NO model training
+- Fast execution (<10 seconds)
+- Save processed data for subsequent components
+- Print "Final Validation Performance: 1.0" on completion""",
+    }
 
-🛑 **OPTUNA CONFIGURATION (CRITICAL)**:
-  - **SILENCE LOGGING**: `optuna.logging.set_verbosity(optuna.logging.WARNING)` (Prevent "False Positive Error Detection")
-  - **LIMIT TUNING**: Use `n_trials=2` or `timeout=60` for validation runs. Do NOT run for 10 minutes.
+    return guidance.get(component_type, "")
 
-- Target execution time: 60-90 seconds per model (use early stopping)
-- Print CV score or validation metrics
 
-#### CRITICAL: Class Imbalance Handling
-- **ALWAYS check class distribution** in training data
-- **Calculate class weights** if imbalanced (ratio > 2:1)
-- For XGBoost: use `scale_pos_weight = negative_count / positive_count`
-- For LightGBM: use `is_unbalance=True` or `class_weight='balanced'`
-- For sklearn models: use `class_weight='balanced'`
-- **ALWAYS use StratifiedKFold** for cross-validation (5 folds)
-- **Print class distribution** before and after predictions
+# ==================== Fix and Debug Prompts ====================
 
-#### CRITICAL: Probability Predictions
-- Use `model.predict_proba(X_test)[:, 1]` for binary classification
-- For multiclass: use `model.predict_proba(X_test)` (all class probabilities)
-- Submission must contain probabilities (0.0-1.0), NOT hard predictions (0/1)
-- Example: `submission['prediction'] = model.predict_proba(X_test)[:, 1]`
-- Validate submission with:
-  - `assert submission.shape == sample_sub.shape`
-  - `assert submission.columns.tolist() == sample_sub.columns.tolist()`
-  - `assert submission['id'].equals(sample_sub['id'])`
-  - print head/dtypes/range checks
-- Clamp probabilities to [0, 1] with `np.clip` before saving
-- Log: min/max/mean of predictions and per-fold scores
-- For CatBoost: specify `cat_features` by indices; prefer `auto_class_weights='Balanced'` (avoid unsupported `class_weight` in older versions)
+FIX_CODE_PROMPT = """Fix this code error.
 
-### If component_type == "ensemble":
-- **PREFERRED: Stacking Ensemble** (best performance)
-  - Load OOF predictions from all base models: `np.load('{models_dir}/oof_{{model_name}}.npy')`
-  - Stack OOF predictions horizontally: `oof_stack = np.column_stack([oof_lgb, oof_xgb, oof_cat, ...])`
-  - Train meta-model (LogisticRegression/Ridge) on stacked OOF: `meta_model.fit(oof_stack, y_train)`
-  - Load test predictions from each model and stack them
-  - Use meta-model to predict on stacked test: `final_predictions = meta_model.predict_proba(test_stack)[:, 1]`
-- **🔥 ADVANCED: Boosting Over Residuals** (HIGHLY EFFECTIVE for Kaggle Playground competitions)
-  
-  **Core Insight**: Playground competitions use SYNTHETIC DATA generated from an original real dataset.
-  The key is to train Stage 1 on the ORIGINAL DATA ONLY, then use Stage 2 to correct its errors on the synthetic competition data.
-  
-  **Why This Works So Well**:
-  1. Stage 1 captures the "true" underlying patterns from real-world original data
-  2. Stage 2 learns to correct the distributional shift between original and synthetic data
-  3. The residual approach prevents Stage 2 from overfitting to synthetic noise
-  4. Works for classification by operating in **logit space** (unbounded, symmetric)
-  
-  - **Stage 1**: Train a STRONG model on ORIGINAL DATA ONLY (NOT competition data!)
-  - **Stage 2**: Convert Stage 1 predictions to logits → create residual target → train Stage 2 (regression) to boost over residuals
-  
-  - **Implementation for Classification** (COMPLETE PATTERN):
-    ```python
-    import numpy as np
-    import pandas as pd
-    from scipy.special import logit, expit
-    import lightgbm as lgb
-    
-    epsilon = 1e-7  # Avoid log(0) or log(1)
-    
-    # =====================================================
-    # STEP 1: Train Stage 1 on ORIGINAL DATA ONLY
-    # =====================================================
-    # CRITICAL: Use the original dataset, NOT competition data!
-    # Check competition "Data" tab or description for source dataset
-    original_train = pd.read_csv('path/to/original_data.csv')
-    X_original = original_train.drop('target', axis=1)
-    y_original = original_train['target']
-    
-    stage1_model = lgb.LGBMClassifier(n_estimators=500, max_depth=7, random_state=42)
-    stage1_model.fit(X_original, y_original)
-    print("✓ Stage 1 trained on ORIGINAL data only")
-    
-    # =====================================================
-    # STEP 2: Get Stage 1 predictions on COMPETITION data
-    # =====================================================
-    comp_train = pd.read_csv('train.csv')  # Competition's synthetic train
-    comp_test = pd.read_csv('test.csv')    # Competition's synthetic test
-    X_comp = comp_train.drop('target', axis=1)
-    y_comp = comp_train['target']
-    
-    pred0_train = stage1_model.predict_proba(X_comp)[:, 1]
-    pred0_test = stage1_model.predict_proba(comp_test)[:, 1]
-    
-    # =====================================================
-    # STEP 3: Convert to logits (CRITICAL for classification!)
-    # =====================================================
-    # Probabilities [0,1] are bounded → bad for residuals
-    # Logits (-∞, +∞) are unbounded → perfect for residuals
-    pred0_train = np.clip(pred0_train, epsilon, 1 - epsilon)
-    pred0_test = np.clip(pred0_test, epsilon, 1 - epsilon)
-    logits0_train = logit(pred0_train)  # log(p/(1-p))
-    logits0_test = logit(pred0_test)
-    
-    # Convert 0/1 target to logits (0→very negative, 1→very positive)
-    target_logits = logit(np.clip(y_comp.values.astype(float), epsilon, 1 - epsilon))
-    
-    # =====================================================
-    # STEP 4: Create residual target
-    # =====================================================
-    # residual = Stage 1 prediction - truth (in logit space)
-    # Stage 2 will learn to predict this error
-    residual_target = logits0_train - target_logits
-    print(f"Residual stats: mean={residual_target.mean():.4f}, std={residual_target.std():.4f}")
-    
-    # =====================================================
-    # STEP 5: Train Stage 2 to predict RESIDUALS (Regression!)
-    # =====================================================
-    # IMPORTANT: This is REGRESSION, not classification!
-    stage2_model = lgb.LGBMRegressor(n_estimators=300, max_depth=5, random_state=42)
-    stage2_model.fit(X_comp, residual_target)
-    print("✓ Stage 2 trained to predict residuals (logit space)")
-    
-    residual_pred_test = stage2_model.predict(comp_test)
-    
-    # =====================================================
-    # STEP 6: Combine predictions (boosting in logit space)
-    # =====================================================
-    # new_logits = original_logits - predicted_residual
-    new_logits_test = logits0_test - residual_pred_test
-    
-    # =====================================================
-    # STEP 7: Convert back to probabilities
-    # =====================================================
-    final_predictions = expit(new_logits_test)  # sigmoid
-    final_predictions = np.clip(final_predictions, 0, 1)
-    
-    print(f"Final: min={final_predictions.min():.4f}, max={final_predictions.max():.4f}")
-    ```
-  
-  - **Key Best Practices**:
-    - **Stage 1 MUST be trained on ORIGINAL data only** (this is the whole point of the technique!)
-    - Stage 1 should be a strong model: XGBoost, LightGBM, Neural Network, or ensemble
-    - Stage 2 is simpler/faster - it just corrects Stage 1's errors (LightGBM recommended)
-    - **ALWAYS use logits** for classification residuals (probabilities don't work!)
-    - **ALWAYS clip before logit()** to avoid log(0)=-∞ or log(1)=+∞
-    - Use proper CV for Stage 2 to prevent overfitting to residuals
-    - Can iterate: Stage 2 → Stage 3 → ... (each boosting over previous residuals)
-    - Combine with stacking: use boosting-over-residuals as one base model in ensemble
-  
-  - **Finding Original Data**:
-    - Check competition "Data" tab for source dataset link
-    - Search Kaggle datasets for the original (e.g., "loan default UCI")
-    - Competition description often mentions the source
-    - If unavailable, skip this technique or use competition data subset for Stage 1
-- **FALLBACK: Weighted Average** (if OOF files missing)
-  - Load submission files from each model
-  - Calculate weights based on CV scores or use equal weights
-  - Combine: `final = w1*pred1 + w2*pred2 + w3*pred3`
-- **MUST create submission.csv** with ensemble predictions
-- **MUST use sample_submission.csv** as the template and validate shape/columns/id
-- Print which models were used and their contribution/weights
-
-## General Requirements
-1. Load data from the provided paths
-2. Implement the component exactly as specified above
-3. Print progress and key metrics
-4. Handle errors gracefully
-5. Use sklearn Pipeline/ColumnTransformer so that imputers/encoders are fit inside CV splits (no leakage)
-6. Default preprocessing: numeric -> SimpleImputer(strategy='median'); categorical (object/category) -> SimpleImputer(strategy='most_frequent') + OneHotEncoder(handle_unknown='ignore', sparse_output=False); wrap model in Pipeline
-7. CRITICAL: Use sparse_output=False (NOT sparse=False) for OneHotEncoder (sklearn 1.2+ compatibility)
-8. CRITICAL: Use pd.concat() instead of .append() for DataFrames/Series (pandas 2.0+ compatibility)
-
-## CRITICAL GUARDRAILS (You are a Kaggle Grandmaster - follow best practices)
-- **NO try-except blocks that hide errors** - let errors surface for debugging
-- **NO subsampling of training data** - use all available data
-- **NO sys.exit()** or similar termination commands
-- **ALWAYS print intermediate validation scores** during training
-- **ALWAYS use all provided features** - don't drop columns arbitrarily
-- **ALWAYS set random_state/random_seed** for reproducibility (use 42)
-- **Print execution time** at the end
-
-## Code Structure
-```python
-# Imports
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-import time
-# ... other imports
-
-# Silence Optuna logs (CRITICAL - prevents false error detection)
-try:
-    import optuna
-    optuna.logging.set_verbosity(optuna.logging.WARNING)
-except ImportError:
-    pass
-
-# Configuration
-RANDOM_SEED = 42
-np.random.seed(RANDOM_SEED)
-
-# ========== PERFORMANCE LOGGING SETUP ==========
-start_time = time.time()
-step_times = {{}}
-
-def log_step(step_name, step_start):
-    # Log timing for a processing step
-    elapsed = time.time() - step_start
-    step_times[step_name] = elapsed
-    cumulative = time.time() - start_time
-    print(f"⏱️ [{{step_name}}] completed in {{elapsed:.2f}}s (cumulative: {{cumulative:.2f}}s)")
-    return time.time()
-
-def print_performance_summary():
-    # Print final performance summary
-    print("\\n📊 Performance Summary:")
-    for step, duration in step_times.items():
-        print(f"  {{step}}: {{duration:.2f}}s")
-    print(f"  TOTAL: {{time.time() - start_time:.2f}}s")
-# ================================================
-
-step_start = time.time()
-
-# Load data
-print("Loading data...")
-train_df = pd.read_csv('{train_data_path}')
-test_df = pd.read_csv('{test_data_path}')
-sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-step_start = log_step("DATA_LOADING", step_start)
-
-print(f"Train shape: {{train_df.shape}}, Test shape: {{test_df.shape}}")
-print(f"Train columns: {{train_df.columns.tolist()}}")
-print("Train dtypes:")
-print(train_df.dtypes)
-
-# CRITICAL: Detect target column (MUST match sample_submission)
-# Priority 1: Environment variable TARGET_COL (explicit override)
-# Priority 2: sample_submission.columns[1] (most reliable for Kaggle)
-# Priority 3: Common target names
-# Priority 4: Last non-id column
-import os
-target_col = None
-
-# Priority 1: Environment variable
-env_target = os.environ.get('TARGET_COL')
-if env_target and env_target in train_df.columns:
-    target_col = env_target
-    print(f"✓ Target from env var TARGET_COL: '{{target_col}}'")
-
-# Priority 2: sample_submission second column
-if target_col is None:
-    candidate_target = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
-    if candidate_target and candidate_target in train_df.columns:
-        target_col = candidate_target
-        print(f"✓ Target from sample_submission: '{{target_col}}'")
-
-# Priority 3: Common target names
-if target_col is None:
-    fallback_targets = ['target', 'label', 'y', 'loan_paid_back', 'survived', 'price', 'sales', 'class', 'outcome']
-    for t in fallback_targets:
-        if t in train_df.columns:
-            target_col = t
-            print(f"✓ Target from common names: '{{target_col}}'")
-            break
-
-# Priority 4: Last non-id column (heuristic)
-if target_col is None:
-    non_id_cols = [c for c in train_df.columns if 'id' not in c.lower()]
-    if non_id_cols:
-        target_col = non_id_cols[-1]
-        print(f"⚠️  Target inferred (last non-id col): '{{target_col}}'")
-
-# Validate target column exists
-assert target_col is not None and target_col in train_df.columns, \\
-    f"Target column could not be detected. Available: {{train_df.columns.tolist()}}. Set TARGET_COL env var."
-print(f"✓ Target column: '{{target_col}}' (verified in train_df)")
-
-# Separate X/y
-y_train = train_df[target_col]
-X_train = train_df.drop(columns=[target_col, 'id'] if 'id' in train_df.columns else [target_col])
-X_test = test_df.drop(columns=['id'], errors='ignore')
-
-# CRITICAL: Identify categorical columns and prepare preprocessing
-numeric_features = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
-categorical_features = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
-print(f"Numeric features: {{len(numeric_features)}}")
-print(f"Categorical features: {{len(categorical_features)}}")
-if categorical_features:
-    print(f"  Categorical columns: {{categorical_features}}")
-    print("  ⚠️  MUST encode categorical features before training")
-
-# Validate target column
-print(f"  Unique values: {{y_train.nunique()}}")
-print(f"  Null count: {{y_train.isnull().sum()}}")
-print(f"  Data type: {{y_train.dtype}}")
-
-# Check class distribution (for model components)
-if y_train.nunique() <= 30:
-    print(f"  Class distribution: {{y_train.value_counts().to_dict()}}")
-
-# Implement component
-print("Implementing {component_name}...")
-
-# Dynamic hyperparameter adjustment based on dataset size
-n_rows = train_df.shape[0]
-n_features = X_train.shape[1]
-
-# Adjust hyperparameters based on dataset size (ADAPTIVE)
-if n_rows < 5_000:
-    n_estimators = 1000
-    max_depth = 8
-    learning_rate = 0.05
-    reg_alpha = 0.01      # Less regularization for small datasets
-    reg_lambda = 0.01
-    min_child_samples = 10
-elif n_rows < 20_000:
-    n_estimators = 800
-    max_depth = 7
-    learning_rate = 0.04
-    reg_alpha = 0.05
-    reg_lambda = 0.05
-    min_child_samples = 15
-elif n_rows < 100_000:
-    n_estimators = 600
-    max_depth = 6
-    learning_rate = 0.03
-    reg_alpha = 0.1       # Moderate regularization
-    reg_lambda = 0.1
-    min_child_samples = 20
-else:
-    n_estimators = 400
-    max_depth = 5
-    learning_rate = 0.03
-    reg_alpha = 0.2       # More regularization for large datasets
-    reg_lambda = 0.2
-    min_child_samples = max(30, int(n_rows * 0.0001))  # 0.01% of dataset
-
-print(f"📊 Dataset-adaptive hyperparameters ({{n_rows:,}} rows):")
-print(f"  n_estimators: {{n_estimators}}")
-print(f"  max_depth: {{max_depth}}")
-print(f"  learning_rate: {{learning_rate}}")
-print(f"  reg_alpha/reg_lambda: {{reg_alpha}}/{{reg_lambda}} (L1/L2 regularization)")
-print(f"  min_child_samples: {{min_child_samples}}")
-
-# ... your code here
-
-# For model components: Calculate class weights if needed
-positive_count = (y_train == 1).sum()
-negative_count = (y_train == 0).sum()
-imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
-print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
-
-if imbalance_ratio > 2.0:
-    print("⚠️  Class imbalance detected - applying weights")
-    scale_pos_weight = negative_count / positive_count
-
-# CRITICAL: Build preprocessing pipeline (MANDATORY for categorical features)
-from sklearn.compose import ColumnTransformer
-from sklearn.pipeline import Pipeline
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import OneHotEncoder
-
-preprocessor = ColumnTransformer(
-    transformers=[
-        ('num', SimpleImputer(strategy='median'), numeric_features),
-        ('cat', Pipeline([
-            ('imputer', SimpleImputer(strategy='most_frequent')),
-            ('encoder', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
-        ]), categorical_features)
-    ] if categorical_features else [
-        ('num', SimpleImputer(strategy='median'), numeric_features)
-    ]
-)
-
-# Example: Wrap model in pipeline with preprocessing
-# from xgboost import XGBClassifier
-# model = Pipeline([
-#     ('preprocessor', preprocessor),
-#     ('classifier', XGBClassifier(
-#         n_estimators=n_estimators,
-#         max_depth=max_depth,
-#         learning_rate=learning_rate,
-#         scale_pos_weight=scale_pos_weight if imbalance_ratio > 2.0 else 1.0,
-#         random_state=42
-#     ))
-# ])
-#
-# Alternative: Apply preprocessing manually
-# X_train_preprocessed = preprocessor.fit_transform(X_train)
-# X_test_preprocessed = preprocessor.transform(X_test)
-
-# Cross-validation with StratifiedKFold (CRITICAL: Save OOF predictions for stacking)
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-
-# Initialize OOF predictions array
-oof_predictions = np.zeros(len(X_train))
-cv_scores = []
-
-step_start = log_step("PREPROCESSING", step_start)
-
-print("\\nTraining with 5-fold cross-validation...")
-cv_start = time.time()
-for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
-    fold_start = time.time()
-    print(f"  Fold {{fold}}/5...")
-    X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-    y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
-
-    # Train model on fold
-    model.fit(X_tr, y_tr)
-
-    # Predict on validation fold (save for OOF)
-    val_preds = model.predict_proba(X_val)[:, 1]
-    oof_predictions[val_idx] = val_preds
-
-    # Calculate fold score
-    from sklearn.metrics import roc_auc_score
-    fold_score = roc_auc_score(y_val, val_preds)
-    cv_scores.append(fold_score)
-    fold_time = time.time() - fold_start
-    running_mean = np.mean(cv_scores)
-    print(f"    📊 Fold {{fold}}/5: score={{fold_score:.4f}} (running mean: {{running_mean:.4f}}) in {{fold_time:.2f}}s")
-    step_times[f"CV_FOLD_{{fold}}"] = fold_time
-
-step_times["MODEL_TRAINING"] = time.time() - cv_start
-print(f"⏱️ [MODEL_TRAINING] completed in {{step_times['MODEL_TRAINING']:.2f}}s")
-print(f"\\nCV Score (ROC-AUC): {{np.mean(cv_scores):.4f}} (+/- {{np.std(cv_scores):.4f}})")
-
-# CRITICAL: Save OOF predictions for stacking ensemble
-oof_path = Path('{models_dir}') / 'oof_{{component_name}}.npy'
-np.save(oof_path, oof_predictions)
-print(f"✓ OOF predictions saved to: {{oof_path}}")
-
-# Make predictions (MUST use predict_proba for probabilities)
-step_start = time.time()
-predictions = model.predict_proba(X_test)[:, 1]  # Binary classification
-
-# CRITICAL: Validate and clamp predictions to [0, 1]
-if predictions.min() < 0 or predictions.max() > 1:
-    print(f"⚠️  Predictions out of range: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}")
-predictions = np.clip(predictions, 0.0, 1.0)
-
-# Validate predictions
-assert not np.isnan(predictions).any(), "NaN values detected in predictions!"
-assert not np.isinf(predictions).any(), "Inf values detected in predictions!"
-assert predictions.min() >= 0 and predictions.max() <= 1, "Predictions still out of range after clipping!"
-print(f"✓ Predictions validated: range=[{{predictions.min():.4f}}, {{predictions.max():.4f}}]")
-
-step_start = log_step("PREDICTION", step_start)
-print(f"Prediction distribution: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
-
-# Save outputs
-print("Saving outputs...")
-submission = sample_sub.copy()
-# CRITICAL: Use the EXACT column name from sample_submission (DO NOT hardcode 'target')
-target_submission_col = sample_sub.columns[1]
-print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
-submission[target_submission_col] = predictions
-
-# CRITICAL VALIDATION: Ensure submission matches sample_submission exactly
-assert submission.shape == sample_sub.shape, f"Submission shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
-assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
-assert submission['id'].equals(sample_sub['id']), "Submission id column does not match sample_submission"
-print(f"✓ Validation passed: columns={{submission.columns.tolist()}}, shape={{submission.shape}}")
-print("Submission head:")
-print(submission.head())
-print(f"Prediction stats: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}, mean={{predictions.mean():.4f}}")
-step_start = time.time()
-submission.to_csv('{submission_path}', index=False)
-log_step("SUBMISSION_SAVE", step_start)
-print(f"✅ Submission saved: {{len(submission)}} rows to {{'{submission_path}'}}")
-
-# Print performance summary
-print_performance_summary()
-
-# MANDATORY: Final validation performance output
-print(f"Final Validation Performance: {{np.mean(cv_scores):.6f}}")
-print("✅ Complete!")
-```
-
-Generate the complete code below:
-"""
-
-# Template for fixing code errors
-FIX_CODE_PROMPT = """The following code failed with an error. Fix it.
-
-## Original Code
+## Code
 ```python
 {code}
 ```
@@ -926,17 +330,10 @@ FIX_CODE_PROMPT = """The following code failed with an error. Fix it.
 ## Error Type
 {error_type}
 
-## Fix Instructions
-1. Identify the root cause of the error
-2. Fix the issue while preserving the component's intent
-3. Add error handling if appropriate
-4. Return the complete fixed code
+Fix the issue while preserving the component's intent. Return complete fixed code."""
 
-Generate the fixed code below:
-"""
 
-# Template for debugging code
-DEBUG_CODE_PROMPT = """Debug and improve the following code that is not working as expected.
+DEBUG_CODE_PROMPT = """Debug this code that failed.
 
 ## Code
 ```python
@@ -946,64 +343,23 @@ DEBUG_CODE_PROMPT = """Debug and improve the following code that is not working 
 ## Issue
 {issue}
 
-## Stdout (last 50 lines)
+## Stdout (last lines)
 {stdout}
 
 ## Stderr
 {stderr}
 
-## Debug Instructions
-1. Analyze the output to identify the problem
-2. Fix any logic errors, missing imports, or incorrect paths
-3. Add debugging print statements if needed
-4. Ensure the code achieves the intended goal
+Analyze the output, fix logic errors or missing imports, and return the complete debugged code."""
 
-Generate the debugged code below:
-"""
 
-# Template for code refactoring
-REFACTOR_CODE_PROMPT = """Refactor the following working code to improve quality.
+# ==================== Refinement Prompt ====================
 
-## Code
-```python
-{code}
-```
+REFINEMENT_WITH_FEEDBACK_PROMPT = """Refine this model based on training feedback.
 
-## Refactoring Goals
-- Improve readability and structure
-- Add proper error handling
-- Optimize performance where possible
-- Add docstrings and comments
-- Follow PEP 8 style guide
+## Current Score
+CV: {current_score}
 
-Generate the refactored code below:
-"""
-
-# Template for component integration
-INTEGRATE_COMPONENT_PROMPT = """Integrate the following component into the existing pipeline.
-
-## New Component
-{new_component_code}
-
-## Existing Pipeline
-{existing_pipeline_code}
-
-## Integration Instructions
-1. Add the new component at the appropriate stage
-2. Ensure data flows correctly between components
-3. Handle any compatibility issues
-4. Maintain existing functionality
-
-Generate the integrated code below:
-"""
-
-# Template for refinement with training feedback
-REFINEMENT_WITH_FEEDBACK_PROMPT = """You are refining a machine learning model based on training feedback.
-
-## Current Performance
-- CV Score: {current_score}
-
-## Training Results Analysis
+## Training Feedback
 {training_feedback}
 
 ## Current Code
@@ -1011,1539 +367,34 @@ REFINEMENT_WITH_FEEDBACK_PROMPT = """You are refining a machine learning model b
 {current_code}
 ```
 
-## Improvement Task
-Based on the training results above, improve the model to achieve a HIGHER CV score.
+## Improvement Guidelines
+Based on the feedback:
+- High variance (std > 0.02): Increase regularization, reduce depth
+- Overfitting (train >> val): Add dropout, increase subsample
+- Underfitting (low score): Decrease regularization, add features
+- Optuna best params: Use as starting point
 
-**Improvement Guidelines** (apply what's relevant based on the feedback):
-1. **High CV variance (std > 0.02)**: 
-   - Increase regularization (reg_alpha, reg_lambda)
-   - Reduce max_depth or num_leaves
-   - Add early stopping
-   - Increase min_child_samples
+Keep the same [LOG:*] format for the feedback loop.
+Return the complete improved code."""
 
-2. **Overfitting detected** (train >> val score):
-   - Increase regularization parameters
-   - Reduce n_estimators
-   - Increase subsample/colsample_bytree
-   - Add dropout for neural networks
 
-3. **Underfitting detected** (low score, stable CV):
-   - Decrease regularization
-   - Increase model complexity (depth, estimators)
-   - Add more features or feature interactions
-   - Try a more complex model architecture
-
-4. **Optuna best params available**:
-   - Use them as the starting hyperparameters
-   - Consider expanding search range around best values
-
-5. **Zero-importance features found**:
-   - Remove them to reduce noise and training time
-   - Focus on top features for interactions
-
-6. **High memory usage**:
-   - Use float32 instead of float64
-   - Reduce batch size
-   - Process data in chunks
-
-7. **Slow training**:
-   - Reduce n_estimators for tuning phase
-   - Use GPU if available
-   - Subsample data for hyperparameter search
-
-**CRITICAL Requirements**:
-- Keep the SAME structured logging format ([LOG:FOLD], [LOG:OPTUNA], etc.)
-- Keep the same CV scheme (StratifiedKFold, same splits)
-- Return the COMPLETE updated Python code
-- Focus on the MOST IMPACTFUL change based on the feedback
-
-Generate the improved code below:
-"""
-
-# Domain-specific code templates
-DOMAIN_CODE_TEMPLATES = {
-    "tabular": """
-# Tabular Data Template
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-from sklearn.metrics import {metric_function}
-import xgboost as xgb
-import lightgbm as lgb
-
-# Load data
-train_df = pd.read_csv('{train_path}')
-test_df = pd.read_csv('{test_path}')
-
-# Separate features and target
-X = train_df.drop('{target_col}', axis=1)
-y = train_df['{target_col}']
-X_test = test_df
-
-# Feature engineering
-# TODO: Implement feature engineering
-
-# Model training
-# GPU Detection (CRITICAL - MANDATORY)
-import torch
-use_gpu = torch.cuda.is_available()
-print(f"GPU Available: {use_gpu}")
-
-if use_gpu:
-    print("✅ GPU ENABLED for training")
-    xgb_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor', 'random_state': 42, 'n_estimators': 100}
-else:
-    print("⚠️  Running on CPU (slower)")
-    xgb_params = {'tree_method': 'hist', 'random_state': 42, 'n_estimators': 100}
-
-model = xgb.XGBClassifier(**xgb_params)
-model.fit(X, y)
-
-# Cross-validation
-cv_scores = cross_val_score(model, X, y, cv=5, scoring='{metric}')
-print(f"CV Score: {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
-
-# Predictions
-predictions = model.predict(X_test)
-
-# Save model
-import joblib
-joblib.dump(model, '{model_path}')
-""",
-
-    "computer_vision": """
-# Computer Vision Template
-import torch
-import torchvision
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
-import timm
-
-# Device setup
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Using device: {{device}}")
-
-# Data augmentation
-transform_train = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.RandomRotation(10),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-])
-
-# Model setup (using timm for pretrained models)
-model = timm.create_model('resnet50', pretrained=True, num_classes={num_classes})
-model = model.to(device)
-
-# Training
-# TODO: Implement training loop
-
-# Save model
-torch.save(model.state_dict(), '{model_path}')
-""",
-
-    "nlp": """
-# NLP Template
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from transformers import Trainer, TrainingArguments
-from datasets import Dataset
-
-# Model and tokenizer
-model_name = 'bert-base-uncased'
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForSequenceClassification.from_pretrained(
-    model_name,
-    num_labels={num_labels}
-)
-
-# Tokenize data
-def tokenize_function(examples):
-    return tokenizer(examples['text'], padding='max_length', truncation=True)
-
-# TODO: Load and prepare data
-# train_dataset = Dataset.from_pandas(train_df)
-# train_dataset = train_dataset.map(tokenize_function, batched=True)
-
-# Training arguments
-training_args = TrainingArguments(
-    output_dir='./models',
-    num_train_epochs=3,
-    per_device_train_batch_size=16,
-    save_steps=500,
-    logging_steps=100,
-)
-
-# Trainer
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=None,  # TODO: Add dataset
-)
-
-# Train
-# trainer.train()
-
-# Save
-model.save_pretrained('{model_path}')
-""",
-
-    "time_series": """
-# Time Series Template
-import pandas as pd
-import numpy as np
-from statsmodels.tsa.arima.model import ARIMA
-from prophet import Prophet
-
-# Load data
-df = pd.read_csv('{data_path}', parse_dates=['{date_col}'])
-
-# Prepare for Prophet
-df_prophet = df.rename(columns={{'{date_col}': 'ds', '{target_col}': 'y'}})
-
-# Train model
-model = Prophet(yearly_seasonality=True, weekly_seasonality=True)
-model.fit(df_prophet)
-
-# Make predictions
-future = model.make_future_dataframe(periods={forecast_periods})
-forecast = model.predict(future)
-
-# Save
-import joblib
-joblib.dump(model, '{model_path}')
-""",
-}
-
-# Advanced ML code templates
-ADVANCED_ML_TEMPLATES = {
-    "stacking_ensemble_classification": """
-# Stacking Ensemble Template for Classification
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import StratifiedKFold
-from sklearn.ensemble import StackingClassifier
-from sklearn.linear_model import LogisticRegression
-import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostClassifier
-import time
-
-RANDOM_SEED = 42
-start_time = time.time()
-
-# Load data
-print("Loading data...")
-train_df = pd.read_csv('{train_data_path}')
-test_df = pd.read_csv('{test_data_path}')
-
-# Prepare features and target
-# TODO: Identify target column and separate features
-X = train_df.drop('{target_col}', axis=1)
-y = train_df['{target_col}']
-X_test = test_df.drop('{target_col}', axis=1, errors='ignore')
-
-# Handle missing values
-from sklearn.impute import SimpleImputer
-imputer = SimpleImputer(strategy='median')
-X_imputed = imputer.fit_transform(X.select_dtypes(include=[np.number]))
-X_test_imputed = imputer.transform(X_test.select_dtypes(include=[np.number]))
-
-# Check class imbalance
-positive_count = (y == 1).sum()
-negative_count = (y == 0).sum()
-imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
-print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
-
-scale_pos_weight = negative_count / positive_count if imbalance_ratio > 2.0 else 1.0
-
-# GPU Detection (CRITICAL - MANDATORY)
-import torch
-use_gpu = torch.cuda.is_available()
-print(f"GPU Available: {use_gpu}")
-
-if use_gpu:
-    print("✅ GPU ENABLED for training")
-    xgb_gpu_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
-    lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}
-else:
-    print("⚠️  Running on CPU (slower)")
-    xgb_gpu_params = {'tree_method': 'hist'}
-    lgb_gpu_params = {'device': 'cpu'}
-
-# Define base learners (diverse models)
-base_learners = [
-    ('xgb', xgb.XGBClassifier(
-        n_estimators=2000,
-        max_depth=7,
-        learning_rate=0.03,
-        scale_pos_weight=scale_pos_weight,
-        random_state=RANDOM_SEED,
-        n_jobs=-1,
-        **xgb_gpu_params
-    )),
-    ('lgb', lgb.LGBMClassifier(
-        n_estimators=2000,
-        max_depth=7,
-        num_leaves=63,
-        learning_rate=0.03,
-        is_unbalance=(imbalance_ratio > 2.0),
-        random_state=RANDOM_SEED,
-        n_jobs=-1,
-        verbose=-1,
-        **lgb_gpu_params
-    )),
-    ('catboost', CatBoostClassifier(
-        iterations=2000,
-        depth=7,
-        learning_rate=0.03,
-        random_state=RANDOM_SEED,
-        verbose=False,
-        task_type="GPU" if use_gpu else "CPU"
-    ))
-]
-
-# Meta-learner
-meta_learner = LogisticRegression(
-    random_state=RANDOM_SEED,
-    max_iter=1000,
-    class_weight='balanced' if imbalance_ratio > 2.0 else None
-)
-
-print("\\nBuilding stacking ensemble...")
-stacking_clf = StackingClassifier(
-    estimators=base_learners,
-    final_estimator=meta_learner,
-    cv=5,
-    n_jobs=-1
-)
-
-# Train stacking model
-print("Training stacking ensemble...")
-stacking_clf.fit(X_imputed, y)
-
-# Cross-validation
-print("\\nEvaluating with cross-validation...")
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-from sklearn.model_selection import cross_val_score
-cv_scores = cross_val_score(stacking_clf, X_imputed, y, cv=skf, scoring='roc_auc', n_jobs=-1)
-print(f"CV Score (ROC-AUC): {{cv_scores.mean():.4f}} (+/- {{cv_scores.std():.4f}})")
-
-# Make predictions
-print("\\nMaking predictions...")
-predictions = stacking_clf.predict_proba(X_test_imputed)[:, 1]
-
-# CRITICAL: Validate and clamp predictions to [0, 1]
-if predictions.min() < 0 or predictions.max() > 1:
-    print(f"⚠️  Predictions out of range: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}")
-predictions = np.clip(predictions, 0.0, 1.0)
-assert not np.isnan(predictions).any(), "NaN values in predictions!"
-assert not np.isinf(predictions).any(), "Inf values in predictions!"
-print(f"✓ Predictions validated: range=[{{predictions.min():.4f}}, {{predictions.max():.4f}}]")
-
-# Save submission
-# Load sample_submission to get correct column names
-sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-submission = sample_sub.copy()
-target_submission_col = sample_sub.columns[1]
-print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
-submission[target_submission_col] = predictions
-assert submission.shape == sample_sub.shape, f"Shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
-assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
-print(f"✓ Validation passed: columns={{submission.columns.tolist()}}")
-submission.to_csv('{submission_path}', index=False)
-
-elapsed_time = time.time() - start_time
-print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
-print(f"Final Validation Performance: {{cv_scores.mean():.6f}}")
-print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
-""",
-
-    "stacking_ensemble_regression": """
-# Stacking Ensemble Template for Regression
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import KFold
-from sklearn.ensemble import StackingRegressor
-from sklearn.linear_model import Ridge
-import xgboost as xgb
-import lightgbm as lgb
-from catboost import CatBoostRegressor
-from sklearn.metrics import mean_squared_error
-import time
-
-RANDOM_SEED = 42
-start_time = time.time()
-
-# Load data
-print("Loading data...")
-train_df = pd.read_csv('{train_data_path}')
-test_df = pd.read_csv('{test_data_path}')
-
-# Detect target column
-target_col = None
-for cand in ['target', 'y', 'loss', 'label']:
-    if cand in train_df.columns:
-        target_col = cand
-        break
-if not target_col:
-    # Use last numeric column
-    numeric_cols = train_df.select_dtypes(include=[np.number]).columns.tolist()
-    target_col = numeric_cols[-1] if numeric_cols else 'target'
-
-print(f"Target column: {{target_col}}")
-
-# Prepare features and target
-X = train_df.drop(target_col, axis=1, errors='ignore')
-y = train_df[target_col]
-X_test = test_df.copy()
-
-# Remove ID columns
-id_cols = [c for c in X.columns if 'id' in c.lower()]
-if id_cols:
-    test_ids = X_test[id_cols[0]] if id_cols[0] in X_test.columns else np.arange(len(X_test))
-    X = X.drop(columns=id_cols)
-    X_test = X_test.drop(columns=[c for c in id_cols if c in X_test.columns])
-else:
-    test_ids = np.arange(len(X_test))
-
-# Handle missing values
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import LabelEncoder
-
-# Separate numeric and categorical
-numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()
-
-# Impute numerics
-num_imputer = SimpleImputer(strategy='median')
-X_num = num_imputer.fit_transform(X[numeric_cols]) if numeric_cols else np.array([]).reshape(len(X), 0)
-X_test_num = num_imputer.transform(X_test[numeric_cols]) if numeric_cols else np.array([]).reshape(len(X_test), 0)
-
-# Encode categoricals
-if cat_cols:
-    X_cat = X[cat_cols].copy()
-    X_test_cat = X_test[cat_cols].copy()
-
-    for col in cat_cols:
-        le = LabelEncoder()
-        # Combine to fit on all categories
-        combined = pd.concat([X_cat[col].astype(str), X_test_cat[col].astype(str)])
-        le.fit(combined.fillna('__MISSING__'))
-        X_cat[col] = le.transform(X_cat[col].astype(str).fillna('__MISSING__'))
-        X_test_cat[col] = le.transform(X_test_cat[col].astype(str).fillna('__MISSING__'))
-
-    X_combined = np.concatenate([X_num, X_cat.values], axis=1)
-    X_test_combined = np.concatenate([X_test_num, X_test_cat.values], axis=1)
-else:
-    X_combined = X_num
-    X_test_combined = X_test_num
-
-print(f"Features: {{X_combined.shape[1]}}")
-
-# GPU Detection (CRITICAL - MANDATORY)
-import torch
-use_gpu = torch.cuda.is_available()
-print(f"GPU Available: {use_gpu}")
-
-if use_gpu:
-    print("✅ GPU ENABLED for training")
-    xgb_gpu_params = {'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}
-    lgb_gpu_params = {'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}
-else:
-    print("⚠️  Running on CPU (slower)")
-    xgb_gpu_params = {'tree_method': 'hist'}
-    lgb_gpu_params = {'device': 'cpu'}
-
-# Define base learners with competitive hyperparameters
-base_learners = [
-    ('lgb', lgb.LGBMRegressor(
-        n_estimators=2000,
-        max_depth=8,
-        num_leaves=63,
-        learning_rate=0.03,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=RANDOM_SEED,
-        n_jobs=-1,
-        verbose=-1,
-        **lgb_gpu_params
-    )),
-    ('xgb', xgb.XGBRegressor(
-        n_estimators=2000,
-        max_depth=7,
-        learning_rate=0.03,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        random_state=RANDOM_SEED,
-        n_jobs=-1,
-        **xgb_gpu_params
-    )),
-    ('catboost', CatBoostRegressor(
-        iterations=2000,
-        depth=7,
-        learning_rate=0.03,
-        random_state=RANDOM_SEED,
-        verbose=False,
-        task_type="GPU" if use_gpu else "CPU"
-    ))
-]
-
-# Meta-learner (Ridge with L2 regularization)
-meta_learner = Ridge(alpha=10.0, random_state=RANDOM_SEED)
-
-print("\\nBuilding stacking ensemble...")
-stacking_reg = StackingRegressor(
-    estimators=base_learners,
-    final_estimator=meta_learner,
-    cv=5,  # 5-fold CV for meta-features
-    n_jobs=-1
-)
-
-# Train stacking model
-print("Training stacking ensemble (this will take 2-3 minutes)...")
-stacking_reg.fit(X_combined, y)
-
-# Cross-validation for evaluation
-print("\\nEvaluating with 5-fold cross-validation...")
-kf = KFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-cv_rmses = []
-
-for fold, (train_idx, val_idx) in enumerate(kf.split(X_combined), 1):
-    X_tr, X_val = X_combined[train_idx], X_combined[val_idx]
-    y_tr, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-    fold_model = StackingRegressor(
-        estimators=base_learners,
-        final_estimator=Ridge(alpha=10.0, random_state=RANDOM_SEED),
-        cv=3,
-        n_jobs=-1
-    )
-    fold_model.fit(X_tr, y_tr)
-    preds = fold_model.predict(X_val)
-
-    rmse = mean_squared_error(y_val, preds, squared=False)
-    cv_rmses.append(rmse)
-    print(f"Fold {{fold}}: RMSE = {{rmse:.6f}}")
-
-print(f"\\nCV RMSE: {{np.mean(cv_rmses):.6f}} (+/- {{np.std(cv_rmses):.6f}})")
-
-# Make predictions on test
-print("\\nMaking test predictions...")
-predictions = stacking_reg.predict(X_test_combined)
-
-# CRITICAL: Validate predictions (no NaN/Inf)
-assert not np.isnan(predictions).any(), "NaN values in predictions!"
-assert not np.isinf(predictions).any(), "Inf values in predictions!"
-print(f"✓ Predictions validated (no NaN/Inf)")
-
-print(f"Prediction distribution:")
-print(f"  Min: {{predictions.min():.6f}}")
-print(f"  Max: {{predictions.max():.6f}}")
-print(f"  Mean: {{predictions.mean():.6f}}")
-print(f"  Median: {{np.median(predictions):.6f}}")
-
-# Save submission
-# Load sample_submission to get correct column names
-sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-submission = sample_sub.copy()
-target_submission_col = sample_sub.columns[1]
-print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
-submission[target_submission_col] = predictions
-assert submission.shape == sample_sub.shape, f"Shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
-assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
-print(f"✓ Validation passed: columns={{submission.columns.tolist()}}")
-submission.to_csv('{submission_path}', index=False)
-
-elapsed_time = time.time() - start_time
-print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
-print(f"Final Validation Performance: {{np.mean(cv_rmses):.6f}}")
-print(f"✅ Stacking ensemble complete! Submission saved with {{len(submission)}} rows")
-""",
-
-    "catboost_model": """
-# CatBoost Model Template (for model component_type)
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import StratifiedKFold, cross_val_score
-from catboost import CatBoostClassifier, Pool
-import time
-
-RANDOM_SEED = 42
-start_time = time.time()
-
-# Load data
-print("Loading data...")
-train_df = pd.read_csv('{train_data_path}')
-test_df = pd.read_csv('{test_data_path}')
-
-# Separate features and target
-# TODO: Identify target column
-X = train_df.drop('{target_col}', axis=1)
-y = train_df['{target_col}']
-X_test = test_df.drop('{target_col}', axis=1, errors='ignore')
-
-# Identify categorical features
-cat_features = X.select_dtypes(include=['object', 'category']).columns.tolist()
-print(f"Categorical features: {{len(cat_features)}}")
-
-# Check class imbalance
-positive_count = (y == 1).sum()
-negative_count = (y == 0).sum()
-imbalance_ratio = max(positive_count, negative_count) / min(positive_count, negative_count)
-print(f"Class imbalance ratio: {{imbalance_ratio:.2f}}")
-
-# GPU Detection (CRITICAL - MANDATORY)
-import torch
-use_gpu = torch.cuda.is_available()
-print(f"GPU Available: {{use_gpu}}")
-task_type = "GPU" if use_gpu else "CPU"
-if use_gpu:
-    print("✅ GPU ENABLED for CatBoost training")
-else:
-    print("⚠️  Running on CPU (slower)")
-
-# CatBoost handles categorical features natively (no encoding needed!)
-# Create Pool objects for efficient training
-train_pool = Pool(
-    data=X,
-    label=y,
-    cat_features=cat_features
-)
-
-test_pool = Pool(
-    data=X_test,
-    cat_features=cat_features
-)
-
-# Configure CatBoost
-model = CatBoostClassifier(
-    iterations=300,
-    depth=6,
-    learning_rate=0.05,
-    loss_function='Logloss',
-    eval_metric='AUC',
-    random_seed=RANDOM_SEED,
-    verbose=50,  # Print every 50 iterations
-    early_stopping_rounds=50,
-    auto_class_weights='Balanced' if imbalance_ratio > 2.0 else None,
-    task_type=task_type  # GPU or CPU
-)
-
-# Train model
-print("\\nTraining CatBoost...")
-model.fit(train_pool, verbose=True)
-
-# Cross-validation
-print("\\nEvaluating with cross-validation...")
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-cv_scores = []
-
-for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
-    X_train_fold, X_val_fold = X.iloc[train_idx], X.iloc[val_idx]
-    y_train_fold, y_val_fold = y.iloc[train_idx], y.iloc[val_idx]
-
-    fold_model = CatBoostClassifier(
-        iterations=300,
-        depth=6,
-        learning_rate=0.05,
-        random_seed=RANDOM_SEED,
-        verbose=False,
-        task_type=task_type  # GPU or CPU
-    )
-    fold_model.fit(X_train_fold, y_train_fold, cat_features=cat_features)
-
-    from sklearn.metrics import roc_auc_score
-    preds = fold_model.predict_proba(X_val_fold)[:, 1]
-    score = roc_auc_score(y_val_fold, preds)
-    cv_scores.append(score)
-    print(f"Fold {{fold}}: {{score:.4f}}")
-
-print(f"\\nCV Score (ROC-AUC): {{np.mean(cv_scores):.4f}} (+/- {{np.std(cv_scores):.4f}})")
-
-# Make predictions (use predict_proba for probabilities)
-print("\\nMaking predictions...")
-predictions = model.predict_proba(test_pool)[:, 1]
-
-# CRITICAL: Validate and clamp predictions to [0, 1]
-if predictions.min() < 0 or predictions.max() > 1:
-    print(f"⚠️  Predictions out of range: min={{predictions.min():.4f}}, max={{predictions.max():.4f}}")
-predictions = np.clip(predictions, 0.0, 1.0)
-assert not np.isnan(predictions).any(), "NaN values in predictions!"
-assert not np.isinf(predictions).any(), "Inf values in predictions!"
-print(f"✓ Predictions validated: range=[{{predictions.min():.4f}}, {{predictions.max():.4f}}]")
-
-print(f"Prediction distribution:")
-print(f"  Min: {{predictions.min():.4f}}")
-print(f"  Max: {{predictions.max():.4f}}")
-print(f"  Mean: {{predictions.mean():.4f}}")
-
-# Save submission
-# Load sample_submission to get correct column names
-sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-submission = sample_sub.copy()
-target_submission_col = sample_sub.columns[1]
-print(f"✓ Using submission column: '{{target_submission_col}}' (from sample_submission)")
-submission[target_submission_col] = predictions
-assert submission.shape == sample_sub.shape, f"Shape mismatch: {{submission.shape}} vs {{sample_sub.shape}}"
-assert submission.columns.tolist() == sample_sub.columns.tolist(), f"Column mismatch: {{submission.columns.tolist()}} vs {{sample_sub.columns.tolist()}}"
-print(f"✓ Validation passed: columns={{submission.columns.tolist()}}")
-submission.to_csv('{submission_path}', index=False)
-
-elapsed_time = time.time() - start_time
-print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
-print(f"Final Validation Performance: {{np.mean(cv_scores):.6f}}")
-print(f"✅ CatBoost model complete! Submission saved with {{len(submission)}} rows")
-""",
-
-    "advanced_feature_engineering": """
-# Advanced Feature Engineering Template (for feature_engineering component_type)
-import pandas as pd
-import numpy as np
-from sklearn.preprocessing import PolynomialFeatures, StandardScaler
-from category_encoders import TargetEncoder
-import time
-
-RANDOM_SEED = 42
-start_time = time.time()
-
-# Load data
-print("Loading data...")
-train_df = pd.read_csv('{train_data_path}')
-test_df = pd.read_csv('{test_data_path}')
-
-# Identify target column
-# TODO: Set target column name
-target_col = '{target_col}'
-X_train = train_df.drop(target_col, axis=1)
-y_train = train_df[target_col]
-X_test = test_df.copy()
-
-print(f"Original features: {{X_train.shape[1]}}")
-
-# 1. Polynomial Features (degree 2 for numeric columns)
-print("\\n1. Creating polynomial features...")
-numeric_cols = X_train.select_dtypes(include=[np.number]).columns.tolist()
-if len(numeric_cols) > 0 and len(numeric_cols) <= 10:  # Only if manageable
-    poly = PolynomialFeatures(degree=2, include_bias=False, interaction_only=True)
-    X_train_poly = poly.fit_transform(X_train[numeric_cols])
-    X_test_poly = poly.transform(X_test[numeric_cols])
-
-    poly_feature_names = [f"poly_{{i}}" for i in range(X_train_poly.shape[1])]
-    X_train_poly_df = pd.DataFrame(X_train_poly, columns=poly_feature_names, index=X_train.index)
-    X_test_poly_df = pd.DataFrame(X_test_poly, columns=poly_feature_names, index=X_test.index)
-
-    X_train = pd.concat([X_train, X_train_poly_df], axis=1)
-    X_test = pd.concat([X_test, X_test_poly_df], axis=1)
-    print(f"   Added {{X_train_poly.shape[1]}} polynomial features")
-
-# 2. Feature Interactions (ratio, diff, product)
-print("\\n2. Creating feature interactions...")
-if len(numeric_cols) >= 2:
-    for i, col1 in enumerate(numeric_cols[:5]):  # Limit to avoid explosion
-        for col2 in numeric_cols[i+1:6]:
-            # Ratio (with safety check for division by zero)
-            X_train[f"ratio_{{col1}}_{{col2}}"] = X_train[col1] / (X_train[col2] + 1e-5)
-            X_test[f"ratio_{{col1}}_{{col2}}"] = X_test[col1] / (X_test[col2] + 1e-5)
-
-            # Difference
-            X_train[f"diff_{{col1}}_{{col2}}"] = X_train[col1] - X_train[col2]
-            X_test[f"diff_{{col1}}_{{col2}}"] = X_test[col1] - X_test[col2]
-
-            # Product
-            X_train[f"prod_{{col1}}_{{col2}}"] = X_train[col1] * X_train[col2]
-            X_test[f"prod_{{col1}}_{{col2}}"] = X_test[col1] * X_test[col2]
-
-# 3. Statistical Transformations
-print("\\n3. Creating statistical transformations...")
-for col in numeric_cols[:10]:  # Limit to most important
-    # Log transform (for positive skewed data)
-    if (X_train[col] > 0).all():
-        X_train[f"log_{{col}}"] = np.log1p(X_train[col])
-        X_test[f"log_{{col}}"] = np.log1p(X_test[col])
-
-    # Square root (for positive skewed data)
-    if (X_train[col] >= 0).all():
-        X_train[f"sqrt_{{col}}"] = np.sqrt(X_train[col])
-        X_test[f"sqrt_{{col}}"] = np.sqrt(X_test[col])
-
-    # Z-score
-    mean_val = X_train[col].mean()
-    std_val = X_train[col].std()
-    if std_val > 0:
-        X_train[f"zscore_{{col}}"] = (X_train[col] - mean_val) / std_val
-        X_test[f"zscore_{{col}}"] = (X_test[col] - mean_val) / std_val
-
-# 4. Target Encoding (leakage-safe with out-of-fold)
-print("\\n4. Creating target encoding for categorical features...")
-cat_cols = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
-if len(cat_cols) > 0:
-    # Use TargetEncoder with smoothing to prevent overfitting
-    encoder = TargetEncoder(smoothing=1.0, min_samples_leaf=20)
-
-    # Fit on train data only
-    X_train_encoded = encoder.fit_transform(X_train[cat_cols], y_train)
-    X_test_encoded = encoder.transform(X_test[cat_cols])
-
-    # Add encoded features with prefix
-    for i, col in enumerate(cat_cols):
-        X_train[f"target_enc_{{col}}"] = X_train_encoded.iloc[:, i]
-        X_test[f"target_enc_{{col}}"] = X_test_encoded.iloc[:, i]
-
-print(f"\\nFinal features: {{X_train.shape[1]}} (added {{X_train.shape[1] - len(train_df.columns) + 1}} features)")
-
-# Save engineered data for later use by models
-print("\\nSaving engineered features...")
-X_train['{{target_col}}'] = y_train
-X_train.to_csv('{models_dir}/train_engineered.csv', index=False)
-X_test.to_csv('{models_dir}/test_engineered.csv', index=False)
-
-elapsed_time = time.time() - start_time
-print(f"\\n⏱️  Execution time: {{elapsed_time:.2f}}s")
-print("✅ Advanced feature engineering complete!")
-""",
-
-    "boosting_over_residuals_classification": """
-# 🔥 Boosting Over Residuals Template for Classification
-# HIGHLY EFFECTIVE for Kaggle Playground competitions with synthetic data
-#
-# Core Idea: Train Stage 1 on ORIGINAL data → predict on competition data →
-# Train Stage 2 to correct Stage 1's errors using residuals in logit space
-#
-# IMPORTANT: This technique ONLY works when original_data_path is different from train_data_path
-# If they are the same, we fallback to a standard weighted ensemble
-import pandas as pd
-import numpy as np
-import os
-from scipy.special import logit, expit
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import roc_auc_score
-import lightgbm as lgb
-import xgboost as xgb
-import time
-
-RANDOM_SEED = 42
-np.random.seed(RANDOM_SEED)
-start_time = time.time()
-epsilon = 1e-7  # Avoid log(0) or log(1)
-
-# =====================================================
-# CHECK: Do we have separate original data?
-# =====================================================
-original_data_path = '{original_data_path}'
-train_data_path = '{train_data_path}'
-
-# Determine if we can use boosting over residuals
-use_boosting_residuals = (
-    original_data_path != train_data_path and 
-    original_data_path and 
-    os.path.exists(original_data_path)
-)
-
-if use_boosting_residuals:
-    print("=" * 60)
-    print("🔥 BOOSTING OVER RESIDUALS - Classification")
-    print("=" * 60)
-    print(f"✓ Original data available: {{original_data_path}}")
-    
-    # =====================================================
-    # STEP 1: Load ORIGINAL data (NOT competition data!)
-    # =====================================================
-    print("\\n📁 Loading ORIGINAL dataset...")
-    original_train = pd.read_csv(original_data_path)
-else:
-    print("=" * 60)
-    print("📊 WEIGHTED ENSEMBLE - Classification (Fallback)")
-    print("=" * 60)
-    print("⚠️  Original data NOT available - using standard ensemble")
-    print(f"   original_data_path: {{original_data_path}}")
-    print(f"   train_data_path: {{train_data_path}}")
-    print("   Tip: For Playground competitions, find the original dataset on Kaggle")
-    
-    # Load competition data only for standard ensemble
-    pass
-
-# =====================================================
-# MAIN LOGIC: Either Boosting Over Residuals or Standard Ensemble
-# =====================================================
-
-target_col = '{target_col}'
-
-if use_boosting_residuals:
-    # =====================================================
-    # BOOSTING OVER RESIDUALS PATH
-    # =====================================================
-    X_original = original_train.drop(target_col, axis=1, errors='ignore')
-    y_original = original_train[target_col]
-    
-    # Remove ID column if exists
-    id_cols = [c for c in X_original.columns if 'id' in c.lower()]
-    if id_cols:
-        X_original = X_original.drop(columns=id_cols)
-    
-    print(f"Original data shape: {{X_original.shape}}")
-    print(f"Original target distribution: {{y_original.value_counts().to_dict()}}")
-    
-    # Handle missing values and categorical features for Stage 1
-    from sklearn.impute import SimpleImputer
-    from sklearn.preprocessing import LabelEncoder
-    
-    numeric_cols = X_original.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    cat_cols = X_original.select_dtypes(include=['object', 'category']).columns.tolist()
-    
-    # Impute numerics
-    if numeric_cols:
-        num_imputer = SimpleImputer(strategy='median')
-        X_original[numeric_cols] = num_imputer.fit_transform(X_original[numeric_cols])
-    
-    # Encode categoricals
-    label_encoders = {{}}
-    for col in cat_cols:
-        le = LabelEncoder()
-        X_original[col] = X_original[col].fillna('__MISSING__').astype(str)
-        X_original[col] = le.fit_transform(X_original[col])
-        label_encoders[col] = le
-    
-    # GPU Detection
-    import torch
-    use_gpu = torch.cuda.is_available()
-    print(f"\\nGPU Available: {{use_gpu}}")
-    lgb_params = {{'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}} if use_gpu else {{'device': 'cpu'}}
-    if use_gpu:
-        print("✅ GPU ENABLED for training")
-    else:
-        print("⚠️  Running on CPU (slower)")
-
-    # =====================================================
-    # STEP 2: Train Stage 1 on ORIGINAL data ONLY
-    # =====================================================
-    print("\\n🎯 Training Stage 1 model on ORIGINAL data only...")
-    stage1_model = lgb.LGBMClassifier(
-        n_estimators=500,
-        max_depth=7,
-        num_leaves=63,
-        learning_rate=0.05,
-        random_state=RANDOM_SEED,
-        verbose=-1,
-        n_jobs=-1,
-        **lgb_params
-    )
-    stage1_model.fit(X_original, y_original)
-    print("✓ Stage 1 trained on ORIGINAL data")
-    
-    # =====================================================
-    # STEP 3: Load COMPETITION data (synthetic)
-    # =====================================================
-    print("\\n📁 Loading COMPETITION dataset (synthetic)...")
-    comp_train = pd.read_csv('{train_data_path}')
-    comp_test = pd.read_csv('{test_data_path}')
-    
-    X_comp = comp_train.drop(target_col, axis=1, errors='ignore')
-    y_comp = comp_train[target_col]
-    X_test = comp_test.copy()
-    
-    # Save test IDs for submission
-    test_ids = X_test['id'] if 'id' in X_test.columns else np.arange(len(X_test))
-    
-    # Remove ID columns
-    for df in [X_comp, X_test]:
-        id_cols = [c for c in df.columns if 'id' in c.lower()]
-        if id_cols:
-            df.drop(columns=id_cols, inplace=True)
-    
-    print(f"Competition train shape: {{X_comp.shape}}")
-    print(f"Competition test shape: {{X_test.shape}}")
-    
-    # Apply same preprocessing as original data
-    if numeric_cols:
-        X_comp[numeric_cols] = num_imputer.transform(X_comp[numeric_cols])
-        X_test[numeric_cols] = num_imputer.transform(X_test[numeric_cols])
-    
-    for col in cat_cols:
-        if col in X_comp.columns:
-            le = label_encoders[col]
-            X_comp[col] = X_comp[col].fillna('__MISSING__').astype(str)
-            X_test[col] = X_test[col].fillna('__MISSING__').astype(str)
-            # Handle unseen categories
-            X_comp[col] = X_comp[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
-            X_test[col] = X_test[col].apply(lambda x: x if x in le.classes_ else '__MISSING__')
-            X_comp[col] = le.transform(X_comp[col])
-            X_test[col] = le.transform(X_test[col])
-
-    # =====================================================
-    # STEP 4: Get Stage 1 predictions on COMPETITION data
-    # =====================================================
-    print("\\n📊 Getting Stage 1 predictions on competition data...")
-    pred0_train = stage1_model.predict_proba(X_comp)[:, 1]
-    pred0_test = stage1_model.predict_proba(X_test)[:, 1]
-    
-    # =====================================================
-    # STEP 5: Convert to LOGITS (CRITICAL for classification!)
-    # =====================================================
-    print("\\n🔄 Converting to logit space...")
-    pred0_train = np.clip(pred0_train, epsilon, 1 - epsilon)
-    pred0_test = np.clip(pred0_test, epsilon, 1 - epsilon)
-    logits0_train = logit(pred0_train)  # log(p/(1-p))
-    logits0_test = logit(pred0_test)
-    
-    # Convert 0/1 target to logits
-    target_logits = logit(np.clip(y_comp.values.astype(float), epsilon, 1 - epsilon))
-    
-    # =====================================================
-    # STEP 6: Create RESIDUAL target
-    # =====================================================
-    residual_target = logits0_train - target_logits
-    print(f"Residual target stats: mean={{residual_target.mean():.4f}}, std={{residual_target.std():.4f}}")
-    
-    # =====================================================
-    # STEP 7: Train Stage 2 to predict RESIDUALS (Regression!)
-    # =====================================================
-    print("\\n🎯 Training Stage 2 model on residuals (REGRESSION)...")
-    
-    # Use cross-validation for Stage 2 to prevent overfitting
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-    stage2_oof = np.zeros(len(X_comp))
-    stage2_test_preds = np.zeros(len(X_test))
-    
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X_comp, y_comp), 1):
-        X_tr, X_val = X_comp.iloc[train_idx], X_comp.iloc[val_idx]
-        res_tr, res_val = residual_target[train_idx], residual_target[val_idx]
-        
-        stage2_model = lgb.LGBMRegressor(
-            n_estimators=300,
-            max_depth=5,
-            num_leaves=31,
-            learning_rate=0.05,
-            random_state=RANDOM_SEED,
-            verbose=-1,
-            n_jobs=-1,
-            **lgb_params
-        )
-        stage2_model.fit(X_tr, res_tr)
-        
-        stage2_oof[val_idx] = stage2_model.predict(X_val)
-        stage2_test_preds += stage2_model.predict(X_test) / 5
-        
-        print(f"  Fold {{fold}}/5 complete")
-    
-    print("✓ Stage 2 trained to predict residuals")
-    
-    # =====================================================
-    # STEP 8: Combine predictions (BOOSTING in logit space)
-    # =====================================================
-    print("\\n🎯 Combining predictions (boosting over residuals)...")
-    # new_logits = original_logits - predicted_residual
-    new_logits_train = logits0_train - stage2_oof
-    new_logits_test = logits0_test - stage2_test_preds
-    
-    # =====================================================
-    # STEP 9: Convert back to PROBABILITIES
-    # =====================================================
-    final_train_probs = expit(new_logits_train)  # sigmoid
-    final_test_probs = expit(new_logits_test)
-    final_test_probs = np.clip(final_test_probs, 0, 1)
-    
-    # Validate predictions
-    assert not np.isnan(final_test_probs).any(), "NaN in predictions!"
-    assert final_test_probs.min() >= 0 and final_test_probs.max() <= 1, "Predictions out of range!"
-    
-    # Evaluate on training data (OOF)
-    train_auc_before = roc_auc_score(y_comp, pred0_train)
-    train_auc_after = roc_auc_score(y_comp, final_train_probs)
-    print(f"\\n📊 Training AUC (OOF):")
-    print(f"  Stage 1 only:                 {{train_auc_before:.6f}}")
-    print(f"  After boosting over residuals: {{train_auc_after:.6f}}")
-    print(f"  Improvement:                  {{(train_auc_after - train_auc_before)*100:.4f}}%")
-    
-    # =====================================================
-    # STEP 10: Save submission
-    # =====================================================
-    print("\\n💾 Saving submission...")
-    sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-    submission = sample_sub.copy()
-    target_submission_col = sample_sub.columns[1]
-    submission[target_submission_col] = final_test_probs
-    
-    # Validation
-    assert submission.shape == sample_sub.shape
-    assert submission.columns.tolist() == sample_sub.columns.tolist()
-    print(f"✓ Submission validated: columns={{submission.columns.tolist()}}")
-    
-    submission.to_csv('{submission_path}', index=False)
-    print(f"✅ Submission saved: {{len(submission)}} rows")
-    
-    print(f"\\nPrediction stats: min={{final_test_probs.min():.4f}}, max={{final_test_probs.max():.4f}}, mean={{final_test_probs.mean():.4f}}")
-
-    elapsed_time = time.time() - start_time
-    print(f"\\n⏱️  Total execution time: {{elapsed_time:.2f}}s")
-    print("\\n" + "=" * 60)
-    print(f"Final Validation Performance: {{train_auc_after:.6f}}")
-    print("=" * 60)
-    print("✅ Boosting Over Residuals complete!")
-
-else:
-    # =====================================================
-    # STANDARD WEIGHTED ENSEMBLE PATH (Fallback)
-    # =====================================================
-    print("\\n📁 Loading COMPETITION dataset...")
-    comp_train = pd.read_csv(train_data_path)
-    comp_test = pd.read_csv('{test_data_path}')
-    sample_sub = pd.read_csv('{submission_path}'.replace('submission.csv', 'sample_submission.csv'))
-    
-    # Detect target column
-    if target_col not in comp_train.columns:
-        target_col = sample_sub.columns[1] if len(sample_sub.columns) > 1 else None
-        if target_col is None or target_col not in comp_train.columns:
-            # Fallback: last non-id column
-            non_id = [c for c in comp_train.columns if 'id' not in c.lower()]
-            target_col = non_id[-1] if non_id else None
-    
-    assert target_col and target_col in comp_train.columns, f"Target column not found: {{target_col}}"
-    print(f"✓ Target column: {{target_col}}")
-    
-    X_train = comp_train.drop(target_col, axis=1, errors='ignore')
-    y_train = comp_train[target_col]
-    X_test = comp_test.copy()
-    
-    # Remove ID columns
-    id_col = None
-    for col in X_train.columns:
-        if 'id' in col.lower():
-            id_col = col
-            break
-    if id_col:
-        X_train = X_train.drop(columns=[id_col])
-        if id_col in X_test.columns:
-            test_ids = X_test[id_col]
-            X_test = X_test.drop(columns=[id_col])
-        else:
-            test_ids = np.arange(len(X_test))
-    else:
-        test_ids = np.arange(len(X_test))
-    
-    print(f"Train shape: {{X_train.shape}}, Test shape: {{X_test.shape}}")
-    
-    # Preprocessing
-    from sklearn.impute import SimpleImputer
-    from sklearn.preprocessing import LabelEncoder
-    
-    numeric_cols = X_train.select_dtypes(include=['int64', 'float64']).columns.tolist()
-    cat_cols = X_train.select_dtypes(include=['object', 'category']).columns.tolist()
-    
-    # Impute numerics
-    if numeric_cols:
-        num_imputer = SimpleImputer(strategy='median')
-        X_train[numeric_cols] = num_imputer.fit_transform(X_train[numeric_cols])
-        X_test[numeric_cols] = num_imputer.transform(X_test[numeric_cols])
-    
-    # Encode categoricals
-    for col in cat_cols:
-        le = LabelEncoder()
-        combined = pd.concat([X_train[col].astype(str), X_test[col].astype(str)])
-        le.fit(combined.fillna('__MISSING__'))
-        X_train[col] = le.transform(X_train[col].astype(str).fillna('__MISSING__'))
-        X_test[col] = le.transform(X_test[col].astype(str).fillna('__MISSING__'))
-    
-    # GPU Detection
-    import torch
-    use_gpu = torch.cuda.is_available()
-    print(f"\\nGPU Available: {{use_gpu}}")
-    lgb_params = {{'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0}} if use_gpu else {{'device': 'cpu'}}
-    xgb_params = {{'tree_method': 'gpu_hist', 'predictor': 'gpu_predictor'}} if use_gpu else {{'tree_method': 'hist'}}
-    
-    # Train multiple models with CV
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_SEED)
-    
-    # Store OOF predictions for each model
-    lgb_oof = np.zeros(len(X_train))
-    xgb_oof = np.zeros(len(X_train))
-    lgb_test = np.zeros(len(X_test))
-    xgb_test = np.zeros(len(X_test))
-    lgb_scores = []
-    xgb_scores = []
-    
-    print("\\n🎯 Training LightGBM and XGBoost with CV...")
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X_train, y_train), 1):
-        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
-        y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
-        
-        # LightGBM
-        lgb_model = lgb.LGBMClassifier(
-            n_estimators=500, max_depth=6, learning_rate=0.03,
-            reg_alpha=0.1, reg_lambda=0.1, min_child_samples=20,
-            random_state=RANDOM_SEED, verbose=-1, n_jobs=-1, **lgb_params
-        )
-        lgb_model.fit(X_tr, y_tr)
-        lgb_oof[val_idx] = lgb_model.predict_proba(X_val)[:, 1]
-        lgb_test += lgb_model.predict_proba(X_test)[:, 1] / 5
-        lgb_scores.append(roc_auc_score(y_val, lgb_oof[val_idx]))
-        
-        # XGBoost
-        xgb_model = xgb.XGBClassifier(
-            n_estimators=500, max_depth=6, learning_rate=0.03,
-            reg_alpha=0.1, reg_lambda=0.1, min_child_weight=20,
-            random_state=RANDOM_SEED, verbosity=0, n_jobs=-1, **xgb_params
-        )
-        xgb_model.fit(X_tr, y_tr)
-        xgb_oof[val_idx] = xgb_model.predict_proba(X_val)[:, 1]
-        xgb_test += xgb_model.predict_proba(X_test)[:, 1] / 5
-        xgb_scores.append(roc_auc_score(y_val, xgb_oof[val_idx]))
-        
-        print(f"  Fold {{fold}}/5: LGB={{lgb_scores[-1]:.4f}}, XGB={{xgb_scores[-1]:.4f}}")
-    
-    # Calculate dynamic weights based on CV scores
-    lgb_cv_mean = np.mean(lgb_scores)
-    xgb_cv_mean = np.mean(xgb_scores)
-    total_score = lgb_cv_mean + xgb_cv_mean
-    lgb_weight = lgb_cv_mean / total_score
-    xgb_weight = xgb_cv_mean / total_score
-    
-    print(f"\\n📊 CV Results:")
-    print(f"  LightGBM: {{lgb_cv_mean:.4f}} (weight: {{lgb_weight:.2f}})")
-    print(f"  XGBoost:  {{xgb_cv_mean:.4f}} (weight: {{xgb_weight:.2f}})")
-    
-    # Combine with dynamic weights
-    final_oof = lgb_weight * lgb_oof + xgb_weight * xgb_oof
-    final_test_probs = lgb_weight * lgb_test + xgb_weight * xgb_test
-    final_test_probs = np.clip(final_test_probs, 0.0, 1.0)
-    
-    # Validate predictions
-    assert not np.isnan(final_test_probs).any(), "NaN in predictions!"
-    assert final_test_probs.min() >= 0 and final_test_probs.max() <= 1, "Predictions out of range!"
-    
-    # Ensemble CV score
-    ensemble_cv = roc_auc_score(y_train, final_oof)
-    print(f"  Ensemble: {{ensemble_cv:.4f}} (dynamic weighted)")
-    
-    # Save submission
-    print("\\n💾 Saving submission...")
-    submission = sample_sub.copy()
-    target_submission_col = sample_sub.columns[1]
-    submission[target_submission_col] = final_test_probs
-    
-    # Validation
-    assert submission.shape == sample_sub.shape
-    assert submission.columns.tolist() == sample_sub.columns.tolist()
-    print(f"✓ Submission validated: columns={{submission.columns.tolist()}}")
-    
-    submission.to_csv('{submission_path}', index=False)
-    print(f"✅ Submission saved: {{len(submission)}} rows")
-    
-    print(f"\\nPrediction stats: min={{final_test_probs.min():.4f}}, max={{final_test_probs.max():.4f}}, mean={{final_test_probs.mean():.4f}}")
-    
-    elapsed_time = time.time() - start_time
-    print(f"\\n⏱️  Total execution time: {{elapsed_time:.2f}}s")
-    print("\\n" + "=" * 60)
-    print(f"Final Validation Performance: {{ensemble_cv:.6f}}")
-    print("=" * 60)
-    print("✅ Standard Weighted Ensemble complete!")
-""",
-}
-
-
-# ==============================================================================
-# ABLATION STUDY PROMPTS (ADK Pattern)
-# ==============================================================================
-# These prompts implement the ablation study pattern from the ADK example,
-# which systematically identifies which parts of the code contribute most
-# to model performance.
-# ==============================================================================
-
-ABLATION_STUDY_PROMPT = """# Introduction
-You are a Kaggle Grandmaster performing an ablation study to understand which parts of the solution contribute most to performance.
-
-# Current Python Solution
-```python
-{code}
-```
-
-# Current Performance
-- CV Score: {cv_score}
-- CV Std: {cv_std}
-
-# Instructions
-Generate Python code that performs an ablation study by:
-1. Creating variations that disable or modify 2-3 key components one at a time
-2. Measuring the performance impact of each ablation
-3. Printing clear results showing which components matter most
-
-## Components to Consider Ablating:
-- Feature engineering (remove specific feature groups)
-- Preprocessing steps (change encoding, normalization)
-- Model hyperparameters (change key params to baseline)
-- CV strategy (different fold strategies)
-- Ensemble weights (if applicable)
-
-# Response Format
-- Output ONLY valid Python code (no markdown, no explanations)
-- Include clear print statements for each ablation result
-- Format output as:
-  ```
-  [ABLATION:component_name] baseline=X.XXXX modified=X.XXXX delta=X.XXXX
-  ```
-- End with a summary ranking components by impact
-
-# Example Output Pattern
-```python
-# Ablation 1: Remove feature engineering
-print("[ABLATION:feature_engineering] baseline=0.8500 modified=0.8200 delta=-0.0300")
-
-# Ablation 2: Use default hyperparameters
-print("[ABLATION:hyperparameter_tuning] baseline=0.8500 modified=0.8350 delta=-0.0150")
-
-# Summary
-print("[ABLATION:SUMMARY] Most impactful: feature_engineering (-0.0300)")
-```
-"""
-
-ABLATION_STUDY_SEQUENTIAL_PROMPT = """# Introduction
-You are a Kaggle Grandmaster performing an ablation study to understand which parts of the solution contribute most to performance.
-
-You have already performed previous ablation studies. Focus on NEW components not yet tested.
-
-# Current Python Solution
-```python
-{code}
-```
-
-# Current Performance
-- CV Score: {cv_score}
-- CV Std: {cv_std}
-
-# Previous Ablation Results
-{prev_ablations}
-
-# Instructions
-Generate Python code that performs an ablation study on DIFFERENT components than before:
-1. Choose 2-3 components NOT covered in previous ablations
-2. Create variations that disable or modify each component
-3. Measure and print the performance impact
-
-## Already Tested (DO NOT repeat):
-{tested_components}
-
-## Components Still Available:
-- Different feature groups (if not fully tested)
-- Alternative preprocessing approaches
-- Different model architectures
-- Post-processing techniques
-- Threshold tuning
-
-# Response Format
-- Output ONLY valid Python code
-- Include clear print statements:
-  ```
-  [ABLATION:component_name] baseline=X.XXXX modified=X.XXXX delta=X.XXXX
-  ```
-- End with updated summary
-
-CRITICAL: Do NOT repeat ablations from previous rounds!
-"""
-
-SUMMARIZE_ABLATION_PROMPT = """# Your Ablation Study Code
-```python
-{code}
-```
-
-# Ablation Study Results
-{results}
-
-# Task
-Summarize the ablation study results in a structured format:
-
-1. **Component Rankings** (ordered by impact):
-   - List each component with its score delta
-   
-2. **Key Insights**:
-   - Which components are critical (removing them hurts score significantly)?
-   - Which components can be simplified or removed?
-   - Are there interactions between components?
-
-3. **Recommended Actions**:
-   - What should be improved first?
-   - What can be removed to simplify the solution?
-   - What new components might help based on the analysis?
-
-Format your response as a clear, actionable summary.
-"""
-
-EXTRACT_IMPROVEMENT_PLAN_PROMPT = """# Introduction
-Based on the ablation study, extract a focused improvement plan targeting the most impactful code block.
-
-# Current Python Solution
-```python
-{code}
-```
-
-# Ablation Study Results
-{ablation_results}
-
-# Task
-1. Identify the code block that has the highest potential for improvement
-2. Propose a specific plan to improve that code block
-3. Extract the exact code block from the solution
-
-# Requirements
-- The plan should be 3-5 sentences describing the improvement
-- The plan should be concrete and implementable
-- Avoid plans that significantly increase runtime
-- Focus on high-impact, low-risk improvements
-
-# Response Format (JSON)
-```json
-[{{
-    "code_block": "```python\n# The exact code to improve\n...code...\n```",
-    "plan": "Description of the improvement plan...",
-    "expected_impact": 0.01,
-    "risk_level": "low|medium|high"
-}}]
-```
-"""
-
-EXTRACT_IMPROVEMENT_PLAN_SEQUENTIAL_PROMPT = """# Introduction
-Based on the ablation study, extract a focused improvement plan targeting a code block NOT yet improved.
-
-# Current Python Solution
-```python
-{code}
-```
-
-# Ablation Study Results
-{ablation_results}
-
-# Previously Improved Code Blocks
-{prev_code_blocks}
-
-# Task
-1. Identify a NEW code block (different from previous) with high improvement potential
-2. Propose a specific plan for this block
-3. Extract the exact code block
-
-# Requirements
-- DO NOT select code blocks already improved before
-- The plan should be 3-5 sentences
-- Avoid plans that increase runtime significantly
-- Focus on high-impact improvements
-
-# Response Format (JSON)
-```json
-[{{
-    "code_block": "```python\n# The exact code to improve\n...code...\n```",
-    "plan": "Description of the improvement plan...",
-    "expected_impact": 0.01,
-    "risk_level": "low|medium|high"
-}}]
-```
-"""
-
-PLAN_REFINEMENT_PROMPT = """# Introduction
-You are refining an improvement plan based on previous attempts and their outcomes.
-
-# Code Block Being Improved
-```python
-{code_block}
-```
-
-# Previous Plans and Their Results
-{prev_plan_summary}
-
-# Task
-Suggest a BETTER plan than the previous attempts:
-1. Analyze why previous plans did or didn't work
-2. Propose a novel approach or refinement
-3. Be specific about the changes needed
-
-# Requirements
-- The plan MUST be different from previous attempts
-- Learn from what worked and what didn't
-- Aim for higher impact with acceptable risk
-- Avoid increasing runtime significantly
-
-# Response Format
-Write a brief 3-5 sentence plan describing:
-- What specific change to make
-- Why it should improve performance
-- How it differs from previous attempts
-"""
-
-IMPLEMENT_PLAN_PROMPT = """# Introduction
-Implement the improvement plan on the specified code block.
-
-# Original Code Block
-```python
-{code_block}
-```
-
-# Improvement Plan
-{plan}
-
-# Full Solution Context (for reference)
-```python
-{full_code}
-```
-
-# Task
-Rewrite the code block implementing the improvement plan.
-
-# Requirements
-- Keep the same function/variable interfaces
-- Do not change code outside this block
-- Maintain all existing imports and dependencies
-- Add comments only where clarification is needed
-- Test edge cases if relevant
-
-# Response Format
-Output ONLY the improved code block wrapped in triple backticks:
-```python
-# Improved code here...
-```
-"""
-
-
-def get_domain_template(domain: str, **kwargs) -> str:
-    """
-    Get domain-specific code template.
-
-    Args:
-        domain: Domain type
-        **kwargs: Template variables
-
-    Returns:
-        Formatted code template
-    """
-    template = DOMAIN_CODE_TEMPLATES.get(domain, DOMAIN_CODE_TEMPLATES["tabular"])
-    return template.format(**kwargs)
-
+# ==================== Utility Functions ====================
 
 def format_component_details(component) -> str:
-    """
-    Format component details for prompts.
+    """Format component details for prompts."""
+    name = getattr(component, "name", "Unknown")
+    component_type = getattr(component, "component_type", "model")
+    estimated_impact = getattr(component, "estimated_impact", 0.0)
+    code = getattr(component, "code", "No description")
 
-    Args:
-        component: AblationComponent object
-
-    Returns:
-        Formatted string
-    """
-    return f"""
-Name: {component.name}
-Type: {component.component_type}
-Estimated Impact: {component.estimated_impact:.1%}
-Description: {component.code}
-"""
+    return f"""Name: {name}
+Type: {component_type}
+Estimated Impact: {estimated_impact:.1%}
+Description: {code}"""
 
 
 def format_error_info(error: str) -> dict[str, str]:
-    """
-    Categorize and format error information.
-
-    Args:
-        error: Error message
-
-    Returns:
-        Dictionary with error_type and formatted error
-    """
+    """Categorize and format error information."""
     error_types = {
         "ModuleNotFoundError": "missing_import",
         "FileNotFoundError": "missing_file",
@@ -2553,6 +404,7 @@ def format_error_info(error: str) -> dict[str, str]:
         "SyntaxError": "syntax_error",
         "MemoryError": "memory_error",
         "Timeout": "timeout",
+        "TimeoutError": "timeout",
     }
 
     error_type = "unknown_error"
@@ -2567,386 +419,98 @@ def format_error_info(error: str) -> dict[str, str]:
     }
 
 
-# ==================== Domain-Specific Code Templates ====================
+# ==================== Ablation Study Prompts ====================
 
+ABLATION_STUDY_PROMPT = """Analyze the impact of component changes through ablation study.
 
-IMAGE_CLASSIFICATION_TEMPLATE = """
-CRITICAL: Use PyTorch DataLoader (NOT sklearn feature extraction)
-
-Standard approach for image classification/regression:
-
-1. Dataset class with PIL Image loading:
+## Baseline Code
 ```python
-from torch.utils.data import Dataset, DataLoader
-from PIL import Image
-from pathlib import Path
-import pandas as pd
-
-class ImageDataset(Dataset):
-    def __init__(self, image_dir, labels_df=None, transform=None):
-        self.image_dir = Path(image_dir)
-        self.labels_df = labels_df
-        self.transform = transform
-        # If labels_df provided, use it; otherwise load all images
-        if labels_df is not None:
-            self.image_paths = [self.image_dir / fname for fname in labels_df['id']]
-            self.labels = labels_df['target'].values
-        else:
-            self.image_paths = list(self.image_dir.glob("*.jpg")) + list(self.image_dir.glob("*.png"))
-            self.labels = None
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def __getitem__(self, idx):
-        image = Image.open(self.image_paths[idx]).convert('RGB')
-        if self.transform:
-            image = self.transform(image)
-        if self.labels is not None:
-            return image, self.labels[idx]
-        return image
+{baseline_code}
 ```
 
-2. Data augmentation with torchvision transforms:
+## Modified Code
 ```python
-from torchvision import transforms
-
-train_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(p=0.5),
-    transforms.RandomRotation(degrees=15),
-    transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-test_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+{modified_code}
 ```
 
-3. Model fine-tuning with transfer learning:
+## Component Being Tested
+{component_name}
+
+Compare baseline vs modified performance. Return analysis in JSON format:
+{{"component": "{component_name}", "baseline_score": float, "modified_score": float, "delta": float, "recommendation": "keep|remove|modify"}}"""
+
+
+ABLATION_STUDY_SEQUENTIAL_PROMPT = """Perform sequential ablation study.
+
+## Current Best Code
 ```python
-import torch
-import torch.nn as nn
-from torchvision import models
-
-# Load pre-trained model
-model = models.efficientnet_b0(pretrained=True)
-
-# Replace classifier for your number of classes
-num_classes = 2  # Adjust based on problem
-model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model = model.to(device)
+{current_code}
 ```
 
-4. Training with cross-validation:
+## Components to Test
+{components}
+
+Test each component's impact sequentially. Return results for each."""
+
+
+SUMMARIZE_ABLATION_PROMPT = """Summarize ablation study results.
+
+## Results
+{results}
+
+Provide:
+1. Most impactful components (positive delta)
+2. Harmful components (negative delta)
+3. Recommended final configuration"""
+
+
+EXTRACT_IMPROVEMENT_PLAN_PROMPT = """Extract improvement plan from ablation results.
+
+## Ablation Results
+{results}
+
+## Current Score
+{current_score}
+
+Create prioritized list of improvements based on ablation findings."""
+
+
+EXTRACT_IMPROVEMENT_PLAN_SEQUENTIAL_PROMPT = """Extract sequential improvement plan.
+
+## Sequential Results
+{results}
+
+## Target Score
+{target_score}
+
+Create ordered plan to reach target score."""
+
+
+PLAN_REFINEMENT_PROMPT = """Refine improvement plan based on actual results.
+
+## Original Plan
+{original_plan}
+
+## Actual Results
+{actual_results}
+
+## Gap Analysis
+{gap_analysis}
+
+Update plan based on what worked and what didn't."""
+
+
+IMPLEMENT_PLAN_PROMPT = """Implement the improvement plan.
+
+## Current Code
 ```python
-from sklearn.model_selection import StratifiedKFold
-import numpy as np
-
-# Setup
-n_folds = 5
-skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-oof_preds = np.zeros((len(train_df), num_classes))
-
-for fold, (train_idx, val_idx) in enumerate(skf.split(train_df, train_df['target'])):
-    print(f"Training Fold {fold+1}/{n_folds}")
-
-    # Create datasets
-    train_dataset = ImageDataset(train_dir, train_df.iloc[train_idx], train_transforms)
-    val_dataset = ImageDataset(train_dir, train_df.iloc[val_idx], test_transforms)
-
-    train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=64, shuffle=False, num_workers=4)
-
-    # Initialize model
-    model = models.efficientnet_b0(pretrained=True)
-    model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-    model = model.to(device)
-
-    # Training loop
-    criterion = nn.CrossEntropyLoss()  # or nn.MSELoss() for regression
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
-
-    for epoch in range(10):  # Adjust epochs
-        model.train()
-        for images, labels in train_loader:
-            images, labels = images.to(device), labels.to(device)
-            optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            optimizer.step()
-
-    # Validation and OOF predictions
-    model.eval()
-    with torch.no_grad():
-        for i, (images, _) in enumerate(val_loader):
-            outputs = model(images.to(device))
-            oof_preds[val_idx[i*64:(i+1)*64]] = outputs.cpu().numpy()
-
-    # Save model
-    torch.save(model.state_dict(), f'model_fold{fold}.pth')
-
-# Generate submission
-test_dataset = ImageDataset(test_dir, None, test_transforms)
-test_loader = DataLoader(test_dataset, batch_size=64, shuffle=False)
-# ... predict and create submission.csv
+{current_code}
 ```
 
-DIRECTORY STRUCTURES:
-- Flat: train/img_001.jpg + train.csv with columns [id, target]
-- ImageFolder: train/class_0/img_001.jpg (use torchvision.datasets.ImageFolder)
-"""
+## Improvement Plan
+{plan}
 
+## Priority
+{priority}
 
-NLP_CLASSIFICATION_TEMPLATE = """
-CRITICAL: Use HuggingFace transformers (RoBERTa, BERT, DistilBERT, T5)
-
-Standard approach for text classification/seq2seq:
-
-1. Load data and tokenizer:
-```python
-import pandas as pd
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, Trainer, TrainingArguments
-from datasets import Dataset
-from sklearn.model_selection import StratifiedKFold
-import numpy as np
-
-# Load data
-train_df = pd.read_csv('train.csv')
-test_df = pd.read_csv('test.csv')
-
-# Model selection
-model_name = 'roberta-base'  # or 'distilbert-base-uncased', 't5-base'
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-
-# Identify text column (common names: 'text', 'comment', 'sentence', 'content')
-text_col = 'text'  # Adjust based on data
-label_col = 'target'  # or 'label'
-
-# Tokenization function
-def tokenize(examples):
-    return tokenizer(
-        examples[text_col],
-        padding='max_length',
-        truncation=True,
-        max_length=128  # Adjust based on text length
-    )
-```
-
-2. Cross-validation setup:
-```python
-n_folds = 5
-skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-num_labels = train_df[label_col].nunique()
-oof_preds = np.zeros((len(train_df), num_labels))
-
-for fold, (train_idx, val_idx) in enumerate(skf.split(train_df, train_df[label_col])):
-    print(f"Training Fold {fold+1}/{n_folds}")
-
-    # Create HuggingFace datasets
-    train_dataset = Dataset.from_pandas(train_df.iloc[train_idx])
-    val_dataset = Dataset.from_pandas(train_df.iloc[val_idx])
-
-    # Tokenize
-    train_dataset = train_dataset.map(tokenize, batched=True)
-    val_dataset = val_dataset.map(tokenize, batched=True)
-
-    # Rename label column if needed
-    train_dataset = train_dataset.rename_column(label_col, "labels")
-    val_dataset = val_dataset.rename_column(label_col, "labels")
-
-    # Set format for PyTorch
-    train_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-    val_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask', 'labels'])
-```
-
-3. Model training with Trainer API:
-```python
-    # Load model
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=num_labels
-    )
-
-    # Training arguments
-    training_args = TrainingArguments(
-        output_dir=f'./results_fold{fold}',
-        num_train_epochs=3,
-        per_device_train_batch_size=16,
-        per_device_eval_batch_size=32,
-        learning_rate=2e-5,
-        warmup_steps=500,
-        weight_decay=0.01,
-        logging_steps=100,
-        eval_strategy='epoch',
-        save_strategy='epoch',
-        load_best_model_at_end=True,
-        metric_for_best_model='eval_loss',
-    )
-
-    # Initialize Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=val_dataset,
-    )
-
-    # Train
-    trainer.train()
-
-    # OOF predictions
-    predictions = trainer.predict(val_dataset)
-    oof_preds[val_idx] = predictions.predictions
-
-    # Save model
-    model.save_pretrained(f'model_fold{fold}')
-```
-
-4. Generate submission:
-```python
-# Prepare test data
-test_dataset = Dataset.from_pandas(test_df)
-test_dataset = test_dataset.map(tokenize, batched=True)
-test_dataset.set_format(type='torch', columns=['input_ids', 'attention_mask'])
-
-# Average predictions across folds
-test_preds = np.zeros((len(test_df), num_labels))
-for fold in range(n_folds):
-    model = AutoModelForSequenceClassification.from_pretrained(f'model_fold{fold}')
-    trainer = Trainer(model=model)
-    predictions = trainer.predict(test_dataset)
-    test_preds += predictions.predictions / n_folds
-
-# Create submission
-submission = pd.DataFrame({
-    'id': test_df['id'],
-    'target': test_preds.argmax(axis=1)  # or test_preds[:,1] for probabilities
-})
-submission.to_csv('submission.csv', index=False)
-```
-
-FOR SEQ2SEQ (translation, text normalization):
-Use T5:
-```python
-from transformers import T5ForConditionalGeneration, T5Tokenizer, Seq2SeqTrainer, Seq2SeqTrainingArguments
-
-model = T5ForConditionalGeneration.from_pretrained('t5-base')
-tokenizer = T5Tokenizer.from_pretrained('t5-base')
-
-# Tokenize with labels for seq2seq
-def tokenize_seq2seq(examples):
-    inputs = tokenizer(examples['input_text'], padding='max_length', truncation=True, max_length=128)
-    labels = tokenizer(examples['target_text'], padding='max_length', truncation=True, max_length=128)
-    inputs['labels'] = labels['input_ids']
-    return inputs
-```
-"""
-
-
-AUDIO_CLASSIFICATION_TEMPLATE = """
-CRITICAL: Convert audio to mel-spectrograms, then use CNN (treat as image problem)
-
-Standard approach for audio classification/regression:
-
-1. Audio to mel-spectrogram conversion:
-```python
-import librosa
-import librosa.display
-import numpy as np
-from PIL import Image
-from pathlib import Path
-import pandas as pd
-
-def audio_to_melspectrogram(audio_path, output_path, sr=22050, n_mels=128):
-    '''
-    Convert audio file to mel-spectrogram and save as PNG image.
-
-    Args:
-        audio_path: Path to audio file (.wav, .mp3, .flac)
-        output_path: Path to save spectrogram image (.png)
-        sr: Sample rate (22050 is standard)
-        n_mels: Number of mel bands (128 is standard)
-    '''
-    # Load audio
-    y, sr = librosa.load(audio_path, sr=sr)
-
-    # Compute mel-spectrogram
-    mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels)
-
-    # Convert to dB scale
-    mel_spec_db = librosa.power_to_db(mel_spec, ref=np.max)
-
-    # Normalize to [0, 255]
-    mel_norm = ((mel_spec_db - mel_spec_db.min()) /
-                (mel_spec_db.max() - mel_spec_db.min()) * 255).astype(np.uint8)
-
-    # Convert to 3-channel RGB image (required for pre-trained CNNs)
-    mel_rgb = np.stack([mel_norm, mel_norm, mel_norm], axis=-1)
-
-    # Transpose to match image format (H, W, C)
-    mel_rgb = np.transpose(mel_rgb, (1, 0, 2))
-
-    # Save as PNG
-    Image.fromarray(mel_rgb).save(output_path)
-
-# Convert all training audio files
-train_spectrograms_dir = Path('train_spectrograms')
-train_spectrograms_dir.mkdir(exist_ok=True)
-
-train_df = pd.read_csv('train.csv')
-for idx, row in train_df.iterrows():
-    audio_path = f"train/{row['audio_id']}.wav"  # Adjust extension
-    output_path = train_spectrograms_dir / f"{row['audio_id']}.png"
-    audio_to_melspectrogram(audio_path, output_path)
-
-# Convert test audio
-test_spectrograms_dir = Path('test_spectrograms')
-test_spectrograms_dir.mkdir(exist_ok=True)
-
-test_df = pd.read_csv('test.csv')
-for idx, row in test_df.iterrows():
-    audio_path = f"test/{row['audio_id']}.wav"
-    output_path = test_spectrograms_dir / f"{row['audio_id']}.png"
-    audio_to_melspectrogram(audio_path, output_path)
-```
-
-2. Now use standard image classification pipeline:
-After converting audio to spectrograms, follow the IMAGE_CLASSIFICATION_TEMPLATE approach:
-- Use PyTorch DataLoader with the spectrogram PNG files
-- Use torchvision.models (EfficientNet, ResNet, etc.)
-- Apply transfer learning from ImageNet
-- Use data augmentation on spectrograms (rotation, flip)
-- Train with cross-validation
-- Generate submission.csv
-
-Example:
-```python
-from torchvision import transforms, models
-import torch.nn as nn
-
-# Data loading for spectrograms
-train_transforms = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.RandomHorizontalFlip(),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
-
-# Model
-model = models.efficientnet_b0(pretrained=True)
-num_classes = train_df['target'].nunique()
-model.classifier[1] = nn.Linear(model.classifier[1].in_features, num_classes)
-
-# Then follow standard image classification training loop
-```
-
-Key insight: Mel-spectrograms are 2D time-frequency representations, perfect for CNNs. This converts the audio problem into a computer vision problem, allowing use of powerful pre-trained image models.
-"""
+Generate improved code implementing the plan."""
