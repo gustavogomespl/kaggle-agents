@@ -5,15 +5,18 @@ This agent implements the "Search-First Strategy" from Google ADK,
 retrieving and analyzing state-of-the-art solutions before generating code.
 """
 
+import json
 from datetime import datetime
 from typing import Any
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
 
 from ..core.config import get_config
 from ..core.state import KaggleState, SOTASolution
 from ..tools.kaggle_search import search_competition_notebooks
+from ..utils.llm_utils import get_text_content
 
 
 class SearchAgent:
@@ -212,9 +215,79 @@ class SearchAgent:
         if not solutions:
             return solutions
 
-        # For now, return as-is
-        # In future, can use LLM to summarize code snippets into strategies
+        print("\n   🔍 Analyzing SOTA code snippets with LLM...")
+
+        # Analyze top 3 solutions with LLM
+        for i, sol in enumerate(solutions[:3]):
+            if sol.code_snippets:
+                print(f"      Analyzing solution {i+1}: {sol.title[:50]}...")
+                analysis = self._analyze_code_snippets(sol)
+                if analysis:
+                    # Enrich solution with extracted insights
+                    if analysis.get("models"):
+                        # Avoid duplicates
+                        new_models = [m for m in analysis["models"] if m not in sol.models_used]
+                        sol.models_used.extend(new_models)
+                    if analysis.get("features"):
+                        new_features = [f for f in analysis["features"] if f not in sol.feature_engineering]
+                        sol.feature_engineering.extend(new_features)
+                    if analysis.get("ensemble") and not sol.ensemble_approach:
+                        sol.ensemble_approach = analysis["ensemble"]
+                    if analysis.get("strategies"):
+                        new_strategies = [s for s in analysis["strategies"] if s not in sol.strategies]
+                        sol.strategies.extend(new_strategies)
+
         return solutions
+
+    def _analyze_code_snippets(self, solution: SOTASolution) -> dict[str, Any]:
+        """
+        Use LLM to extract insights from code snippets.
+
+        Args:
+            solution: SOTA solution with code snippets
+
+        Returns:
+            Dictionary with extracted models, features, ensemble, strategies
+        """
+        # Prepare code snippets (limit to first 3, truncate each to 1000 chars)
+        snippets_text = "\n\n---\n\n".join(
+            snippet[:1000] for snippet in solution.code_snippets[:3]
+        )
+
+        prompt = f"""Analyze these Kaggle solution code snippets and extract key patterns.
+
+Title: {solution.title}
+
+Code Snippets:
+{snippets_text}
+
+Return a JSON object with:
+- models: list of ML models/algorithms used (e.g., ["LightGBM", "XGBoost", "CatBoost"])
+- features: list of feature engineering techniques (e.g., ["target encoding", "polynomial features", "lag features"])
+- ensemble: ensemble strategy if any (e.g., "stacking with Ridge meta-learner", "weighted average")
+- strategies: list of key strategies/tricks (e.g., ["5-fold stratified CV", "early stopping", "adversarial validation"])
+
+Return ONLY valid JSON, no explanation or markdown."""
+
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            content = get_text_content(response.content).strip()
+
+            # Parse JSON - handle markdown wrapping
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            result = json.loads(content)
+            return result
+
+        except json.JSONDecodeError as e:
+            print(f"      ⚠️ JSON parse error: {e}")
+            return {}
+        except Exception as e:
+            print(f"      ⚠️ Code analysis failed: {e}")
+            return {}
 
     def _print_summary(self, solutions: list[SOTASolution]) -> None:
         """
