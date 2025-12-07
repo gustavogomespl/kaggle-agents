@@ -64,6 +64,29 @@ class KaggleSearcher:
         self.api.authenticate()
         self.config = get_config()
 
+    @staticmethod
+    def _get_kernel_attr(kernel: Any, names: list[str], default: Any = None) -> Any:
+        """
+        Safely pull an attribute from a Kaggle Kernel object handling API field variants.
+
+        Args:
+            kernel: Kernel object returned by Kaggle API
+            names: Candidate attribute names in priority order
+            default: Fallback value
+
+        Returns:
+            Attribute value or default if missing
+        """
+        for name in names:
+            if hasattr(kernel, name):
+                try:
+                    value = getattr(kernel, name)
+                except Exception:
+                    continue
+                if value is not None:
+                    return value
+        return default
+
     def search_notebooks(
         self,
         competition: str,
@@ -94,18 +117,30 @@ class KaggleSearcher:
 
             notebooks = []
             for kernel in kernels:
-                # Extract metadata
-                metadata = NotebookMetadata(
-                    ref=kernel.ref,
-                    title=kernel.title,
-                    author=kernel.author,
-                    total_votes=kernel.total_votes,
-                    medal_type=getattr(kernel, 'medal_type', None),
-                    language=kernel.language,
-                    competition=competition,
-                    url=f"https://www.kaggle.com/code/{kernel.ref}",
-                )
-                notebooks.append(metadata)
+                try:
+                    ref = self._get_kernel_attr(kernel, ["ref", "slug"])
+                    if not ref:
+                        continue
+
+                    total_votes = self._get_kernel_attr(
+                        kernel,
+                        ["total_votes", "totalVotes", "voteCount", "vote_count"],
+                        0,
+                    )
+
+                    metadata = NotebookMetadata(
+                        ref=ref,
+                        title=self._get_kernel_attr(kernel, ["title"], ""),
+                        author=self._get_kernel_attr(kernel, ["author", "owner"], ""),
+                        total_votes=int(total_votes) if total_votes is not None else 0,
+                        medal_type=self._get_kernel_attr(kernel, ["medal_type", "medalType"]),
+                        language=self._get_kernel_attr(kernel, ["language"], language or "python"),
+                        competition=competition,
+                        url=f"https://www.kaggle.com/code/{ref}",
+                    )
+                    notebooks.append(metadata)
+                except Exception as kernel_err:
+                    print(f"  Skipping kernel due to parse error: {kernel_err}")
 
             return notebooks[:page_size]
 
