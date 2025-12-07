@@ -11,6 +11,7 @@ from sklearn.model_selection import cross_val_predict
 
 from ..core.config import get_config
 from ..core.state import KaggleState
+from ..utils.llm_utils import get_text_content
 
 
 class EnsembleAgent:
@@ -419,7 +420,7 @@ Return a JSON object:
 """
         try:
             response = llm.invoke([HumanMessage(content=prompt)])
-            content = response.content.strip()
+            content = get_text_content(response.content).strip()
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "```" in content:

@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.config import get_config, get_llm_for_role
 from ..core.state import KaggleState
+from ..utils.llm_utils import get_text_content
 
 
 class ReportingAgent:
@@ -126,7 +127,7 @@ Structure:
         ]
 
         response = self.llm.invoke(messages)
-        return response.content
+        return get_text_content(response.content)
 
 def reporting_agent_node(state: KaggleState) -> dict[str, Any]:
     agent = ReportingAgent()

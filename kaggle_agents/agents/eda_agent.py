@@ -8,6 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from ..utils.config import Config
+from ..utils.llm_utils import get_text_content
 from ..utils.state import KaggleState
 
 
@@ -109,9 +110,10 @@ Provide 5-7 key insights about this data and what we should focus on."""
             response = self.llm.invoke([system_msg, human_msg])
 
             # Extract insights from LLM response
+            response_text = get_text_content(response.content)
             insights = [
                 line.strip("- ").strip()
-                for line in response.content.split("\n")
+                for line in response_text.split("\n")
                 if line.strip() and (line.strip().startswith("-") or (len(line.strip()) > 0 and line.strip()[0].isdigit()))
             ]
 
@@ -121,7 +123,7 @@ Provide 5-7 key insights about this data and what we should focus on."""
             messages = state.get("messages", []) if isinstance(state, dict) else state.messages
             messages.append(
                 HumanMessage(
-                    content=f"EDA completed. Key insights: {response.content}"
+                    content=f"EDA completed. Key insights: {response_text}"
                 )
             )
 

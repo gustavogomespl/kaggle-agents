@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..core.config import calculate_score_improvement, get_config, get_llm_for_role
 from ..core.state import IterationMemory, KaggleState
 from ..optimization import create_training_collector
+from ..utils.llm_utils import get_text_content
 
 
 # ==================== Meta-Evaluator Agent ====================
@@ -382,7 +383,7 @@ class MetaEvaluatorAgent:
 
         # Parse guidance from response
         try:
-            guidance = json.loads(response.content)
+            guidance = json.loads(get_text_content(response.content))
         except json.JSONDecodeError:
             # Fallback if JSON parsing fails
             guidance = {

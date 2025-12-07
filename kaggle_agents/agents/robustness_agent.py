@@ -14,6 +14,7 @@ import pandas as pd
 
 from ..core.config import get_config
 from ..core.state import KaggleState, ValidationResult
+from ..utils.llm_utils import get_text_content
 
 
 class RobustnessAgent:
@@ -209,7 +210,7 @@ IMPORTANT:
 """
         try:
             response = self.llm.invoke([HumanMessage(content=prompt)])
-            content = response.content.strip()
+            content = get_text_content(response.content).strip()
             # Handle potential markdown wrapping
             if "```json" in content:
                 content = content.split("```json")[1].split("```")[0].strip()

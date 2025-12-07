@@ -34,6 +34,7 @@ from ..prompts.templates.developer_prompts import (
     format_error_info,
 )
 from ..tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
+from ..utils.llm_utils import get_text_content
 from ..utils.log_parser import parse_training_logs, format_feedback_for_llm
 
 
@@ -379,7 +380,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     try:
                         refined_response = self.llm.invoke(refine_messages)
                         refined_code = self._extract_code_from_response(
-                            refined_response.content
+                            get_text_content(refined_response.content)
                         )
 
                         print("Executing refined code...")
@@ -1485,7 +1486,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             ]
 
             response = self.llm.invoke(messages)
-            code = self._extract_code_from_response(response.content)
+            code = self._extract_code_from_response(get_text_content(response.content))
 
         return code
 
@@ -1535,7 +1536,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             ]
 
             response = self.llm.invoke(messages)
-            return response.content.strip()
+            return get_text_content(response.content).strip()
         except Exception as e:
             return f"Meta-feedback unavailable: {e!s}"
 
@@ -1565,7 +1566,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             ]
 
             response = self.llm.invoke(messages)
-            fixed_code = self._extract_code_from_response(response.content)
+            fixed_code = self._extract_code_from_response(get_text_content(response.content))
 
         return fixed_code
 
@@ -1606,7 +1607,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             ]
 
             response = self.llm.invoke(messages)
-            debugged_code = self._extract_code_from_response(response.content)
+            debugged_code = self._extract_code_from_response(get_text_content(response.content))
 
             test_result = self.executor.execute(debugged_code, working_dir)
 

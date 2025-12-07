@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
 from ..core.state import CompetitionInfo, DomainType
+from ..utils.llm_utils import get_text_content
 
 
 class DomainDetector:
@@ -254,7 +255,7 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 
         try:
             response = self.llm.invoke(prompt)
-            content = response.content if hasattr(response, "content") else str(response)
+            content = get_text_content(response.content) if hasattr(response, "content") else str(response)
             domain = content.strip().lower().replace(" ", "_")
 
             if domain in self.DOMAINS:

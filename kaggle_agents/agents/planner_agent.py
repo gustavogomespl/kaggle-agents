@@ -22,6 +22,7 @@ from ..prompts.templates.planner_prompts import (
     REFINE_ABLATION_PLAN_PROMPT,
     get_domain_guidance,
 )
+from ..utils.llm_utils import get_text_content
 
 
 # ==================== DSPy Signatures ====================
@@ -525,7 +526,7 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 ]
 
                 response = self.llm.invoke(messages)
-                plan_text = response.content.strip()
+                plan_text = get_text_content(response.content).strip()
 
                 # Parse JSON
                 # Remove markdown code blocks if present

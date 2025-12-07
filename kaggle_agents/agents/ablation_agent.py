@@ -21,6 +21,7 @@ from ..core.state import KaggleState
 from ..core.config import get_config
 from ..core.logger import get_logger
 from ..tools.code_executor import CodeExecutor
+from ..utils.llm_utils import get_text_content
 from ..utils.log_parser import TrainingFeedback, parse_training_logs
 from ..prompts.templates.developer_prompts import (
     ABLATION_STUDY_PROMPT,
@@ -304,8 +305,8 @@ class AblationStudyAgent:
         ]
         
         response = self.model.invoke(messages)
-        ablation_code = self._extract_code(response.content)
-        
+        ablation_code = self._extract_code(get_text_content(response.content))
+
         if not ablation_code:
             logger.warning("Failed to generate ablation code")
             return AblationSummary()
@@ -410,7 +411,7 @@ class AblationStudyAgent:
         
         # Parse JSON response
         try:
-            json_match = re.search(r"\[.*\]", response.content, re.DOTALL)
+            json_match = re.search(r"\[.*\]", get_text_content(response.content), re.DOTALL)
             if json_match:
                 plans = json.loads(json_match.group())
                 if plans and len(plans) > 0:
@@ -448,8 +449,8 @@ class AblationStudyAgent:
         ]
         
         response = self.model.invoke(messages)
-        improved_block = self._extract_code(response.content)
-        
+        improved_block = self._extract_code(get_text_content(response.content))
+
         if not improved_block:
             logger.warning("Failed to generate improved code block")
             return state.current_code, None
@@ -514,7 +515,7 @@ class AblationStudyAgent:
         # Create refined plan
         refined_plan = ImprovementPlan(
             code_block=current_plan.code_block,
-            plan=response.content.strip(),
+            plan=get_text_content(response.content).strip(),
             expected_impact=current_plan.expected_impact * 0.9,  # Slightly lower expectations
             risk_level=current_plan.risk_level,
         )

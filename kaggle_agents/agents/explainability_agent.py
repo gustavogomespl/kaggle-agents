@@ -13,6 +13,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.config import get_config, get_llm
 from ..core.state import KaggleState
+from ..utils.llm_utils import get_text_content
 
 
 class ExplainabilityAgent:
@@ -119,7 +120,7 @@ class ExplainabilityAgent:
         ]
 
         response = self.llm.invoke(messages)
-        return response.content
+        return get_text_content(response.content)
 
     def _save_report(self, working_dir: str, report: str):
         """Save the report to a markdown file."""
