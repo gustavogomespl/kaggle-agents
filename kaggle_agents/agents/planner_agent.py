@@ -224,8 +224,16 @@ class PlannerAgent:
 
             # Parse JSON from response
             try:
-                analysis = json.loads(response.content)
-            except json.JSONDecodeError:
+                content = get_text_content(response.content)
+                # Strip optional markdown fences
+                if isinstance(content, str):
+                    content = content.strip()
+                    if "```json" in content:
+                        content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+                    elif content.startswith("```") and content.endswith("```"):
+                        content = content.strip("` \n")
+                analysis = json.loads(content)
+            except Exception:
                 # Fallback to empty analysis
                 analysis = {
                     "common_models": [],
