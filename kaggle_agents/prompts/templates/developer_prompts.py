@@ -91,7 +91,7 @@ def build_context(state: dict[str, Any]) -> DynamicContext:
     Returns:
         DynamicContext with extracted information
     """
-    from ..utils.log_parser import parse_training_logs, format_feedback_for_llm
+    from ...utils.log_parser import parse_training_logs, format_feedback_for_llm
 
     context = DynamicContext()
     context.iteration_num = state.get("current_iteration", 0)
