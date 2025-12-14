@@ -6,6 +6,7 @@ best practices with environment variable support and validation.
 """
 
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
@@ -143,14 +144,29 @@ class PathConfig:
             Path: Best base directory for the environment
         """
         # Check if running in Google Colab
-        try:
-            import google.colab
+        # Note: We avoid importing google.colab directly as it can cause
+        # compatibility issues with IPython/coloransi versions
+        is_colab = (
+            os.path.exists("/content") and
+            os.getenv("COLAB_RELEASE_TAG") is not None
+        ) or (
+            # Fallback: check if google.colab is in sys.modules (already imported)
+            "google.colab" in sys.modules
+        ) or (
+            # Another fallback: check /content existence + typical Colab env vars
+            os.path.exists("/content") and
+            os.getenv("COLAB_GPU") is not None
+        ) or (
+            # Final fallback: just check /content directory exists
+            os.path.exists("/content") and
+            os.path.exists("/root/.config/Google")
+        )
+
+        if is_colab:
             # In Colab, use /content/kaggle_competitions
             colab_base = Path("/content/kaggle_competitions")
-            print(f"📍 Colab environment detected, using: {colab_base}")
+            print(f"Colab environment detected, using: {colab_base}")
             return colab_base
-        except ImportError:
-            pass
 
         # Check if in Kaggle Kernels
         if os.getenv("KAGGLE_KERNEL_RUN_TYPE"):
