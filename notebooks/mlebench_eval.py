@@ -1,0 +1,238 @@
+#!/usr/bin/env python3
+"""
+MLE-bench Evaluation Script for Kaggle Agents.
+
+This script provides a streamlined way to evaluate kaggle-agents
+on MLE-bench competitions using the new solve_mlebench() function.
+
+Usage:
+    python mlebench_eval.py --competition aerial-cactus-identification
+    python mlebench_eval.py --lite  # Run all 22 lite competitions
+"""
+
+import argparse
+import json
+import os
+from datetime import datetime
+from pathlib import Path
+
+# MLE-bench Lite competitions (22 total)
+MLEBENCH_LITE = [
+    # Image Classification
+    {"id": "aerial-cactus-identification", "type": "binary_classification", "metric": "auc", "size_gb": 0.025},
+    {"id": "aptos2019-blindness-detection", "type": "multiclass_classification", "metric": "quadratic_weighted_kappa", "size_gb": 10.22},
+    {"id": "dog-breed-identification", "type": "multiclass_classification", "metric": "log_loss", "size_gb": 0.75},
+    {"id": "dogs-vs-cats-redux-kernels-edition", "type": "binary_classification", "metric": "log_loss", "size_gb": 0.85},
+    {"id": "leaf-classification", "type": "multiclass_classification", "metric": "log_loss", "size_gb": 0.036},
+    {"id": "plant-pathology-2020-fgvc7", "type": "multiclass_classification", "metric": "auc", "size_gb": 0.8},
+    {"id": "ranzcr-clip-catheter-line-classification", "type": "multilabel_classification", "metric": "auc", "size_gb": 13.13},
+    {"id": "siim-isic-melanoma-classification", "type": "binary_classification", "metric": "auc", "size_gb": 116.16},
+
+    # Image To Image / Regression
+    {"id": "denoising-dirty-documents", "type": "regression", "metric": "rmse", "size_gb": 0.06},
+    {"id": "histopathologic-cancer-detection", "type": "binary_classification", "metric": "auc", "size_gb": 7.76},
+
+    # Text Classification
+    {"id": "detecting-insults-in-social-commentary", "type": "binary_classification", "metric": "auc", "size_gb": 0.002},
+    {"id": "jigsaw-toxic-comment-classification-challenge", "type": "multilabel_classification", "metric": "auc", "size_gb": 0.06},
+    {"id": "random-acts-of-pizza", "type": "binary_classification", "metric": "auc", "size_gb": 0.003},
+    {"id": "spooky-author-identification", "type": "multiclass_classification", "metric": "log_loss", "size_gb": 0.002},
+
+    # Tabular
+    {"id": "new-york-city-taxi-fare-prediction", "type": "regression", "metric": "rmse", "size_gb": 5.7},
+    {"id": "nomad2018-predict-transparent-conductors", "type": "regression", "metric": "rmsle", "size_gb": 0.006},
+    {"id": "tabular-playground-series-dec-2021", "type": "regression", "metric": "rmse", "size_gb": 0.7},
+    {"id": "tabular-playground-series-may-2022", "type": "regression", "metric": "rmse", "size_gb": 0.57},
+
+    # Audio
+    {"id": "mlsp-2013-birds", "type": "multilabel_classification", "metric": "auc", "size_gb": 0.585},
+    {"id": "the-icml-2013-whale-challenge-right-whale-redux", "type": "binary_classification", "metric": "auc", "size_gb": 0.29},
+
+    # Seq->Seq
+    {"id": "text-normalization-challenge-english-language", "type": "seq2seq", "metric": "accuracy", "size_gb": 0.01},
+    {"id": "text-normalization-challenge-russian-language", "type": "seq2seq", "metric": "accuracy", "size_gb": 0.01},
+]
+
+
+def get_competition_info(competition_id: str) -> dict:
+    """Get competition info from MLEBENCH_LITE list."""
+    for comp in MLEBENCH_LITE:
+        if comp["id"] == competition_id:
+            return comp
+    return {"id": competition_id, "type": "unknown", "metric": "unknown", "size_gb": 0}
+
+
+def run_evaluation(
+    competition_ids: list[str],
+    output_dir: str = "./mlebench_results",
+    max_iterations: int = 3,
+    timeout_per_component: int = 3000,
+):
+    """
+    Run kaggle-agents evaluation on MLE-bench competitions.
+
+    Args:
+        competition_ids: List of competition IDs to evaluate
+        output_dir: Directory to save results
+        max_iterations: Maximum workflow iterations
+        timeout_per_component: Timeout per component in seconds
+    """
+    from kaggle_agents.mlebench import solve_mlebench
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    all_results = []
+    start_time = datetime.now()
+
+    print("=" * 70)
+    print("MLE-BENCH EVALUATION")
+    print("=" * 70)
+    print(f"Competitions: {len(competition_ids)}")
+    print(f"Max iterations: {max_iterations}")
+    print(f"Timeout per component: {timeout_per_component}s")
+    print("=" * 70)
+
+    for idx, comp_id in enumerate(competition_ids, 1):
+        print(f"\n{'#' * 70}")
+        print(f"# [{idx}/{len(competition_ids)}] {comp_id}")
+        print(f"{'#' * 70}")
+
+        comp_info = get_competition_info(comp_id)
+
+        try:
+            result = solve_mlebench(
+                competition_id=comp_id,
+                problem_type=comp_info["type"],
+                evaluation_metric=comp_info["metric"],
+                max_iterations=max_iterations,
+                timeout_per_component=timeout_per_component,
+                enable_checkpoint_recovery=True,
+            )
+
+            result_dict = {
+                "competition_id": comp_id,
+                "success": result.success,
+                "valid_submission": result.valid_submission,
+                "score": result.score,
+                "gold_medal": result.gold_medal,
+                "silver_medal": result.silver_medal,
+                "bronze_medal": result.bronze_medal,
+                "above_median": result.above_median,
+                "execution_time": result.execution_time,
+                "iterations": result.iterations,
+                "components_implemented": result.components_implemented,
+                "error": result.error,
+            }
+
+        except Exception as e:
+            import traceback
+            result_dict = {
+                "competition_id": comp_id,
+                "success": False,
+                "error": str(e),
+                "traceback": traceback.format_exc(),
+            }
+
+        all_results.append(result_dict)
+
+        # Save intermediate results
+        with open(output_path / "results.json", "w") as f:
+            json.dump(all_results, f, indent=2, default=str)
+
+    # Final summary
+    total_time = (datetime.now() - start_time).total_seconds()
+
+    summary = {
+        "total_competitions": len(competition_ids),
+        "successful": sum(1 for r in all_results if r.get("success")),
+        "valid_submissions": sum(1 for r in all_results if r.get("valid_submission")),
+        "gold_medals": sum(1 for r in all_results if r.get("gold_medal")),
+        "silver_medals": sum(1 for r in all_results if r.get("silver_medal")),
+        "bronze_medals": sum(1 for r in all_results if r.get("bronze_medal")),
+        "above_median": sum(1 for r in all_results if r.get("above_median")),
+        "total_time_seconds": total_time,
+    }
+
+    # Save summary
+    with open(output_path / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
+
+    # Print summary
+    print("\n" + "=" * 70)
+    print("EVALUATION COMPLETE")
+    print("=" * 70)
+    print(f"Total competitions: {summary['total_competitions']}")
+    print(f"Successful: {summary['successful']}")
+    print(f"Valid submissions: {summary['valid_submissions']}")
+    print(f"Gold medals: {summary['gold_medals']}")
+    print(f"Silver medals: {summary['silver_medals']}")
+    print(f"Bronze medals: {summary['bronze_medals']}")
+    print(f"Above median: {summary['above_median']}")
+    print(f"Total time: {total_time / 60:.1f} minutes")
+    print(f"\nResults saved to: {output_path}")
+
+    return all_results, summary
+
+
+def main():
+    parser = argparse.ArgumentParser(description="MLE-bench Evaluation for Kaggle Agents")
+    parser.add_argument(
+        "-c", "--competition",
+        type=str,
+        help="Single competition ID to evaluate"
+    )
+    parser.add_argument(
+        "--lite",
+        action="store_true",
+        help="Run all 22 MLE-bench Lite competitions"
+    )
+    parser.add_argument(
+        "--small",
+        action="store_true",
+        help="Run only small competitions (<1GB)"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        type=str,
+        default="./mlebench_results",
+        help="Output directory for results"
+    )
+    parser.add_argument(
+        "--max-iterations",
+        type=int,
+        default=3,
+        help="Maximum workflow iterations"
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=3000,
+        help="Timeout per component in seconds"
+    )
+
+    args = parser.parse_args()
+
+    # Determine competitions to run
+    if args.competition:
+        competition_ids = [args.competition]
+    elif args.lite:
+        competition_ids = [c["id"] for c in MLEBENCH_LITE]
+    elif args.small:
+        competition_ids = [c["id"] for c in MLEBENCH_LITE if c["size_gb"] < 1.0]
+    else:
+        # Default: run smallest competition as test
+        competition_ids = ["aerial-cactus-identification"]
+        print("No competition specified. Running default: aerial-cactus-identification")
+        print("Use --lite for all 22 competitions, --small for <1GB competitions")
+
+    run_evaluation(
+        competition_ids=competition_ids,
+        output_dir=args.output,
+        max_iterations=args.max_iterations,
+        timeout_per_component=args.timeout,
+    )
+
+
+if __name__ == "__main__":
+    main()

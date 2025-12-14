@@ -635,6 +635,71 @@ def run_workflow(
     return final_state
 
 
+# ==================== MLE-bench Workflow ====================
+
+def create_mlebench_workflow() -> StateGraph:
+    """
+    Create a workflow for MLE-bench evaluation.
+
+    This workflow skips data_download_node since MLE-bench data
+    is already prepared and loaded into the state.
+
+    The flow is:
+        domain_detection → search → planner → developer (loop) →
+        robustness → ensemble → submission → reporting
+
+    Returns:
+        Compiled StateGraph
+    """
+    workflow = StateGraph(KaggleState)
+
+    # Add nodes (skip data_download)
+    workflow.add_node("domain_detection", domain_detection_node)
+    workflow.add_node("search", search_agent_node)
+    workflow.add_node("planner", planner_agent_node)
+    workflow.add_node("developer", developer_agent_node)
+    workflow.add_node("robustness", robustness_agent_node)
+    workflow.add_node("ensemble", ensemble_agent_node)
+    workflow.add_node("submission", submission_agent_node)
+    workflow.add_node("reporting", reporting_agent_node)
+
+    # Entry point: domain_detection (data already loaded)
+    workflow.set_entry_point("domain_detection")
+
+    # Domain Detection → Search
+    workflow.add_edge("domain_detection", "search")
+
+    # Search → Planner
+    workflow.add_edge("search", "planner")
+
+    # Planner → Developer
+    workflow.add_edge("planner", "developer")
+
+    # Developer → Conditional (more components or done?)
+    workflow.add_conditional_edges(
+        "developer",
+        route_after_developer,
+        {
+            "iterate": "developer",      # More components to implement
+            "end": "robustness",          # All components done → validate
+        }
+    )
+
+    # Robustness → Ensemble
+    workflow.add_edge("robustness", "ensemble")
+
+    # Ensemble → Submission
+    workflow.add_edge("ensemble", "submission")
+
+    # Submission → Reporting (no iteration for MLE-bench, single pass)
+    workflow.add_edge("submission", "reporting")
+
+    # Reporting → END
+    workflow.add_edge("reporting", END)
+
+    return workflow.compile()
+
+
 # ==================== Simplified Workflow (for testing) ====================
 
 def create_simple_workflow() -> StateGraph:
