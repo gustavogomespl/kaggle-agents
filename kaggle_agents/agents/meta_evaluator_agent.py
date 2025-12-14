@@ -20,6 +20,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ..core.config import calculate_score_improvement, get_config, get_llm_for_role
 from ..core.state import IterationMemory, KaggleState
 from ..optimization import create_training_collector
+from ..prompts.templates.developer_prompts import format_component_details
+from ..prompts.templates.planner_prompts import get_domain_guidance
 from ..utils.llm_utils import get_text_content
 
 
@@ -558,10 +560,43 @@ Focus on actionable, specific improvements based on error patterns and performan
 
         ablation_plan = state.get("ablation_plan", [])
         dev_results = state.get("development_results", [])
-        competition_info = state.get("competition_info")
 
         if not ablation_plan or not dev_results:
             return
+
+        competition_info = state.get("competition_info")
+        domain = state.get("domain_detected", "tabular")
+        working_dir = state.get("working_directory", "")
+
+        # Build planner inputs matching AblationPlannerSignature
+        comp_info_str = ""
+        if competition_info:
+            comp_info_str = (
+                f"Name: {competition_info.name}\n"
+                f"Description: {getattr(competition_info, 'description', '')}\n"
+                f"Problem Type: {getattr(competition_info, 'problem_type', '')}\n"
+                f"Metric: {getattr(competition_info, 'evaluation_metric', '')}\n"
+                f"Domain: {domain}\n"
+            )
+
+        sota_solutions = state.get("sota_solutions", [])
+        if sota_solutions:
+            sota_lines = []
+            for sol in sota_solutions[:5]:
+                title = getattr(sol, "title", "Unknown")
+                score = getattr(sol, "score", 0.0)
+                votes = getattr(sol, "votes", 0)
+                models = getattr(sol, "models_used", []) or []
+                strategies = getattr(sol, "strategies", []) or []
+                sota_lines.append(
+                    f"- {title} (score={score}, votes={votes}) "
+                    f"models={models[:3]} strategies={strategies[:3]}"
+                )
+            sota_summary = "\n".join(sota_lines)
+        else:
+            sota_summary = "No SOTA solutions available."
+
+        domain_guidance = get_domain_guidance(str(domain))
 
         # Collect planner example
         plan_quality_score = reward_signals["r_combined"]
@@ -569,20 +604,27 @@ Focus on actionable, specific improvements based on error patterns and performan
         self.training_collector.add_example(
             agent_name="planner",
             inputs={
-                "competition_name": competition_info.name if competition_info else "unknown",
-                "domain": state.get("domain_detected", "tabular"),
-                "problem_type": competition_info.problem_type if competition_info else "unknown",
+                "competition_info": comp_info_str,
+                "domain": str(domain),
+                "sota_summary": sota_summary,
+                "domain_guidance": domain_guidance,
             },
             outputs={
-                "ablation_plan": [
-                    {
-                        "name": c.name,
-                        "type": c.component_type,
-                        "code_outline": c.code,
-                        "estimated_impact": c.estimated_impact,
-                    }
-                    for c in ablation_plan
-                ]
+                "ablation_plan": json.dumps(
+                    [
+                        {
+                            "name": c.name,
+                            "component_type": c.component_type,
+                            "description": c.code,
+                            "estimated_impact": c.estimated_impact,
+                            "rationale": "",
+                            "code_outline": "",
+                        }
+                        for c in ablation_plan
+                    ],
+                    indent=2,
+                ),
+                "analysis": "",
             },
             score=plan_quality_score,
         )
@@ -598,12 +640,28 @@ Focus on actionable, specific improvements based on error patterns and performan
             self.training_collector.add_example(
                 agent_name="developer_generator",
                 inputs={
-                    "component_type": component.component_type,
-                    "component_name": component.name,
-                    "code_outline": component.code,  # Use code outline as description
+                    "component_details": format_component_details(component),
+                    "competition_context": (
+                        f"Name: {competition_info.name if competition_info else 'unknown'}\n"
+                        f"Domain: {domain}\n"
+                        f"Problem Type: {competition_info.problem_type if competition_info else 'unknown'}\n"
+                        f"Metric: {competition_info.evaluation_metric if competition_info else 'unknown'}\n"
+                    ),
+                    "data_paths": (
+                        f"Train: {state.get('current_train_path') or state.get('train_data_path', '')}\n"
+                        f"Test: {state.get('current_test_path') or state.get('test_data_path', '')}\n"
+                        f"Models: {working_dir}/models\n"
+                        f"Sample Submission: {state.get('sample_submission_path', '')}\n"
+                    ),
+                    "requirements": (
+                        f"Implement {component.component_type}: {component.name}\n"
+                        f"Time budget: {state.get('component_timeout', state.get('testing_timeout', 'unknown'))}\n"
+                        "Return a complete, executable script and write a valid submission CSV."
+                    ),
                 },
                 outputs={
                     "code": result.code,
+                    "explanation": "",
                 },
                 score=component_score,
             )

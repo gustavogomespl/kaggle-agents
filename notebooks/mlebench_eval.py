@@ -13,6 +13,7 @@ Usage:
 import argparse
 import json
 import os
+import csv
 from datetime import datetime
 from pathlib import Path
 
@@ -118,6 +119,7 @@ def run_evaluation(
                 "gold_medal": result.gold_medal,
                 "silver_medal": result.silver_medal,
                 "bronze_medal": result.bronze_medal,
+                "any_medal": bool(result.gold_medal or result.silver_medal or result.bronze_medal),
                 "above_median": result.above_median,
                 "execution_time": result.execution_time,
                 "iterations": result.iterations,
@@ -150,13 +152,25 @@ def run_evaluation(
         "gold_medals": sum(1 for r in all_results if r.get("gold_medal")),
         "silver_medals": sum(1 for r in all_results if r.get("silver_medal")),
         "bronze_medals": sum(1 for r in all_results if r.get("bronze_medal")),
+        "any_medals": sum(1 for r in all_results if r.get("any_medal")),
         "above_median": sum(1 for r in all_results if r.get("above_median")),
         "total_time_seconds": total_time,
     }
+    total = summary["total_competitions"] or 1
+    summary["valid_submission_percentage"] = summary["valid_submissions"] / total
+    summary["any_medal_percentage"] = summary["any_medals"] / total
 
     # Save summary
     with open(output_path / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
+
+    # Save CSV for easy reporting
+    csv_path = output_path / "results.csv"
+    fieldnames = sorted({k for row in all_results for k in row.keys()})
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(all_results)
 
     # Print summary
     print("\n" + "=" * 70)
@@ -168,9 +182,11 @@ def run_evaluation(
     print(f"Gold medals: {summary['gold_medals']}")
     print(f"Silver medals: {summary['silver_medals']}")
     print(f"Bronze medals: {summary['bronze_medals']}")
+    print(f"Any medal: {summary['any_medals']} ({summary['any_medal_percentage']:.1%})")
     print(f"Above median: {summary['above_median']}")
     print(f"Total time: {total_time / 60:.1f} minutes")
     print(f"\nResults saved to: {output_path}")
+    print(f"CSV saved to: {csv_path}")
 
     return all_results, summary
 

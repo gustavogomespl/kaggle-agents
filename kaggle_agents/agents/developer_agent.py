@@ -22,6 +22,7 @@ from ..core.config import (
     is_metric_minimization,
 )
 from ..core.state import AblationComponent, DevelopmentResult, KaggleState
+from ..core.state import CodeAttempt
 from ..optimization import create_optimizer
 from ..prompts.templates.developer_prompts import (
     DEBUG_CODE_PROMPT,
@@ -207,7 +208,7 @@ class DeveloperAgent:
                 f"Component timeout set to: {desired_timeout}s ({desired_timeout / 60:.1f} min)"
             )
 
-        result = self._implement_component(component, state)
+        result, attempt_records = self._implement_component(component, state)
 
         should_keep_component = True
         new_cv_score = 0.0
@@ -236,6 +237,7 @@ class DeveloperAgent:
                     "current_component_index": current_index + 1,
                     "component_rollback": component.name,
                     "rollback_reason": "No CV improvement detected (Ablation Study)",
+                    "code_attempts": attempt_records,
                 }
 
         should_advance = result.success or (
@@ -249,6 +251,7 @@ class DeveloperAgent:
             if should_advance
             else current_index,
             "last_updated": datetime.now(),
+            "code_attempts": attempt_records,
         }
 
         if result.success and component.component_type == "model":
@@ -435,7 +438,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         self,
         component: AblationComponent,
         state: KaggleState,
-    ) -> DevelopmentResult:
+    ) -> tuple[DevelopmentResult, list[CodeAttempt]]:
         """
         Implement a single component with retry and debug.
 
@@ -444,11 +447,12 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             state: Current state
 
         Returns:
-            DevelopmentResult
+            (DevelopmentResult, attempt_records)
         """
         competition_info = state["competition_info"]
         working_dir = Path(state["working_directory"])
         domain = state.get("domain_detected", "tabular")
+        attempt_records: list[CodeAttempt] = []
 
         # Prefer paths discovered during data download/previous steps
         train_path = Path(
@@ -493,15 +497,26 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 execution_time=0.0,
                 artifacts_created=[],
                 errors=[error_msg],
-            )
+            ), attempt_records
 
         skip_result = self._should_skip_component(component, state)
         if skip_result is not None:
-            return skip_result
+            return skip_result, attempt_records
 
         print("\nGenerating code...")
         code = self._generate_code(
             component, competition_info, working_dir, domain, state
+        )
+        attempt_records.append(
+            CodeAttempt(
+                component_name=component.name,
+                component_type=component.component_type,
+                stage="generate",
+                attempt=0,
+                success=False,
+                code_excerpt="\n".join(code.splitlines()[:140]),
+                run_fidelity="full",
+            )
         )
 
         if (
@@ -537,6 +552,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         print("\nExecuting code...")
         max_retries = 3
+        meta_feedback: str | None = None
         for attempt in range(max_retries):
             print(f"\nAttempt {attempt + 1}/{max_retries}")
 
@@ -548,6 +564,23 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             if exec_result.success:
                 print(f"Execution successful ({exec_result.execution_time:.2f}s)")
 
+                attempt_records.append(
+                    CodeAttempt(
+                        component_name=component.name,
+                        component_type=component.component_type,
+                        stage="generate" if attempt == 0 else "fix",
+                        attempt=attempt + 1,
+                        success=True,
+                        cv_score=self._extract_cv_score(exec_result.stdout),
+                        code_excerpt="\n".join(code.splitlines()[:140]),
+                        stdout_tail=(exec_result.stdout or "")[-2000:],
+                        stderr_tail=(exec_result.stderr or "")[-2000:],
+                        execution_time=exec_result.execution_time,
+                        run_fidelity="full",
+                        meta_feedback=meta_feedback,
+                    )
+                )
+
                 return DevelopmentResult(
                     code=code,
                     success=True,
@@ -556,7 +589,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     execution_time=exec_result.execution_time,
                     artifacts_created=exec_result.artifacts_created,
                     errors=[],
-                )
+                ), attempt_records
 
             print(
                 f"Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}"
@@ -567,18 +600,36 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 error_msg = (
                     exec_result.errors[0] if exec_result.errors else exec_result.stderr
                 )
-                feedback = self._get_meta_feedback(code, error_msg, component.name)
-                print(f"Meta-Feedback:\n{feedback}\n")
+                meta_feedback = self._get_meta_feedback(code, error_msg, component.name)
+                print(f"Meta-Feedback:\n{meta_feedback}\n")
+
+            error_msg = (
+                exec_result.errors[0] if exec_result.errors else exec_result.stderr
+            )
+            attempt_records.append(
+                CodeAttempt(
+                    component_name=component.name,
+                    component_type=component.component_type,
+                    stage="generate" if attempt == 0 else "fix",
+                    attempt=attempt + 1,
+                    success=False,
+                    cv_score=self._extract_cv_score(exec_result.stdout),
+                    error=error_msg[:800] if error_msg else None,
+                    meta_feedback=meta_feedback,
+                    code_excerpt="\n".join(code.splitlines()[:140]),
+                    stdout_tail=(exec_result.stdout or "")[-2000:],
+                    stderr_tail=(exec_result.stderr or "")[-2000:],
+                    execution_time=exec_result.execution_time,
+                    run_fidelity="full",
+                )
+            )
 
             if attempt < max_retries - 1:
-                error_msg = (
-                    exec_result.errors[0] if exec_result.errors else exec_result.stderr
-                )
                 if error_msg:
                     snippet = error_msg.replace("\n", " ")[:400]
                     print(f"Passing error context to fixer: {snippet}")
                 print("Attempting to fix...")
-                code = self._fix_code_error(code, error_msg)
+                code = self._fix_code_error(code, error_msg, meta_feedback=meta_feedback)
 
         # If all retries failed, try debug iterations
         print("\nEntering debug mode...")
@@ -589,7 +640,27 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             snippet = debug_error_msg.replace("\n", " ")[:400]
             print(f"Last error passed to debugger: {snippet}")
         code, exec_result, debug_success = self._debug_code(
-            code, exec_result, working_dir, max_iterations=5
+            code, exec_result, working_dir, max_iterations=5, meta_feedback=meta_feedback
+        )
+
+        attempt_records.append(
+            CodeAttempt(
+                component_name=component.name,
+                component_type=component.component_type,
+                stage="debug",
+                attempt=max_retries + 1,
+                success=bool(debug_success and exec_result.success),
+                cv_score=self._extract_cv_score(exec_result.stdout),
+                error=(exec_result.errors[0] if exec_result.errors else exec_result.stderr)[:800]
+                if (exec_result.errors or exec_result.stderr)
+                else None,
+                meta_feedback=meta_feedback,
+                code_excerpt="\n".join(code.splitlines()[:140]),
+                stdout_tail=(exec_result.stdout or "")[-2000:],
+                stderr_tail=(exec_result.stderr or "")[-2000:],
+                execution_time=exec_result.execution_time,
+                run_fidelity="debug",
+            )
         )
 
         return DevelopmentResult(
@@ -600,7 +671,8 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             execution_time=exec_result.execution_time,
             artifacts_created=exec_result.artifacts_created,
             errors=exec_result.errors,
-        )
+            run_fidelity="debug",
+        ), attempt_records
 
     def _extract_cv_score(self, stdout: str) -> float | None:
         """
@@ -1454,7 +1526,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             """
 
         # Build dynamic context from state (SOTA, feedback, rewards)
-        context = build_context(state) if state else build_context({})
+        context = build_context(state, component=component) if state else build_context({})
 
         # Prepare paths dictionary
         paths = {
@@ -1465,11 +1537,29 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         }
 
         if self.use_dspy:
+            requirements_with_context = requirements
+            if context.iteration_num == 0 and context.sota_patterns:
+                requirements_with_context += (
+                    "\n\n## SOTA Patterns (reference)\n" + context.sota_patterns[:1200]
+                )
+            if context.previous_feedback:
+                requirements_with_context += (
+                    "\n\n## Previous Training Feedback\n" + context.previous_feedback[:1200]
+                )
+            if context.attempt_feedback:
+                requirements_with_context += (
+                    "\n\n## Prior Attempts (Study + Fix)\n" + context.attempt_feedback[:1600]
+                )
+            if context.reward_guidance:
+                requirements_with_context += (
+                    "\n\n## Meta-Evaluator Guidance\n" + context.reward_guidance[:800]
+                )
+
             result = self.generator_module(
                 component_details=component_details,
                 competition_context=competition_context,
                 data_paths=data_paths,
-                requirements=requirements,
+                requirements=requirements_with_context,
             )
             code = self._extract_code_from_response(result.code)
         else:
@@ -1540,22 +1630,32 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         except Exception as e:
             return f"Meta-feedback unavailable: {e!s}"
 
-    def _fix_code_error(self, code: str, error: str) -> str:
+    def _fix_code_error(
+        self,
+        code: str,
+        error: str,
+        *,
+        meta_feedback: str | None = None,
+    ) -> str:
         """Fix code based on error."""
         error_info = format_error_info(error)
+        error_text = error_info["error"]
+        if meta_feedback:
+            error_text = f"{error_text}\n\nMeta-Feedback:\n{meta_feedback}"
 
         if self.use_dspy:
             result = self.fixer_module(
                 code=code,
-                error=error_info["error"],
+                error=error_text,
                 error_type=error_info["error_type"],
             )
             fixed_code = self._extract_code_from_response(result.fixed_code)
         else:
             prompt = FIX_CODE_PROMPT.format(
                 code=code,
-                error=error_info["error"],
+                error=error_text,
                 error_type=error_info["error_type"],
+                meta_feedback=meta_feedback or "",
             )
 
             # Use DEVELOPER_CORE_IDENTITY + HARD_CONSTRAINTS as system context
@@ -1576,6 +1676,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         exec_result: ExecutionResult,
         working_dir: Path,
         max_iterations: int = 10,
+        meta_feedback: str | None = None,
     ) -> tuple[str, ExecutionResult, bool]:
         """Debug code iteratively with loop-safety and configurable timeouts."""
         original_timeout = getattr(self.executor, "timeout", None)
@@ -1597,6 +1698,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 issue=issue,
                 stdout=exec_result.stdout[-2000:] if exec_result.stdout else "",
                 stderr=exec_result.stderr[-2000:] if exec_result.stderr else "",
+                meta_feedback=meta_feedback or "",
             )
 
             # Use DEVELOPER_CORE_IDENTITY + HARD_CONSTRAINTS as system context

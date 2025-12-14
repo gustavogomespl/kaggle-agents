@@ -5,6 +5,8 @@ Refactored to be agentic, feedback-driven, and RL-friendly.
 Inspired by Claude Code's concise style.
 """
 
+import os
+import random
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -44,7 +46,10 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 - pd.concat() instead of .append() for pandas 2.0+
 - Optuna: set_verbosity(WARNING), n_trials <= 5, timeout=60 for validation
 - LightGBM callbacks: lgb.early_stopping(100), not early_stopping_rounds param
-- XGBoost callbacks: xgb.callback.EarlyStopping(rounds=100)"""
+- XGBoost callbacks: xgb.callback.EarlyStopping(rounds=100)
+
+## PyTorch Gotchas:
+- Dataset __getitem__ must return tensors/arrays (never None) so DataLoader can collate"""
 
 
 # ==================== Logging Format ====================
@@ -67,6 +72,7 @@ class DynamicContext:
 
     sota_patterns: str = ""
     previous_feedback: str = ""
+    attempt_feedback: str = ""
     reward_guidance: str = ""
     iteration_num: int = 0
     what_worked: list[str] = field(default_factory=list)
@@ -75,7 +81,7 @@ class DynamicContext:
     target_score: Optional[float] = None
 
 
-def build_context(state: dict[str, Any]) -> DynamicContext:
+def build_context(state: dict[str, Any], component: Any | None = None) -> DynamicContext:
     """
     Build dynamic context from KaggleState for prompt injection.
 
@@ -87,6 +93,7 @@ def build_context(state: dict[str, Any]) -> DynamicContext:
 
     Args:
         state: KaggleState dictionary
+        component: Optional component being implemented (for filtering attempt history)
 
     Returns:
         DynamicContext with extracted information
@@ -142,6 +149,51 @@ def build_context(state: dict[str, Any]) -> DynamicContext:
         if hasattr(latest, "what_failed"):
             context.what_failed = latest.what_failed or []
 
+    # Poetiq-style feedback injection: include selected prior attempts + feedback
+    attempts = state.get("code_attempts", [])
+    if attempts:
+        component_name = getattr(component, "name", None) if component is not None else None
+
+        def _get_field(a: Any, key: str) -> Any:
+            if isinstance(a, dict):
+                return a.get(key)
+            return getattr(a, key, None)
+
+        relevant = (
+            [a for a in attempts if _get_field(a, "component_name") == component_name]
+            if component_name
+            else list(attempts)
+        )
+
+        # Selection controls (defaults tuned for token safety)
+        try:
+            selection_probability = float(os.getenv("ATTEMPT_SELECTION_PROB", "1.0"))
+        except ValueError:
+            selection_probability = 1.0
+
+        try:
+            max_attempts = int(os.getenv("ATTEMPT_CONTEXT_MAX", "3"))
+        except ValueError:
+            max_attempts = 3
+
+        selection_probability = max(0.0, min(selection_probability, 1.0))
+        max_attempts = max(0, min(max_attempts, 5))
+
+        rng = random.Random(42)
+        selected = [a for a in relevant if rng.random() < selection_probability]
+
+        def _attempt_score(a: Any) -> float:
+            cv = _get_field(a, "cv_score")
+            if isinstance(cv, (int, float)):
+                return float(cv)
+            return 1.0 if bool(_get_field(a, "success")) else 0.0
+
+        selected.sort(key=_attempt_score, reverse=True)
+        selected = selected[:max_attempts]
+
+        if selected:
+            context.attempt_feedback = _format_attempts_for_prompt(selected)
+
     return context
 
 
@@ -169,6 +221,46 @@ def _format_sota_for_prompt(solutions: list, max_solutions: int = 3) -> str:
         lines.append("")
 
     return "\n".join(lines)
+
+def _format_attempts_for_prompt(attempts: list[Any]) -> str:
+    """Format prior attempts (code + feedback) into prompt-friendly text."""
+
+    def _get_field(a: Any, key: str) -> Any:
+        if isinstance(a, dict):
+            return a.get(key)
+        return getattr(a, key, None)
+
+    blocks: list[str] = []
+    for idx, attempt in enumerate(attempts, start=1):
+        stage = _get_field(attempt, "stage") or "unknown"
+        attempt_num = _get_field(attempt, "attempt")
+        success = bool(_get_field(attempt, "success"))
+        cv_score = _get_field(attempt, "cv_score")
+        error = _get_field(attempt, "error")
+        meta_feedback = _get_field(attempt, "meta_feedback")
+        code_excerpt = (_get_field(attempt, "code_excerpt") or "").strip()
+        stdout_tail = (_get_field(attempt, "stdout_tail") or "").strip()
+
+        header = f"<attempt_{idx}> stage={stage} attempt={attempt_num} success={success}"
+        if isinstance(cv_score, (int, float)):
+            header += f" cv_score={float(cv_score):.6f}"
+
+        parts = [header]
+        if error:
+            parts.append(f"error: {str(error)[:400]}")
+        if meta_feedback:
+            parts.append("meta_feedback:")
+            parts.append(str(meta_feedback)[:700])
+        if stdout_tail:
+            parts.append("stdout_tail:")
+            parts.append(str(stdout_tail)[:700])
+        if code_excerpt:
+            parts.append("code_excerpt:")
+            parts.append(f"```python\n{code_excerpt[:1600]}\n```")
+        parts.append(f"</attempt_{idx}>")
+        blocks.append("\n".join(parts))
+
+    return "\n\n".join(blocks)
 
 
 # ==================== Prompt Composition ====================
@@ -218,6 +310,11 @@ def compose_generate_prompt(
             parts.append("")
             parts.append("## Previous Attempt Feedback:")
             parts.append(context.previous_feedback)
+
+        if context.attempt_feedback:
+            parts.append("")
+            parts.append("## Prior Attempts (Study + Fix):")
+            parts.append(context.attempt_feedback)
 
         if context.what_worked:
             parts.append("")
@@ -330,6 +427,9 @@ FIX_CODE_PROMPT = """Fix this code error.
 ## Error Type
 {error_type}
 
+## Meta-Feedback (use this to fix root cause)
+{meta_feedback}
+
 Fix the issue while preserving the component's intent. Return complete fixed code."""
 
 
@@ -348,6 +448,9 @@ DEBUG_CODE_PROMPT = """Debug this code that failed.
 
 ## Stderr
 {stderr}
+
+## Meta-Feedback (if available)
+{meta_feedback}
 
 Analyze the output, fix logic errors or missing imports, and return the complete debugged code."""
 

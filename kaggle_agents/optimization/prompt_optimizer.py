@@ -303,12 +303,31 @@ class TrainingDataCollector:
         """
         examples = self.get_examples(agent_name, min_score)
 
+        required_inputs: dict[str, set[str]] = {
+            "planner": {"competition_info", "domain", "sota_summary", "domain_guidance"},
+            "developer_generator": {
+                "component_details",
+                "competition_context",
+                "data_paths",
+                "requirements",
+            },
+            "developer_fixer": {"code", "error", "error_type"},
+        }
+        required = required_inputs.get(agent_name, set())
+
         dspy_examples = []
         for ex in examples:
+            inputs = ex.get("inputs", {})
+            outputs = ex.get("outputs", {})
+
+            if required and not required.issubset(set(inputs.keys())):
+                # Skip legacy/malformed examples to keep optimization stable.
+                continue
+
             dspy_ex = dspy.Example(
-                **ex["inputs"],
-                **ex["outputs"],
-            ).with_inputs(*ex["inputs"].keys())
+                **inputs,
+                **outputs,
+            ).with_inputs(*inputs.keys())
 
             dspy_examples.append(dspy_ex)
 

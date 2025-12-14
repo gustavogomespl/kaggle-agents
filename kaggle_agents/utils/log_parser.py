@@ -204,6 +204,46 @@ def parse_training_logs(stdout: str) -> TrainingFeedback:
     for line in stdout.splitlines():
         line = line.strip()
 
+        # Fallback (unstructured) fold metrics from common training scripts
+        # Example: "Fold 3 Validation Accuracy: 0.988571"
+        if not line.startswith("[LOG:"):
+            match = re.search(
+                r"\bFold\s*(\d+)\s+Validation\s+(?:AUC|AUROC|Accuracy|F1|RMSE|MAE|LogLoss|Log_Loss)\s*:\s*([\d.]+)",
+                line,
+                re.IGNORECASE,
+            )
+            if match:
+                try:
+                    score = float(match.group(2))
+                    feedback.fold_scores.append(score)
+                except ValueError:
+                    pass
+
+            # Example: "Best val acc for fold 0: 0.9983"
+            match = re.search(
+                r"\bBest\s+val\s+(?:auc|acc|accuracy|f1|rmse|mae|logloss|log_loss)\s+for\s+fold\s*(\d+)\s*:\s*([\d.]+)",
+                line,
+                re.IGNORECASE,
+            )
+            if match:
+                try:
+                    score = float(match.group(2))
+                    feedback.fold_scores.append(score)
+                except ValueError:
+                    pass
+
+            # Example: "🎯 Final Validation Performance: 0.988514"
+            match = re.search(
+                r"Final\s+Validation\s+Performance\s*:\s*([\d.]+)",
+                line,
+                re.IGNORECASE,
+            )
+            if match and not feedback.cv_mean:
+                try:
+                    feedback.cv_mean = float(match.group(1))
+                except ValueError:
+                    pass
+
         # Parse [LOG:FOLD]
         if "[LOG:FOLD]" in line:
             match = re.search(
@@ -425,4 +465,3 @@ def format_feedback_for_llm(feedback: TrainingFeedback) -> str:
         sections.append("")
 
     return "\n".join(sections)
-

@@ -516,7 +516,43 @@ class CodeExecutor:
                 if elapsed >= self.timeout:
                     process.kill()
                     process.wait()
-                    raise subprocess.TimeoutExpired(process.args, self.timeout)
+                    # Drain remaining output after kill
+                    time.sleep(0.1)
+                    while not stdout_queue.empty():
+                        try:
+                            _, line = stdout_queue.get_nowait()
+                            stdout_lines.append(line)
+                        except Empty:
+                            break
+                    while not stderr_queue.empty():
+                        try:
+                            _, line = stderr_queue.get_nowait()
+                            stderr_lines.append(line)
+                        except Empty:
+                            break
+
+                    stdout_thread.join(timeout=1)
+                    stderr_thread.join(timeout=1)
+
+                    stdout = ''.join(stdout_lines)
+                    stderr = ''.join(stderr_lines)
+
+                    # Track artifacts after execution (partial)
+                    artifacts_after = self._get_artifacts(working_path)
+                    artifacts_created = list(set(artifacts_after) - set(artifacts_before))
+                    artifacts_created = [
+                        a for a in artifacts_created if not a.endswith(script_file.name)
+                    ]
+
+                    return ExecutionResult(
+                        success=False,
+                        stdout=stdout,
+                        stderr=(stderr + f"\nExecution timeout after {self.timeout}s").strip(),
+                        execution_time=self.timeout,
+                        exit_code=-1,
+                        artifacts_created=artifacts_created,
+                        errors=[f"Timeout: execution exceeded {self.timeout}s"],
+                    )
 
                 # Print progress update if no output for a while
                 time_since_output = time.time() - last_output_time

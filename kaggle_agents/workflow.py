@@ -25,6 +25,7 @@ from .agents.reporting_agent import reporting_agent_node
 from .agents.submission_agent import submission_agent_node
 from .core.state import KaggleState, create_initial_state
 from .domain import detect_competition_domain
+from .nodes.prompt_refinement import prompt_refinement_node
 from .tools.kaggle_api import KaggleAPIClient
 
 
@@ -459,6 +460,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
+    workflow.add_node("prompt_refinement", prompt_refinement_node)  # RLPrompt/DSPy optimization
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("reporting", reporting_agent_node)
 
@@ -500,8 +502,9 @@ def create_workflow() -> StateGraph:
     # Performance Evaluation → Meta-Evaluator (RL analysis)
     workflow.add_edge("performance_evaluation", "meta_evaluator")
 
-    # Meta-Evaluator → Iteration Control
-    workflow.add_edge("meta_evaluator", "iteration_control")
+    # Meta-Evaluator → Prompt Refinement → Iteration Control
+    workflow.add_edge("meta_evaluator", "prompt_refinement")
+    workflow.add_edge("prompt_refinement", "iteration_control")
 
     # Iteration Control → Conditional (refine or done?)
     workflow.add_conditional_edges(
@@ -661,6 +664,8 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("robustness", robustness_agent_node)
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("submission", submission_agent_node)
+    workflow.add_node("meta_evaluator", meta_evaluator_node)
+    workflow.add_node("prompt_refinement", prompt_refinement_node)
     workflow.add_node("reporting", reporting_agent_node)
 
     # Entry point: domain_detection (data already loaded)
@@ -691,8 +696,10 @@ def create_mlebench_workflow() -> StateGraph:
     # Ensemble → Submission
     workflow.add_edge("ensemble", "submission")
 
-    # Submission → Reporting (no iteration for MLE-bench, single pass)
-    workflow.add_edge("submission", "reporting")
+    # Submission → Meta-Evaluator → Prompt Refinement → Reporting
+    workflow.add_edge("submission", "meta_evaluator")
+    workflow.add_edge("meta_evaluator", "prompt_refinement")
+    workflow.add_edge("prompt_refinement", "reporting")
 
     # Reporting → END
     workflow.add_edge("reporting", END)

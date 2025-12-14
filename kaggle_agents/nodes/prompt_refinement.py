@@ -68,7 +68,10 @@ class PromptRefinementDecider:
         decisions = {}
 
         # Check planner
-        planner_examples = self.training_collector.get_examples("planner", min_score=0.3)
+        planner_examples = self.training_collector.convert_to_dspy_examples(
+            "planner",
+            min_score=0.3,
+        )
         decisions["planner"] = len(planner_examples) >= self.min_training_examples
 
         if decisions["planner"]:
@@ -77,7 +80,10 @@ class PromptRefinementDecider:
             print(f"   ⏭️ Planner: Only {len(planner_examples)} examples (need {self.min_training_examples})")
 
         # Check developer
-        developer_examples = self.training_collector.get_examples("developer_generator", min_score=0.5)
+        developer_examples = self.training_collector.convert_to_dspy_examples(
+            "developer_generator",
+            min_score=0.5,
+        )
         decisions["developer"] = len(developer_examples) >= self.min_training_examples
 
         if decisions["developer"]:

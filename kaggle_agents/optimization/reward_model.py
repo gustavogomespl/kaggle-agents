@@ -11,6 +11,7 @@ Enhanced with:
 """
 
 import re
+import json
 from typing import Any
 
 import dspy
@@ -53,8 +54,14 @@ class PlannerRewardModel:
         Returns:
             Reward score (0-1)
         """
-        # Extract ablation plan from prediction
+        # Extract ablation plan from prediction (may be JSON string)
         plan = prediction.ablation_plan if hasattr(prediction, 'ablation_plan') else []
+        if isinstance(plan, str):
+            try:
+                parsed = json.loads(plan)
+                plan = parsed if isinstance(parsed, list) else []
+            except Exception:
+                plan = []
 
         if not plan:
             return 0.0

@@ -95,6 +95,27 @@ class DevelopmentResult:
     execution_time: float = 0.0
     artifacts_created: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    run_fidelity: Literal["full", "debug"] = "full"
+
+
+@dataclass
+class CodeAttempt:
+    """A single code execution attempt for learning and prompt feedback."""
+
+    component_name: str
+    component_type: str
+    stage: Literal["generate", "fix", "debug", "refine"]
+    attempt: int
+    success: bool
+    cv_score: Optional[float] = None
+    error: Optional[str] = None
+    meta_feedback: Optional[str] = None
+    code_excerpt: str = ""
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    execution_time: float = 0.0
+    run_fidelity: Literal["full", "debug"] = "full"
+    timestamp: datetime = field(default_factory=datetime.now)
 
 
 @dataclass
@@ -172,6 +193,7 @@ class KaggleState(TypedDict):
     development_results: Annotated[list[DevelopmentResult], add]
     current_code: str
     code_retry_count: int
+    code_attempts: Annotated[list[CodeAttempt], add]
 
     # Validation Phase
     validation_results: Annotated[list[ValidationResult], add]
@@ -188,6 +210,7 @@ class KaggleState(TypedDict):
     target_percentile: float  # goal: 20th percentile (top 20%)
     best_single_model_score: Optional[float]
     best_single_model_name: Optional[str]
+    baseline_cv_score: Optional[float]
 
     # Iteration Control
     current_iteration: int
@@ -288,6 +311,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         development_results=[],
         current_code="",
         code_retry_count=0,
+        code_attempts=[],
 
         # Validation Phase
         validation_results=[],
@@ -304,6 +328,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         target_percentile=20.0,  # top 20%
         best_single_model_score=None,
         best_single_model_name=None,
+        baseline_cv_score=None,
 
         # Iteration Control
         current_iteration=0,
