@@ -334,7 +334,94 @@ class MLEBenchDataAdapter:
         # Create models directory in workspace
         (workspace_path / "models").mkdir(exist_ok=True)
 
+        # Create symlinks in workspace pointing to MLE-bench data
+        # This allows the developer agent to find files in working_directory
+        self._create_workspace_links(info, workspace_path, public_dir)
+
         return info
+
+    def _create_workspace_links(
+        self,
+        info: MLEBenchDataInfo,
+        workspace: Path,
+        public_dir: Path,
+    ) -> None:
+        """
+        Create symlinks in workspace pointing to MLE-bench data files.
+
+        This ensures the developer agent can find data files in the working directory.
+        """
+        import shutil
+
+        print(f"   Creating workspace links...", flush=True)
+
+        # Files/dirs to link
+        items_to_link = []
+
+        # Add train data
+        if info.train_path and info.train_path.exists():
+            items_to_link.append(("train", info.train_path))
+        if info.train_csv_path and info.train_csv_path.exists():
+            items_to_link.append(("train.csv", info.train_csv_path))
+
+        # Add test data
+        if info.test_path and info.test_path.exists():
+            items_to_link.append(("test", info.test_path))
+        if info.test_csv_path and info.test_csv_path.exists():
+            items_to_link.append(("test.csv", info.test_csv_path))
+
+        # Add sample submission
+        if info.sample_submission_path and info.sample_submission_path.exists():
+            items_to_link.append(("sample_submission.csv", info.sample_submission_path))
+
+        # Also link any other CSVs in public_dir
+        for csv_file in public_dir.glob("*.csv"):
+            name = csv_file.name
+            if not any(name == item[0] for item in items_to_link):
+                items_to_link.append((name, csv_file))
+
+        # Create symlinks
+        for link_name, target in items_to_link:
+            link_path = workspace / link_name
+            if link_path.exists() or link_path.is_symlink():
+                # Remove existing link/file
+                if link_path.is_symlink() or link_path.is_file():
+                    link_path.unlink()
+                elif link_path.is_dir():
+                    shutil.rmtree(link_path)
+
+            try:
+                # Create symlink
+                link_path.symlink_to(target)
+                print(f"      Linked: {link_name} -> {target}", flush=True)
+            except OSError as e:
+                # Symlinks may fail on some systems, fall back to copy
+                print(f"      Symlink failed for {link_name}, copying instead: {e}", flush=True)
+                if target.is_dir():
+                    shutil.copytree(target, link_path)
+                else:
+                    shutil.copy2(target, link_path)
+                print(f"      Copied: {link_name}", flush=True)
+
+        # Update info paths to point to workspace
+        if (workspace / "train.csv").exists():
+            info.train_csv_path = workspace / "train.csv"
+            if info.data_type == "tabular":
+                info.train_path = workspace / "train.csv"
+        if (workspace / "train").exists():
+            info.train_path = workspace / "train"
+
+        if (workspace / "test.csv").exists():
+            info.test_csv_path = workspace / "test.csv"
+            if info.data_type == "tabular":
+                info.test_path = workspace / "test.csv"
+        if (workspace / "test").exists():
+            info.test_path = workspace / "test"
+
+        if (workspace / "sample_submission.csv").exists():
+            info.sample_submission_path = workspace / "sample_submission.csv"
+
+        print(f"   Workspace setup complete!", flush=True)
 
     def get_state_paths(self, info: MLEBenchDataInfo) -> dict[str, Any]:
         """
