@@ -81,6 +81,15 @@ kaggle-agents = "kaggle_agents.cli:main"
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
+# ==================== Packaging (setuptools) ====================
+# Newer setuptools will refuse to build if it auto-discovers multiple
+# top-level packages in a flat layout (e.g. `notebooks/` + `kaggle_agents/`).
+# We explicitly restrict discovery to the actual library package.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["kaggle_agents*"]
+exclude = ["notebooks*", "tests*", "competitions*", "adk_example_inspiration*", "references*"]
+
 # ==================== Ruff Configuration ====================
 [tool.ruff]
 # Excluir diretórios da análise

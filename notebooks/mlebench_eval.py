@@ -78,7 +78,16 @@ def run_evaluation(
         max_iterations: Maximum workflow iterations
         timeout_per_component: Timeout per component in seconds
     """
-    from kaggle_agents.mlebench import solve_mlebench
+    try:
+        from kaggle_agents.mlebench import solve_mlebench
+    except ModuleNotFoundError as e:
+        if e.name != "kaggle_agents":
+            raise
+        import sys
+
+        repo_root = Path(__file__).resolve().parents[1]
+        sys.path.insert(0, str(repo_root))
+        from kaggle_agents.mlebench import solve_mlebench
 
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
