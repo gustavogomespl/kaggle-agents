@@ -58,24 +58,37 @@ class MLEBenchDataAdapter:
     @staticmethod
     def _detect_mle_cache() -> Path:
         """Detect MLE-bench cache path based on environment."""
-        # Check common locations in order of priority
+        print(f"[MLEBenchDataAdapter] Detecting cache path...", flush=True)
+        print(f"[MLEBenchDataAdapter]   Path.home() = {Path.home()}", flush=True)
+
+        # 1. Check environment variable first
+        env_path = os.environ.get("MLEBENCH_DATA_DIR")
+        if env_path:
+            env_path_obj = Path(env_path)
+            print(f"[MLEBenchDataAdapter]   MLEBENCH_DATA_DIR = {env_path}, exists = {env_path_obj.exists()}", flush=True)
+            if env_path_obj.exists():
+                return env_path_obj
+
+        # 2. Check common locations in order of priority
         candidates = [
-            # 1. Environment variable
-            Path(os.environ.get("MLEBENCH_DATA_DIR", "")),
-            # 2. User home (works in Colab: /root/.cache)
+            # User home (works in Colab: /root/.cache)
             Path.home() / ".cache" / "mle-bench" / "data",
-            # 3. Explicit /root for containers
+            # Explicit /root for containers
             Path("/root/.cache/mle-bench/data"),
-            # 4. Colab content directory (alternative)
+            # Colab content directory (alternative)
             Path("/content/.cache/mle-bench/data"),
         ]
 
         for path in candidates:
-            if path and path.exists():
+            exists = path.exists()
+            print(f"[MLEBenchDataAdapter]   Checking {path}, exists = {exists}", flush=True)
+            if exists:
                 return path
 
         # Default fallback (will be created if needed)
-        return Path.home() / ".cache" / "mle-bench" / "data"
+        default = Path.home() / ".cache" / "mle-bench" / "data"
+        print(f"[MLEBenchDataAdapter] Warning: No cache found, using default: {default}", flush=True)
+        return default
 
     def __init__(self, mle_cache_path: Optional[Path] = None):
         """
@@ -99,6 +112,23 @@ class MLEBenchDataAdapter:
         """Check if a competition is already prepared by MLE-bench."""
         comp_path = self.get_competition_path(competition_id)
         public_dir = comp_path / "public"
+
+        # Debug: show what we're looking for
+        print(f"[MLEBenchDataAdapter] Checking if prepared:", flush=True)
+        print(f"[MLEBenchDataAdapter]   Competition path: {comp_path}", flush=True)
+        print(f"[MLEBenchDataAdapter]   Competition path exists: {comp_path.exists()}", flush=True)
+        print(f"[MLEBenchDataAdapter]   Public dir: {public_dir}", flush=True)
+        print(f"[MLEBenchDataAdapter]   Public dir exists: {public_dir.exists()}", flush=True)
+
+        # Also check the base competition directory structure
+        base_comp_dir = self.mle_cache / competition_id
+        if base_comp_dir.exists():
+            try:
+                contents = list(base_comp_dir.iterdir())
+                print(f"[MLEBenchDataAdapter]   Base dir contents: {[p.name for p in contents]}", flush=True)
+            except Exception as e:
+                print(f"[MLEBenchDataAdapter]   Error listing base dir: {e}", flush=True)
+
         return public_dir.exists()
 
     def detect_data_type(self, public_dir: Path) -> str:
