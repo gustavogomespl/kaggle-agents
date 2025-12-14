@@ -138,18 +138,54 @@ class MLEBenchDataAdapter:
         Returns:
             'tabular', 'image', 'audio', or 'text'
         """
-        # Check for image directories
-        for dir_name in ['train', 'test', 'images', 'train_images', 'test_images']:
-            dir_path = public_dir / dir_name
-            if dir_path.is_dir():
-                # Sample files in directory
-                sample_files = list(dir_path.glob('*'))[:10]
-                extensions = [f.suffix.lower() for f in sample_files if f.is_file()]
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
 
-                if any(ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff'] for ext in extensions):
-                    return 'image'
-                elif any(ext in ['.wav', '.mp3', '.flac', '.ogg'] for ext in extensions):
-                    return 'audio'
+        def _dir_contains_ext(dir_path: Path, exts: set[str], limit: int = 200) -> bool:
+            seen = 0
+            for p in dir_path.rglob("*"):
+                if not p.is_file():
+                    continue
+                seen += 1
+                if p.suffix.lower() in exts:
+                    return True
+                if seen >= limit:
+                    break
+            return False
+
+        # 1) Check common directories (recursively, to handle nested zips)
+        for dir_name in ["train", "test", "images", "train_images", "test_images"]:
+            dir_path = public_dir / dir_name
+            if not dir_path.is_dir():
+                continue
+            if _dir_contains_ext(dir_path, image_exts):
+                return "image"
+            if _dir_contains_ext(dir_path, audio_exts):
+                return "audio"
+
+        # 2) Check root for obvious media files (some zips extract flat)
+        for p in list(public_dir.glob("*"))[:500]:
+            if not p.is_file():
+                continue
+            ext = p.suffix.lower()
+            if ext in image_exts:
+                return "image"
+            if ext in audio_exts:
+                return "audio"
+
+        # 3) Peek inside zips as a fallback (fast, no extraction assumptions)
+        for zip_file in public_dir.glob("*.zip"):
+            try:
+                with zipfile.ZipFile(zip_file, "r") as z:
+                    # Only inspect a prefix to keep this cheap
+                    for name in z.namelist()[:5000]:
+                        lower = name.lower()
+                        if any(lower.endswith(ext) for ext in image_exts):
+                            return "image"
+                        if any(lower.endswith(ext) for ext in audio_exts):
+                            return "audio"
+            except Exception:
+                continue
 
         # Check for text-heavy CSVs
         for csv_file in public_dir.glob('*.csv'):
@@ -274,49 +310,45 @@ class MLEBenchDataAdapter:
             print(f"   Sample submission: {sample_sub.name}")
             print(f"   Target column: {info.target_column}")
 
-        # Find train data
-        if data_type == 'image':
-            # Image competition: look for train directory + labels CSV
-            for dir_name in ['train', 'train_images', 'images/train']:
-                train_dir = public_dir / dir_name
-                if train_dir.is_dir():
-                    info.train_path = train_dir
-                    break
+        # Find train data - check both directories and CSVs regardless of data_type
+        # Train directory (for image/audio competitions)
+        for dir_name in ['train', 'train_images', 'images/train']:
+            train_dir = public_dir / dir_name
+            if train_dir.is_dir():
+                info.train_path = train_dir
+                print(f"   Train dir: {train_dir.name}/")
+                break
 
-            # Look for labels CSV
-            train_csv = self._find_csv_file(public_dir, [
-                'train.csv', 'train_labels.csv', 'labels.csv'
-            ])
-            if train_csv:
-                info.train_csv_path = train_csv
-                print(f"   Train images: {info.train_path}")
-                print(f"   Train labels: {train_csv.name}")
-        else:
-            # Tabular/text: direct CSV
-            train_csv = self._find_csv_file(public_dir, ['train.csv', 'train*.csv'])
-            if train_csv:
+        # Train CSV (labels for image competitions, or data for tabular)
+        train_csv = self._find_csv_file(public_dir, [
+            'train.csv', 'train_labels.csv', 'labels.csv', 'train*.csv'
+        ])
+        if train_csv:
+            info.train_csv_path = train_csv
+            if not info.train_path or data_type == 'tabular':
                 info.train_path = train_csv
-                info.train_csv_path = train_csv
-                print(f"   Train: {train_csv.name}")
+            print(f"   Train CSV: {train_csv.name}")
 
-        # Find test data
-        if data_type == 'image':
-            for dir_name in ['test', 'test_images', 'images/test']:
-                test_dir = public_dir / dir_name
-                if test_dir.is_dir():
-                    info.test_path = test_dir
-                    break
+        # Find test data - check both directories and CSVs regardless of data_type
+        # Test directory (for image/audio competitions)
+        for dir_name in ['test', 'test_images', 'images/test']:
+            test_dir = public_dir / dir_name
+            if test_dir.is_dir():
+                info.test_path = test_dir
+                print(f"   Test dir: {test_dir.name}/")
+                break
 
-            test_csv = self._find_csv_file(public_dir, ['test.csv', 'test*.csv'])
-            if test_csv:
-                info.test_csv_path = test_csv
-                print(f"   Test images: {info.test_path}")
-        else:
-            test_csv = self._find_csv_file(public_dir, ['test.csv', 'test*.csv'])
-            if test_csv:
+        # Test CSV
+        test_csv = self._find_csv_file(public_dir, ['test.csv', 'test*.csv'])
+        if test_csv:
+            info.test_csv_path = test_csv
+            if not info.test_path or data_type == 'tabular':
                 info.test_path = test_csv
-                info.test_csv_path = test_csv
-                print(f"   Test: {test_csv.name}")
+            print(f"   Test CSV: {test_csv.name}")
+
+        # Debug: list all files found
+        all_files = list(public_dir.glob("*"))
+        print(f"   All files in public_dir: {[f.name for f in all_files]}")
 
         # Find ground truth (for validation after submission)
         if private_dir.exists():
@@ -358,15 +390,19 @@ class MLEBenchDataAdapter:
         # Files/dirs to link
         items_to_link = []
 
-        # Add train data
-        if info.train_path and info.train_path.exists():
-            items_to_link.append(("train", info.train_path))
+        # ALWAYS check for train/test directories in public_dir first (for image/audio competitions)
+        # This takes precedence over info.train_path which might be set to CSV for tabular
+        for dir_name in ["train", "test"]:
+            candidate_dir = public_dir / dir_name
+            if candidate_dir.is_dir():
+                items_to_link.append((dir_name, candidate_dir))
+                print(f"      Found dir: {dir_name}/", flush=True)
+
+        # Add train CSV
         if info.train_csv_path and info.train_csv_path.exists():
             items_to_link.append(("train.csv", info.train_csv_path))
 
-        # Add test data
-        if info.test_path and info.test_path.exists():
-            items_to_link.append(("test", info.test_path))
+        # Add test CSV (if exists - many image competitions don't have this)
         if info.test_csv_path and info.test_csv_path.exists():
             items_to_link.append(("test.csv", info.test_csv_path))
 

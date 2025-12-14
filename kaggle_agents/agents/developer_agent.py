@@ -455,16 +455,35 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         attempt_records: list[CodeAttempt] = []
 
         # Prefer paths discovered during data download/previous steps
-        train_path = Path(
-            state.get("current_train_path")
-            or state.get("train_data_path")
-            or working_dir / "train.csv"
-        )
-        test_path = Path(
-            state.get("current_test_path")
-            or state.get("test_data_path")
-            or working_dir / "test.csv"
-        )
+        train_candidates = [
+            state.get("current_train_path"),
+            state.get("train_data_path"),
+            str(working_dir / "train.csv"),
+            str(working_dir / "train"),
+        ]
+        test_candidates = [
+            state.get("current_test_path"),
+            state.get("test_data_path"),
+            str(working_dir / "test.csv"),
+            str(working_dir / "test"),
+            str(working_dir / "test.zip"),
+        ]
+
+        def _first_existing_path(candidates: list[str | None]) -> Path:
+            for candidate in candidates:
+                if not candidate:
+                    continue
+                path = Path(candidate)
+                if path.exists():
+                    return path
+            # Fall back to first non-empty candidate to preserve error messaging
+            for candidate in candidates:
+                if candidate:
+                    return Path(candidate)
+            return Path()
+
+        train_path = _first_existing_path(train_candidates)
+        test_path = _first_existing_path(test_candidates)
 
         train_exists = train_path.exists()
         test_exists = test_path.exists()
@@ -475,9 +494,12 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             error_msg += f"Expected: {train_path.name}, {test_path.name}\n"
 
             if working_dir.exists():
-                existing_files = [f.name for f in working_dir.iterdir() if f.is_file()]
+                existing_items = sorted(
+                    f.name + ("/" if f.is_dir() else "")
+                    for f in working_dir.iterdir()
+                )
                 error_msg += (
-                    f"Found: {existing_files if existing_files else 'No files'}\n"
+                    f"Found: {existing_items if existing_items else 'Empty dir'}\n"
                 )
             else:
                 error_msg += "Working directory doesn't exist\n"

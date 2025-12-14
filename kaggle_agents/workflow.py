@@ -153,7 +153,29 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     competition_info = state["competition_info"]
     working_dir = state["working_directory"]
 
-    domain, confidence = detect_competition_domain(competition_info, working_dir)
+    # Fast-path: in MLE-bench mode (and some pipelines) we already know the raw data type
+    data_type = (state.get("data_files") or {}).get("data_type")
+    problem_type = (competition_info.problem_type or "").lower()
+
+    if data_type in {"image", "audio", "text"}:
+        if data_type == "image":
+            domain = "image_regression" if "regression" in problem_type else "image_classification"
+            confidence = 0.95
+        elif data_type == "audio":
+            domain = "audio_regression" if "regression" in problem_type else "audio_classification"
+            confidence = 0.95
+        else:  # text
+            if "seq" in problem_type or "seq2seq" in problem_type:
+                domain = "seq_to_seq"
+                confidence = 0.95
+            elif "regression" in problem_type:
+                domain = "text_regression"
+                confidence = 0.95
+            else:
+                domain = "text_classification"
+                confidence = 0.95
+    else:
+        domain, confidence = detect_competition_domain(competition_info, working_dir)
 
     print(f"\n Domain Detected: {domain}")
     print(f"   Confidence: {confidence:.1%}")
