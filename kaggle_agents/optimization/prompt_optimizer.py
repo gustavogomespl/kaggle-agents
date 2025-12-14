@@ -34,34 +34,51 @@ class PromptOptimizer:
         self.config = get_config()
         self._setup_dspy()
 
+    def _is_reasoning_model(self, model: str) -> bool:
+        """Check if the model is an OpenAI reasoning model that requires special config."""
+        reasoning_patterns = [
+            "o-1", "o1-", "o-3", "o3-",  # o-1, o-3 series
+            "gpt-5",  # gpt-5 series (including gpt-5-mini)
+        ]
+        model_lower = model.lower()
+        return any(pattern in model_lower for pattern in reasoning_patterns)
+
     def _setup_dspy(self) -> None:
         """Configure DSPy with the appropriate language model."""
         # Get safe max_tokens based on model
         max_tokens = self.config.llm.max_tokens
+        temperature = self.config.llm.temperature
+        model = self.config.llm.model
 
         # Configure LM based on provider
         if self.config.llm.provider == "openai":
+            # OpenAI reasoning models (o-1, o-3, gpt-5) require temperature=1.0 and max_tokens >= 16000
+            if self._is_reasoning_model(model):
+                temperature = 1.0
+                max_tokens = max(max_tokens or 16000, 16000)
+                print(f"[DSPy] Detected reasoning model '{model}', using temperature=1.0, max_tokens={max_tokens}", flush=True)
+
             lm = dspy.LM(
-                model=f"openai/{self.config.llm.model}",
+                model=f"openai/{model}",
                 api_key=os.getenv("OPENAI_API_KEY"),
                 max_tokens=max_tokens,
-                temperature=self.config.llm.temperature,
+                temperature=temperature,
             )
         elif self.config.llm.provider == "anthropic":
             # DSPy supports Anthropic via LiteLLM
             lm = dspy.LM(
-                model=f"anthropic/{self.config.llm.model}",
+                model=f"anthropic/{model}",
                 api_key=os.getenv("ANTHROPIC_API_KEY"),
                 max_tokens=max_tokens,
-                temperature=self.config.llm.temperature,
+                temperature=temperature,
             )
         elif self.config.llm.provider == "gemini":
             # DSPy supports Google Gemini via LiteLLM
             lm = dspy.LM(
-                model=f"gemini/{self.config.llm.model}",
+                model=f"gemini/{model}",
                 api_key=os.getenv("GOOGLE_API_KEY"),
                 max_tokens=max_tokens,
-                temperature=self.config.llm.temperature,
+                temperature=temperature,
             )
         else:
             raise ValueError(f"Unsupported LLM provider: {self.config.llm.provider}")
