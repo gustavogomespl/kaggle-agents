@@ -89,26 +89,31 @@ def run_evaluation(
         sys.path.insert(0, str(repo_root))
         from kaggle_agents.mlebench import solve_mlebench
 
+    print(f"[mlebench_eval] Starting evaluation at {datetime.now()}", flush=True)
+
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     all_results = []
     start_time = datetime.now()
 
-    print("=" * 70)
-    print("MLE-BENCH EVALUATION")
-    print("=" * 70)
-    print(f"Competitions: {len(competition_ids)}")
-    print(f"Max iterations: {max_iterations}")
-    print(f"Timeout per component: {timeout_per_component}s")
-    print("=" * 70)
+    print("=" * 70, flush=True)
+    print("MLE-BENCH EVALUATION", flush=True)
+    print("=" * 70, flush=True)
+    print(f"Competitions: {len(competition_ids)}", flush=True)
+    print(f"Max iterations: {max_iterations}", flush=True)
+    print(f"Timeout per component: {timeout_per_component}s", flush=True)
+    print("=" * 70, flush=True)
 
     for idx, comp_id in enumerate(competition_ids, 1):
-        print(f"\n{'#' * 70}")
-        print(f"# [{idx}/{len(competition_ids)}] {comp_id}")
-        print(f"{'#' * 70}")
+        print(f"\n{'#' * 70}", flush=True)
+        print(f"# [{idx}/{len(competition_ids)}] {comp_id}", flush=True)
+        print(f"{'#' * 70}", flush=True)
 
         comp_info = get_competition_info(comp_id)
+        print(f"  Problem type: {comp_info['type']}", flush=True)
+        print(f"  Metric: {comp_info['metric']}", flush=True)
+        print(f"  Calling solve_mlebench()...", flush=True)
 
         try:
             result = solve_mlebench(
@@ -119,6 +124,10 @@ def run_evaluation(
                 timeout_per_component=timeout_per_component,
                 enable_checkpoint_recovery=True,
             )
+
+            print(f"  solve_mlebench() returned!", flush=True)
+            print(f"  Success: {result.success}", flush=True)
+            print(f"  Error: {result.error}", flush=True)
 
             result_dict = {
                 "competition_id": comp_id,
@@ -136,13 +145,20 @@ def run_evaluation(
                 "error": result.error,
             }
 
+            if result.traceback:
+                result_dict["traceback"] = result.traceback
+                print(f"  Traceback:\n{result.traceback}", flush=True)
+
         except Exception as e:
             import traceback
+            error_tb = traceback.format_exc()
+            print(f"  EXCEPTION in solve_mlebench: {e}", flush=True)
+            print(f"  Traceback:\n{error_tb}", flush=True)
             result_dict = {
                 "competition_id": comp_id,
                 "success": False,
                 "error": str(e),
-                "traceback": traceback.format_exc(),
+                "traceback": error_tb,
             }
 
         all_results.append(result_dict)

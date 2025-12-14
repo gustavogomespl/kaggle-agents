@@ -6,8 +6,11 @@ on MLE-bench competitions with proper data handling and grading.
 """
 
 import json
+import os
 import subprocess
+import sys
 import time
+import traceback as tb
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +25,20 @@ from ..core.state import CompetitionInfo, KaggleState, create_initial_state
 from .data_adapter import MLEBenchDataAdapter, MLEBenchDataInfo
 
 
-console = Console()
+# Force flush for Colab/Jupyter compatibility
+console = Console(force_terminal=True)
+
+
+def _log(msg: str, level: str = "INFO") -> None:
+    """Log message to both Rich console and stdout for Colab compatibility."""
+    # Always print to stdout for Colab
+    print(f"[{level}] {msg}", flush=True)
+    # Also try Rich console
+    try:
+        style = {"ERROR": "red", "WARN": "yellow", "INFO": "cyan"}.get(level, "white")
+        console.print(f"[{style}]{msg}[/{style}]")
+    except Exception:
+        pass
 
 
 @dataclass
@@ -209,22 +225,35 @@ class MLEBenchRunner:
             self._display_header(competition_id, problem_type, evaluation_metric)
 
             # Step 1: Prepare data from MLE-bench
-            console.print("\n[bold]Step 1: Preparing MLE-bench data[/bold]")
+            _log("Step 1: Preparing MLE-bench data")
+            _log(f"  MLE-bench cache path: {self.data_adapter.mle_cache}")
+            _log(f"  Competition: {competition_id}")
+
+            # Check if competition is prepared
+            comp_path = self.data_adapter.get_competition_path(competition_id)
+            _log(f"  Checking path: {comp_path}")
 
             if not self.data_adapter.is_competition_prepared(competition_id):
+                _log(f"Competition '{competition_id}' not prepared!", "ERROR")
+                _log(f"Expected path: {comp_path / 'public'}", "ERROR")
+                _log(f"Run: mlebench prepare -c {competition_id}", "ERROR")
                 raise FileNotFoundError(
                     f"Competition '{competition_id}' not prepared. "
                     f"Run: mlebench prepare -c {competition_id}"
                 )
 
+            _log(f"  Data is prepared!")
+
             workspace = self.workspace_base / "competitions" / competition_id
+            _log(f"  Workspace: {workspace}")
+
             data_info = self.data_adapter.prepare_workspace(
                 competition_id=competition_id,
                 workspace_path=workspace,
             )
 
             # Step 2: Create initial state with MLE-bench data
-            console.print("\n[bold]Step 2: Initializing workflow state[/bold]")
+            _log("Step 2: Initializing workflow state")
 
             state = create_initial_state(
                 competition_name=competition_id,
@@ -250,10 +279,13 @@ class MLEBenchRunner:
             state["max_iterations"] = max_iterations
 
             # Step 3: Run MLE-bench workflow
-            console.print("\n[bold]Step 3: Running workflow[/bold]")
+            _log("Step 3: Running workflow")
+            _log(f"  Max iterations: {max_iterations}")
+            _log(f"  Timeout per component: {timeout_per_component}s")
 
             from ..workflow import create_mlebench_workflow
 
+            _log("  Creating workflow graph...")
             workflow = create_mlebench_workflow()
             config = {
                 "recursion_limit": 150,
@@ -265,21 +297,24 @@ class MLEBenchRunner:
                 }
             }
 
+            _log("  Invoking workflow... (this may take a while)")
             final_state = workflow.invoke(state, config)
+            _log("  Workflow completed!")
 
             # Collect workflow metrics
             dev_results = final_state.get("development_results", [])
             result.iterations = final_state.get("current_iteration", 0)
             result.components_implemented = len(dev_results)
+            _log(f"  Iterations: {result.iterations}, Components: {result.components_implemented}")
 
             # Step 4: Find and grade submission
-            console.print("\n[bold]Step 4: Grading submission[/bold]")
+            _log("Step 4: Grading submission")
 
             submission_path = self._find_submission(workspace)
 
             if submission_path:
                 result.submission_path = str(submission_path)
-                console.print(f"   Found: {submission_path.name}")
+                _log(f"  Found submission: {submission_path.name}")
 
                 grading = self._grade_submission(competition_id, submission_path)
                 result.grading_output = grading
@@ -293,17 +328,19 @@ class MLEBenchRunner:
 
                 if result.valid_submission:
                     result.success = True
+                    _log(f"  Valid submission! Score: {result.score}")
                 else:
                     result.error = grading.get("error", "Invalid submission")
+                    _log(f"  Invalid submission: {result.error}", "WARN")
             else:
                 result.error = "No submission file generated"
-                console.print("[red]   No submission file found![/red]")
+                _log("  No submission file found!", "ERROR")
 
         except Exception as e:
-            import traceback
             result.error = str(e)
-            result.traceback = traceback.format_exc()
-            console.print(f"\n[red]Error: {e}[/red]")
+            result.traceback = tb.format_exc()
+            _log(f"EXCEPTION: {e}", "ERROR")
+            _log(f"Traceback:\n{result.traceback}", "ERROR")
 
         # Record execution time
         result.execution_time = time.time() - start_time

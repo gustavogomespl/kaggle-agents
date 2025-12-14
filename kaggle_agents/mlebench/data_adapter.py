@@ -5,6 +5,7 @@ This module provides utilities to adapt MLE-bench prepared data
 to the kaggle-agents expected format.
 """
 
+import os
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,7 +38,7 @@ class MLEBenchDataAdapter:
     Adapter to prepare MLE-bench data for kaggle-agents workflow.
 
     MLE-bench structure:
-        /root/.cache/mle-bench/data/{competition}/prepared/
+        ~/.cache/mle-bench/data/{competition}/prepared/
             public/
                 train.csv or train/ (directory with images)
                 test.csv or test/ (directory with images)
@@ -54,16 +55,41 @@ class MLEBenchDataAdapter:
             models/
     """
 
-    DEFAULT_MLE_CACHE = Path("/root/.cache/mle-bench/data")
+    @staticmethod
+    def _detect_mle_cache() -> Path:
+        """Detect MLE-bench cache path based on environment."""
+        # Check common locations in order of priority
+        candidates = [
+            # 1. Environment variable
+            Path(os.environ.get("MLEBENCH_DATA_DIR", "")),
+            # 2. User home (works in Colab: /root/.cache)
+            Path.home() / ".cache" / "mle-bench" / "data",
+            # 3. Explicit /root for containers
+            Path("/root/.cache/mle-bench/data"),
+            # 4. Colab content directory (alternative)
+            Path("/content/.cache/mle-bench/data"),
+        ]
+
+        for path in candidates:
+            if path and path.exists():
+                return path
+
+        # Default fallback (will be created if needed)
+        return Path.home() / ".cache" / "mle-bench" / "data"
 
     def __init__(self, mle_cache_path: Optional[Path] = None):
         """
         Initialize the adapter.
 
         Args:
-            mle_cache_path: Path to MLE-bench cache directory
+            mle_cache_path: Path to MLE-bench cache directory (auto-detected if None)
         """
-        self.mle_cache = Path(mle_cache_path) if mle_cache_path else self.DEFAULT_MLE_CACHE
+        if mle_cache_path:
+            self.mle_cache = Path(mle_cache_path)
+        else:
+            self.mle_cache = self._detect_mle_cache()
+
+        print(f"[MLEBenchDataAdapter] Using cache path: {self.mle_cache}", flush=True)
 
     def get_competition_path(self, competition_id: str) -> Path:
         """Get the prepared data path for a competition."""
