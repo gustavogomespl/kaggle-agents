@@ -204,21 +204,87 @@ class MLEBenchDataAdapter:
         return 'tabular'
 
     def _extract_zips(self, directory: Path) -> None:
-        """Extract all ZIP files in directory."""
-        for zip_file in directory.glob('*.zip'):
+        """Extract all ZIP files in directory.
+
+        Notes:
+            Some competitions ship flat zips (files at root). For those, we extract into
+            a subdirectory named after the zip stem to avoid polluting `directory/` and
+            to create stable `train/` / `test/` folders when the zip is named similarly.
+        """
+
+        def _should_extract_to_subdir(
+            z: zipfile.ZipFile, sample_limit: int = 2000
+        ) -> bool:
+            """Heuristic: extract to subdir if there are files at zip root."""
+            seen = 0
+            for name in z.namelist():
+                if not name or name.endswith("/"):
+                    continue
+                seen += 1
+                # Root-level files -> no directory structure
+                if "/" not in name:
+                    return True
+                if seen >= sample_limit:
+                    break
+            return False
+
+        def _already_extracted(
+            z: zipfile.ZipFile, destination_root: Path, sample_limit: int = 50
+        ) -> bool:
+            """Best-effort check to avoid re-extracting large archives."""
+            checked = 0
+            for name in z.namelist():
+                if not name or name.endswith("/"):
+                    continue
+                checked += 1
+                if (destination_root / name).exists():
+                    return True
+                if checked >= sample_limit:
+                    break
+            return False
+
+        for zip_file in directory.glob("*.zip"):
             extract_dir = directory / zip_file.stem
-            if not extract_dir.exists():
-                print(f"   Extracting: {zip_file.name}")
-                try:
-                    with zipfile.ZipFile(zip_file, 'r') as z:
+            try:
+                with zipfile.ZipFile(zip_file, "r") as z:
+                    extract_to_subdir = _should_extract_to_subdir(z)
+                    destination_root = extract_dir if extract_to_subdir else directory
+
+                    if destination_root.exists() and _already_extracted(z, destination_root):
+                        continue
+
+                    print(f"   Extracting: {zip_file.name}")
+                    if extract_to_subdir:
+                        extract_dir.mkdir(parents=True, exist_ok=True)
+                        z.extractall(extract_dir)
+                    else:
                         z.extractall(directory)
-                except zipfile.BadZipFile:
-                    print(f"   Warning: {zip_file.name} is not a valid zip")
+            except zipfile.BadZipFile:
+                print(f"   Warning: {zip_file.name} is not a valid zip")
 
     def _find_csv_file(self, directory: Path, patterns: list[str]) -> Optional[Path]:
         """Find a CSV file matching any of the patterns."""
         for pattern in patterns:
             matches = list(directory.glob(pattern))
+            if matches:
+                return matches[0]
+        return None
+
+    def _find_first_zip(self, directory: Path, kind: str) -> Optional[Path]:
+        """Find a likely train/test ZIP in a directory."""
+        kind_norm = kind.strip().lower()
+        if kind_norm not in {"train", "test"}:
+            raise ValueError(f"kind must be 'train' or 'test', got: {kind}")
+
+        patterns = [
+            f"{kind_norm}.zip",
+            f"{kind_norm}_images.zip",
+            f"{kind_norm}_imgs.zip",
+            f"{kind_norm}*.zip",
+            f"*{kind_norm}*.zip",
+        ]
+        for pattern in patterns:
+            matches = sorted(directory.glob(pattern))
             if matches:
                 return matches[0]
         return None
@@ -312,7 +378,13 @@ class MLEBenchDataAdapter:
 
         # Find train data - check both directories and CSVs regardless of data_type
         # Train directory (for image/audio competitions)
-        for dir_name in ['train', 'train_images', 'images/train']:
+        for dir_name in [
+            "train",
+            "train_images",
+            "train_imgs",
+            "training",
+            "images/train",
+        ]:
             train_dir = public_dir / dir_name
             if train_dir.is_dir():
                 info.train_path = train_dir
@@ -325,13 +397,26 @@ class MLEBenchDataAdapter:
         ])
         if train_csv:
             info.train_csv_path = train_csv
-            if not info.train_path or data_type == 'tabular':
+            if data_type == "tabular":
                 info.train_path = train_csv
             print(f"   Train CSV: {train_csv.name}")
 
+        # Train ZIP fallback (common in CV competitions)
+        if info.train_path is None:
+            train_zip = self._find_first_zip(public_dir, kind="train")
+            if train_zip:
+                info.train_path = train_zip
+                print(f"   Train ZIP: {train_zip.name}")
+
         # Find test data - check both directories and CSVs regardless of data_type
         # Test directory (for image/audio competitions)
-        for dir_name in ['test', 'test_images', 'images/test']:
+        for dir_name in [
+            "test",
+            "test_images",
+            "test_imgs",
+            "testing",
+            "images/test",
+        ]:
             test_dir = public_dir / dir_name
             if test_dir.is_dir():
                 info.test_path = test_dir
@@ -342,9 +427,28 @@ class MLEBenchDataAdapter:
         test_csv = self._find_csv_file(public_dir, ['test.csv', 'test*.csv'])
         if test_csv:
             info.test_csv_path = test_csv
-            if not info.test_path or data_type == 'tabular':
+            if data_type == "tabular":
                 info.test_path = test_csv
             print(f"   Test CSV: {test_csv.name}")
+
+        # Test ZIP fallback (common in CV competitions)
+        if info.test_path is None:
+            test_zip = self._find_first_zip(public_dir, kind="test")
+            if test_zip:
+                info.test_path = test_zip
+                print(f"   Test ZIP: {test_zip.name}")
+
+        # Some image competitions store all images under a single folder (e.g., `images/`)
+        # with train/test splits provided via CSVs. If so, point both train/test paths there.
+        if data_type == "image" and (info.train_path is None or info.test_path is None):
+            images_dir = public_dir / "images"
+            if images_dir.is_dir():
+                if info.train_path is None:
+                    info.train_path = images_dir
+                    print("   Train dir fallback: images/")
+                if info.test_path is None:
+                    info.test_path = images_dir
+                    print("   Test dir fallback: images/")
 
         # Debug: list all files found
         all_files = list(public_dir.glob("*"))
@@ -390,13 +494,15 @@ class MLEBenchDataAdapter:
         # Files/dirs to link
         items_to_link = []
 
-        # ALWAYS check for train/test directories in public_dir first (for image/audio competitions)
-        # This takes precedence over info.train_path which might be set to CSV for tabular
-        for dir_name in ["train", "test"]:
-            candidate_dir = public_dir / dir_name
-            if candidate_dir.is_dir():
-                items_to_link.append((dir_name, candidate_dir))
-                print(f"      Found dir: {dir_name}/", flush=True)
+        # Link canonical train/test assets for non-tabular domains.
+        # We always expose them as `train/` and `test/` inside the workspace, even if the
+        # underlying directory is named differently (e.g., `train_images/`).
+        if info.train_path and info.train_path.is_dir():
+            items_to_link.append(("train", info.train_path))
+            print(f"      Found train dir: {info.train_path}", flush=True)
+        if info.test_path and info.test_path.is_dir():
+            items_to_link.append(("test", info.test_path))
+            print(f"      Found test dir: {info.test_path}", flush=True)
 
         # Add train CSV
         if info.train_csv_path and info.train_csv_path.exists():
@@ -409,6 +515,10 @@ class MLEBenchDataAdapter:
         # Add sample submission
         if info.sample_submission_path and info.sample_submission_path.exists():
             items_to_link.append(("sample_submission.csv", info.sample_submission_path))
+
+        # Also link ZIPs (common in CV competitions); keep original names for transparency.
+        for zip_file in public_dir.glob("*.zip"):
+            items_to_link.append((zip_file.name, zip_file))
 
         # Also link any other CSVs in public_dir
         for csv_file in public_dir.glob("*.csv"):
@@ -446,6 +556,10 @@ class MLEBenchDataAdapter:
                 info.train_path = workspace / "train.csv"
         if (workspace / "train").exists():
             info.train_path = workspace / "train"
+        if info.train_path and info.train_path.is_file():
+            linked_train_file = workspace / info.train_path.name
+            if linked_train_file.exists():
+                info.train_path = linked_train_file
 
         if (workspace / "test.csv").exists():
             info.test_csv_path = workspace / "test.csv"
@@ -453,6 +567,10 @@ class MLEBenchDataAdapter:
                 info.test_path = workspace / "test.csv"
         if (workspace / "test").exists():
             info.test_path = workspace / "test"
+        if info.test_path and info.test_path.is_file():
+            linked_test_file = workspace / info.test_path.name
+            if linked_test_file.exists():
+                info.test_path = linked_test_file
 
         if (workspace / "sample_submission.csv").exists():
             info.sample_submission_path = workspace / "sample_submission.csv"
@@ -469,10 +587,14 @@ class MLEBenchDataAdapter:
         Returns:
             Dictionary with paths for state initialization
         """
+        # Prefer the main data asset (dir/zip) for non-tabular domains; keep CSVs in `data_files`.
+        train_data_path = info.train_path or info.train_csv_path
+        test_data_path = info.test_path or info.test_csv_path
+
         return {
             "working_directory": str(info.workspace),
-            "train_data_path": str(info.train_csv_path or info.train_path or ""),
-            "test_data_path": str(info.test_csv_path or info.test_path or ""),
+            "train_data_path": str(train_data_path or ""),
+            "test_data_path": str(test_data_path or ""),
             "sample_submission_path": str(info.sample_submission_path or ""),
             "target_col": info.target_column,
             "data_files": {

@@ -460,30 +460,49 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             state.get("train_data_path"),
             str(working_dir / "train.csv"),
             str(working_dir / "train"),
+            str(working_dir / "train_images"),
+            str(working_dir / "images"),
+            str(working_dir / "train.zip"),
         ]
         test_candidates = [
             state.get("current_test_path"),
             state.get("test_data_path"),
             str(working_dir / "test.csv"),
             str(working_dir / "test"),
+            str(working_dir / "test_images"),
+            str(working_dir / "images"),
             str(working_dir / "test.zip"),
         ]
 
-        def _first_existing_path(candidates: list[str | None]) -> Path:
+        prefer_asset_dir = str(domain).startswith(("image", "audio"))
+
+        def _first_existing_path(candidates: list[str | None], prefer_dir: bool) -> Path:
+            existing: list[Path] = []
             for candidate in candidates:
                 if not candidate:
                     continue
                 path = Path(candidate)
                 if path.exists():
-                    return path
+                    existing.append(path)
+
+            if existing:
+                if prefer_dir:
+                    for p in existing:
+                        if p.is_dir():
+                            return p
+                    for p in existing:
+                        if p.is_file() and p.suffix.lower() == ".zip":
+                            return p
+                return existing[0]
+
             # Fall back to first non-empty candidate to preserve error messaging
             for candidate in candidates:
                 if candidate:
                     return Path(candidate)
             return Path()
 
-        train_path = _first_existing_path(train_candidates)
-        test_path = _first_existing_path(test_candidates)
+        train_path = _first_existing_path(train_candidates, prefer_dir=prefer_asset_dir)
+        test_path = _first_existing_path(test_candidates, prefer_dir=prefer_asset_dir)
 
         train_exists = train_path.exists()
         test_exists = test_path.exists()
