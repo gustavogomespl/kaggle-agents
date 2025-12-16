@@ -564,10 +564,11 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
                 return "end"
 
     # Decide based on refinement flag
-    if needs_refinement and current_iteration > 0:
+    if needs_refinement:
         print(f"   ➡️  Refining (iteration {current_iteration})")
         return "refine"
-    print("   ➡️  Ending (no refinement needed or first iteration)")
+
+    print("   ➡️  Ending (no refinement needed)")
     return "end"
 
 
