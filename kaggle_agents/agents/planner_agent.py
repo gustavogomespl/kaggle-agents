@@ -165,7 +165,7 @@ class PlannerAgent:
             ablation_plan = self._generate_ablation_plan(state, sota_analysis)
 
         # 3. Validate and enhance plan
-        validated_plan = self._validate_plan(ablation_plan)
+        validated_plan = self._validate_plan(ablation_plan, state=state)
 
         # 4. Print summary
         self._print_summary(validated_plan)
@@ -362,10 +362,22 @@ Domain: {domain}
             print(curriculum_insights)
 
         if self.use_dspy:
-            # TEMPORARY FIX: Skip DSPy, use fallback directly
-            # DSPy consistently generates only 2 components instead of 5
-            print("  🔧 Using fallback plan (ensures 5 high-quality components)")
-            plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights)
+            # DSPy path: Use AblationPlannerModule (with fallback if it generates too few components)
+            print("  🧠 Using DSPy for ablation plan generation...")
+            try:
+                result = self.planner_module(
+                    competition_info=comp_info_str,
+                    domain=domain,
+                    sota_summary=sota_summary,
+                    domain_guidance=domain_guidance,
+                )
+                plan_data = self._parse_llm_plan_response(result.ablation_plan, sota_analysis)
+                if len(plan_data) < 3:
+                    print(f"  ⚠️ DSPy generated only {len(plan_data)} components, using fallback")
+                    plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
+            except Exception as e:
+                print(f"  ⚠️ DSPy plan generation failed: {e}, using fallback")
+                plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
 
         else:
             # Use direct LLM call
@@ -386,16 +398,32 @@ IMPORTANT: Use the curriculum insights above to:
 3. Learn from common error patterns and component success rates
 4. Build upon successful patterns while exploring new improvements
 
-Generate a plan that leverages proven successful strategies and avoids known pitfalls."""
+Generate a plan that leverages proven successful strategies and avoids known pitfalls.
 
-            [
+Return a JSON array with 3-5 components. Each component must have:
+- name: unique identifier
+- component_type: one of [feature_engineering, model, preprocessing, ensemble]
+- description: what this component does
+- estimated_impact: float 0.0-1.0
+- code_outline: brief implementation sketch"""
+
+            messages = [
                 SystemMessage(content=PLANNER_SYSTEM_PROMPT + "\n\n" + domain_guidance),
                 HumanMessage(content=enhanced_prompt),
             ]
 
-            # TEMPORARY FIX: Skip LLM call, use fallback directly
-            print("  🔧 Using fallback plan (ensures 5 high-quality components)")
-            plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights)
+            # Invoke LLM and parse response
+            print("  🧠 Using LLM for ablation plan generation (SOTA-aware)...")
+            try:
+                response = self.llm.invoke(messages)
+                plan_text = response.content if hasattr(response, "content") else str(response)
+                plan_data = self._parse_llm_plan_response(plan_text, sota_analysis)
+                if len(plan_data) < 3:
+                    print(f"  ⚠️ LLM generated only {len(plan_data)} components, using fallback")
+                    plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
+            except Exception as e:
+                print(f"  ⚠️ LLM plan generation failed: {e}, using fallback")
+                plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
 
         # Convert to AblationComponent objects
         components = []
@@ -690,51 +718,79 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 return None
         return None
 
-    def _validate_plan(self, plan: list[AblationComponent]) -> list[AblationComponent]:
+    def _validate_plan(
+        self,
+        plan: list[AblationComponent],
+        *,
+        state: KaggleState | None = None,
+    ) -> list[AblationComponent]:
         """
         Validate and enhance the ablation plan.
 
         Args:
             plan: Initial plan
+            state: Current workflow state (optional, for fast-mode constraints)
 
         Returns:
             Validated plan
         """
-        # Filter out invalid components (keep only high impact >= 10%)
-        valid_plan = [c for c in plan if c.estimated_impact >= 0.10]
+        run_mode = str((state or {}).get("run_mode", "")).lower()
+        objective = str((state or {}).get("objective", "")).lower()
+        domain = str((state or {}).get("domain_detected", "tabular")).lower()
+        timeout_cap = (state or {}).get("timeout_per_component")
+        if isinstance(timeout_cap, str):
+            try:
+                timeout_cap = int(timeout_cap)
+            except ValueError:
+                timeout_cap = None
 
-        # Limit to maximum 6 components (quality over quantity)
-        if len(valid_plan) > 6:
-            print(f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top 6 by impact")
-            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[:6]
+        fast_mode = bool((state or {}).get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
+        if isinstance(timeout_cap, int) and timeout_cap <= 1200:
+            fast_mode = True
 
-        # CRITICAL: Ensure at least TWO model components exist
-        # Model components are required to generate predictions and create ensembles
+        # In fast mode, allow smaller-impact but cheap components (e.g., TTA inference).
+        min_impact = 0.05 if fast_mode else 0.10
+
+        # Filter out invalid components
+        valid_plan = [c for c in plan if c.estimated_impact >= min_impact]
+
+        # Limit components (quality over quantity)
+        max_components = 3 if fast_mode else 6
+        if len(valid_plan) > max_components:
+            print(
+                f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top {max_components} by impact"
+            )
+            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[:max_components]
+
+        # Ensure we have enough model components to produce predictions.
         model_count = sum(1 for c in valid_plan if c.component_type == "model")
+        tabular_domain = domain.startswith("tabular") or domain in {"tabular", "tabular_classification", "tabular_regression"}
+        require_two_models = tabular_domain and not fast_mode
 
         if model_count == 0:
-            print("  ⚠️  No 'model' components found - adding 2 baseline models")
-            # Add two different baseline models
-            baseline_lgbm = AblationComponent(
-                name="baseline_lightgbm",
-                component_type="model",
-                code="",  # Will be generated by developer agent
-                estimated_impact=0.20,
-                tested=False,
-                actual_impact=None,
-            )
-            baseline_xgb = AblationComponent(
-                name="baseline_xgboost",
-                component_type="model",
-                code="",
-                estimated_impact=0.18,
-                tested=False,
-                actual_impact=None,
-            )
-            valid_plan.extend([baseline_lgbm, baseline_xgb])
-            print(f"     Added: {baseline_lgbm.name} and {baseline_xgb.name}")
+            print("  ⚠️  No 'model' components found - adding a baseline model")
+            if domain.startswith("image_"):
+                baseline = AblationComponent(
+                    name="baseline_resnet18",
+                    component_type="model",
+                    code="",
+                    estimated_impact=0.20 if not fast_mode else 0.10,
+                    tested=False,
+                    actual_impact=None,
+                )
+            else:
+                baseline = AblationComponent(
+                    name="baseline_lightgbm",
+                    component_type="model",
+                    code="",
+                    estimated_impact=0.20,
+                    tested=False,
+                    actual_impact=None,
+                )
+            valid_plan.append(baseline)
+            print(f"     Added: {baseline.name}")
 
-        elif model_count == 1:
+        elif model_count == 1 and require_two_models:
             print("  ⚠️  Only 1 'model' component found - adding second baseline model")
             baseline_model = AblationComponent(
                 name="baseline_xgboost",
@@ -747,10 +803,10 @@ Generate a plan that leverages proven successful strategies and avoids known pit
             valid_plan.append(baseline_model)
             print(f"     Added: {baseline_model.name}")
 
-        # Ensure 3-5 components total
-        if len(valid_plan) < 3:
-            print("  ⚠️  Plan has fewer than 3 components")
-        elif len(valid_plan) > 5:
+        # Ensure 2-5 components total (fast mode allows 2)
+        if len(valid_plan) < 2:
+            print("  ⚠️  Plan has fewer than 2 components")
+        elif len(valid_plan) > 5 and not fast_mode:
             print(f"  ⚠️  Plan still has {len(valid_plan)} components after filtering")
 
         # Sort by type: preprocessing first, then models, then ensembles
@@ -768,11 +824,74 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         return valid_plan
 
 
+    def _parse_llm_plan_response(
+        self,
+        response_text: str,
+        sota_analysis: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Parse LLM response into a list of component dictionaries.
+
+        Handles both raw JSON and markdown-wrapped JSON responses.
+
+        Args:
+            response_text: Raw LLM response text
+            sota_analysis: SOTA analysis for fallback enrichment
+
+        Returns:
+            List of component dictionaries
+        """
+        import re
+
+        # Try to extract JSON array from response
+        text = response_text.strip()
+
+        # Remove markdown code blocks if present
+        if "```json" in text:
+            match = re.search(r"```json\s*(.*?)\s*```", text, re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+        elif "```" in text:
+            match = re.search(r"```\s*(.*?)\s*```", text, re.DOTALL)
+            if match:
+                text = match.group(1).strip()
+
+        # Find JSON array
+        json_start = text.find("[")
+        json_end = text.rfind("]") + 1
+
+        if json_start >= 0 and json_end > json_start:
+            json_str = text[json_start:json_end]
+            try:
+                parsed = json.loads(json_str)
+                if isinstance(parsed, list):
+                    # Validate and normalize each component
+                    valid_components = []
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            component = {
+                                "name": item.get("name", "unnamed"),
+                                "component_type": item.get("component_type", "model"),
+                                "description": item.get("description", ""),
+                                "estimated_impact": float(item.get("estimated_impact", 0.1)),
+                                "code_outline": item.get("code_outline", item.get("description", "")),
+                                "rationale": item.get("rationale", ""),
+                            }
+                            valid_components.append(component)
+                    return valid_components
+            except json.JSONDecodeError as e:
+                print(f"  ⚠️ JSON parse error: {e}")
+
+        # If JSON parsing fails, return empty (caller will use fallback)
+        return []
+
     def _create_fallback_plan(
         self,
         domain: str,
         sota_analysis: dict[str, Any],
         curriculum_insights: str = "",
+        *,
+        state: KaggleState | None = None,
     ) -> list[dict[str, Any]]:
         """
         Create domain-specific fallback plan when LLM parsing fails.
@@ -787,22 +906,45 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         Returns:
             List of component dictionaries (3-5 components depending on domain)
         """
+        run_mode = str((state or {}).get("run_mode", "")).lower()
+        objective = str((state or {}).get("objective", "")).lower()
+        timeout_cap = (state or {}).get("timeout_per_component")
+        if isinstance(timeout_cap, str):
+            try:
+                timeout_cap = int(timeout_cap)
+            except ValueError:
+                timeout_cap = None
+
+        # Speed-first when optimizing for MLE-bench medals or tight component caps.
+        fast_mode = (
+            run_mode == "mlebench"
+            or "medal" in objective
+            or (isinstance(timeout_cap, int) and timeout_cap <= 1200)
+        )
+
         # Route to domain-specific fallback method
         if domain.startswith("image_"):
-            return self._create_image_fallback_plan(domain, sota_analysis)
+            return self._create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
         elif domain.startswith("text_") or domain == "seq_to_seq":
             return self._create_text_fallback_plan(domain, sota_analysis)
         elif domain.startswith("audio_"):
             return self._create_audio_fallback_plan(domain, sota_analysis)
         else:
             # Tabular (existing logic)
-            return self._create_tabular_fallback_plan(domain, sota_analysis, curriculum_insights)
+            return self._create_tabular_fallback_plan(
+                domain,
+                sota_analysis,
+                curriculum_insights,
+                fast_mode=fast_mode,
+            )
 
     def _create_tabular_fallback_plan(
         self,
         domain: str,
         sota_analysis: dict[str, Any],
         curriculum_insights: str = "",
+        *,
+        fast_mode: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Create fallback plan for tabular competitions (classification/regression).
@@ -819,6 +961,34 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         """
         # Note: Curriculum insights are logged but fallback uses fixed plan
         # In future iterations, could use insights to reorder components
+        if fast_mode:
+            return [
+                {
+                    "name": "lightgbm_fast_cv",
+                    "component_type": "model",
+                    "description": "LightGBM baseline tuned for speed (no Optuna). Use fewer estimators + early stopping/callbacks. Respect KAGGLE_AGENTS_CV_FOLDS for faster iteration.",
+                    "estimated_impact": 0.18,
+                    "rationale": "High ROI baseline for tabular tasks; fast enough to iterate under tight time budgets (MLE-bench).",
+                    "code_outline": "LGBMClassifier/Regressor with sane defaults, 3-fold CV when FAST_MODE, save OOF/test preds",
+                },
+                {
+                    "name": "xgboost_fast_cv",
+                    "component_type": "model",
+                    "description": "XGBoost baseline tuned for speed (no Optuna). Use hist/gpu_hist where available. Respect time budget and fold count env vars.",
+                    "estimated_impact": 0.16,
+                    "rationale": "Provides diversity vs LightGBM with similar compute budget; useful for a quick ensemble.",
+                    "code_outline": "XGBClassifier/Regressor with fixed params, 3-fold CV when FAST_MODE, save OOF/test preds",
+                },
+                {
+                    "name": "stacking_ensemble",
+                    "component_type": "ensemble",
+                    "description": "Stack OOF predictions from LightGBM + XGBoost with LogisticRegression/Ridge meta-learner. Fallback to weighted average if needed.",
+                    "estimated_impact": 0.10,
+                    "rationale": "Cheap ensemble step that often improves generalization without additional heavy training.",
+                    "code_outline": "Load models/oof_*.npy + models/test_*.npy, fit meta-model on OOF, predict test, write submission",
+                },
+            ]
+
         plan = []
 
         # ALWAYS add feature engineering first (high impact)
@@ -883,6 +1053,8 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         self,
         domain: str,
         sota_analysis: dict[str, Any],
+        *,
+        fast_mode: bool = False,
     ) -> list[dict[str, Any]]:
         """
         Create fallback plan for image competitions (PyTorch/TensorFlow DataLoaders).
@@ -892,13 +1064,36 @@ Generate a plan that leverages proven successful strategies and avoids known pit
         Args:
             domain: Competition domain (image_classification, image_regression, etc.)
             sota_analysis: SOTA analysis results
+            fast_mode: If True, return minimal 2-component plan for speed
 
         Returns:
-            List of component dictionaries (3 components: 2 models + 1 ensemble)
+            List of component dictionaries (2 in fast mode, 3 normally)
         """
         is_regression = "regression" in domain
         task = "regression" if is_regression else "classification"
 
+        # FAST MODE: Only 2 components for maximum speed (MLE-bench optimization)
+        if fast_mode:
+            return [
+                {
+                    "name": f"efficientnet_b0_fast_{task}",
+                    "component_type": "model",
+                    "description": f"EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern.",
+                    "estimated_impact": 0.30,
+                    "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
+                    "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save best checkpoint, implement _check_deadline() pattern"
+                },
+                {
+                    "name": "tta_inference_only",
+                    "component_type": "ensemble",
+                    "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained model and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
+                    "estimated_impact": 0.05,
+                    "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
+                    "code_outline": "Load models/best_model.pth, for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv"
+                }
+            ]
+
+        # NORMAL MODE: 3 components (2 models + TTA ensemble)
         return [
             {
                 "name": f"efficientnet_b0_{task}",
@@ -906,15 +1101,15 @@ Generate a plan that leverages proven successful strategies and avoids known pit
                 "description": f"EfficientNet-B0 pre-trained fine-tuned for {task}. PyTorch DataLoader with ImageFolder or custom Dataset. Data augmentation (rotation, flip, color jitter). Use transfer learning from ImageNet weights.",
                 "estimated_impact": 0.28,
                 "rationale": "EfficientNet achieves SOTA on ImageNet with excellent efficiency. Transfer learning transfers learned features. Data augmentation prevents overfitting on small datasets.",
-                "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, 5-fold StratifiedKFold CV, save OOF predictions for ensemble"
+                "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, CV folds via KAGGLE_AGENTS_CV_FOLDS, save OOF predictions for ensemble"
             },
             {
                 "name": f"resnet50_{task}",
                 "component_type": "model",
-                "description": f"ResNet50 fine-tuned with different augmentation strategy (Cutout, Mixup) for architectural diversity in ensemble.",
+                "description": "ResNet50 fine-tuned with different augmentation strategy (Cutout, Mixup) for architectural diversity in ensemble.",
                 "estimated_impact": 0.24,
-                "rationale": "ResNet provides different feature extraction than EfficientNet (residual connections vs compound scaling). Ensemble benefits from architectural diversity. Different augmentation adds robustness.",
-                "code_outline": "torchvision.models.resnet50(pretrained=True), replace fc layer, Cutout + Mixup augmentation, AdamW optimizer with cosine annealing, 5-fold CV"
+                "rationale": "ResNet provides complementary features vs EfficientNet. Ensemble benefits from architectural diversity.",
+                "code_outline": "torchvision.models.resnet50(pretrained=True), replace head, Cutout + Mixup augmentations, AdamW, CV folds via KAGGLE_AGENTS_CV_FOLDS"
             },
             {
                 "name": "tta_ensemble",

@@ -180,17 +180,47 @@ class DeveloperAgent:
             print("All components implemented!")
             return {"current_component_index": current_index}
 
+        # If a previous iteration already achieved the objective (e.g., medal in MLE-bench),
+        # allow skipping remaining planned components to save time.
+        if state.get("skip_remaining_components"):
+            print("Skipping remaining components (skip_remaining_components=True)")
+            return {"current_component_index": len(ablation_plan)}
+
+        run_mode = str(state.get("run_mode", "")).lower()
+        mlebench_grade = state.get("mlebench_grade")
+        if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
+            if mlebench_grade.get("valid_submission") and any(
+                mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]
+            ):
+                print("Skipping remaining components (medal already achieved)")
+                return {
+                    "skip_remaining_components": True,
+                    "current_component_index": len(ablation_plan),
+                }
+
         component = ablation_plan[current_index]
         print(f"\n= Implementing: {component.name} ({component.component_type})")
         print(f"Estimated Impact: {component.estimated_impact:.1%}")
 
-        base_timeout = self.config.ablation.testing_timeout
-        heavy_timeout = max(base_timeout, 2700)
-        ensemble_timeout = min(base_timeout, 1200) if base_timeout else 1200
-        ensemble_timeout = max(ensemble_timeout, 1200)
-        feature_timeout = min(base_timeout, 900) if base_timeout else 900
-        feature_timeout = max(feature_timeout, 900)
-        light_timeout = min(base_timeout, 300) if base_timeout else 300
+        def _coerce_int(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        # Allow runners (e.g., MLE-bench) to cap runtime per component via state.
+        base_timeout = _coerce_int(
+            state.get("timeout_per_component"),
+            self.config.ablation.testing_timeout,
+        )
+        if base_timeout <= 0:
+            base_timeout = self.config.ablation.testing_timeout or 300
+
+        # Per-type caps (never exceed base_timeout)
+        heavy_timeout = base_timeout
+        ensemble_timeout = min(base_timeout, 1200)
+        feature_timeout = min(base_timeout, 900)
+        light_timeout = min(base_timeout, 300)
         name_lower = component.name.lower()
 
         if component.component_type == "model" or "optuna" in name_lower:
@@ -276,6 +306,35 @@ class DeveloperAgent:
                 shutil.copy(submission_path, backup_path)
                 print(f"Backup submission saved: {backup_name}")
 
+                # In MLE-bench mode, grade after each successful model component so we can
+                # stop early once the objective is reached (medal/target/above-median).
+                if run_mode == "mlebench":
+                    grading = self._grade_with_mlebench(
+                        competition_name=competition_info.name,
+                        submission_path=submission_path,
+                    )
+                    state_updates["mlebench_grade"] = grading
+                    score = grading.get("score")
+                    if grading.get("valid_submission") and isinstance(score, (int, float)):
+                        state_updates["current_performance_score"] = float(score)
+                        print(
+                            f"✅ MLE-bench grade: score={float(score):.5f} "
+                            f"above_median={bool(grading.get('above_median', False))}"
+                        )
+
+                        if self._should_stop_on_mlebench_grade(
+                            grading=grading,
+                            state=state,
+                            metric_name=competition_info.evaluation_metric,
+                        ):
+                            print("🏁 Objective reached (MLE-bench) - stopping remaining components")
+                            state_updates["skip_remaining_components"] = True
+                            state_updates["current_component_index"] = len(ablation_plan)
+                    else:
+                        print(
+                            f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
+                        )
+
                 current_best_score = state.get("best_single_model_score")
                 metric_name = competition_info.evaluation_metric
 
@@ -312,15 +371,22 @@ class DeveloperAgent:
 
             if (
                 component.component_type == "model"
-                and self.config.ablation.enable_refinement
+                and self._should_run_refinement(
+                    component,
+                    state,
+                    new_cv_score,
+                    execution_time_s=result.execution_time,
+                    component_timeout_s=desired_timeout,
+                )
             ):
                 print("\nADK Refinement Loop: Trying to improve score...")
                 best_code = result.code
                 best_score = new_cv_score if new_cv_score is not None else 0.0
                 best_stdout = result.stdout
 
-                for i in range(2):
-                    print(f"Refinement Iteration {i + 1}/2")
+                refinement_iters = self._get_refinement_iterations(state)
+                for i in range(refinement_iters):
+                    print(f"Refinement Iteration {i + 1}/{refinement_iters}")
 
                     # Parse training logs for structured feedback
                     training_feedback = parse_training_logs(best_stdout)
@@ -433,6 +499,158 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     print(f"     Test:  {eng_test.name}")
 
         return state_updates
+
+    def _get_refinement_iterations(self, state: KaggleState) -> int:
+        """Number of refinement iterations (can be reduced for fast/mlebench runs)."""
+        run_mode = str(state.get("run_mode", "")).lower()
+        if run_mode == "mlebench":
+            return 0
+        try:
+            return max(0, min(int(os.getenv("REFINEMENT_ITERS", "2")), 3))
+        except ValueError:
+            return 2
+
+    def _should_run_refinement(
+        self,
+        component: AblationComponent,
+        state: KaggleState,
+        new_cv_score: float | None,
+        execution_time_s: float | None,
+        component_timeout_s: int,
+    ) -> bool:
+        """Decide whether to run expensive post-success refinements."""
+        if component.component_type != "model":
+            return False
+
+        if not self.config.ablation.enable_refinement:
+            return False
+
+        run_mode = str(state.get("run_mode", "")).lower()
+        objective = str(state.get("objective", "")).lower()
+
+        # Default to speed-first in MLE-bench / medal objective.
+        if run_mode == "mlebench" or "medal" in objective:
+            return False
+
+        # If the component already consumed most of its budget, don't re-run it.
+        if execution_time_s is not None and component_timeout_s > 0:
+            if float(execution_time_s) >= component_timeout_s * 0.70:
+                return False
+
+        # If a target score is defined and already reached, skip refinement.
+        target_score = state.get("target_score")
+        if isinstance(target_score, str):
+            try:
+                target_score = float(target_score)
+            except ValueError:
+                target_score = None
+
+        if isinstance(target_score, (int, float)) and isinstance(new_cv_score, (int, float)):
+            metric_name = state.get("competition_info").evaluation_metric if state.get("competition_info") else ""
+            if is_metric_minimization(metric_name):
+                if float(new_cv_score) <= float(target_score):
+                    return False
+            else:
+                if float(new_cv_score) >= float(target_score):
+                    return False
+
+        return True
+
+    def _grade_with_mlebench(
+        self,
+        *,
+        competition_name: str,
+        submission_path: Path,
+    ) -> dict[str, Any]:
+        """Grade a submission locally using the `mlebench grade-sample` CLI."""
+        import json
+        import subprocess
+
+        if shutil.which("mlebench") is None:
+            return {
+                "valid_submission": False,
+                "error": "mlebench CLI not found in PATH",
+            }
+
+        try:
+            result = subprocess.run(
+                ["mlebench", "grade-sample", str(submission_path), competition_name],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            output = (result.stdout or "") + (result.stderr or "")
+
+            # Extract the first JSON object from output (mlebench prints extra lines)
+            json_start = output.find("{")
+            json_end = output.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                try:
+                    parsed = json.loads(output[json_start:json_end])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+
+            return {
+                "valid_submission": False,
+                "error": f"Could not parse mlebench output (exit={result.returncode}): {output[:500]}",
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "valid_submission": False,
+                "error": "MLE-bench grading timeout (60s)",
+            }
+        except Exception as e:
+            return {
+                "valid_submission": False,
+                "error": str(e),
+            }
+
+    def _should_stop_on_mlebench_grade(
+        self,
+        *,
+        grading: dict[str, Any],
+        state: KaggleState,
+        metric_name: str,
+    ) -> bool:
+        """Decide whether to stop implementing more components based on MLE-bench grading."""
+        if not grading.get("valid_submission"):
+            return False
+
+        # Medal achieved -> always stop.
+        if any(grading.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
+            return True
+
+        score = grading.get("score")
+        if isinstance(score, str):
+            try:
+                score = float(score)
+            except ValueError:
+                score = None
+
+        target_score = state.get("target_score")
+        if isinstance(target_score, str):
+            try:
+                target_score = float(target_score)
+            except ValueError:
+                target_score = None
+
+        if isinstance(score, (int, float)) and isinstance(target_score, (int, float)):
+            if is_metric_minimization(metric_name):
+                if float(score) <= float(target_score):
+                    return True
+            else:
+                if float(score) >= float(target_score):
+                    return True
+
+        # In fast mode, stop once we're above median (speed-first iteration).
+        if bool(state.get("fast_mode")) and bool(grading.get("above_median", False)):
+            return True
+
+        return False
 
     def _implement_component(
         self,
@@ -594,13 +812,51 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         print("\nExecuting code...")
         max_retries = 3
         meta_feedback: str | None = None
+
+        # Provide runtime knobs to generated code (optional but strongly encouraged).
+        run_mode = str(state.get("run_mode", "")).lower()
+        objective = str(state.get("objective", ""))
+        fast_mode = bool(state.get("fast_mode")) or (
+            run_mode == "mlebench"
+            or os.getenv("KAGGLE_AGENTS_FAST_MODE", "").lower() in {"1", "true", "yes"}
+            or os.getenv("FAST_MODE", "").lower() in {"1", "true", "yes"}
+        )
+        cv_folds_override = os.getenv("KAGGLE_AGENTS_CV_FOLDS")
+        cv_folds: int
+        state_cv_folds = state.get("cv_folds")
+        if cv_folds_override:
+            try:
+                cv_folds = max(2, min(int(cv_folds_override), 10))
+            except ValueError:
+                cv_folds = 2 if run_mode == "mlebench" else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
+        else:
+            if isinstance(state_cv_folds, int) and state_cv_folds >= 2:
+                cv_folds = min(state_cv_folds, 10)
+            else:
+                cv_folds = 2 if run_mode == "mlebench" else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
+        env_overrides = {
+            "KAGGLE_AGENTS_COMPONENT_TIMEOUT_S": str(getattr(self.executor, "timeout", "")),
+            "KAGGLE_AGENTS_RUN_MODE": run_mode,
+            "KAGGLE_AGENTS_OBJECTIVE": objective,
+            "KAGGLE_AGENTS_FAST_MODE": "1" if fast_mode else "0",
+            "KAGGLE_AGENTS_CV_FOLDS": str(cv_folds),
+        }
+        prev_env: dict[str, str | None] = {k: os.getenv(k) for k in env_overrides}
+
         for attempt in range(max_retries):
             print(f"\nAttempt {attempt + 1}/{max_retries}")
 
+            for k, v in env_overrides.items():
+                os.environ[k] = v
             exec_result = self.executor.execute(
                 code=code,
                 working_dir=working_dir,
             )
+            for k, old in prev_env.items():
+                if old is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = old
 
             if exec_result.success:
                 print(f"Execution successful ({exec_result.execution_time:.2f}s)")
@@ -974,6 +1230,42 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         instructions.append(f"Implement {component.component_type}: {component.name}")
 
+        run_mode = str(state.get("run_mode", "")).lower()
+        objective = str(state.get("objective", "")).lower()
+        domain = str(state.get("domain_detected", state.get("domain", "tabular"))).lower()
+        is_image = domain.startswith("image") or domain in {"computer_vision", "vision"}
+
+        # Budget hints (useful for faster iteration + avoiding hard executor timeouts)
+        timeout_hint = state.get("timeout_per_component")
+        if not isinstance(timeout_hint, (int, float)):
+            try:
+                timeout_hint = int(timeout_hint) if timeout_hint is not None else None
+            except Exception:
+                timeout_hint = None
+        if timeout_hint is None:
+            timeout_hint = getattr(self.executor, "timeout", None)
+
+        if isinstance(timeout_hint, (int, float)):
+            instructions.append("\n⏱️ TIME BUDGET (CRITICAL):")
+            instructions.append(
+                f"  - Component must complete within ~{int(timeout_hint)}s (env: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S)."
+            )
+            instructions.append(
+                "  - Implement a soft-deadline (e.g., budget-45s): if exceeded, stop training, save best artifacts, and still print the final metric line."
+            )
+            instructions.append(
+                "  - Read env vars: KAGGLE_AGENTS_FAST_MODE and KAGGLE_AGENTS_CV_FOLDS to reduce compute when needed."
+            )
+
+        if run_mode == "mlebench" or "medal" in objective:
+            instructions.append("\n🏁 MLE-BENCH OBJECTIVE:")
+            instructions.append(
+                "  - Optimize for MLE-bench medal: prioritize fast end-to-end runtime + robust valid submission."
+            )
+            instructions.append(
+                "  - Prefer cheaper training (fewer folds/epochs) and inference-time tricks (TTA) over expensive CV sweeps."
+            )
+
         current_iteration = state.get("current_iteration", 0)
         if current_iteration > 0:
             instructions.append(f"\n⚡ REFINEMENT ITERATION {current_iteration}")
@@ -1029,24 +1321,30 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                         instructions.append(f"  - {error_msg}")
 
         current_score = state.get("current_performance_score", 0.0)
-        target_score = os.getenv("TARGET_SCORE", 0.9268)
+        target_score = state.get("target_score", os.getenv("TARGET_SCORE"))
+        if isinstance(target_score, str):
+            try:
+                target_score = float(target_score)
+            except ValueError:
+                target_score = None
         if current_score > 0:
-            gap = target_score - current_score
-            instructions.append(
-                f"\nPERFORMANCE GAP: {gap:.4f} to reach target ({target_score:.4f})"
-            )
-            if gap < 0.01:
+            if isinstance(target_score, (int, float)):
+                gap = float(target_score) - float(current_score)
                 instructions.append(
-                    "  - Small gap: Focus on fine-tuning hyperparameters"
+                    f"\nPERFORMANCE GAP: {gap:.4f} to reach target ({float(target_score):.4f})"
                 )
-            elif gap < 0.05:
-                instructions.append(
-                    "  - Medium gap: Consider feature engineering or ensemble methods"
-                )
-            else:
-                instructions.append(
-                    "  - Large gap: May need different model architecture or approach"
-                )
+                if gap < 0.01:
+                    instructions.append(
+                        "  - Small gap: Focus on fine-tuning hyperparameters"
+                    )
+                elif gap < 0.05:
+                    instructions.append(
+                        "  - Medium gap: Consider feature engineering or ensemble methods"
+                    )
+                else:
+                    instructions.append(
+                        "  - Large gap: May need different model architecture or approach"
+                    )
 
         if component.component_type == "model":
             instructions.append("\nMODEL COMPONENT REQUIREMENTS:")
@@ -1055,23 +1353,36 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 "  - MUST create submission.csv with probability predictions (0.0-1.0)"
             )
             instructions.append(
-                f"  - CRITICAL: Use target_col from dataset info (target_col='{state.get('target_col', 'target')}' if available)"
-            )
-            instructions.append(
                 "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')"
             )
-            instructions.append(
-                "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder"
-            )
-            instructions.append(
-                "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')"
-            )
-            instructions.append(
-                "  - CatBoost is the ONLY exception that handles categorical features natively"
-            )
-            instructions.append(
-                "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)"
-            )
+
+            if not is_image:
+                instructions.append(
+                    f"  - CRITICAL: Use target_col from dataset info (target_col='{state.get('target_col', 'target')}' if available)"
+                )
+                instructions.append(
+                    "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder"
+                )
+                instructions.append(
+                    "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')"
+                )
+                instructions.append(
+                    "  - CatBoost is the ONLY exception that handles categorical features natively"
+                )
+                instructions.append(
+                    "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)"
+                )
+            else:
+                instructions.append("\n🖼️ IMAGE MODELLING (SPEED-ORIENTED):")
+                instructions.append(
+                    "  - Use a pretrained backbone (torchvision/timm). In FAST_MODE: freeze backbone and train a small head for 1-2 epochs."
+                )
+                instructions.append(
+                    "  - Use mixed precision (torch.cuda.amp) if CUDA available; keep augmentations lightweight."
+                )
+                instructions.append(
+                    "  - Use fewer folds when budgeted: n_folds=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','3'))"
+                )
 
             instructions.append("\n🔄 CONSISTENT CROSS-VALIDATION (CRITICAL):")
             instructions.append(
@@ -1093,7 +1404,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             instructions.append("        # ... train/val split ...")
             instructions.append("    ```")
             instructions.append(
-                "  - IF NOT EXISTS: Use StratifiedKFold(n_splits=5, shuffle=True, random_state=42)"
+                "  - IF NOT EXISTS: Use StratifiedKFold(n_splits=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','5')), shuffle=True, random_state=42)"
             )
 
             instructions.append(
@@ -1640,9 +1951,11 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             Strategic feedback string
         """
         # Quick analysis prompt
+        timeout_s = getattr(self.executor, "timeout", None)
         prompt = f"""You are a Meta-Evaluator analyzing code failure.
 
         Component: {component_name}
+        Component timeout: {timeout_s}s
         Error: {error[:500]}
 
         Code Summary (first 500 lines):

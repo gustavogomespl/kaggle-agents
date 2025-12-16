@@ -27,19 +27,40 @@ Output: A single Python code block. No explanations outside the code."""
 
 HARD_CONSTRAINTS = """## MUST (violations cause failures):
 1. predict_proba() for classification (NOT predict())
-2. StratifiedKFold(n_splits=5, shuffle=True, random_state=42) for CV
+2. CV folds must respect `KAGGLE_AGENTS_CV_FOLDS` (default 5): StratifiedKFold(n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5")), shuffle=True, random_state=42)
 3. Pipeline/ColumnTransformer for preprocessing - fit INSIDE CV folds only
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
 5. Clamp predictions: np.clip(predictions, 0, 1) before saving
 6. Match sample_submission.csv exactly: columns, IDs, shape
 7. Print "Final Validation Performance: {score:.6f}" at the end
 8. Set random_state=42 everywhere for reproducibility
+9. MANDATORY SOFT-DEADLINE PATTERN (prevents hard timeout kills):
+   ```python
+   import os, time
+   _START_TIME = time.time()
+   _TIMEOUT_S = int(os.getenv("KAGGLE_AGENTS_COMPONENT_TIMEOUT_S", "600"))
+   _SOFT_DEADLINE_S = _TIMEOUT_S - 45  # Reserve 45s for cleanup/save
+
+   def _check_deadline() -> bool:
+       '''Return True if deadline exceeded.'''
+       return (time.time() - _START_TIME) >= _SOFT_DEADLINE_S
+
+   # Call inside training loops:
+   for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
+       if _check_deadline():
+           print("[LOG:WARNING] Soft deadline reached, stopping early")
+           break
+       # ... train fold ...
+
+   # ALWAYS print final metric even if stopped early
+   print(f"Final Validation Performance: {cv_score:.6f}")
+   ```
 
 ## MUST NOT:
 - sys.exit(), exit(), quit(), raise SystemExit, os._exit()
 - try-except blocks that swallow errors (let them surface)
 - early_stopping_rounds as direct fit() parameter (use callbacks)
-- Subsample training data (use all available data)
+- Subsample training data unless `KAGGLE_AGENTS_FAST_MODE=1` (FAST_MODE may subsample to meet budget, but keep determinism)
 
 ## API Gotchas:
 - OneHotEncoder: sparse_output=False (NOT sparse=False) for sklearn 1.2+
@@ -79,6 +100,10 @@ class DynamicContext:
     what_failed: list[str] = field(default_factory=list)
     best_score: Optional[float] = None
     target_score: Optional[float] = None
+    run_mode: str = ""
+    objective: str = ""
+    timeout_per_component: Optional[int] = None
+    fast_mode: bool = False
 
 
 def build_context(state: dict[str, Any], component: Any | None = None) -> DynamicContext:
@@ -103,7 +128,21 @@ def build_context(state: dict[str, Any], component: Any | None = None) -> Dynami
     context = DynamicContext()
     context.iteration_num = state.get("current_iteration", 0)
     context.best_score = state.get("best_score")
-    context.target_score = state.get("target_percentile")
+    context.target_score = state.get("target_score")
+    context.run_mode = str(state.get("run_mode", ""))
+    context.objective = str(state.get("objective", ""))
+    context.fast_mode = (
+        str(state.get("run_mode", "")).lower() == "mlebench"
+        or str(os.getenv("KAGGLE_AGENTS_FAST_MODE", "")).lower() in {"1", "true", "yes"}
+        or str(os.getenv("FAST_MODE", "")).lower() in {"1", "true", "yes"}
+    )
+    timeout_val = state.get("timeout_per_component")
+    if isinstance(timeout_val, str):
+        try:
+            timeout_val = int(timeout_val)
+        except ValueError:
+            timeout_val = None
+    context.timeout_per_component = timeout_val if isinstance(timeout_val, int) else None
 
     # Extract SOTA patterns from search results
     sota_solutions = state.get("sota_solutions", [])
@@ -135,7 +174,15 @@ def build_context(state: dict[str, Any], component: Any | None = None) -> Dynami
     if reward_signals:
         r_combined = reward_signals.get("r_combined", 0)
         r_performance = reward_signals.get("r_performance", 0)
-        guidance_parts.append(f"Reward: r_combined={r_combined:.3f}, r_performance={r_performance:.3f}")
+        r_medal = reward_signals.get("r_medal")
+        if isinstance(r_medal, (int, float)):
+            guidance_parts.append(
+                f"Reward: r_combined={r_combined:.3f}, r_performance={r_performance:.3f}, r_medal={float(r_medal):.3f}"
+            )
+        else:
+            guidance_parts.append(
+                f"Reward: r_combined={r_combined:.3f}, r_performance={r_performance:.3f}"
+            )
 
     if guidance_parts:
         context.reward_guidance = "\n".join(guidance_parts)
@@ -297,6 +344,30 @@ def compose_generate_prompt(
         _format_task(component, competition_info, paths),
     ]
 
+    # Runtime/objective hints (important for timeout-sensitive runs like MLE-bench).
+    if context.run_mode or context.objective or context.timeout_per_component is not None:
+        parts.append("")
+        parts.append("## Objective & Budget")
+        if context.run_mode:
+            parts.append(f"- run_mode: {context.run_mode}")
+        if context.objective:
+            parts.append(f"- objective: {context.objective}")
+        if context.timeout_per_component is not None:
+            parts.append(f"- timeout_per_component_seconds: {context.timeout_per_component}")
+        parts.append("- Env knobs: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, KAGGLE_AGENTS_CV_FOLDS, KAGGLE_AGENTS_FAST_MODE")
+
+    # MLE-bench specific guidance for medal optimization
+    if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():
+        parts.append("")
+        parts.append("## MLE-BENCH MEDAL OPTIMIZATION (CRITICAL)")
+        parts.append("- GOAL: Achieve at least a Bronze medal")
+        parts.append("- TIME BUDGET: Complete within timeout - IMPLEMENT soft-deadline pattern")
+        parts.append("- CV FOLDS: Use 2-3 folds max (speed over precision)")
+        parts.append("- EARLY STOPPING: Stop training early if deadline approaches")
+        parts.append("- SUBMISSION: MUST generate valid submission even if training incomplete")
+        parts.append("- FALLBACK: If time runs out, use best checkpoint so far")
+        parts.append("- For image models: freeze backbone, train head only, 2-3 epochs max")
+
     # ADAPTIVE: First iteration = SOTA heavy
     if context.iteration_num == 0:
         if context.sota_patterns:
@@ -380,12 +451,14 @@ def _get_component_guidance(component_type: str) -> str:
     """Get minimal, type-specific guidance."""
     guidance = {
         "model": """## Model Component Requirements
-- Train model with 5-fold StratifiedKFold CV
+- IMPLEMENT soft-deadline pattern (see HARD_CONSTRAINTS #9) - check _check_deadline() INSIDE fold loop
+- Train model with StratifiedKFold CV using n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5"))
 - Save OOF predictions to models/oof_{name}.npy for stacking
 - Handle class imbalance if ratio > 2:1 (class_weight or scale_pos_weight)
 - Print per-fold scores: [LOG:FOLD] fold={n} score={s:.6f}
 - Use GPU if available (check torch.cuda.is_available())
-- Create submission.csv with probabilities [0,1]""",
+- Create submission.csv with probabilities [0,1]
+- ALWAYS print "Final Validation Performance: {score}" even if stopped early due to deadline""",
 
         "feature_engineering": """## Feature Engineering Requirements
 - Transform train and test consistently

@@ -272,8 +272,16 @@ class MetaEvaluatorAgent:
 
         dev_results = state.get("development_results", [])
         submissions = state.get("submissions", [])
+        # Prefer MLE-bench grading when available (enables medal-oriented rewards).
+        mlebench_grade = state.get("mlebench_grade")
         current_score = state.get("current_performance_score", 0.0)
+        if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
+            score = mlebench_grade.get("score")
+            if isinstance(score, (int, float)):
+                current_score = float(score)
         best_score = state.get("best_score", 0.0)
+        run_mode = str(state.get("run_mode", "")).lower()
+        objective = str(state.get("objective", "")).lower()
 
         # Reward 1: Functional Correctness (binary)
         total_components = len(dev_results)
@@ -282,8 +290,31 @@ class MetaEvaluatorAgent:
 
         # Reward 2: Performance (continuous, normalized 0-1)
         # Try to get dynamic target from state (e.g. from leaderboard), else default
-        target_score = state.get("target_score", 0.9238)  # Default to 0.9238 if not set
-        r_performance = min(current_score / target_score, 1.0) if target_score > 0 else 0.0
+        target_score = state.get("target_score", 1)  # Default to 1 if not set
+        if isinstance(target_score, str):
+            try:
+                target_score = float(target_score)
+            except ValueError:
+                target_score = 1
+
+        # Medal-aware shaping (MLE-bench objective)
+        r_medal = 0.0
+        if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
+            if mlebench_grade.get("gold_medal"):
+                r_medal = 1.0
+            elif mlebench_grade.get("silver_medal"):
+                r_medal = 0.8
+            elif mlebench_grade.get("bronze_medal"):
+                r_medal = 0.6
+            elif mlebench_grade.get("above_median"):
+                r_medal = 0.4
+
+        score_component = min(current_score / float(target_score), 1.0) if float(target_score) > 0 else 0.0
+        if run_mode == "mlebench" or "medal" in objective:
+            # Blend medal attainment with raw score; medal dominates to keep the objective explicit.
+            r_performance = min(0.7 * r_medal + 0.3 * score_component, 1.0)
+        else:
+            r_performance = score_component
 
         # Reward 3: Improvement (delta from previous best)
         # Get evaluation metric to handle both minimize and maximize metrics correctly
@@ -315,14 +346,25 @@ class MetaEvaluatorAgent:
         r_robustness = 1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
 
         # Combined reward (weighted)
-        weights = {
-            "functional": 0.25,
-            "performance": 0.40,
-            "improvement": 0.1,
-            "semantics": 0.05,
-            "diversity": 0.1,
-            "robustness": 0.1,
-        }
+        # In MLE-bench, speed and medal attainment matter more than exploring many components.
+        if run_mode == "mlebench" or "medal" in objective:
+            weights = {
+                "functional": 0.25,
+                "performance": 0.45,
+                "improvement": 0.05,
+                "semantics": 0.15,
+                "diversity": 0.05,
+                "robustness": 0.05,
+            }
+        else:
+            weights = {
+                "functional": 0.25,
+                "performance": 0.40,
+                "improvement": 0.1,
+                "semantics": 0.05,
+                "diversity": 0.1,
+                "robustness": 0.1,
+            }
 
         r_combined = (
             weights["functional"] * r_functional +
@@ -340,6 +382,7 @@ class MetaEvaluatorAgent:
             "r_semantics": r_semantics,
             "r_diversity": r_diversity,
             "r_robustness": r_robustness,
+            "r_medal": r_medal,
             "r_combined": r_combined,
         }
 
@@ -406,10 +449,28 @@ class MetaEvaluatorAgent:
     ) -> str:
         """Build context string for LLM evaluation."""
         current_iteration = state.get("current_iteration", 0)
+        run_mode = str(state.get("run_mode", "")).lower()
+        objective = str(state.get("objective", "")).lower()
+        mlebench_grade = state.get("mlebench_grade")
+
         current_score = state.get("current_performance_score", 0.0)
-        target_score = 0.9238
+        if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
+            score = mlebench_grade.get("score")
+            if isinstance(score, (int, float)):
+                current_score = float(score)
+
+        target_score = state.get("target_score", 1)
+        if isinstance(target_score, str):
+            try:
+                target_score = float(target_score)
+            except ValueError:
+                target_score = 1
 
         context = f"""# Iteration {current_iteration} Evaluation
+
+## Objective
+- run_mode: {run_mode or 'kaggle'}
+- objective: {objective or 'top20'}
 
 ## Current Performance
 - Score: {current_score:.4f}
@@ -426,6 +487,22 @@ class MetaEvaluatorAgent:
 
 ## Error Patterns
 {chr(10).join('- ' + p for p in failure_analysis['error_patterns'])}
+"""
+
+        if isinstance(mlebench_grade, dict):
+            medals = []
+            if mlebench_grade.get("gold_medal"):
+                medals.append("Gold")
+            if mlebench_grade.get("silver_medal"):
+                medals.append("Silver")
+            if mlebench_grade.get("bronze_medal"):
+                medals.append("Bronze")
+            context += f"""
+## MLE-bench Grading
+- valid_submission: {bool(mlebench_grade.get('valid_submission', False))}
+- score: {mlebench_grade.get('score')}
+- above_median: {bool(mlebench_grade.get('above_median', False))}
+- medals: {', '.join(medals) if medals else 'None'}
 """
 
         # FULL CODE AND PERFORMANCE ANALYSIS
@@ -485,6 +562,11 @@ class MetaEvaluatorAgent:
 
 ## Your Task
 Analyze the above results and provide strategic guidance for improving prompts in the next iteration.
+
+If the objective is `mlebench_medal`, explicitly prioritize:
+- Achieving at least a Bronze medal (then Silver/Gold)
+- Reducing wall-clock execution time (avoid expensive CV / over-sized models)
+- Robustness and deterministic outputs (no flaky dependencies)
 
 Return a JSON object with:
 {{

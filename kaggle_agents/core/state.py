@@ -168,6 +168,17 @@ class KaggleState(TypedDict):
     # Competition Context
     competition_info: CompetitionInfo
     working_directory: str
+    run_mode: str  # e.g. "kaggle" | "mlebench"
+    objective: str  # e.g. "top20" | "mlebench_medal"
+    timeout_per_component: Optional[int]
+    enable_checkpoint_recovery: bool
+    cv_folds: Optional[int]
+    fast_mode: bool
+    target_score: Optional[float]
+    current_performance_score: float
+    mlebench_grade: Optional[dict[str, Any]]
+    skip_remaining_components: bool
+    errors: Annotated[list[str], add]
     current_train_path: Optional[str]
     current_test_path: Optional[str]
     train_data_path: str
@@ -286,6 +297,17 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
             problem_type="",
         ),
         working_directory=working_dir,
+        run_mode="kaggle",
+        objective="top20",
+        timeout_per_component=None,
+        enable_checkpoint_recovery=True,
+        cv_folds=None,
+        fast_mode=False,
+        target_score=None,
+        current_performance_score=0.0,
+        mlebench_grade=None,
+        skip_remaining_components=False,
+        errors=[],
         current_train_path=None,
         current_test_path=None,
         train_data_path="",

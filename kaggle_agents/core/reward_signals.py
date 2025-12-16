@@ -34,7 +34,7 @@ class RewardCalculator:
     def __init__(
         self,
         weights: dict[str, float] | None = None,
-        target_score: float = 0.9238,
+        target_score: float = 1,
     ):
         """
         Initialize reward calculator.

@@ -196,7 +196,7 @@ class MLEBenchRunner:
         problem_type: str = "unknown",
         evaluation_metric: str = "unknown",
         max_iterations: int = 3,
-        timeout_per_component: int = 3000,
+        timeout_per_component: int = 1800,  # 30 min default for fast MLE-bench iteration
         enable_checkpoint_recovery: bool = True,
     ) -> MLEBenchResult:
         """
@@ -277,6 +277,16 @@ class MLEBenchRunner:
 
             # Set iteration config
             state["max_iterations"] = max_iterations
+            # Mark run mode so agents can switch objective/reward behavior
+            state["run_mode"] = "mlebench"
+            state["objective"] = "mlebench_medal"
+            state["timeout_per_component"] = timeout_per_component
+            state["enable_checkpoint_recovery"] = enable_checkpoint_recovery
+
+            # MLE-bench speed optimizations
+            state["cv_folds"] = 3  # Reduce from 5 to 3 for faster iteration
+            state["fast_mode"] = True  # Enable speed-first mode in agents
+            state["target_score"] = 0.8  # Default: above_median (adjustable per competition)
 
             # Step 3: Run MLE-bench workflow
             _log("Step 3: Running workflow")

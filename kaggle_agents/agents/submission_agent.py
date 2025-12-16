@@ -5,6 +5,10 @@ This agent handles submission creation, Kaggle upload, leaderboard monitoring,
 and score-based iteration decisions.
 """
 
+import json
+import os
+import shutil
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -57,6 +61,7 @@ class SubmissionAgent:
 
         working_dir = Path(state["working_directory"])
         competition_name = state["competition_info"].name
+        metric_name = state["competition_info"].evaluation_metric
         sample_submission_path = state.get("sample_submission_path") or working_dir / "sample_submission.csv"
 
         # Find submission file
@@ -92,6 +97,54 @@ class SubmissionAgent:
 
         print("✅ Validation passed")
 
+        mlebench_grade: dict[str, Any] | None = None
+
+        # In MLE-bench mode (or when explicitly enabled), grade locally so downstream
+        # feedback/rewards can optimize for medals without needing Kaggle API.
+        mlebench_mode = (
+            str(state.get("run_mode", "")).lower() == "mlebench"
+            or os.getenv("MLEBENCH_MODE", "").lower() in {"1", "true", "yes"}
+        )
+        if mlebench_mode:
+            grading = self._grade_with_mlebench(
+                competition_name=competition_name,
+                submission_path=submission_path,
+            )
+            mlebench_grade = grading
+
+            # Surface grading in state for meta-evaluator feedback/reward signals
+            score = grading.get("score")
+            valid = bool(grading.get("valid_submission", False))
+
+            if valid and isinstance(score, (int, float)):
+                print(
+                    f"✅ MLE-bench grade: score={float(score):.5f} "
+                    f"medal={'gold' if grading.get('gold_medal') else 'silver' if grading.get('silver_medal') else 'bronze' if grading.get('bronze_medal') else 'none'}"
+                )
+                submission_result = SubmissionResult(
+                    submission_id=None,
+                    public_score=float(score),
+                    private_score=None,
+                    percentile=None,
+                    cv_score=None,
+                    submitted_at=datetime.now(),
+                )
+                updated_best = compare_scores(
+                    state.get("best_score", 0.0) or 0.0,
+                    float(score),
+                    metric_name,
+                )
+                return {
+                    "submissions": [submission_result],
+                    "best_score": updated_best,
+                    "current_performance_score": float(score),
+                    "mlebench_grade": grading,
+                    "last_updated": datetime.now(),
+                }
+
+            print(f"⚠️  MLE-bench grading failed: {grading.get('error', 'unknown error')}")
+            # Fall back to the usual Kaggle upload path if possible.
+
         # Upload to Kaggle
         submission_result = self._upload_to_kaggle(
             competition_name=competition_name,
@@ -110,8 +163,6 @@ class SubmissionAgent:
         if current_best is None:
             current_best = 0.0
         new_score = submission_result.public_score
-        metric_name = state["competition_info"].evaluation_metric
-
         # Only update if we have a valid new score
         if new_score is not None:
             # First valid score OR comparison with existing best
@@ -127,7 +178,62 @@ class SubmissionAgent:
             "submissions": [submission_result],
             "best_score": updated_best,  # Guaranteed to be float
             "last_updated": datetime.now(),
+            **({"mlebench_grade": mlebench_grade} if mlebench_grade is not None else {}),
         }
+
+    def _grade_with_mlebench(
+        self,
+        competition_name: str,
+        submission_path: Path,
+    ) -> dict[str, Any]:
+        """
+        Grade a submission with the local `mlebench grade-sample` CLI.
+
+        Returns a dict compatible with MLE-bench output, e.g.:
+        {valid_submission, score, gold_medal, silver_medal, bronze_medal, above_median, error}
+        """
+        if shutil.which("mlebench") is None:
+            return {
+                "valid_submission": False,
+                "error": "mlebench CLI not found in PATH",
+            }
+
+        try:
+            result = subprocess.run(
+                ["mlebench", "grade-sample", str(submission_path), competition_name],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            output = (result.stdout or "") + (result.stderr or "")
+
+            # Extract the first JSON object from output (mlebench prints extra lines)
+            json_start = output.find("{")
+            json_end = output.rfind("}") + 1
+            if json_start >= 0 and json_end > json_start:
+                try:
+                    parsed = json.loads(output[json_start:json_end])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+
+            return {
+                "valid_submission": False,
+                "error": f"Could not parse mlebench output (exit={result.returncode}): {output[:500]}",
+            }
+
+        except subprocess.TimeoutExpired:
+            return {
+                "valid_submission": False,
+                "error": "MLE-bench grading timeout (60s)",
+            }
+        except Exception as e:
+            return {
+                "valid_submission": False,
+                "error": str(e),
+            }
 
     def _find_submission_file(self, working_dir: Path) -> Path | None:
         """Find submission file in working directory."""

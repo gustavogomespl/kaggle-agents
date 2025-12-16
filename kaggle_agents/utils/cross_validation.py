@@ -2,8 +2,10 @@
 Cross-validation utilities for consistent evaluation.
 """
 
+from __future__ import annotations
+
 import pandas as pd
-from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit
 
 
 def generate_folds(
@@ -62,3 +64,49 @@ def generate_folds(
     print(f"      ✅ Saved fixed folds to: {output_path}")
 
     return output_path
+
+
+class AdaptiveCrossValidator:
+    """Utility helpers for selecting CV and scoring strategies."""
+
+    @staticmethod
+    def get_cv_strategy(strategy_name: str, n_splits: int = 5, *, random_state: int = 42):
+        """Return a scikit-learn CV splitter for a given strategy name."""
+        name = (strategy_name or "").lower()
+        if "timeseriessplit" in name or "time" in name:
+            return TimeSeriesSplit(n_splits=n_splits)
+        if "stratified" in name:
+            return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        return KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+
+    @staticmethod
+    def determine_best_strategy(X: pd.DataFrame, y: pd.Series, data_chars: dict) -> str:
+        """Heuristic strategy selection based on dataset characteristics."""
+        temporal = bool((data_chars.get("temporal") or {}).get("has_date_columns"))
+        if temporal:
+            return "TimeSeriesSplit"
+
+        target = data_chars.get("target") or {}
+        imbalance_ratio = target.get("imbalance_ratio")
+        if isinstance(imbalance_ratio, (int, float)) and float(imbalance_ratio) >= 2.0:
+            return "StratifiedKFold"
+
+        # Default
+        return "KFold"
+
+    @staticmethod
+    def get_scoring_metric(problem_type: str, metric_name: str | None = None) -> str:
+        """Map problem type / metric name to scikit-learn scoring identifiers."""
+        metric = (metric_name or "").strip().lower()
+        ptype = (problem_type or "").strip().lower()
+
+        if metric in {"auc", "roc_auc", "roc-auc"}:
+            return "roc_auc"
+        if metric in {"rmse", "root_mean_squared_error"}:
+            return "neg_root_mean_squared_error"
+        if metric in {"mae", "mean_absolute_error"}:
+            return "neg_mean_absolute_error"
+
+        if ptype == "regression":
+            return "neg_mean_squared_error"
+        return "accuracy"

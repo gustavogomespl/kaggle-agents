@@ -256,7 +256,15 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     print("="*60)
 
     current_score = state.get("best_score", 0.0)
-    target_score = 0.9238  # Top 20% threshold
+    # Dynamic target_score from state (set by MLE-bench or config), fallback to top 20% threshold
+    target_score = state.get("target_score")
+    if target_score is None:
+        target_score = 1
+    elif isinstance(target_score, str):
+        try:
+            target_score = float(target_score)
+        except ValueError:
+            target_score = 1
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
@@ -387,6 +395,58 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     Returns:
         "iterate" to continue implementing components, or "end" if done
     """
+    # Explicit early-stop flag (e.g., set by DeveloperAgent after MLE-bench grading)
+    if state.get("skip_remaining_components"):
+        print("\n⏩ skip_remaining_components=True - Stopping component iteration early")
+        return "end"
+
+    # Check for medal achievement in MLE-bench mode (early exit)
+    mlebench_grade = state.get("mlebench_grade")
+    run_mode = str(state.get("run_mode", "")).lower()
+
+    if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
+        if mlebench_grade.get("valid_submission"):
+            if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
+                print("\n🏅 MEDAL ACHIEVED - Stopping component iteration early")
+                return "end"
+            if bool(state.get("fast_mode")) and mlebench_grade.get("above_median"):
+                print("\n✅ ABOVE MEDIAN (fast_mode) - Stopping component iteration early")
+                return "end"
+
+            # Also allow stopping once a configured target_score is reached.
+            from .core.config import is_metric_minimization
+
+            metric_name = ""
+            try:
+                metric_name = state["competition_info"].evaluation_metric
+            except Exception:
+                metric_name = ""
+
+            current_score = state.get("current_performance_score", 0.0)
+            target_score = state.get("target_score")
+
+            if isinstance(current_score, str):
+                try:
+                    current_score = float(current_score)
+                except ValueError:
+                    current_score = 0.0
+
+            if isinstance(target_score, str):
+                try:
+                    target_score = float(target_score)
+                except ValueError:
+                    target_score = None
+
+            if isinstance(current_score, (int, float)) and isinstance(target_score, (int, float)):
+                if is_metric_minimization(metric_name):
+                    if float(current_score) <= float(target_score):
+                        print("\n🎯 Target reached (min metric) - Stopping component iteration early")
+                        return "end"
+                else:
+                    if float(current_score) >= float(target_score):
+                        print("\n🎯 Target reached - Stopping component iteration early")
+                        return "end"
+
     # Check for critical errors (e.g., data download failed)
     errors = state.get("errors", [])
     if errors:
@@ -438,18 +498,70 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     print(f"   Max iterations: {max_iterations}")
     print(f"   Needs refinement: {needs_refinement}")
 
+    if state.get("skip_remaining_components"):
+        print("   ⏩ skip_remaining_components=True - Ending iteration")
+        return "end"
+
+    # Check for medal achievement in MLE-bench mode (early exit)
+    mlebench_grade = state.get("mlebench_grade")
+    run_mode = str(state.get("run_mode", "")).lower()
+
+    if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
+        if mlebench_grade.get("valid_submission"):
+            if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
+                print("   🏅 MEDAL ACHIEVED - Ending iteration")
+                return "end"
+
     # Check termination conditions first
     if current_iteration >= max_iterations:
         print("   ➡️  Ending (max iterations reached)")
         return "end"
 
-    # Check if goal already achieved
+    # Check if goal already achieved - dynamic target_score
     current_score = state.get("current_performance_score", 0.0)
-    target_score = 0.9238
+    target_score = state.get("target_score")
+    if target_score is None:
+        target_score = 1
+    elif isinstance(target_score, str):
+        try:
+            target_score = float(target_score)
+        except ValueError:
+            target_score = 1
 
-    if current_score >= target_score:
-        print(f"   ➡️  Ending (goal achieved: {current_score:.4f} >= {target_score:.4f})")
-        return "end"
+    # Respect metric direction when available
+    from .core.config import is_metric_minimization
+
+    metric_name = ""
+    try:
+        metric_name = state["competition_info"].evaluation_metric
+    except Exception:
+        metric_name = ""
+
+    if isinstance(current_score, str):
+        try:
+            current_score = float(current_score)
+        except ValueError:
+            current_score = 0.0
+
+    if isinstance(target_score, str):
+        try:
+            target_score = float(target_score)
+        except ValueError:
+            target_score = 1
+
+    if isinstance(current_score, (int, float)) and isinstance(target_score, (int, float)):
+        if is_metric_minimization(metric_name):
+            if float(current_score) <= float(target_score):
+                print(
+                    f"   ➡️  Ending (goal achieved: {current_score:.4f} <= {target_score:.4f})"
+                )
+                return "end"
+        else:
+            if float(current_score) >= float(target_score):
+                print(
+                    f"   ➡️  Ending (goal achieved: {current_score:.4f} >= {target_score:.4f})"
+                )
+                return "end"
 
     # Decide based on refinement flag
     if needs_refinement and current_iteration > 0:
