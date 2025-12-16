@@ -290,12 +290,16 @@ class MetaEvaluatorAgent:
 
         # Reward 2: Performance (continuous, normalized 0-1)
         # Try to get dynamic target from state (e.g. from leaderboard), else default
-        target_score = state.get("target_score", 1)  # Default to 1 if not set
-        if isinstance(target_score, str):
+        target_score = state.get("target_score")
+        if target_score is None:
+            target_score = 1.0
+        elif isinstance(target_score, str):
             try:
                 target_score = float(target_score)
-            except ValueError:
-                target_score = 1
+            except (ValueError, TypeError):
+                target_score = 1.0
+        elif not isinstance(target_score, (int, float)):
+            target_score = 1.0
 
         # Medal-aware shaping (MLE-bench objective)
         r_medal = 0.0
@@ -309,7 +313,18 @@ class MetaEvaluatorAgent:
             elif mlebench_grade.get("above_median"):
                 r_medal = 0.4
 
-        score_component = min(current_score / float(target_score), 1.0) if float(target_score) > 0 else 0.0
+        # Ensure current_score is numeric
+        if isinstance(current_score, str):
+            try:
+                current_score = float(current_score)
+            except (ValueError, TypeError):
+                current_score = 0.0
+
+        score_component = (
+            min(float(current_score) / float(target_score), 1.0)
+            if float(target_score) > 0
+            else 0.0
+        )
         if run_mode == "mlebench" or "medal" in objective:
             # Blend medal attainment with raw score; medal dominates to keep the objective explicit.
             r_performance = min(0.7 * r_medal + 0.3 * score_component, 1.0)
@@ -459,12 +474,16 @@ class MetaEvaluatorAgent:
             if isinstance(score, (int, float)):
                 current_score = float(score)
 
-        target_score = state.get("target_score", 1)
-        if isinstance(target_score, str):
+        target_score = state.get("target_score")
+        if target_score is None:
+            target_score = 1.0
+        elif isinstance(target_score, str):
             try:
                 target_score = float(target_score)
-            except ValueError:
-                target_score = 1
+            except (ValueError, TypeError):
+                target_score = 1.0
+        elif not isinstance(target_score, (int, float)):
+            target_score = 1.0
 
         context = f"""# Iteration {current_iteration} Evaluation
 

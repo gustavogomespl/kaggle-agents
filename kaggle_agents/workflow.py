@@ -259,12 +259,12 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     # Dynamic target_score from state (set by MLE-bench or config), fallback to top 20% threshold
     target_score = state.get("target_score")
     if target_score is None:
-        target_score = 1
+        target_score = 1.0
     elif isinstance(target_score, str):
         try:
             target_score = float(target_score)
         except ValueError:
-            target_score = 1
+            target_score = 1.0
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
@@ -521,12 +521,12 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     current_score = state.get("current_performance_score", 0.0)
     target_score = state.get("target_score")
     if target_score is None:
-        target_score = 1
+        target_score = 1.0
     elif isinstance(target_score, str):
         try:
             target_score = float(target_score)
         except ValueError:
-            target_score = 1
+            target_score = 1.0
 
     # Respect metric direction when available
     from .core.config import is_metric_minimization
