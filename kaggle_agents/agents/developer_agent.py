@@ -646,10 +646,6 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 if float(score) >= float(target_score):
                     return True
 
-        # In fast mode, stop once we're above median (speed-first iteration).
-        if bool(state.get("fast_mode")) and bool(grading.get("above_median", False)):
-            return True
-
         return False
 
     def _implement_component(

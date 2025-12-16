@@ -286,9 +286,8 @@ class MLEBenchRunner:
             # MLE-bench speed optimizations
             state["cv_folds"] = 3  # Reduce from 5 to 3 for faster iteration
             state["fast_mode"] = True  # Enable speed-first mode in agents
-            # Don't set an arbitrary target_score - it varies widely across competitions.
-            # Early stopping should rely on MLE-bench grading (medals, above_median).
-            state["target_score"] = None
+            # Use an aggressive target for medal-seeking; workflows can override per run.
+            state["target_score"] = 1.0
 
             # Step 3: Run MLE-bench workflow
             _log("Step 3: Running workflow")

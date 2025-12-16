@@ -409,9 +409,6 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
             if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
                 print("\n🏅 MEDAL ACHIEVED - Stopping component iteration early")
                 return "end"
-            if bool(state.get("fast_mode")) and mlebench_grade.get("above_median"):
-                print("\n✅ ABOVE MEDIAN (fast_mode) - Stopping component iteration early")
-                return "end"
 
             # Also allow stopping once a configured target_score is reached.
             from .core.config import is_metric_minimization
@@ -425,6 +422,9 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
             current_score = state.get("current_performance_score", 0.0)
             target_score = state.get("target_score")
 
+            if target_score is None:
+                target_score = 1.0
+
             if isinstance(current_score, str):
                 try:
                     current_score = float(current_score)
@@ -435,7 +435,7 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
                 try:
                     target_score = float(target_score)
                 except ValueError:
-                    target_score = None
+                    target_score = 1.0
 
             if isinstance(current_score, (int, float)) and isinstance(target_score, (int, float)):
                 if is_metric_minimization(metric_name):
