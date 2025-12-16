@@ -416,7 +416,18 @@ Return a JSON array with 3-5 components. Each component must have:
             print("  🧠 Using LLM for ablation plan generation (SOTA-aware)...")
             try:
                 response = self.llm.invoke(messages)
-                plan_text = response.content if hasattr(response, "content") else str(response)
+                # Normalize response content to text (handles list/dict responses from some LLM backends)
+                try:
+                    from ..utils.llm_utils import get_text_content
+                    plan_text = get_text_content(response.content)
+                except Exception:
+                    plan_text = response.content if hasattr(response, "content") else response
+                if not isinstance(plan_text, str):
+                    # Coerce lists/dicts to string for parsing
+                    try:
+                        plan_text = "\n".join(map(str, plan_text))  # type: ignore[arg-type]
+                    except Exception:
+                        plan_text = str(plan_text)
                 plan_data = self._parse_llm_plan_response(plan_text, sota_analysis)
                 if len(plan_data) < 3:
                     print(f"  ⚠️ LLM generated only {len(plan_data)} components, using fallback")
@@ -842,6 +853,13 @@ Return a JSON array with 3-5 components. Each component must have:
             List of component dictionaries
         """
         import re
+
+        # Coerce non-string responses (e.g., list) to string safely
+        if not isinstance(response_text, str):
+            try:
+                response_text = "\n".join(map(str, response_text))  # type: ignore[arg-type]
+            except Exception:
+                response_text = str(response_text)
 
         # Try to extract JSON array from response
         text = response_text.strip()
