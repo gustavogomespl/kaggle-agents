@@ -752,6 +752,43 @@ class CodeExecutor:
 
         return filtered.strip()
 
+    def _filter_tqdm_logs(self, output: str) -> str:
+        """
+        Filter out tqdm progress bar output that is commonly written to stderr.
+
+        Many ML scripts use tqdm, which writes progress updates to stderr by default.
+        Those updates are not errors and should not cause the execution to be marked
+        as failed.
+        """
+        if not output:
+            return ""
+
+        kept_lines: list[str] = []
+        for line in output.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            # Keep anything that looks like an actual exception/error.
+            if any(tok in stripped for tok in ("Traceback", "Error", "Exception")):
+                kept_lines.append(line)
+                continue
+
+            # Drop common tqdm progress patterns, e.g.:
+            # "Fold0 Train Epoch1:  12%|█▏        | 33/275 [00:41<04:49,  1.20s/it, loss=1.62]"
+            # "Validation:   0%|          | 0/138 [00:00<?, ?it/s]"
+            has_bar = "%|" in stripped and "|" in stripped
+            has_rate = ("it/s" in stripped) or ("s/it" in stripped)
+            has_counts = bool(re.search(r"\b\d+/\d+\b", stripped))
+            if has_bar and (has_rate or has_counts):
+                continue
+            if has_rate and has_counts:
+                continue
+
+            kept_lines.append(line)
+
+        return "\n".join(kept_lines).strip()
+
     def _parse_errors(self, stderr: str, stdout: str) -> list[str]:
         """
         Parse and categorize errors from output.
@@ -765,8 +802,10 @@ class CodeExecutor:
         """
         errors = []
 
-        # Filter out Optuna informational logs before parsing
+        # Filter out non-error stderr noise before parsing.
+        # Optuna and tqdm commonly log to stderr even on successful runs.
         stderr_filtered = self._filter_optuna_logs(stderr) if stderr else ""
+        stderr_filtered = self._filter_tqdm_logs(stderr_filtered)
 
         # Check stderr for Python exceptions
         if stderr_filtered:

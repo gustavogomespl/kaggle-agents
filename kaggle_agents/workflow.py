@@ -389,68 +389,39 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     """
     Route after developer agent completes.
 
+    Simplified routing logic - only stops for:
+    1. Explicit skip_remaining_components flag
+    2. Medal achievement (MLE-bench success)
+    3. Critical errors (data download failed, auth issues)
+    4. All components implemented
+
+    Target score checking is delegated to iteration_control to allow
+    multiple refinement iterations with meta-evaluator insights.
+
     Args:
         state: Current state
 
     Returns:
         "iterate" to continue implementing components, or "end" if done
     """
-    # Explicit early-stop flag (e.g., set by DeveloperAgent after MLE-bench grading)
+    # Explicit early-stop flag (e.g., set by DeveloperAgent)
     if state.get("skip_remaining_components"):
-        print("\n⏩ skip_remaining_components=True - Stopping component iteration early")
+        print("\n⏩ skip_remaining_components=True - Moving to validation")
         return "end"
 
-    # Check for medal achievement in MLE-bench mode (early exit)
+    # Check for medal achievement in MLE-bench mode (immediate success)
     mlebench_grade = state.get("mlebench_grade")
     run_mode = str(state.get("run_mode", "")).lower()
 
     if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
         if mlebench_grade.get("valid_submission"):
             if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
-                print("\n🏅 MEDAL ACHIEVED - Stopping component iteration early")
+                print("\n🏅 MEDAL ACHIEVED - Moving to validation")
                 return "end"
 
-            # Also allow stopping once a configured target_score is reached.
-            from .core.config import is_metric_minimization
-
-            metric_name = ""
-            try:
-                metric_name = state["competition_info"].evaluation_metric
-            except Exception:
-                metric_name = ""
-
-            current_score = state.get("current_performance_score", 0.0)
-            target_score = state.get("target_score")
-
-            if target_score is None:
-                target_score = 1.0
-
-            if isinstance(current_score, str):
-                try:
-                    current_score = float(current_score)
-                except ValueError:
-                    current_score = 0.0
-
-            if isinstance(target_score, str):
-                try:
-                    target_score = float(target_score)
-                except ValueError:
-                    target_score = 1.0
-
-            if isinstance(current_score, (int, float)) and isinstance(target_score, (int, float)):
-                if is_metric_minimization(metric_name):
-                    if float(current_score) <= float(target_score):
-                        print("\n🎯 Target reached (min metric) - Stopping component iteration early")
-                        return "end"
-                else:
-                    if float(current_score) >= float(target_score):
-                        print("\n🎯 Target reached - Stopping component iteration early")
-                        return "end"
-
-    # Check for critical errors (e.g., data download failed)
+    # Check for critical errors (data download failed, auth issues)
     errors = state.get("errors", [])
     if errors:
-        # Check if error is about missing data files
         for error in errors:
             if "Data download failed" in error or "authentication failed" in error.lower():
                 print("\n⚠️ Critical error detected, stopping workflow")
@@ -473,15 +444,22 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
                     print("\n⚠️ Repeated data file errors, stopping workflow")
                     return "end"
 
+        remaining = len(ablation_plan) - current_component_index
+        print(f"\n🔄 {remaining} component(s) remaining - continuing iteration")
         return "iterate"
 
-    # All components done
+    # All components done - move to validation
+    print(f"\n✅ All {len(ablation_plan)} components implemented - moving to validation")
     return "end"
 
 
 def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"]:
     """
     Route after iteration control - decide if we refine or end.
+
+    In MLE-bench mode, aggressively refines until:
+    1. Medal is achieved
+    2. Max iterations reached
 
     Args:
         state: Current state
@@ -492,32 +470,46 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     needs_refinement = state.get("needs_refinement", False)
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
+    run_mode = str(state.get("run_mode", "")).lower()
+    mlebench_grade = state.get("mlebench_grade")
 
     print("\n🔀 Routing decision:")
     print(f"   Current iteration: {current_iteration}")
     print(f"   Max iterations: {max_iterations}")
     print(f"   Needs refinement: {needs_refinement}")
+    print(f"   Run mode: {run_mode}")
 
+    # Explicit skip flag
     if state.get("skip_remaining_components"):
-        print("   ⏩ skip_remaining_components=True - Ending iteration")
+        print("   ⏩ skip_remaining_components=True - Ending")
         return "end"
 
-    # Check for medal achievement in MLE-bench mode (early exit)
-    mlebench_grade = state.get("mlebench_grade")
-    run_mode = str(state.get("run_mode", "")).lower()
+    # Check for medal achievement (success - stop)
+    if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
+        if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
+            print("   🏅 MEDAL ACHIEVED - Success!")
+            return "end"
 
-    if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
-        if mlebench_grade.get("valid_submission"):
-            if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
-                print("   🏅 MEDAL ACHIEVED - Ending iteration")
-                return "end"
-
-    # Check termination conditions first
+    # Max iterations reached
     if current_iteration >= max_iterations:
-        print("   ➡️  Ending (max iterations reached)")
+        print(f"   ⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
         return "end"
 
-    # Check if goal already achieved - dynamic target_score
+    # MLE-bench mode: aggressively refine until medal or max_iterations
+    if run_mode == "mlebench":
+        # Log refinement guidance if available
+        refinement_guidance = state.get("refinement_guidance", {})
+        if refinement_guidance:
+            print("   📋 Refinement guidance available from meta-evaluator")
+            if refinement_guidance.get("planner_guidance"):
+                print(f"      Planner: {refinement_guidance['planner_guidance'][:80]}...")
+            if refinement_guidance.get("developer_guidance"):
+                print(f"      Developer: {refinement_guidance['developer_guidance'][:80]}...")
+
+        print(f"   🔄 MLE-bench mode: Starting refinement iteration {current_iteration + 1}")
+        return "refine"
+
+    # Standard Kaggle mode: check target_score
     current_score = state.get("current_performance_score", 0.0)
     target_score = state.get("target_score")
     if target_score is None:
@@ -547,28 +539,24 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         try:
             target_score = float(target_score)
         except ValueError:
-            target_score = 1
+            target_score = 1.0
 
     if isinstance(current_score, (int, float)) and isinstance(target_score, (int, float)):
         if is_metric_minimization(metric_name):
             if float(current_score) <= float(target_score):
-                print(
-                    f"   ➡️  Ending (goal achieved: {current_score:.4f} <= {target_score:.4f})"
-                )
+                print(f"   ✅ Goal achieved: {current_score:.4f} <= {target_score:.4f}")
                 return "end"
         else:
             if float(current_score) >= float(target_score):
-                print(
-                    f"   ➡️  Ending (goal achieved: {current_score:.4f} >= {target_score:.4f})"
-                )
+                print(f"   ✅ Goal achieved: {current_score:.4f} >= {target_score:.4f}")
                 return "end"
 
     # Decide based on refinement flag
     if needs_refinement:
-        print(f"   ➡️  Refining (iteration {current_iteration})")
+        print(f"   🔄 Starting refinement iteration {current_iteration + 1}")
         return "refine"
 
-    print("   ➡️  Ending (no refinement needed)")
+    print("   ✅ No refinement needed")
     return "end"
 
 
@@ -784,7 +772,9 @@ def create_mlebench_workflow() -> StateGraph:
 
     The flow is:
         domain_detection → search → planner → developer (loop) →
-        robustness → ensemble → submission → reporting
+        robustness → ensemble → submission → performance_evaluation →
+        meta_evaluator → prompt_refinement → iteration_control →
+        [refine → planner | end → reporting]
 
     Returns:
         Compiled StateGraph
@@ -799,8 +789,10 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("robustness", robustness_agent_node)
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("submission", submission_agent_node)
+    workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)
     workflow.add_node("prompt_refinement", prompt_refinement_node)
+    workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("reporting", reporting_agent_node)
 
     # Entry point: domain_detection (data already loaded)
@@ -831,10 +823,23 @@ def create_mlebench_workflow() -> StateGraph:
     # Ensemble → Submission
     workflow.add_edge("ensemble", "submission")
 
-    # Submission → Meta-Evaluator → Prompt Refinement → Reporting
-    workflow.add_edge("submission", "meta_evaluator")
+    # Submission → Performance Evaluation → Meta-Evaluator
+    workflow.add_edge("submission", "performance_evaluation")
+    workflow.add_edge("performance_evaluation", "meta_evaluator")
+
+    # Meta-Evaluator → Prompt Refinement → Iteration Control
     workflow.add_edge("meta_evaluator", "prompt_refinement")
-    workflow.add_edge("prompt_refinement", "reporting")
+    workflow.add_edge("prompt_refinement", "iteration_control")
+
+    # Iteration Control → Conditional (refine or end?)
+    workflow.add_conditional_edges(
+        "iteration_control",
+        route_after_iteration_control,
+        {
+            "refine": "planner",   # Start refinement cycle (back to planner with guidance)
+            "end": "reporting",    # Goal achieved or max iterations → Report
+        }
+    )
 
     # Reporting → END
     workflow.add_edge("reporting", END)
