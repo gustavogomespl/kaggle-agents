@@ -690,16 +690,36 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
                     "current_component_index": current_index + 1,
                     "component_rollback": component.name,
                     "rollback_reason": "No CV improvement detected (Ablation Study)",
+                    "code_retry_count": 0,
                     "code_attempts": attempt_records,
                 }
 
-        should_advance = result.success or (
-            not result.success and "Data files not found" in (result.stderr or "")
+        code_retry_count = _coerce_int(state.get("code_retry_count"), 0)
+        max_component_retries = _coerce_int(
+            os.getenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES"), 3
         )
+        max_component_retries = max(1, max_component_retries)
+        skip_due_to_retries = False
+
+        if result.success:
+            code_retry_count = 0
+        else:
+            code_retry_count = max(0, code_retry_count) + 1
+            if code_retry_count >= max_component_retries:
+                skip_due_to_retries = True
+                print(
+                    f"⚠️ Max component retries reached ({code_retry_count}/{max_component_retries}) "
+                    f"for {component.name}. Skipping."
+                )
+
+        data_not_found = not result.success and "Data files not found" in (
+            result.stderr or ""
+        )
+        should_advance = result.success or data_not_found or skip_due_to_retries
         state_updates = {
             "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
-            "code_retry_count": 0,
+            "code_retry_count": 0 if should_advance else code_retry_count,
             "current_component_index": current_index + 1
             if should_advance
             else current_index,

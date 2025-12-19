@@ -811,13 +811,23 @@ class CodeExecutor:
         if stderr_filtered:
             # Extract traceback info
             if "Traceback" in stderr_filtered:
-                lines = stderr_filtered.split('\n')
-                for _i, line in enumerate(lines):
-                    if line.startswith("Traceback"):
-                        # Get the actual error (usually last line)
-                        error_line = lines[-2] if len(lines) > 1 else line
-                        errors.append(error_line.strip())
+                lines = stderr_filtered.split("\n")
+                error_line = ""
+                for line in reversed(lines):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    if re.match(r"^[A-Za-z_]+(Error|Exception):", stripped):
+                        error_line = stripped
                         break
+                if not error_line:
+                    for line in reversed(lines):
+                        stripped = line.strip()
+                        if stripped:
+                            error_line = stripped
+                            break
+                if error_line:
+                    errors.append(error_line)
 
             # Common error patterns
             error_patterns = [
