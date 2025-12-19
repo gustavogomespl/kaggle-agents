@@ -143,7 +143,20 @@ class PlannerAgent:
         current_iteration = state.get("current_iteration", 0)
         is_refinement = current_iteration > 1
 
-        if is_refinement:
+        # Check if Eureka mode should be used
+        # Eureka is activated when:
+        # 1. crossover_guidance exists (from meta-evaluator evolutionary crossover)
+        # 2. OR evolutionary_generation > 0 (continuing evolutionary search)
+        # 3. OR is_refinement and we want to explore multiple strategies
+        crossover_guidance = state.get("crossover_guidance", {})
+        evolutionary_generation = state.get("evolutionary_generation", 0)
+        use_eureka = bool(crossover_guidance) or evolutionary_generation > 0 or is_refinement
+
+        if use_eureka:
+            print("\n" + "="*60)
+            print("= PLANNER AGENT: Eureka Multi-Candidate Planning")
+            print("="*60)
+        elif is_refinement:
             print("\n" + "="*60)
             print("= PLANNER AGENT: Refining Ablation Plan (RL-based)")
             print("="*60)
@@ -156,8 +169,29 @@ class PlannerAgent:
         print("\nAnalyzing SOTA patterns...")
         sota_analysis = self._analyze_sota_solutions(state)
 
-        # 2. Generate ablation plan (initial or refinement)
-        if is_refinement:
+        # 2. Generate ablation plan
+        if use_eureka:
+            # Eureka: Generate multiple candidate plans and select best
+            print("\n🧬 Using Eureka multi-candidate evolutionary planning...")
+            eureka_result = self.generate_with_eureka(state, sota_analysis, n_candidates=3)
+
+            # Validate the selected plan
+            validated_plan = self._validate_plan(eureka_result["ablation_plan"], state=state)
+
+            # Print summary
+            self._print_summary(validated_plan)
+
+            # Return Eureka-specific state updates
+            return {
+                "ablation_plan": validated_plan,
+                "candidate_plans": eureka_result["candidate_plans"],
+                "current_plan_index": eureka_result["current_plan_index"],
+                "evolutionary_generation": eureka_result["evolutionary_generation"],
+                "optimization_strategy": eureka_result["optimization_strategy"],
+                "last_updated": datetime.now(),
+            }
+
+        elif is_refinement:
             print("\n🔄 Refining plan based on previous results...")
             ablation_plan = self._refine_ablation_plan(state, sota_analysis)
         else:
@@ -1272,6 +1306,244 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
                 print(f"   Code: {comp.code[:80]}...")
 
         print("\n" + "="*60)
+
+    # ==================== Eureka: Multi-Candidate Evolutionary Planning ====================
+
+    def _generate_multiple_plans(
+        self,
+        state: KaggleState,
+        sota_analysis: dict[str, Any],
+        n_candidates: int = 3,
+    ) -> list[tuple[list[AblationComponent], str, float]]:
+        """
+        Eureka-style: Generate multiple candidate plans with different strategies.
+
+        Args:
+            state: Current workflow state
+            sota_analysis: SOTA analysis results
+            n_candidates: Number of candidate plans to generate
+
+        Returns:
+            List of (plan, strategy, fitness_score) tuples
+        """
+        print(f"\n   Eureka: Generating {n_candidates} candidate plans...")
+
+        strategies = [
+            {
+                "name": "conservative",
+                "prompt_modifier": "Focus on proven, reliable approaches. Use well-established models like XGBoost, LightGBM. Prioritize stability over novelty.",
+                "model_preference": ["xgboost", "lightgbm", "random_forest"],
+            },
+            {
+                "name": "aggressive",
+                "prompt_modifier": "Focus on innovative approaches. Prioritize novel feature engineering, creative ensembles, and cutting-edge techniques.",
+                "model_preference": ["catboost", "neural_network", "stacking"],
+            },
+            {
+                "name": "balanced",
+                "prompt_modifier": "Mix proven models with creative features. Balance stability with innovation.",
+                "model_preference": ["xgboost", "lightgbm", "catboost"],
+            },
+        ]
+
+        candidate_plans = []
+
+        for i, strategy in enumerate(strategies[:n_candidates]):
+            print(f"   - Generating {strategy['name']} plan...")
+
+            # Generate plan with strategy-specific modifications
+            plan = self._generate_plan_with_strategy(state, sota_analysis, strategy)
+
+            # Evaluate fitness
+            fitness = self._evaluate_plan_fitness(plan, state)
+
+            candidate_plans.append((plan, strategy["name"], fitness))
+            print(f"     Fitness: {fitness:.3f}")
+
+        # Sort by fitness (highest first)
+        candidate_plans.sort(key=lambda x: x[2], reverse=True)
+
+        return candidate_plans
+
+    def _generate_plan_with_strategy(
+        self,
+        state: KaggleState,
+        sota_analysis: dict[str, Any],
+        strategy: dict[str, Any],
+    ) -> list[AblationComponent]:
+        """
+        Generate a single plan with a specific strategy.
+
+        Args:
+            state: Current workflow state
+            sota_analysis: SOTA analysis results
+            strategy: Strategy configuration
+
+        Returns:
+            List of ablation components
+        """
+        competition_info = state["competition_info"]
+        domain = state.get("domain_detected", "tabular")
+
+        # Create strategy-modified prompt
+        strategy_prompt = f"""
+Strategy: {strategy['name'].upper()}
+{strategy['prompt_modifier']}
+
+Preferred approaches: {', '.join(strategy['model_preference'])}
+"""
+
+        # Use fallback plan generation with strategy bias
+        plan = self._create_fallback_plan(domain, sota_analysis)
+
+        # Modify plan based on strategy
+        if strategy["name"] == "conservative":
+            # Filter to keep only well-established models
+            plan = [c for c in plan if any(
+                m in c.name.lower()
+                for m in ["xgboost", "lightgbm", "random", "logistic", "baseline"]
+            )] or plan[:2]
+
+        elif strategy["name"] == "aggressive":
+            # Boost feature engineering and ensemble components
+            for comp in plan:
+                if comp.component_type in ["feature_engineering", "ensemble"]:
+                    comp.estimated_impact = min(comp.estimated_impact * 1.3, 1.0)
+
+        return plan
+
+    def _evaluate_plan_fitness(
+        self,
+        plan: list[AblationComponent],
+        state: KaggleState,
+    ) -> float:
+        """
+        Eureka-style: Evaluate fitness of a plan based on history.
+
+        Considers:
+        - Past success/failure patterns from iteration_memory
+        - Component type diversity
+        - Estimated impact scores
+        - Crossover guidance from meta-evaluator
+
+        Args:
+            plan: Candidate plan to evaluate
+            state: Current workflow state
+
+        Returns:
+            Fitness score (0-1)
+        """
+        score = 0.0
+        iteration_memory = state.get("iteration_memory", [])
+        crossover_guidance = state.get("crossover_guidance", {})
+
+        # 1. Historical success/failure (40% weight)
+        historical_score = 0.0
+        for comp in plan:
+            for memory in iteration_memory:
+                # Reward components similar to what worked
+                if comp.component_type in memory.what_worked:
+                    historical_score += 0.2
+                # Penalize components similar to what failed
+                if comp.component_type in memory.what_failed:
+                    historical_score -= 0.1
+
+        historical_score = max(0, min(historical_score, 1.0))
+        score += 0.4 * historical_score
+
+        # 2. Diversity bonus (20% weight)
+        unique_types = len(set(c.component_type for c in plan))
+        diversity_score = min(unique_types / 4.0, 1.0)  # Target: 4 different types
+        score += 0.2 * diversity_score
+
+        # 3. Estimated impact (25% weight)
+        if plan:
+            avg_impact = sum(c.estimated_impact for c in plan) / len(plan)
+            score += 0.25 * avg_impact
+
+        # 4. Crossover guidance alignment (15% weight)
+        if crossover_guidance:
+            preserve_components = crossover_guidance.get("preserve_components", [])
+            avoid_components = crossover_guidance.get("avoid_components", [])
+
+            alignment_score = 0.0
+            for comp in plan:
+                if comp.component_type in preserve_components:
+                    alignment_score += 0.3
+                if comp.component_type in avoid_components:
+                    alignment_score -= 0.2
+
+            alignment_score = max(0, min(alignment_score, 1.0))
+            score += 0.15 * alignment_score
+
+        return min(max(score, 0.0), 1.0)
+
+    def _select_best_plan(
+        self,
+        candidate_plans: list[tuple[list[AblationComponent], str, float]],
+    ) -> tuple[list[AblationComponent], str]:
+        """
+        Select the best plan from candidates.
+
+        Args:
+            candidate_plans: List of (plan, strategy, fitness) tuples
+
+        Returns:
+            Tuple of (best_plan, strategy_name)
+        """
+        if not candidate_plans:
+            return [], "none"
+
+        best_plan, strategy, fitness = candidate_plans[0]
+        print(f"\n   Eureka: Selected '{strategy}' plan (fitness: {fitness:.3f})")
+
+        return best_plan, strategy
+
+    def generate_with_eureka(
+        self,
+        state: KaggleState,
+        sota_analysis: dict[str, Any],
+        n_candidates: int = 3,
+    ) -> dict[str, Any]:
+        """
+        Eureka-style plan generation with multiple candidates.
+
+        Args:
+            state: Current workflow state
+            sota_analysis: SOTA analysis results
+            n_candidates: Number of candidates to generate
+
+        Returns:
+            State updates with plan and candidate info
+        """
+        print("\n   Eureka: Multi-candidate evolutionary planning...")
+
+        # Generate multiple candidate plans
+        candidate_plans = self._generate_multiple_plans(state, sota_analysis, n_candidates)
+
+        # Select the best plan
+        best_plan, strategy = self._select_best_plan(candidate_plans)
+
+        # Store all candidates for potential crossover in next iteration
+        from ..core.state import CandidatePlan
+
+        stored_candidates = [
+            CandidatePlan(
+                components=plan,
+                strategy=strat,
+                fitness_score=fitness,
+                generation=state.get("evolutionary_generation", 0) + 1,
+            )
+            for plan, strat, fitness in candidate_plans
+        ]
+
+        return {
+            "ablation_plan": best_plan,
+            "candidate_plans": stored_candidates,
+            "current_plan_index": 0,
+            "evolutionary_generation": state.get("evolutionary_generation", 0) + 1,
+            "optimization_strategy": f"eureka_{strategy}",
+        }
 
 
 # ==================== LangGraph Node Function ====================

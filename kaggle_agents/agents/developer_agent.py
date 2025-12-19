@@ -21,9 +21,9 @@ from ..core.config import (
     get_llm_for_role,
     is_metric_minimization,
 )
-from ..core.state import AblationComponent, DevelopmentResult, KaggleState
+from ..core.state import AblationComponent, DevelopmentResult, KaggleState, ReasoningTrace, SelfEvaluation
 from ..core.state import CodeAttempt
-from ..optimization import create_optimizer
+from ..optimization import create_optimizer, create_preference_collector
 from ..prompts.templates.developer_prompts import (
     DEBUG_CODE_PROMPT,
     DEVELOPER_CORE_IDENTITY,
@@ -151,6 +151,429 @@ class DeveloperAgent:
             if self.fixer_module is None:
                 print("Using base (unoptimized) fixer module")
                 self.fixer_module = CodeFixerModule()
+
+        # GRPO: Store last reasoning trace for state persistence
+        self._last_reasoning_trace: ReasoningTrace | None = None
+
+        # DPO: Preference collector for learning from code fixes
+        self._preference_collector = create_preference_collector()
+
+        # Quiet-STaR: Store last self-evaluation for state persistence
+        self._last_self_evaluation: SelfEvaluation | None = None
+
+    # ==================== GRPO: Reasoning-First Code Generation ====================
+
+    def _generate_reasoning_trace(
+        self,
+        component: AblationComponent,
+        state: KaggleState,
+    ) -> ReasoningTrace:
+        """
+        GRPO-style: Generate structured reasoning trace before code generation.
+
+        Creates a chain-of-thought analysis that:
+        1. Analyzes requirements
+        2. Identifies potential issues
+        3. Plans implementation approach
+        4. Defines validation checklist
+
+        Args:
+            component: Component to implement
+            state: Current workflow state
+
+        Returns:
+            ReasoningTrace with structured analysis
+        """
+        from datetime import datetime
+
+        competition_info = state.get("competition_info")
+        domain = state.get("domain_detected", "tabular")
+        failure_analysis = state.get("failure_analysis", {})
+        known_errors = failure_analysis.get("error_patterns", [])
+
+        prompt = f"""Before implementing {component.name} ({component.component_type}), analyze the task:
+
+COMPETITION: {competition_info.name if competition_info else 'Unknown'}
+DOMAIN: {domain}
+METRIC: {competition_info.evaluation_metric if competition_info else 'Unknown'}
+COMPONENT: {component.name}
+TYPE: {component.component_type}
+DESCRIPTION: {component.code[:500] if component.code else 'No description'}
+
+KNOWN ERROR PATTERNS TO AVOID: {', '.join(known_errors) if known_errors else 'None'}
+
+Provide a structured analysis in JSON format:
+{{
+    "requirements_analysis": "What exactly this component needs to do (2-3 sentences)",
+    "potential_issues": ["Issue 1 that could cause failure", "Issue 2", "Issue 3"],
+    "solution_approach": "High-level technical approach (2-3 sentences)",
+    "implementation_plan": "Step 1: ...\\nStep 2: ...\\nStep 3: ...",
+    "validation_checklist": ["Check 1", "Check 2", "Check 3", "Check 4"]
+}}
+
+Be specific and actionable. Focus on preventing common failures."""
+
+        messages = [
+            SystemMessage(content="You are an expert ML engineer analyzing implementation requirements."),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+            content = get_text_content(response.content).strip()
+
+            # Extract JSON from response
+            import json
+            import re
+
+            # Try to find JSON in response
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                result = json.loads(json_match.group())
+            else:
+                result = {}
+
+            return ReasoningTrace(
+                component_name=component.name,
+                requirements_analysis=result.get("requirements_analysis", ""),
+                potential_issues=result.get("potential_issues", []),
+                solution_approach=result.get("solution_approach", ""),
+                implementation_plan=result.get("implementation_plan", ""),
+                validation_checklist=result.get("validation_checklist", []),
+                step_scores={},
+                final_score=0.0,
+                timestamp=datetime.now(),
+            )
+
+        except Exception as e:
+            print(f"   ⚠️ Reasoning trace generation failed: {e}")
+            return ReasoningTrace(
+                component_name=component.name,
+                requirements_analysis=f"Implement {component.component_type}: {component.name}",
+                potential_issues=known_errors[:3] if known_errors else [],
+                solution_approach="Standard implementation approach",
+                implementation_plan="",
+                validation_checklist=["Verify output format", "Check for errors"],
+                step_scores={},
+                final_score=0.0,
+                timestamp=datetime.now(),
+            )
+
+    def _validate_reasoning(
+        self,
+        trace: ReasoningTrace,
+        state: KaggleState,
+    ) -> dict[str, float]:
+        """
+        GRPO-style: Validate reasoning quality with process rewards.
+
+        Evaluates:
+        - Issue coverage: Does reasoning address known error patterns?
+        - Plan specificity: Is the implementation plan concrete?
+        - Validation quality: Are validation checks comprehensive?
+
+        Args:
+            trace: Reasoning trace to validate
+            state: Current workflow state
+
+        Returns:
+            Dictionary of step scores
+        """
+        scores = {}
+
+        failure_analysis = state.get("failure_analysis", {})
+        known_errors = failure_analysis.get("error_patterns", [])
+
+        # 1. Issue Coverage Score (0-1)
+        # Check if identified issues cover known error patterns
+        if known_errors and trace.potential_issues:
+            issues_text = " ".join(trace.potential_issues).lower()
+            covered = sum(1 for e in known_errors if e.lower().replace("_", " ") in issues_text)
+            scores["issue_coverage"] = min(covered / max(len(known_errors), 1), 1.0)
+        else:
+            scores["issue_coverage"] = 0.5 if trace.potential_issues else 0.2
+
+        # 2. Plan Specificity Score (0-1)
+        # Check if implementation plan has concrete steps
+        if trace.implementation_plan:
+            steps = trace.implementation_plan.split("\n")
+            concrete_steps = [s for s in steps if len(s.strip()) > 10]
+            scores["plan_specificity"] = min(len(concrete_steps) / 5, 1.0)
+        else:
+            scores["plan_specificity"] = 0.0
+
+        # 3. Validation Quality Score (0-1)
+        # Check if validation checklist is comprehensive
+        if trace.validation_checklist:
+            scores["validation_quality"] = min(len(trace.validation_checklist) / 4, 1.0)
+        else:
+            scores["validation_quality"] = 0.0
+
+        # 4. Requirements Clarity Score (0-1)
+        if trace.requirements_analysis:
+            # Longer, more detailed analysis scores higher
+            scores["requirements_clarity"] = min(len(trace.requirements_analysis) / 200, 1.0)
+        else:
+            scores["requirements_clarity"] = 0.0
+
+        # 5. Solution Approach Score (0-1)
+        if trace.solution_approach:
+            scores["solution_approach"] = min(len(trace.solution_approach) / 150, 1.0)
+        else:
+            scores["solution_approach"] = 0.0
+
+        return scores
+
+    def _refine_reasoning(
+        self,
+        trace: ReasoningTrace,
+        step_scores: dict[str, float],
+        state: KaggleState,
+    ) -> ReasoningTrace:
+        """
+        GRPO-style: Refine reasoning trace based on process reward scores.
+
+        Args:
+            trace: Original reasoning trace
+            step_scores: Scores for each reasoning step
+            state: Current workflow state
+
+        Returns:
+            Refined reasoning trace
+        """
+        weak_areas = [k for k, v in step_scores.items() if v < 0.5]
+
+        if not weak_areas:
+            return trace
+
+        print(f"   🔄 Refining reasoning (weak areas: {weak_areas})")
+
+        refinement_prompt = f"""The following reasoning trace needs improvement in: {', '.join(weak_areas)}
+
+ORIGINAL TRACE:
+- Requirements: {trace.requirements_analysis}
+- Issues: {trace.potential_issues}
+- Approach: {trace.solution_approach}
+- Plan: {trace.implementation_plan}
+- Validation: {trace.validation_checklist}
+
+WEAK AREAS TO IMPROVE:
+{chr(10).join(f'- {area}: Score {step_scores.get(area, 0):.2f}/1.0' for area in weak_areas)}
+
+Provide an IMPROVED version focusing on the weak areas. Return JSON:
+{{
+    "requirements_analysis": "Improved requirements (more specific)",
+    "potential_issues": ["More specific issue 1", "Issue 2", "Issue 3", "Issue 4"],
+    "solution_approach": "More detailed approach",
+    "implementation_plan": "Step 1: Specific action\\nStep 2: ...\\nStep 3: ...\\nStep 4: ...\\nStep 5: ...",
+    "validation_checklist": ["Specific check 1", "Check 2", "Check 3", "Check 4", "Check 5"]
+}}"""
+
+        messages = [
+            SystemMessage(content="You are refining an implementation plan to address weak areas."),
+            HumanMessage(content=refinement_prompt),
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+            content = get_text_content(response.content).strip()
+
+            import json
+            import re
+
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                result = json.loads(json_match.group())
+
+                # Update trace with refined content
+                from dataclasses import replace
+                return replace(
+                    trace,
+                    requirements_analysis=result.get("requirements_analysis", trace.requirements_analysis),
+                    potential_issues=result.get("potential_issues", trace.potential_issues),
+                    solution_approach=result.get("solution_approach", trace.solution_approach),
+                    implementation_plan=result.get("implementation_plan", trace.implementation_plan),
+                    validation_checklist=result.get("validation_checklist", trace.validation_checklist),
+                )
+
+        except Exception as e:
+            print(f"   ⚠️ Reasoning refinement failed: {e}")
+
+        return trace
+
+    def _format_reasoning_for_prompt(self, trace: ReasoningTrace) -> str:
+        """Format reasoning trace for injection into code generation prompt."""
+        if not trace:
+            return ""
+
+        issues_str = "\n".join(f"  - {issue}" for issue in trace.potential_issues[:5])
+        validation_str = "\n".join(f"  - {check}" for check in trace.validation_checklist[:5])
+
+        return f"""
+## GRPO Reasoning Trace (Pre-implementation Analysis)
+
+### Requirements Analysis
+{trace.requirements_analysis}
+
+### Potential Issues to Prevent
+{issues_str}
+
+### Solution Approach
+{trace.solution_approach}
+
+### Implementation Plan
+{trace.implementation_plan}
+
+### Validation Checklist (MUST verify before submission)
+{validation_str}
+
+**IMPORTANT**: Follow this reasoning trace. Address ALL identified issues in your implementation.
+"""
+
+    # ==================== Quiet-STaR: Self-Evaluation ====================
+
+    def _self_evaluate_code(
+        self,
+        code: str,
+        component: AblationComponent,
+        state: KaggleState,
+    ) -> SelfEvaluation:
+        """
+        Quiet-STaR style: Internal reflection before finalizing code.
+
+        Performs self-evaluation asking:
+        - Will this code execute without errors?
+        - Will it improve the metric?
+        - Are there obvious issues to fix?
+
+        Args:
+            code: Generated code to evaluate
+            component: Component being implemented
+            state: Current workflow state
+
+        Returns:
+            SelfEvaluation with confidence, concerns, and suggested fixes
+        """
+        competition_info = state.get("competition_info")
+        metric = competition_info.evaluation_metric if competition_info else "unknown"
+        domain = state.get("domain_detected", "tabular")
+
+        # Truncate code for LLM
+        code_preview = code[:3000] + "..." if len(code) > 3000 else code
+
+        prompt = f"""Self-evaluate this code before execution. Be critical and honest.
+
+COMPONENT: {component.name} ({component.component_type})
+METRIC: {metric}
+DOMAIN: {domain}
+
+CODE:
+```python
+{code_preview}
+```
+
+Analyze and return JSON:
+{{
+    "confidence": 0.0-1.0 (how likely this will execute successfully AND improve the metric),
+    "concerns": ["Concern 1", "Concern 2", ...] (up to 5 specific issues),
+    "suggested_fixes": ["Fix 1", "Fix 2", ...] (concrete fixes for the concerns),
+    "proceed": true/false (should we execute this code or regenerate?),
+    "reflection": "Brief summary of overall assessment"
+}}
+
+Be specific about potential failure points (imports, data types, output format, etc.)."""
+
+        messages = [
+            SystemMessage(content="You are a critical code reviewer evaluating ML code before execution."),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+            content = get_text_content(response.content).strip()
+
+            import json
+            import re
+
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                result = json.loads(json_match.group())
+
+                return SelfEvaluation(
+                    confidence=float(result.get("confidence", 0.5)),
+                    concerns=result.get("concerns", [])[:5],
+                    suggested_fixes=result.get("suggested_fixes", [])[:5],
+                    proceed=bool(result.get("proceed", True)),
+                    reflection_summary=result.get("reflection", ""),
+                )
+
+        except Exception as e:
+            print(f"   ⚠️ Self-evaluation failed: {e}")
+
+        # Default: proceed with moderate confidence
+        return SelfEvaluation(
+            confidence=0.5,
+            concerns=[],
+            suggested_fixes=[],
+            proceed=True,
+            reflection_summary="Self-evaluation could not be performed",
+        )
+
+    def _apply_self_evaluation_fixes(
+        self,
+        code: str,
+        evaluation: SelfEvaluation,
+        component: AblationComponent,
+    ) -> str:
+        """
+        Apply suggested fixes from self-evaluation.
+
+        Args:
+            code: Original code
+            evaluation: Self-evaluation with suggested fixes
+            component: Component being implemented
+
+        Returns:
+            Fixed code
+        """
+        if not evaluation.suggested_fixes:
+            return code
+
+        fixes_text = "\n".join(f"- {fix}" for fix in evaluation.suggested_fixes)
+        concerns_text = "\n".join(f"- {concern}" for concern in evaluation.concerns)
+
+        prompt = f"""Apply these fixes to the code:
+
+CONCERNS:
+{concerns_text}
+
+SUGGESTED FIXES:
+{fixes_text}
+
+ORIGINAL CODE:
+```python
+{code}
+```
+
+Return the COMPLETE fixed code with all fixes applied. Include ALL imports and functionality."""
+
+        messages = [
+            SystemMessage(content="You are fixing code based on self-evaluation feedback. Apply all suggested fixes."),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+            fixed_code = self._extract_code_from_response(get_text_content(response.content))
+
+            if len(fixed_code) > 100:  # Basic sanity check
+                print(f"   ✓ Applied {len(evaluation.suggested_fixes)} self-evaluation fixes")
+                return fixed_code
+
+        except Exception as e:
+            print(f"   ⚠️ Failed to apply self-evaluation fixes: {e}")
+
+        return code
 
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -283,6 +706,24 @@ class DeveloperAgent:
             "last_updated": datetime.now(),
             "code_attempts": attempt_records,
         }
+
+        # GRPO: Persist reasoning trace in state
+        if self._last_reasoning_trace is not None:
+            state_updates["reasoning_traces"] = [self._last_reasoning_trace]
+            state_updates["current_reasoning"] = self._last_reasoning_trace
+            self._last_reasoning_trace = None  # Reset for next component
+
+        # DPO: Persist preference pairs in state
+        preference_pairs = self._preference_collector.get_pairs_for_state()
+        if preference_pairs:
+            state_updates["preference_pairs"] = preference_pairs
+            print(f"   📊 DPO: Collected {len(preference_pairs)} preference pairs")
+
+        # Quiet-STaR: Persist self-evaluation in state
+        if self._last_self_evaluation is not None:
+            state_updates["self_evaluations"] = [self._last_self_evaluation]
+            state_updates["last_self_evaluation"] = self._last_self_evaluation
+            self._last_self_evaluation = None  # Reset for next component
 
         if result.success and component.component_type == "model":
             oof_file = working_dir / "models" / f"oof_{component.name}.npy"
@@ -758,9 +1199,47 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         if skip_result is not None:
             return skip_result, attempt_records
 
+        # GRPO: Generate reasoning trace before code generation
+        reasoning_trace = None
+        run_mode = str(state.get("run_mode", "")).lower()
+        use_grpo = run_mode != "mlebench" and not state.get("fast_mode", False)
+
+        if use_grpo:
+            print("\n🧠 GRPO: Generating reasoning trace...")
+            reasoning_trace = self._generate_reasoning_trace(component, state)
+
+            # Validate reasoning quality
+            step_scores = self._validate_reasoning(reasoning_trace, state)
+            avg_score = sum(step_scores.values()) / len(step_scores) if step_scores else 0.0
+            print(f"   Reasoning quality: {avg_score:.2f} (scores: {step_scores})")
+
+            # Refine if quality is below threshold
+            if avg_score < 0.6:
+                reasoning_trace = self._refine_reasoning(reasoning_trace, step_scores, state)
+                step_scores = self._validate_reasoning(reasoning_trace, state)
+                avg_score = sum(step_scores.values()) / len(step_scores) if step_scores else 0.0
+                print(f"   Refined reasoning quality: {avg_score:.2f}")
+
+            # Store scores in trace
+            reasoning_trace = reasoning_trace.__class__(
+                component_name=reasoning_trace.component_name,
+                requirements_analysis=reasoning_trace.requirements_analysis,
+                potential_issues=reasoning_trace.potential_issues,
+                solution_approach=reasoning_trace.solution_approach,
+                implementation_plan=reasoning_trace.implementation_plan,
+                validation_checklist=reasoning_trace.validation_checklist,
+                step_scores=step_scores,
+                final_score=avg_score,
+                timestamp=reasoning_trace.timestamp,
+            )
+
+            # Store for state persistence
+            self._last_reasoning_trace = reasoning_trace
+
         print("\nGenerating code...")
         code = self._generate_code(
-            component, competition_info, working_dir, domain, state
+            component, competition_info, working_dir, domain, state,
+            reasoning_trace=reasoning_trace,
         )
         attempt_records.append(
             CodeAttempt(
@@ -804,6 +1283,31 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         if not is_valid:
             print(f"Syntax error detected: {syntax_error}")
             code = self._fix_syntax_error(code, syntax_error)
+
+        # Quiet-STaR: Self-evaluate code before execution
+        use_quiet_star = run_mode != "mlebench" and not state.get("fast_mode", False)
+
+        if use_quiet_star:
+            print("\n🔮 Quiet-STaR: Self-evaluating code...")
+            self_eval = self._self_evaluate_code(code, component, state)
+            print(f"   Confidence: {self_eval.confidence:.2f}, Proceed: {self_eval.proceed}")
+
+            if self_eval.concerns:
+                print(f"   Concerns: {', '.join(self_eval.concerns[:3])}")
+
+            # Store for state persistence
+            self._last_self_evaluation = self_eval
+
+            # Decision checkpoint: apply fixes if confidence is low or proceed=False
+            if self_eval.confidence < 0.5 or not self_eval.proceed:
+                if self_eval.suggested_fixes:
+                    print("   🔧 Applying self-evaluation fixes...")
+                    code = self._apply_self_evaluation_fixes(code, self_eval, component)
+
+                    # Re-evaluate after fixes
+                    self_eval = self._self_evaluate_code(code, component, state)
+                    self._last_self_evaluation = self_eval
+                    print(f"   Post-fix confidence: {self_eval.confidence:.2f}")
 
         print("\nExecuting code...")
         max_retries = 3
@@ -933,7 +1437,8 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             snippet = debug_error_msg.replace("\n", " ")[:400]
             print(f"Last error passed to debugger: {snippet}")
         code, exec_result, debug_success = self._debug_code(
-            code, exec_result, working_dir, max_iterations=5, meta_feedback=meta_feedback
+            code, exec_result, working_dir, max_iterations=5, meta_feedback=meta_feedback,
+            component_name=component.name, component_type=component.component_type,
         )
 
         attempt_records.append(
@@ -1817,8 +2322,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         working_dir: Path,
         domain: str,
         state: KaggleState = None,
+        reasoning_trace: ReasoningTrace = None,
     ) -> str:
-        """Generate code for a component."""
+        """Generate code for a component with optional GRPO reasoning trace."""
         component_details = format_component_details(component)
 
         dataset_info = self._get_dataset_info(working_dir, state)
@@ -1872,6 +2378,11 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             3. Print progress and metrics
             4. Handle errors gracefully
             """
+
+        # GRPO: Inject reasoning trace into requirements
+        if reasoning_trace:
+            reasoning_guidance = self._format_reasoning_for_prompt(reasoning_trace)
+            requirements = reasoning_guidance + "\n\n" + requirements
 
         # Build dynamic context from state (SOTA, feedback, rewards)
         context = build_context(state, component=component) if state else build_context({})
@@ -2027,8 +2538,13 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         working_dir: Path,
         max_iterations: int = 10,
         meta_feedback: str | None = None,
+        component_name: str = "",
+        component_type: str = "",
     ) -> tuple[str, ExecutionResult, bool]:
         """Debug code iteratively with loop-safety and configurable timeouts."""
+        # DPO: Store original code for preference pair collection
+        original_code = code
+        original_error = exec_result.errors[0] if exec_result.errors else exec_result.stderr[:500]
         original_timeout = getattr(self.executor, "timeout", None)
         # Use configurable debug_timeout (default 600s = 10 min) for Optuna tuning
         debug_timeout = self.config.ablation.debug_timeout
@@ -2065,6 +2581,21 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
             if test_result.success:
                 print("Debug successful!")
+
+                # DPO: Collect preference pair (original failed -> fixed succeeded)
+                if component_name and original_code != debugged_code:
+                    context = f"Fixing {component_type}: {component_name}"
+                    self._preference_collector.collect_from_fix_cycle(
+                        component_name=component_name,
+                        component_type=component_type,
+                        original_code=original_code,
+                        fixed_code=debugged_code,
+                        context=context,
+                        error=original_error,
+                        cv_score=None,  # Will be updated later if available
+                    )
+                    print(f"   📊 DPO: Collected preference pair for {component_name}")
+
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return debugged_code, test_result, True

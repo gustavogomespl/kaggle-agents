@@ -26,6 +26,11 @@ from .agents.submission_agent import submission_agent_node
 from .core.state import KaggleState, create_initial_state
 from .domain import detect_competition_domain
 from .nodes.prompt_refinement import prompt_refinement_node
+from .nodes.curriculum_learning import (
+    curriculum_learning_node,
+    inject_subtask_guidance,
+    route_after_curriculum,
+)
 from .tools.kaggle_api import KaggleAPIClient
 
 
@@ -763,6 +768,36 @@ def run_workflow(
 
 # ==================== MLE-bench Workflow ====================
 
+def route_after_meta_evaluator(state: KaggleState) -> Literal["curriculum", "continue"]:
+    """
+    Route after meta-evaluator - check if curriculum learning is needed.
+
+    WEBRL-style: If there are critical failures, generate sub-tasks first.
+
+    Args:
+        state: Current state
+
+    Returns:
+        "curriculum" if subtasks needed, "continue" otherwise
+    """
+    failure_analysis = state.get("failure_analysis", {})
+    error_patterns = failure_analysis.get("error_patterns", [])
+    failed_components = failure_analysis.get("failed_components", [])
+
+    # Check for critical errors that need curriculum learning
+    critical_errors = ["memory_error", "timeout_error", "import_error", "syntax_error"]
+    has_critical = any(e in critical_errors for e in error_patterns)
+
+    # Only trigger curriculum if we have failures and this is a refinement iteration
+    current_iteration = state.get("current_iteration", 0)
+
+    if has_critical and current_iteration > 0 and len(failed_components) > 0:
+        print("\n   WEBRL: Critical failures detected - triggering curriculum learning")
+        return "curriculum"
+
+    return "continue"
+
+
 def create_mlebench_workflow() -> StateGraph:
     """
     Create a workflow for MLE-bench evaluation.
@@ -773,8 +808,12 @@ def create_mlebench_workflow() -> StateGraph:
     The flow is:
         domain_detection → search → planner → developer (loop) →
         robustness → ensemble → submission → performance_evaluation →
-        meta_evaluator → prompt_refinement → iteration_control →
-        [refine → planner | end → reporting]
+        meta_evaluator → [curriculum_learning] → prompt_refinement →
+        iteration_control → [refine → planner | end → reporting]
+
+    Features:
+        - WEBRL: Curriculum learning from failures (auto sub-tasks)
+        - Iteration loop for refinement
 
     Returns:
         Compiled StateGraph
@@ -791,6 +830,8 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)
+    workflow.add_node("curriculum_learning", curriculum_learning_node)  # WEBRL
+    workflow.add_node("inject_curriculum", inject_subtask_guidance)  # WEBRL guidance injection
     workflow.add_node("prompt_refinement", prompt_refinement_node)
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("reporting", reporting_agent_node)
@@ -827,8 +868,21 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_edge("submission", "performance_evaluation")
     workflow.add_edge("performance_evaluation", "meta_evaluator")
 
-    # Meta-Evaluator → Prompt Refinement → Iteration Control
-    workflow.add_edge("meta_evaluator", "prompt_refinement")
+    # Meta-Evaluator → Conditional (WEBRL: curriculum or continue?)
+    workflow.add_conditional_edges(
+        "meta_evaluator",
+        route_after_meta_evaluator,
+        {
+            "curriculum": "curriculum_learning",  # WEBRL: Generate sub-tasks
+            "continue": "prompt_refinement",      # Standard path
+        }
+    )
+
+    # Curriculum Learning → Inject Guidance → Prompt Refinement
+    workflow.add_edge("curriculum_learning", "inject_curriculum")
+    workflow.add_edge("inject_curriculum", "prompt_refinement")
+
+    # Prompt Refinement → Iteration Control
     workflow.add_edge("prompt_refinement", "iteration_control")
 
     # Iteration Control → Conditional (refine or end?)

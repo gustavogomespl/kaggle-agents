@@ -5,6 +5,8 @@ Enhanced with:
 - ExecutionFeedbackRewardModel: Uses structured logs for rich rewards
 - AblationRewardModel: Evaluates ablation study quality
 - ImprovementTrackingRewardModel: Tracks score progression across iterations
+- PreferenceCollector: DPO-style preference learning from code fixes
+- PreferenceRewardModel: Scores code based on learned preferences
 """
 
 from .prompt_optimizer import (
@@ -34,6 +36,14 @@ from .reward_model import (
     create_planner_metric,
     create_validation_metric,
 )
+from .preference_learning import (
+    # DPO-style Preference Learning
+    PreferenceCollector,
+    PreferenceRewardModel,
+    # Factory Functions
+    create_preference_collector,
+    create_preference_reward_model,
+)
 
 
 __all__ = [
@@ -41,6 +51,9 @@ __all__ = [
     "AblationRewardModel",
     "ExecutionFeedbackRewardModel",
     "ImprovementTrackingRewardModel",
+    # DPO-style Preference Learning
+    "PreferenceCollector",
+    "PreferenceRewardModel",
     # Standard Reward Models
     "CombinedRewardModel",
     "DeveloperRewardModel",
@@ -59,6 +72,8 @@ __all__ = [
     "create_kaggle_metric",
     "create_optimizer",
     "create_planner_metric",
+    "create_preference_collector",
+    "create_preference_reward_model",
     "create_training_collector",
     "create_validation_metric",
 ]
