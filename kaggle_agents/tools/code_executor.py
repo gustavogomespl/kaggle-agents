@@ -256,12 +256,12 @@ class CodeExecutor:
             fixes_applied.append("Replaced remaining sys.exit() calls with RuntimeError")
 
         # Auto-fix other termination calls
-        if "exit()" in code and "sys.exit" not in code:
-            code = code.replace("exit()", "pass  # Replaced exit()")
+        if re.search(r"(?<!\\w)exit\\(\\)", code) and "sys.exit" not in code:
+            code = re.sub(r"(?<!\\w)exit\\(\\)", "pass  # Replaced exit()", code)
             fixes_applied.append("Replaced exit() with pass")
 
-        if "quit()" in code:
-            code = code.replace("quit()", "pass  # Replaced quit()")
+        if re.search(r"(?<!\\w)quit\\(\\)", code):
+            code = re.sub(r"(?<!\\w)quit\\(\\)", "pass  # Replaced quit()", code)
             fixes_applied.append("Replaced quit() with pass")
 
         if "os._exit(" in code:

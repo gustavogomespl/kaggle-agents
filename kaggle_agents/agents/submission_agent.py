@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from kaggle.api.kaggle_api_extended import KaggleApi
 
@@ -303,8 +304,14 @@ class SubmissionAgent:
 
             # For classification/probabilities, enforce [0,1]; for regression, allow any numeric range
             if is_classification:
-                if (preds < 0).any() or (preds > 1).any():
-                    return False, f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})"
+                vals = preds.astype(float).to_numpy()
+                integer_like = np.all(np.isclose(vals, np.round(vals)))
+                if integer_like:
+                    if (vals < 0).any():
+                        return False, "Class labels must be >= 0"
+                else:
+                    if (vals < 0).any() or (vals > 1).any():
+                        return False, f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})"
 
             if not preds.replace([float("inf"), float("-inf")], pd.NA).notna().all():
                 return False, "Predictions contain inf or NaN values"
