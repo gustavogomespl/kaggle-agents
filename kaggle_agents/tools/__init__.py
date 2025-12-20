@@ -22,8 +22,6 @@ __all__ = [
     "execute_code",
     "validate_code_syntax",
     # Lazy imports (avoid importing Kaggle SDK at module import time)
-    "CompetitionAnalyzer",
-    "auto_detect_competition_config",
     "DiscussionMetadata",
     "KaggleSearcher",
     "NotebookMetadata",
@@ -31,8 +29,6 @@ __all__ = [
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
-    "CompetitionAnalyzer": ("competition_analyzer", "CompetitionAnalyzer"),
-    "auto_detect_competition_config": ("competition_analyzer", "auto_detect_competition_config"),
     "DiscussionMetadata": ("kaggle_search", "DiscussionMetadata"),
     "KaggleSearcher": ("kaggle_search", "KaggleSearcher"),
     "NotebookMetadata": ("kaggle_search", "NotebookMetadata"),
