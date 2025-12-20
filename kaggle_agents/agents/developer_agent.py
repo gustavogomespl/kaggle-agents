@@ -665,6 +665,7 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
 
         should_keep_component = True
         new_cv_score = 0.0
+        force_retry = False
 
         if result.success and component.component_type == "model":
             from kaggle_agents.tools.code_executor import ExecutionResult
@@ -699,11 +700,19 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
             os.getenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES"), 3
         )
         max_component_retries = max(1, max_component_retries)
+        min_component_score = None
+        min_component_score_env = os.getenv("KAGGLE_AGENTS_MIN_COMPONENT_SCORE")
+        if min_component_score_env:
+            try:
+                min_component_score = float(min_component_score_env)
+            except ValueError:
+                print(
+                    f"⚠️ Invalid KAGGLE_AGENTS_MIN_COMPONENT_SCORE='{min_component_score_env}'"
+                )
+                min_component_score = None
         skip_due_to_retries = False
 
-        if result.success:
-            code_retry_count = 0
-        else:
+        if not result.success:
             code_retry_count = max(0, code_retry_count) + 1
             if code_retry_count >= max_component_retries:
                 skip_due_to_retries = True
@@ -761,6 +770,7 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
                 (p for p in submission_candidates if p is not None and p.exists()),
                 None,
             )
+            grading = None
             if submission_path:
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
@@ -798,6 +808,55 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
 
                 current_best_score = state.get("best_single_model_score")
                 metric_name = competition_info.evaluation_metric
+                if min_component_score is not None and not state_updates.get("skip_remaining_components"):
+                    score_for_gate = None
+                    score_source = None
+                    if run_mode == "mlebench" and isinstance(grading, dict):
+                        score = grading.get("score")
+                        if grading.get("valid_submission") and isinstance(
+                            score, (int, float)
+                        ):
+                            score_for_gate = float(score)
+                            score_source = "mlebench"
+                    if score_for_gate is None and isinstance(new_cv_score, (int, float)):
+                        score_for_gate = float(new_cv_score)
+                        score_source = "cv"
+                    if score_for_gate is None:
+                        extracted = self._extract_cv_score(result.stdout)
+                        if isinstance(extracted, (int, float)):
+                            score_for_gate = float(extracted)
+                            score_source = "cv"
+
+                    if score_for_gate is not None:
+                        is_minimize = is_metric_minimization(metric_name)
+                        below_threshold = (
+                            score_for_gate > min_component_score
+                            if is_minimize
+                            else score_for_gate < min_component_score
+                        )
+                        if below_threshold:
+                            retry_next = code_retry_count + 1
+                            if retry_next >= max_component_retries:
+                                print(
+                                    f"⚠️ Score {score_for_gate:.5f} ({score_source}) below threshold "
+                                    f"{min_component_score:.5f}, but max retries reached "
+                                    f"({retry_next}/{max_component_retries}). Proceeding."
+                                )
+                            else:
+                                force_retry = True
+                                state_updates["code_retry_count"] = retry_next
+                                state_updates["current_component_index"] = current_index
+                                state_updates["development_results"] = []
+                                print(
+                                    f"🔄 Score {score_for_gate:.5f} ({score_source}) below threshold "
+                                    f"{min_component_score:.5f}; retrying component "
+                                    f"({retry_next}/{max_component_retries})."
+                                )
+                    else:
+                        print(
+                            "⚠️ Min score gate set but no score could be extracted; "
+                            "skipping threshold enforcement."
+                        )
 
                 is_best = False
                 if new_cv_score is not None:
@@ -821,11 +880,16 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
             else:
                 print("Warning: submission.csv not found after successful execution")
 
-            if result.success and should_keep_component and new_cv_score is not None:
+            if (
+                result.success
+                and should_keep_component
+                and new_cv_score is not None
+                and not force_retry
+            ):
                 state_updates["baseline_cv_score"] = new_cv_score
                 print(f"Updated baseline CV score: {new_cv_score:.4f}")
 
-        if result.success and should_keep_component:
+        if result.success and should_keep_component and not force_retry:
             cache_key = f"component_result_{component.name}"
             state_updates[cache_key] = result
             print(f"Cached successful result for: {component.name}")
