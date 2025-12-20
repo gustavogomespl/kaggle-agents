@@ -470,36 +470,51 @@ Return a JSON array with 3-5 components. Each component must have:
                 print(f"  ⚠️ LLM plan generation failed: {e}, using fallback")
                 plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
 
-        # Convert to AblationComponent objects
-        components = []
+        components = self._coerce_components(plan_data)
+
+        # Sort by estimated impact (descending)
+        components.sort(key=lambda x: x.estimated_impact, reverse=True)
+
+        return components
+
+    def _coerce_components(
+        self,
+        plan_data: list[Any],
+    ) -> list[AblationComponent]:
+        """Normalize plan data into AblationComponent objects."""
+        components: list[AblationComponent] = []
         for i, item in enumerate(plan_data):
-            # Generate name if not provided by LLM
+            if isinstance(item, AblationComponent):
+                components.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+
             name = item.get("name")
             if not name or name == "unnamed":
                 comp_type = item.get("component_type", "component")
-                # Create descriptive name from type and index
                 name = f"{comp_type}_{i+1}"
-                # If there's a description, try to extract key words
                 if item.get("description"):
-                    desc = item["description"].lower()
-                    # Extract first meaningful word
+                    desc = str(item["description"]).lower()
                     for word in desc.split():
                         if len(word) > 4 and word not in ["using", "apply", "create", "implement"]:
                             name = f"{word}_{comp_type}"
                             break
 
+            try:
+                estimated_impact = float(item.get("estimated_impact", 0.05))
+            except (TypeError, ValueError):
+                estimated_impact = 0.05
+
             component = AblationComponent(
                 name=name,
                 component_type=item.get("component_type", "preprocessing"),
-                code=item.get("code_outline", ""),
-                estimated_impact=float(item.get("estimated_impact", 0.05)),
+                code=item.get("code_outline", item.get("description", "")),
+                estimated_impact=estimated_impact,
                 tested=False,
                 actual_impact=None,
             )
             components.append(component)
-
-        # Sort by estimated impact (descending)
-        components.sort(key=lambda x: x.estimated_impact, reverse=True)
 
         return components
 
@@ -1395,6 +1410,7 @@ Preferred approaches: {', '.join(strategy['model_preference'])}
 
         # Use fallback plan generation with strategy bias
         plan = self._create_fallback_plan(domain, sota_analysis)
+        plan = self._coerce_components(plan)
 
         # Modify plan based on strategy
         if strategy["name"] == "conservative":

@@ -342,8 +342,12 @@ IMPORTANT:
         submission_path = working_dir / "submission.csv"
 
         if not submission_path.exists():
-            # Check in artifacts
-            if "submission.csv" not in dev_result.artifacts_created:
+            artifact_candidates = [
+                artifact
+                for artifact in dev_result.artifacts_created
+                if "submission" in artifact.lower() and artifact.endswith(".csv")
+            ]
+            if not artifact_candidates:
                 issues.append("Submission file not created")
                 suggestions.append("Ensure code saves submission.csv")
                 return ValidationResult(
@@ -354,11 +358,7 @@ IMPORTANT:
                     suggestions=suggestions,
                 )
 
-            # Find submission in artifacts
-            for artifact in dev_result.artifacts_created:
-                if "submission" in artifact.lower() and artifact.endswith(".csv"):
-                    submission_path = working_dir / artifact
-                    break
+            submission_path = working_dir / artifact_candidates[0]
 
         try:
             # Read submission

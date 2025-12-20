@@ -779,10 +779,11 @@ class CodeExecutor:
             # "Validation:   0%|          | 0/138 [00:00<?, ?it/s]"
             has_bar = "%|" in stripped and "|" in stripped
             has_rate = ("it/s" in stripped) or ("s/it" in stripped)
+            has_speed = bool(re.search(r"\b\d+(\.\d+)?\s*[kMGT]?B/s\b", stripped, re.IGNORECASE))
             has_counts = bool(re.search(r"\b\d+/\d+\b", stripped))
-            if has_bar and (has_rate or has_counts):
+            if has_bar and (has_rate or has_speed or has_counts):
                 continue
-            if has_rate and has_counts:
+            if (has_rate or has_speed) and has_counts:
                 continue
 
             kept_lines.append(line)
@@ -806,6 +807,13 @@ class CodeExecutor:
         # Optuna and tqdm commonly log to stderr even on successful runs.
         stderr_filtered = self._filter_optuna_logs(stderr) if stderr else ""
         stderr_filtered = self._filter_tqdm_logs(stderr_filtered)
+        if stderr_filtered:
+            stderr_lines = []
+            for line in stderr_filtered.splitlines():
+                if "Warning" in line or "WARNING" in line:
+                    continue
+                stderr_lines.append(line)
+            stderr_filtered = "\n".join(stderr_lines).strip()
 
         # Check stderr for Python exceptions
         if stderr_filtered:
@@ -853,12 +861,7 @@ class CodeExecutor:
                 if not re.match(r'^\s*\[.*?\]\s*$', stderr_filtered.strip()):
                     errors.append(f"Error: {stderr_filtered.strip()[:200]}")
 
-        # Check stdout for warnings (but not Optuna trial info)
-        stdout_filtered = self._filter_optuna_logs(stdout) if stdout else ""
-        if "Warning:" in stdout_filtered or "WARNING:" in stdout_filtered:
-            warnings = re.findall(r"(Warning:.*|WARNING:.*)", stdout_filtered)
-            if warnings and len(errors) < 3:  # Limit warnings
-                errors.extend(warnings[:3])
+        # Do not treat warnings as errors.
 
         return errors
 
