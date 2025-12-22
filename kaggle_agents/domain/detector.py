@@ -54,7 +54,7 @@ class DomainDetector:
 Categories:
 - image_classification: Classify images into categories (dog breeds, cancer detection, plant diseases)
 - image_regression: Predict continuous values from images (age estimation, severity scores)
-- image_to_image: Transform images (denoising, super-resolution, style transfer)
+- image_to_image: Transform images (denoising, super-resolution, style transfer) or pixel-level (one row per pixel) if it's an image-to-image task and the sample submission has pixel-level format in csv
 - image_segmentation: Pixel-wise classification of images
 - object_detection: Locate and classify objects in images
 - text_classification: Classify text (sentiment, toxicity, spam, author identification)
@@ -82,7 +82,7 @@ Respond with ONLY the category name, nothing else. Example: image_classification
     DESCRIPTIONS = {
         "image_classification": "Classify images into discrete categories",
         "image_regression": "Predict continuous values from images",
-        "image_to_image": "Transform images (denoising, super-resolution, style transfer)",
+        "image_to_image": "Transform images (denoising, super-resolution, style transfer) or pixel-level (one row per pixel)",
         "image_segmentation": "Pixel-wise classification of images",
         "object_detection": "Locate and classify objects in images",
         "text_classification": "Classify text into categories",
