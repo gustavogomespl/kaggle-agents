@@ -159,6 +159,41 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             if p.is_dir() and p.name.lower().startswith(("train", "test"))
         ] if data_dir.exists() else []
 
+        # Image-to-image heuristic: look for paired train + clean/target directories
+        if data_dir.exists():
+            dir_map = {p.name.lower(): p for p in data_dir.iterdir() if p.is_dir()}
+            clean_dir_names = [
+                "train_cleaned",
+                "train_clean",
+                "clean",
+                "cleaned",
+                "gt",
+                "ground_truth",
+                "train_gt",
+                "target",
+                "targets",
+                "train_target",
+            ]
+            train_dir = None
+            for name in ("train", "training", "train_images"):
+                if name in dir_map:
+                    train_dir = dir_map[name]
+                    break
+            clean_dir = None
+            for name in clean_dir_names:
+                if name in dir_map:
+                    clean_dir = dir_map[name]
+                    break
+
+            if train_dir and clean_dir:
+                train_counts, train_total = analyze_dir(train_dir)
+                clean_counts, clean_total = analyze_dir(clean_dir)
+                train_result = classify(train_counts, train_total)
+                clean_result = classify(clean_counts, clean_total)
+                if train_result and clean_result:
+                    if train_result[0].startswith("image_") and clean_result[0].startswith("image_"):
+                        return ("image_to_image", 0.92)
+
         for dir_path in candidate_dirs:
             counts, total = analyze_dir(dir_path)
             result = classify(counts, total)
@@ -206,6 +241,26 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 
         if metadata_type == "image":
             desc_lower = (competition_info.description or "").lower()
+            name_lower = (competition_info.name or "").lower()
+            if any(
+                kw in desc_lower or kw in name_lower
+                for kw in (
+                    "denoise",
+                    "denoising",
+                    "deblur",
+                    "deblurring",
+                    "super-resolution",
+                    "super resolution",
+                    "inpaint",
+                    "inpainting",
+                    "colorize",
+                    "colourize",
+                    "restoration",
+                    "noise",
+                    "clean",
+                )
+            ):
+                return "image_to_image", 0.92
             if "segment" in desc_lower:
                 return "image_segmentation", 0.95
             elif "detect" in desc_lower or "object" in desc_lower:

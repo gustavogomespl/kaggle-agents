@@ -22,6 +22,7 @@ class MLEBenchDataInfo:
     workspace: Path
     train_path: Optional[Path] = None
     test_path: Optional[Path] = None
+    clean_train_path: Optional[Path] = None
     sample_submission_path: Optional[Path] = None
     train_csv_path: Optional[Path] = None  # For image competitions with labels CSV
     test_csv_path: Optional[Path] = None
@@ -401,6 +402,26 @@ class MLEBenchDataAdapter:
                 info.train_path = train_csv
             print(f"   Train CSV: {train_csv.name}")
 
+        # Image-to-image: look for "clean"/target image directories (e.g., train_cleaned)
+        clean_dir_candidates = [
+            "train_cleaned",
+            "train_clean",
+            "clean",
+            "cleaned",
+            "gt",
+            "ground_truth",
+            "train_gt",
+            "target",
+            "targets",
+            "train_target",
+        ]
+        for dir_name in clean_dir_candidates:
+            clean_dir = public_dir / dir_name
+            if clean_dir.is_dir():
+                info.clean_train_path = clean_dir
+                print(f"   Clean/target dir: {clean_dir.name}/")
+                break
+
         # Train ZIP fallback (common in CV competitions)
         if info.train_path is None:
             train_zip = self._find_first_zip(public_dir, kind="train")
@@ -508,6 +529,11 @@ class MLEBenchDataAdapter:
         if info.train_csv_path and info.train_csv_path.exists():
             items_to_link.append(("train.csv", info.train_csv_path))
 
+        # Add clean/target train directory for image-to-image tasks
+        if info.clean_train_path and info.clean_train_path.is_dir():
+            items_to_link.append((info.clean_train_path.name, info.clean_train_path))
+            print(f"      Found clean/target dir: {info.clean_train_path}", flush=True)
+
         # Add test CSV (if exists - many image competitions don't have this)
         if info.test_csv_path and info.test_csv_path.exists():
             items_to_link.append(("test.csv", info.test_csv_path))
@@ -600,6 +626,7 @@ class MLEBenchDataAdapter:
             "data_files": {
                 "train": str(info.train_path) if info.train_path else "",
                 "test": str(info.test_path) if info.test_path else "",
+                "clean_train": str(info.clean_train_path) if info.clean_train_path else "",
                 "train_csv": str(info.train_csv_path) if info.train_csv_path else "",
                 "test_csv": str(info.test_csv_path) if info.test_csv_path else "",
                 "sample_submission": str(info.sample_submission_path) if info.sample_submission_path else "",
