@@ -43,6 +43,17 @@ DomainType = Literal[
 ]
 
 
+# ==================== Submission Format Types ====================
+
+SubmissionFormatType = Literal[
+    "standard",      # One row per sample (classification/regression)
+    "pixel_level",   # One row per pixel (image-to-image, segmentation)
+    "multi_label",   # Multiple rows per sample
+    "ranking",       # Ranking format
+    "rle_encoded",   # Run-length encoded masks (segmentation)
+]
+
+
 @dataclass
 class CompetitionInfo:
     """Competition metadata and configuration."""
@@ -54,6 +65,8 @@ class CompetitionInfo:
     domain: Optional[DomainType] = None
     data_files: list[str] = field(default_factory=list)
     submission_format: dict[str, Any] = field(default_factory=dict)
+    submission_format_type: Optional[SubmissionFormatType] = None
+    submission_format_metadata: dict[str, Any] = field(default_factory=dict)
     deadline: Optional[datetime] = None
 
 
@@ -380,6 +393,8 @@ def merge_competition_info(existing: Optional[CompetitionInfo], new: Competition
         domain=new.domain if new.domain is not None else existing.domain,
         data_files=new.data_files if new.data_files else existing.data_files,
         submission_format=new.submission_format if new.submission_format else existing.submission_format,
+        submission_format_type=new.submission_format_type if new.submission_format_type is not None else existing.submission_format_type,
+        submission_format_metadata=new.submission_format_metadata if new.submission_format_metadata else existing.submission_format_metadata,
         deadline=new.deadline if new.deadline is not None else existing.deadline,
     )
 

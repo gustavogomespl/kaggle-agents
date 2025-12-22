@@ -829,7 +829,17 @@ Return a JSON array with 3-5 components. Each component must have:
 
         if model_count == 0:
             print("  ⚠️  No 'model' components found - adding a baseline model")
-            if domain.startswith("image_"):
+            if domain == "image_to_image" or domain == "image_segmentation":
+                # CRITICAL: Use encoder-decoder for image-to-image, not classifier
+                baseline = AblationComponent(
+                    name="baseline_unet_encoder_decoder",
+                    component_type="model",
+                    code="U-Net encoder-decoder for pixel-level prediction. Output must be same size as input. Flatten to pixel-level CSV format.",
+                    estimated_impact=0.30 if not fast_mode else 0.20,
+                    tested=False,
+                    actual_impact=None,
+                )
+            elif domain.startswith("image_"):
                 baseline = AblationComponent(
                     name="baseline_resnet18",
                     component_type="model",
@@ -990,7 +1000,11 @@ Return a JSON array with 3-5 components. Each component must have:
         )
 
         # Route to domain-specific fallback method
-        if domain.startswith("image_"):
+        if domain == "image_to_image" or domain == "image_segmentation":
+            # CRITICAL: Image-to-image tasks require pixel-level predictions
+            # Use specialized fallback plan with encoder-decoder architectures
+            return self._create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
+        elif domain.startswith("image_"):
             return self._create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
         elif domain.startswith("text_") or domain == "seq_to_seq":
             return self._create_text_fallback_plan(domain, sota_analysis)
@@ -1185,6 +1199,136 @@ Return a JSON array with 3-5 components. Each component must have:
                 "estimated_impact": 0.15,
                 "rationale": "TTA averages predictions over multiple augmented views of each test image, reducing variance. Weighted ensemble (by CV score) combines different architectures. Typical +2-5% improvement.",
                 "code_outline": "For each test image: apply 5 transforms (original, hflip, vflip, rotate90, rotate270), get predictions from each model, average TTA predictions per model, then weighted average models by CV score"
+            }
+        ]
+
+    def _create_image_to_image_fallback_plan(
+        self,
+        domain: str,
+        sota_analysis: dict[str, Any],
+        *,
+        fast_mode: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        Create fallback plan for image-to-image tasks (denoising, super-resolution, style transfer).
+
+        CRITICAL: These tasks require PIXEL-LEVEL predictions, not per-image predictions.
+        The submission format is typically one row per pixel: id=image_row_col, value=pixel_intensity.
+
+        Args:
+            domain: Competition domain (image_to_image)
+            sota_analysis: SOTA analysis results
+            fast_mode: If True, return minimal plan for speed
+
+        Returns:
+            List of component dictionaries with encoder-decoder architectures
+        """
+        if fast_mode:
+            return [
+                {
+                    "name": "simple_autoencoder_denoiser",
+                    "component_type": "model",
+                    "description": """Simple convolutional autoencoder for image-to-image transformation.
+
+CRITICAL - THIS IS A PIXEL-LEVEL PREDICTION TASK:
+- Model must output FULL IMAGE (same H x W as input), NOT a single value
+- Use encoder-decoder architecture (Conv2d -> ConvTranspose2d)
+- DO NOT use classifiers (EfficientNet, ResNet with FC head)
+
+Architecture:
+- Encoder: 3-4 Conv2d layers with ReLU, max pooling
+- Decoder: 3-4 ConvTranspose2d layers with ReLU
+- Output: Same size as input (H x W) for grayscale
+
+Training:
+- Input: noisy/degraded images
+- Target: clean images
+- Loss: MSE or L1 loss between output and target image
+
+SUBMISSION FORMAT (CRITICAL - MUST FOLLOW):
+```python
+sample_sub = pd.read_csv(sample_submission_path)
+expected_rows = len(sample_sub)  # Typically MILLIONS of rows
+
+submission_rows = []
+for img_path in sorted(test_images):
+    img_id = img_path.stem  # e.g., "1" from "1.png"
+    pred = model(preprocess(img))  # OUTPUT: (H, W) image
+    H, W = pred.shape
+    for row in range(H):
+        for col in range(W):
+            pixel_id = f"{img_id}_{row+1}_{col+1}"
+            submission_rows.append({"id": pixel_id, "value": float(pred[row, col])})
+
+assert len(submission_rows) == expected_rows
+pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
+```""",
+                    "estimated_impact": 0.35,
+                    "rationale": "Simple autoencoder is fast to train and provides baseline for denoising. Pixel-level output is critical for correct submission format.",
+                    "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, flatten to pixel-level CSV"
+                },
+                {
+                    "name": "submission_format_validator",
+                    "component_type": "ensemble",
+                    "description": "Validate pixel-level submission format matches sample_submission.csv exactly.",
+                    "estimated_impact": 0.05,
+                    "rationale": "Critical validation to catch format errors before submission.",
+                    "code_outline": "Load sample_sub, verify row count matches, verify ID format matches exactly"
+                }
+            ]
+
+        # Full mode: U-Net and ensemble
+        return [
+            {
+                "name": "unet_encoder_decoder",
+                "component_type": "model",
+                "description": """U-Net architecture for image-to-image transformation with skip connections.
+
+CRITICAL - THIS IS A PIXEL-LEVEL PREDICTION TASK:
+- Model must output FULL IMAGE (same H x W as input)
+- U-Net preserves fine details through skip connections
+- DO NOT use classifiers (EfficientNet, ResNet with FC head)
+
+U-Net Architecture:
+- Encoder: 4 blocks of (Conv2d, BatchNorm, ReLU, MaxPool)
+- Bottleneck: Conv2d block
+- Decoder: 4 blocks of (ConvTranspose2d, concat skip, Conv2d, BatchNorm, ReLU)
+- Output: Conv2d(1, 1, 1) for single-channel grayscale output
+
+SUBMISSION FORMAT (CRITICAL):
+Read sample_submission.csv to get expected row count (millions of rows).
+Flatten each output image to pixel format: {img_id}_{row}_{col} -> value""",
+                "estimated_impact": 0.40,
+                "rationale": "U-Net is SOTA for image-to-image tasks. Skip connections preserve fine details crucial for denoising/super-resolution.",
+                "code_outline": "PyTorch U-Net with skip connections, MSE loss, 3-5 epochs, output full image, flatten to pixel CSV"
+            },
+            {
+                "name": "residual_autoencoder",
+                "component_type": "model",
+                "description": """Residual autoencoder that predicts the NOISE (residual) rather than clean image.
+
+Architecture:
+- Similar to U-Net but predicts: clean = noisy - predicted_noise
+- Residual learning makes training more stable
+- Output: Same size as input
+
+This provides model diversity for ensemble.""",
+                "estimated_impact": 0.35,
+                "rationale": "Residual learning (predicting noise) often works better than direct denoising. Provides ensemble diversity.",
+                "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, same pixel-level submission format"
+            },
+            {
+                "name": "pixel_ensemble_average",
+                "component_type": "ensemble",
+                "description": """Average predictions from U-Net and Residual autoencoder at pixel level.
+
+1. Load predictions from both models
+2. Average pixel values: final[i,j] = (unet[i,j] + residual[i,j]) / 2
+3. Flatten to submission format
+4. Validate row count matches sample_submission.csv""",
+                "estimated_impact": 0.10,
+                "rationale": "Ensembling reduces prediction variance. Simple average works well for image tasks.",
+                "code_outline": "Load both model outputs, pixel-wise average, flatten to CSV, validate format"
             }
         ]
 

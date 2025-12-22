@@ -32,7 +32,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
 5. Clamp predictions: np.clip(predictions, 0, 1) before saving
 6. Match sample_submission.csv exactly: columns, IDs, shape
-7. Print "Final Validation Performance: {score:.6f}" at the end
+7. Print "Final Validation Performance: {score:.6f}" at the end (CRITICAL: Meta-Evaluator depends on this exact string)
 8. Set random_state=42 everywhere for reproducibility
 9. MANDATORY SOFT-DEADLINE PATTERN (prevents hard timeout kills):
    ```python
@@ -70,9 +70,41 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 - Optuna: set_verbosity(WARNING), n_trials <= 5, timeout=60 for validation
 - LightGBM callbacks: lgb.early_stopping(100), not early_stopping_rounds param
 - XGBoost callbacks: xgb.callback.EarlyStopping(rounds=100)
+- Albumentations: `IAASharpen` is removed, use `Sharpen`. Ensure input is RGB (3 channels) for color transforms.
+
 
 ## PyTorch Gotchas:
-- Dataset __getitem__ must return tensors/arrays (never None) so DataLoader can collate"""
+- Dataset __getitem__ must return tensors/arrays (never None) so DataLoader can collate
+
+## IMAGE-TO-IMAGE / PIXEL-LEVEL TASKS (CRITICAL):
+If domain is image_to_image, image_segmentation, or submission format is pixel_level:
+1. Output must be a FULL IMAGE (same HxW as input), NOT a single value per image
+2. Use encoder-decoder architectures (U-Net, autoencoder), NOT classifiers
+3. NEVER use image classifiers (EfficientNet, ResNet with FC head) for these tasks
+4. NEVER use global average pooling followed by dense layers
+5. Submission must be FLATTENED to pixel-level format:
+   - Read sample_submission.csv to get exact ID format and row count
+   - ID format is typically: '{image_id}_{row}_{col}' or '{image_id}_{pixel_index}'
+   - MUST match EXACT number of rows in sample_submission (often millions of rows)
+6. Example flattening code (CRITICAL - use this pattern):
+   ```python
+   sample_sub = pd.read_csv(sample_submission_path)
+   expected_rows = len(sample_sub)
+
+   submission_rows = []
+   for img_path in sorted(test_images):  # MUST be sorted for consistent order
+       img_id = img_path.stem  # e.g., "1" from "1.png"
+       pred = model(preprocess(img))  # Output: HxW image, NOT a single value
+       H, W = pred.shape
+       for row in range(H):
+           for col in range(W):
+               pixel_id = f"{img_id}_{row+1}_{col+1}"  # 1-indexed to match sample
+               submission_rows.append({"id": pixel_id, "value": float(pred[row, col])})
+
+   assert len(submission_rows) == expected_rows, f"Expected {expected_rows} rows, got {len(submission_rows)}"
+   pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
+   ```
+7. Verify submission shape BEFORE saving: if row count doesn't match sample_submission, your model architecture is WRONG"""
 
 
 # ==================== Logging Format ====================
@@ -483,7 +515,59 @@ def _get_component_guidance(component_type: str) -> str:
 - Fast execution (<10 seconds)
 - Save processed data for subsequent components
 - Print "Final Validation Performance: 1.0" on completion""",
+
+        "image_to_image_model": """## Image-to-Image Model Requirements (CRITICAL)
+This is a PIXEL-LEVEL prediction task. Your model must output FULL IMAGES, not single values.
+
+### Architecture (MUST USE):
+- U-Net: encoder-decoder with skip connections
+- Autoencoder: encoder-decoder without skip connections
+- DnCNN: deep CNN with residual learning
+- Fully Convolutional Network (FCN)
+
+### Architecture (DO NOT USE):
+- EfficientNet, ResNet, VGG with classification head
+- Any model with global average pooling + dense layers
+- Any model that outputs a single value per image
+
+### Model Output:
+- Input: Image of shape (H, W, C) or (H, W)
+- Output: Image of shape (H, W, C) or (H, W) - SAME spatial dimensions
+- Loss: MSE, L1, SSIM, or perceptual loss
+
+### Submission Format (CRITICAL):
+Sample submission has MILLIONS of rows (one per pixel), NOT one per image!
+
+```python
+# CORRECT pattern for pixel-level submission:
+sample_sub = pd.read_csv(sample_submission_path)
+expected_rows = len(sample_sub)  # e.g., 5,789,880 rows
+
+submission_rows = []
+for img_path in sorted(test_images):
+    img_id = img_path.stem
+    pred = model(load_image(img_path))  # OUTPUT: (H, W) image
+    H, W = pred.shape
+
+    for row in range(H):
+        for col in range(W):
+            pixel_id = f"{img_id}_{row+1}_{col+1}"  # Match sample format
+            submission_rows.append({"id": pixel_id, "value": pred[row, col]})
+
+# VERIFY before saving
+assert len(submission_rows) == expected_rows, f"WRONG: {len(submission_rows)} vs {expected_rows}"
+pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
+```
+
+### Common Mistake to Avoid:
+If your submission has ~29 rows instead of ~5.8M rows, you used a CLASSIFIER instead of an encoder-decoder.
+The number of rows = number of test images means WRONG architecture.""",
     }
+
+    # Handle domain-specific model types
+    if component_type == "model":
+        # Check if we have context suggesting image-to-image
+        return guidance.get(component_type, "")
 
     return guidance.get(component_type, "")
 

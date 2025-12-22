@@ -292,6 +292,76 @@ For time series competitions, prioritize:
 - Forecasting models (ARIMA, Prophet, LSTM)
 - Feature engineering for temporal patterns
 """,
+    "image_to_image": """
+For image-to-image competitions (denoising, super-resolution, style transfer, inpainting):
+
+CRITICAL: These are PIXEL-LEVEL prediction tasks, NOT image classification!
+
+## Architecture priorities:
+- U-Net with skip connections (best for denoising, segmentation)
+- Residual autoencoders (good for learning subtle transformations)
+- DnCNN (denoising-specific CNN with residual learning)
+- Fully Convolutional Networks (FCN) for dense prediction
+
+## Submission format (CRITICAL - READ CAREFULLY):
+- Output is NOT one prediction per image
+- Output is ONE PREDICTION PER PIXEL
+- Sample submission typically has MILLIONS of rows (one per pixel across all test images)
+- ID format is usually: '{image_id}_{row}_{col}' or '{image_id}_{pixel_index}'
+- ALWAYS read sample_submission.csv to understand exact format
+
+## Model output requirements:
+- Must output FULL IMAGE with same spatial dimensions as input (HxW or HxWxC)
+- Then FLATTEN to pixel-level format for submission CSV
+- Example: 420x540 image = 226,800 rows in submission per image
+
+## Flattening code pattern:
+```python
+submission_rows = []
+for img_path in test_images:
+    img_id = img_path.stem
+    pred = model(preprocess(img))  # Output: HxW
+    H, W = pred.shape
+    for row in range(H):
+        for col in range(W):
+            pixel_id = f"{img_id}_{row+1}_{col+1}"  # 1-indexed
+            submission_rows.append({"id": pixel_id, "value": pred[row, col]})
+```
+
+## DO NOT USE:
+- Image classifiers (EfficientNet, ResNet with FC classification head)
+- Single-value regression models
+- Any architecture that outputs one value per image
+- Global average pooling followed by dense layers
+
+## Training approach:
+- Input: degraded/noisy image
+- Target: clean/original image
+- Loss: MSE, L1, or perceptual loss (VGG feature loss)
+- Use paired training data (noisy -> clean pairs)
+""",
+    "image_segmentation": """
+For image segmentation competitions:
+
+CRITICAL: These require PIXEL-WISE classification/regression!
+
+## Architecture priorities:
+- U-Net (standard for medical and general segmentation)
+- DeepLabV3+ (for semantic segmentation)
+- Mask R-CNN (for instance segmentation)
+- HRNet (maintains high-resolution representations)
+
+## Submission format considerations:
+- Check if RLE (Run-Length Encoding) is required
+- Or pixel-level format (one row per pixel)
+- Some competitions use mask images directly
+
+## Key techniques:
+- Data augmentation: rotation, flip, elastic deformation
+- Multi-scale training
+- Test-time augmentation (TTA)
+- Post-processing: CRF, morphological operations
+""",
 }
 
 

@@ -9,7 +9,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import cross_val_predict
 
-from ..core.config import get_config
+from ..core.config import get_config, is_metric_minimization
 from ..core.state import KaggleState
 from ..utils.llm_utils import get_text_content
 
@@ -310,6 +310,7 @@ class EnsembleAgent:
         working_dir: Path,
         submissions: list[Any],  # List[SubmissionResult]
         current_iteration: int,
+        metric_name: str,
     ) -> bool:
         """
         Create Temporal Ensemble (Success Memory) by blending past best submissions.
@@ -321,11 +322,16 @@ class EnsembleAgent:
             working_dir: Path to working directory
             submissions: List of SubmissionResult objects
             current_iteration: Current iteration number
+            metric_name: Name of the evaluation metric (to determine sort direction)
 
         Returns:
             True if ensemble created and saved as submission.csv
         """
         print(f"\n  ⏳ Temporal Ensemble (Iteration {current_iteration})")
+        
+        # Determine strict direction
+        minimize = is_metric_minimization(metric_name)
+        print(f"      Metric: {metric_name} (Minimize: {minimize})")
 
         # 1. Gather candidate files
         candidates = []
@@ -369,9 +375,15 @@ class EnsembleAgent:
         # Filter candidates to only those that were considered "best" at their time?
         # SIMPLIFICATION: Just take the top 3 available files. Assuming 'score' in filename is meaningful.
 
-        # Let's just Sort Descending (Higher Score = Better) as default default.
-        # Most "Lite" benchmarks (Accuracy, AUC) are max.
-        sorted_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
+        # Sort logic based on metric direction
+        # If minimize (RMSE, LogLoss): asc=True (lower score is better)
+        # If maximize (AUC, Accuracy): asc=False (higher score is better)
+        # We want the BEST files first. 
+        # So for minimize: sort by score ASC.
+        # For maximize: sort by score DESC (reverse=True).
+        reverse_sort = not minimize
+        
+        sorted_candidates = sorted(candidates, key=lambda x: x["score"], reverse=reverse_sort)
         top_k = sorted_candidates[:3]
 
         print(f"      Blending Top {len(top_k)} past submissions:")
@@ -596,8 +608,13 @@ Return a JSON object:
             best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
             working_dir_value = state.get("working_directory", "") if isinstance(state, dict) else state.working_directory
             working_dir = Path(working_dir_value) if working_dir_value else Path()
+            working_dir = Path(working_dir_value) if working_dir_value else Path()
             test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
             sample_submission_path = state.get("sample_submission_path", "") if isinstance(state, dict) else state.sample_submission_path
+            
+            # Access metric name safely from competition_info
+            comp_info = state.get("competition_info") if isinstance(state, dict) else getattr(state, "competition_info", None)
+            metric_name = getattr(comp_info, "evaluation_metric", "") if comp_info else ""
 
             # DEBUG: Detailed information about available models
             dev_results = state.get("development_results", [])
@@ -861,7 +878,7 @@ Return a JSON object:
                      import shutil
                      shutil.copy2(current_sub, temp_current)
 
-                 self.create_temporal_ensemble(working_dir, submissions, current_iteration)
+                 self.create_temporal_ensemble(working_dir, submissions, current_iteration, metric_name)
 
             return {
                 "errors": [*errors, error_msg]

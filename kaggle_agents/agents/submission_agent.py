@@ -272,6 +272,8 @@ class SubmissionAgent:
 
         Args:
             submission_path: Path to submission CSV
+            sample_submission_path: Path to sample_submission.csv for comparison
+            problem_type: Competition problem type (classification, regression, etc.)
 
         Returns:
             Tuple of (is_valid, message)
@@ -295,12 +297,80 @@ class SubmissionAgent:
             if sample_submission_path and Path(sample_submission_path).exists():
                 try:
                     sample_sub = pd.read_csv(sample_submission_path)
-                    if df.shape != sample_sub.shape:
-                        return False, f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})"
+
+                    # Enhanced shape mismatch detection for pixel-level format
+                    if df.shape[0] != sample_sub.shape[0]:
+                        expected_rows = sample_sub.shape[0]
+                        actual_rows = df.shape[0]
+                        ratio = expected_rows / max(actual_rows, 1)
+
+                        # Detect pixel-level format mismatch (expected >> actual)
+                        if ratio > 100:
+                            return False, f"""
+PIXEL-LEVEL FORMAT MISMATCH DETECTED!
+
+Expected: {expected_rows:,} rows (one per pixel)
+Got: {actual_rows:,} rows (looks like one per image)
+
+This appears to be an image-to-image task (denoising, segmentation, super-resolution)
+that requires PIXEL-LEVEL predictions.
+
+YOUR MODEL ARCHITECTURE IS WRONG. You likely used a classifier (e.g., EfficientNet,
+ResNet with FC head) instead of an encoder-decoder (e.g., U-Net, autoencoder).
+
+REQUIREMENTS:
+1. Model must output a FULL IMAGE (same H x W as input), not a single value
+2. Use encoder-decoder architecture (U-Net, autoencoder, FCN)
+3. Flatten output to pixel-level format for submission
+
+CORRECT CODE PATTERN:
+```python
+sample_sub = pd.read_csv(sample_submission_path)
+expected_rows = len(sample_sub)  # {expected_rows:,} rows
+
+submission_rows = []
+for img_path in sorted(test_images):
+    img_id = img_path.stem  # e.g., "1" from "1.png"
+    pred = model(preprocess(img))  # OUTPUT: (H, W) image, NOT single value
+    H, W = pred.shape
+    for row in range(H):
+        for col in range(W):
+            pixel_id = f"{{img_id}}_{{row+1}}_{{col+1}}"
+            submission_rows.append({{"id": pixel_id, "value": pred[row, col]}})
+
+assert len(submission_rows) == expected_rows
+pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
+```
+
+DO NOT USE:
+- Image classifiers (EfficientNet, ResNet, VGG with FC head)
+- Models that output a single value per image
+- Global average pooling followed by dense layers
+"""
+                        else:
+                            return False, f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})"
+
                     if df.columns.tolist() != sample_sub.columns.tolist():
                         return False, f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}"
-                    if "id" in df.columns and not df["id"].equals(sample_sub["id"]):
-                        return False, "ID column does not match sample_submission"
+
+                    # Check ID column match (case-insensitive column name)
+                    id_col = None
+                    for col in df.columns:
+                        if col.lower() == "id":
+                            id_col = col
+                            break
+
+                    if id_col and not df[id_col].astype(str).equals(sample_sub[sample_sub.columns[0]].astype(str)):
+                        # Check if it's just an ordering issue vs completely wrong IDs
+                        sub_ids = set(df[id_col].astype(str))
+                        sample_ids = set(sample_sub[sample_sub.columns[0]].astype(str))
+                        if sub_ids != sample_ids:
+                            missing = sample_ids - sub_ids
+                            extra = sub_ids - sample_ids
+                            return False, f"ID values don't match sample_submission. Missing {len(missing)} IDs, {len(extra)} unexpected IDs."
+                        else:
+                            return False, "ID column order doesn't match sample_submission (values are correct but order is wrong)"
+
                 except Exception as e:
                     return False, f"Failed to compare with sample_submission: {e!s}"
 
