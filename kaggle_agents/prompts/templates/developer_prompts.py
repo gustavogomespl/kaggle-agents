@@ -61,6 +61,8 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 - try-except blocks that swallow errors (let them surface)
 - early_stopping_rounds as direct fit() parameter (use callbacks)
 - Subsample training data unless `KAGGLE_AGENTS_FAST_MODE=1` (FAST_MODE may subsample to meet budget, but keep determinism)
+- `pin_memory=True` in DataLoader (causes warnings/crashes). USE `pin_memory=False`.
+- `num_workers > 0` in DataLoader (safe default is 0 to avoid fork/spawn issues).
 
 ## API Gotchas:
 - OneHotEncoder: sparse_output=False (NOT sparse=False) for sklearn 1.2+
@@ -106,7 +108,7 @@ class DynamicContext:
     fast_mode: bool = False
 
 
-def build_context(state: dict[str, Any], component: Any | None = None) -> DynamicContext:
+def build_context(state: dict[str, Any], component: Optional[Any] = None) -> DynamicContext:
     """
     Build dynamic context from KaggleState for prompt injection.
 
@@ -377,10 +379,21 @@ def compose_generate_prompt(
 
     # ADAPTIVE: Later iterations = Feedback heavy
     else:
+        # CRITICAL: Feedback comes first to ensure corrections are applied
         if context.previous_feedback:
             parts.append("")
-            parts.append("## Previous Attempt Feedback:")
+            parts.append("## Previous Attempt Feedback (MUST FIX):")
             parts.append(context.previous_feedback)
+
+        if context.what_failed:
+            parts.append("")
+            parts.append("## What Failed (DO NOT REPEAT):")
+            parts.append("\n".join(f"- {f}" for f in context.what_failed[:5]))
+
+        if context.reward_guidance:
+            parts.append("")
+            parts.append("## Meta-Evaluator Guidance:")
+            parts.append(context.reward_guidance)
 
         if context.attempt_feedback:
             parts.append("")
@@ -391,16 +404,6 @@ def compose_generate_prompt(
             parts.append("")
             parts.append("## What Worked (Keep these approaches):")
             parts.append("\n".join(f"- {w}" for w in context.what_worked[:5]))
-
-        if context.what_failed:
-            parts.append("")
-            parts.append("## What Failed (Avoid these):")
-            parts.append("\n".join(f"- {f}" for f in context.what_failed[:5]))
-
-        if context.reward_guidance:
-            parts.append("")
-            parts.append("## Meta-Evaluator Guidance:")
-            parts.append(context.reward_guidance)
 
         # Still include truncated SOTA as reference
         if context.sota_patterns:

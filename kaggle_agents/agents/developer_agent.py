@@ -828,35 +828,40 @@ Return the COMPLETE fixed code with all fixes applied. Include ALL imports and f
                             score_source = "cv"
 
                     if score_for_gate is not None:
+                        import math
+
+                        if not math.isfinite(score_for_gate):
+                            score_for_gate = None
+
+                    if score_for_gate is None:
                         is_minimize = is_metric_minimization(metric_name)
-                        below_threshold = (
-                            score_for_gate > min_component_score
-                            if is_minimize
-                            else score_for_gate < min_component_score
-                        )
-                        if below_threshold:
-                            retry_next = code_retry_count + 1
-                            if retry_next >= max_component_retries:
-                                print(
-                                    f"⚠️ Score {score_for_gate:.5f} ({score_source}) below threshold "
-                                    f"{min_component_score:.5f}, but max retries reached "
-                                    f"({retry_next}/{max_component_retries}). Proceeding."
-                                )
-                            else:
-                                force_retry = True
-                                state_updates["code_retry_count"] = retry_next
-                                state_updates["current_component_index"] = current_index
-                                state_updates["development_results"] = []
-                                print(
-                                    f"🔄 Score {score_for_gate:.5f} ({score_source}) below threshold "
-                                    f"{min_component_score:.5f}; retrying component "
-                                    f"({retry_next}/{max_component_retries})."
-                                )
-                    else:
-                        print(
-                            "⚠️ Min score gate set but no score could be extracted; "
-                            "skipping threshold enforcement."
-                        )
+                        score_for_gate = float("inf") if is_minimize else float("-inf")
+                        score_source = "missing"
+
+                    is_minimize = is_metric_minimization(metric_name)
+                    below_threshold = (
+                        score_for_gate > min_component_score
+                        if is_minimize
+                        else score_for_gate < min_component_score
+                    )
+                    if below_threshold:
+                        retry_next = code_retry_count + 1
+                        if retry_next >= max_component_retries:
+                            print(
+                                f"⚠️ Score {score_for_gate} ({score_source}) below threshold "
+                                f"{min_component_score:.5f}, but max retries reached "
+                                f"({retry_next}/{max_component_retries}). Proceeding."
+                            )
+                        else:
+                            force_retry = True
+                            state_updates["code_retry_count"] = retry_next
+                            state_updates["current_component_index"] = current_index
+                            state_updates["development_results"] = []
+                            print(
+                                f"🔄 Score {score_for_gate} ({score_source}) below threshold "
+                                f"{min_component_score:.5f}; retrying component "
+                                f"({retry_next}/{max_component_retries})."
+                            )
 
                 is_best = False
                 if new_cv_score is not None:
@@ -1566,23 +1571,28 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         Returns:
             Extracted CV score, or None if not found
         """
+        import math
         import re
 
         # Try multiple patterns to extract CV score
+        number = r"([+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?|nan|inf)"
         patterns = [
-            r"CV Score.*?(\d+\.\d+)",
-            r"Final Validation Performance:\s*(\d+\.\d+)",
-            r"ROC-AUC.*?(\d+\.\d+)",
-            r"Accuracy.*?(\d+\.\d+)",
-            r"RMSE.*?(\d+\.\d+)",
-            r"Mean.*?(\d+\.\d+)\s*\(",  # Mean score with std
+            rf"CV Score.*?{number}",
+            rf"Final Validation Performance:\s*{number}",
+            rf"ROC-AUC.*?{number}",
+            rf"Accuracy.*?{number}",
+            rf"RMSE.*?{number}",
+            rf"Mean.*?{number}\s*\(",  # Mean score with std
         ]
 
         for pattern in patterns:
             match = re.search(pattern, stdout, re.IGNORECASE)
             if match:
                 try:
-                    return float(match.group(1))
+                    value = float(match.group(1))
+                    if math.isnan(value) or math.isinf(value):
+                        return None
+                    return value
                 except ValueError:
                     continue
 
@@ -1819,6 +1829,29 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         objective = str(state.get("objective", "")).lower()
         domain = str(state.get("domain_detected", state.get("domain", "tabular"))).lower()
         is_image = domain.startswith("image") or domain in {"computer_vision", "vision"}
+        problem_type = ""
+        try:
+            comp_info = state.get("competition_info")
+            problem_type = comp_info.problem_type if comp_info else ""
+        except Exception:
+            problem_type = ""
+        is_classification = "class" in str(problem_type).lower()
+        sample_integer_labels = False
+        sample_submission_path = state.get("sample_submission_path")
+        if sample_submission_path:
+            try:
+                import pandas as pd
+                import numpy as np
+
+                sample_sub = pd.read_csv(sample_submission_path)
+                if sample_sub.shape[1] >= 2:
+                    sample_vals = sample_sub.iloc[:, 1]
+                    if pd.api.types.is_numeric_dtype(sample_vals):
+                        vals = sample_vals.to_numpy()
+                        if vals.size:
+                            sample_integer_labels = np.allclose(vals, np.round(vals))
+            except Exception:
+                sample_integer_labels = False
 
         # Budget hints (useful for faster iteration + avoiding hard executor timeouts)
         timeout_hint = state.get("timeout_per_component")
@@ -1934,9 +1967,19 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         if component.component_type == "model":
             instructions.append("\nMODEL COMPONENT REQUIREMENTS:")
             instructions.append("  - MUST train a model and generate predictions")
-            instructions.append(
-                "  - MUST create submission.csv with probability predictions (0.0-1.0)"
-            )
+            if is_classification:
+                if sample_integer_labels:
+                    instructions.append(
+                        "  - MUST create submission.csv with integer class labels (0..K-1) matching sample_submission"
+                    )
+                else:
+                    instructions.append(
+                        "  - MUST create submission.csv with probability predictions (0.0-1.0)"
+                    )
+            else:
+                instructions.append(
+                    "  - MUST create submission.csv with numeric predictions (regression)"
+                )
             instructions.append(
                 "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')"
             )
@@ -1968,6 +2011,11 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 instructions.append(
                     "  - Use fewer folds when budgeted: n_folds=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','3'))"
                 )
+                data_files = state.get("data_files") if state else {}
+                if isinstance(data_files, dict) and data_files.get("train_csv"):
+                    instructions.append(
+                        f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)"
+                    )
 
             instructions.append("\n🔄 CONSISTENT CROSS-VALIDATION (CRITICAL):")
             instructions.append(
@@ -2000,6 +2048,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             )
             instructions.append(
                 "  - MUST print 'Final Validation Performance: {score}'"
+            )
+            instructions.append(
+                "  - If metric is NaN/inf, replace with 0.0 before printing Final Validation Performance"
             )
             instructions.append(
                 "  - MUST handle class imbalance with class_weight='balanced'"
@@ -2437,6 +2488,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             else working_dir / "sample_submission.csv"
         )
         models_dir = working_dir / "models"
+        data_files = state.get("data_files", {}) if state else {}
+        train_csv_path = data_files.get("train_csv", "")
+        test_csv_path = data_files.get("test_csv", "")
 
         competition_context = f"""
         Name: {competition_info.name}
@@ -2447,7 +2501,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         data_paths = f"""
         Train: {resolved_train_path}
+        Train CSV: {train_csv_path}
         Test: {resolved_test_path}
+        Test CSV: {test_csv_path}
         Models: {models_dir}
         Sample Submission: {sample_submission_path}
         Submission Output: {sample_submission_path}
@@ -2474,7 +2530,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         # Prepare paths dictionary
         paths = {
             "train": str(resolved_train_path),
+            "train_csv": str(train_csv_path),
             "test": str(resolved_test_path),
+            "test_csv": str(test_csv_path),
             "models": str(models_dir),
             "submission": str(sample_submission_path),
         }

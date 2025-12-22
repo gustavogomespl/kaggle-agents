@@ -7,7 +7,7 @@ identifying high-impact components for systematic improvement.
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -318,7 +318,7 @@ class PlannerAgent:
                 insights.append(f"   - {pattern}")
 
         if all_failed:
-            insights.append("\n❌ What Failed (avoid these approaches):")
+            insights.append("\n❌ CRITICAL: What Failed (DO NOT REPEAT these approaches):")
             # Get last 5 unique failure patterns
             unique_failed = list(dict.fromkeys(all_failed))[-5:]
             for pattern in unique_failed:
@@ -763,7 +763,7 @@ Return a JSON array with 3-5 components. Each component must have:
 
         return plan[:4]
 
-    def _extract_validation_score(self, stdout: str) -> float | None:
+    def _extract_validation_score(self, stdout: str) -> Optional[float]:
         """Parse validation score from stdout if present."""
         import re
 
@@ -782,7 +782,7 @@ Return a JSON array with 3-5 components. Each component must have:
         self,
         plan: list[AblationComponent],
         *,
-        state: KaggleState | None = None,
+        state: Optional[KaggleState] = None,
     ) -> list[AblationComponent]:
         """
         Validate and enhance the ablation plan.
@@ -958,7 +958,7 @@ Return a JSON array with 3-5 components. Each component must have:
         sota_analysis: dict[str, Any],
         curriculum_insights: str = "",
         *,
-        state: KaggleState | None = None,
+        state: Optional[KaggleState] = None,
     ) -> list[dict[str, Any]]:
         """
         Create domain-specific fallback plan when LLM parsing fails.
