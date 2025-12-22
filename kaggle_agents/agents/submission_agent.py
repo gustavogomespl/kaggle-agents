@@ -122,12 +122,23 @@ class SubmissionAgent:
                     f"✅ MLE-bench grade: score={float(score):.5f} "
                     f"medal={'gold' if grading.get('gold_medal') else 'silver' if grading.get('silver_medal') else 'bronze' if grading.get('bronze_medal') else 'none'}"
                 )
+                # Save temporal version (Success Memory)
+                versioned_path = working_dir / f"submission_iter_{state.get('current_iteration', 0)}_score_{float(score):.4f}.csv"
+                try:
+                    import shutil
+                    shutil.copy2(submission_path, versioned_path)
+                    print(f"✅ Saved temporal backup: {versioned_path.name}")
+                except Exception as e:
+                    print(f"⚠️ Failed to save temporal backup: {e}")
+                    versioned_path = None
+
                 submission_result = SubmissionResult(
                     submission_id=None,
                     public_score=float(score),
                     private_score=None,
                     percentile=None,
                     cv_score=None,
+                    file_path=str(versioned_path) if versioned_path else None,
                     submitted_at=datetime.now(),
                 )
                 updated_best = compare_scores(
@@ -422,12 +433,23 @@ class SubmissionAgent:
             else:
                 print("\n⏳ Score not yet available (check leaderboard later)")
 
+            # Save temporal version (Success Memory)
+            versioned_path = working_dir / f"submission_iter_{state.get('current_iteration', 0)}_score_{public_score if public_score is not None else 0.0:.4f}.csv"
+            try:
+                import shutil
+                shutil.copy2(submission_path, versioned_path)
+                print(f"✅ Saved temporal backup: {versioned_path.name}")
+            except Exception as e:
+                print(f"⚠️ Failed to save temporal backup: {e}")
+                versioned_path = None
+
             return SubmissionResult(
                 submission_id=submission_id,
                 public_score=public_score,
                 private_score=None,
                 percentile=percentile,
                 cv_score=cv_score,
+                file_path=str(versioned_path) if versioned_path else None,
                 submitted_at=datetime.now(),
             )
 

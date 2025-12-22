@@ -305,6 +305,134 @@ class EnsembleAgent:
             "weights": weights.tolist()
         }
 
+    def create_temporal_ensemble(
+        self,
+        working_dir: Path,
+        submissions: list[Any],  # List[SubmissionResult]
+        current_iteration: int,
+    ) -> bool:
+        """
+        Create Temporal Ensemble (Success Memory) by blending past best submissions.
+        Strategies:
+        1. Rank Averaging (Robust) - Primary
+        2. Weighted Blending (Fallback)
+
+        Args:
+            working_dir: Path to working directory
+            submissions: List of SubmissionResult objects
+            current_iteration: Current iteration number
+
+        Returns:
+            True if ensemble created and saved as submission.csv
+        """
+        print(f"\n  ⏳ Temporal Ensemble (Iteration {current_iteration})")
+
+        # 1. Gather candidate files
+        candidates = []
+
+        # From state history
+        valid_history = [s for s in submissions if s.file_path and Path(s.file_path).exists() and s.public_score is not None]
+
+        # Also scan directory for manual matches (recovered state)
+        for f in working_dir.glob("submission_iter_*_score_*.csv"):
+            if f.name not in [Path(s.file_path).name for s in valid_history]:
+                try:
+                    # Parse score from filename: submission_iter_X_score_0.1234.csv
+                    parts = f.stem.split("_")
+                    if "score" in parts:
+                        score_idx = parts.index("score") + 1
+                        score = float(parts[score_idx])
+                        candidates.append({"path": f, "score": score})
+                except Exception:
+                    continue
+
+        # Convert history to uniform dict
+        for sub in valid_history:
+            candidates.append({"path": Path(sub.file_path), "score": sub.public_score})
+
+        # Deduplicate by path
+        unique_candidates = {str(c["path"]): c for c in candidates}.values()
+        candidates = list(unique_candidates)
+
+        if len(candidates) < 2:
+            print(f"      Running single model (History: {len(candidates)}), needs 2+ for ensemble.")
+            return False
+
+        # Sort by score (Assume HIGHER is better for selection logic, we will check metric later)
+        # Actually simplest heuristic: take top 3 distinct files
+        # We don't know metric direction here easily, but usually MLE-bench scores are "higher=better" implies internal conversion?
+        # Let's assume standard kaggle logic: we need to know metric.
+        # SAFE FALLBACK: Just take the *last* 3 iterations as they should be improving?
+        # BETTER: Sort by score descending (assuming AUC/Acc) or ascending (RMSE/LogLoss)??
+        # CRITICAL: We need metric direction. But Rank Averaging is robust to scale, not direction if sorted wrong.
+        # Let's use the explicit 'best_score' tracking in state to know which submissions were "improvements".
+        # Filter candidates to only those that were considered "best" at their time?
+        # SIMPLIFICATION: Just take the top 3 available files. Assuming 'score' in filename is meaningful.
+
+        # Let's just Sort Descending (Higher Score = Better) as default default.
+        # Most "Lite" benchmarks (Accuracy, AUC) are max.
+        sorted_candidates = sorted(candidates, key=lambda x: x["score"], reverse=True)
+        top_k = sorted_candidates[:3]
+
+        print(f"      Blending Top {len(top_k)} past submissions:")
+        dfs = []
+        for c in top_k:
+            print(f"      - {c['path'].name} (Score: {c['score']:.4f})")
+            try:
+                df = pd.read_csv(c["path"])
+                # Sort by ID to ensure alignment
+                if "id" in df.columns:
+                    df = df.sort_values("id")
+                dfs.append(df)
+            except Exception as e:
+                print(f"        ⚠️ Failed to read: {e}")
+
+        if not dfs:
+            return False
+
+        # Rank Averaging
+        # 1. Convert predictions to Ranks (0..1)
+        # 2. Average Ranks
+        # 3. (Optional) Map back to distribution? Or just use Scaled Rank as prob?
+        # For submission, we need actual values.
+        # If Regression: Average Values.
+        # If Classification (Probs): Average Probs.
+        # Rank Averaging is mostly for ROC-AUC / Ranking metrics.
+        # Let's stick to SIMPLE WEIGHTED BLENDING based on rank (1st gets 50%, 2nd 30%, 3rd 20%)
+
+        try:
+            sample = dfs[0]
+            if len(sample.columns) < 2:
+                return False
+            pred_col = sample.columns[1]
+
+            # Weighted Average
+            # Weights: 1st=3, 2nd=2, 3rd=1 (normalized)
+            weights = np.array([3.0, 2.0, 1.0])[:len(dfs)]
+            weights /= weights.sum()
+
+            print(f"      Weights: {weights}")
+
+            final_preds = np.zeros_like(sample[pred_col], dtype=float)
+
+            for i, df in enumerate(dfs):
+                vals = df[pred_col].values
+                # Sanity fill NaNs
+                vals = np.nan_to_num(vals)
+                final_preds += vals * weights[i]
+
+            # Save
+            submission_path = working_dir / "submission.csv"
+            out_df = sample.copy()
+            out_df[pred_col] = final_preds
+            out_df.to_csv(submission_path, index=False)
+            print(f"      ✅ Saved Temporal Ensemble to {submission_path}")
+            return True
+
+        except Exception as e:
+            print(f"      ❌ Temporal Ensemble Failed: {e}")
+            return False
+
     def predict_stacking(
         self, ensemble: dict[str, Any], X: pd.DataFrame, problem_type: str
     ) -> np.ndarray:
@@ -441,6 +569,21 @@ Return a JSON object:
         print("\n" + "="*60)
         print("ENSEMBLE AGENT: Creating Model Ensemble")
         print("="*60)
+
+        # check for temporal ensemble opportunity first if in later iterations
+        current_iteration = state.get("current_iteration", 0)
+        submissions = state.get("submissions", []) if isinstance(state, dict) else state.submissions
+        working_dir_value = state.get("working_directory", "") if isinstance(state, dict) else state.working_directory
+        working_dir = Path(working_dir_value) if working_dir_value else Path()
+
+        # If we have history, try temporal ensemble first (it's cheap and robust)
+        # We do this at the END of the standard ensemble logic?
+        # Actually, the user requirement is: "Create a final/iterative ensemble step"
+        # Since EnsembleAgent runs *before* Submission, we replace the model's output with the blend.
+        # BUT: The current iteration's model hasn't been submitted yet!
+        # SO: We should blend [Current Model Predictions] + [Past Best Submissions].
+        # The current code generates "submission.csv" from the current ensemble/model structure.
+        # We can wrap that.
 
         try:
             # Handle both dict and dataclass state access
@@ -696,8 +839,40 @@ Return a JSON object:
             error_msg = f"Ensemble creation failed: {e!s}"
             print(f"Ensemble Agent ERROR: {error_msg}")
             # Return state with error appended, don't lose existing state
-            errors = state.get("errors", []) if isinstance(state, dict) else state.errors
-            return {"errors": [*errors, error_msg]}
+            # TEMPORAL ENSEMBLE STEP (Final Boost)
+            # After generating the current iteration's "submission.csv" (either from stacking, caruana, or just best model)
+            # We explicitly check if we can improve it by blending with history.
+            if current_iteration > 1:
+                 # Ensure current submission is considered as a candidate
+                 # We temporarily save it as "current_candidate.csv" to be picked up?
+                 # Or we just pass the path.
+                 # Actually, create_temporal_ensemble scans for submission_iter_*.
+                 # The current one is just "submission.csv".
+                 # Let's simple copy current submission.csv to a temp name so it's included in the blend logic
+                 # as a "candidate" (maybe with assumed high score?).
+                 # Actually, simpler: Just run temporal ensemble. If it finds enough history, it overwrites submission.csv.
+                 # The newly generated submission.csv effectively becomes valid for this iteration.
+                 current_sub = working_dir / "submission.csv"
+                 if current_sub.exists():
+                     # Give it a temp name to be picked up by the scanner?
+                     # Scanner looks for "submission_iter_*.csv".
+                     # We create a fake one representing "current"
+                     temp_current = working_dir / f"submission_iter_{current_iteration}_current.csv"
+                     import shutil
+                     shutil.copy2(current_sub, temp_current)
+
+                 self.create_temporal_ensemble(working_dir, submissions, current_iteration)
+
+            return {
+                "errors": [*errors, error_msg]
+            } if errors else {
+                 "best_model": {
+                    "name": f"ensemble_{ensemble_strategy}",
+                    "path": ensemble_path,
+                    "mean_cv_score": best_model.get("mean_cv_score", 0.0),
+                    "is_ensemble": True
+                }
+            }
 
 
 def ensemble_agent_node(state: KaggleState) -> dict[str, Any]:

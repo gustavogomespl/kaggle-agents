@@ -139,6 +139,7 @@ class SubmissionResult:
     private_score: Optional[float] = None
     percentile: Optional[float] = None
     cv_score: Optional[float] = None
+    file_path: Optional[str] = None
     submitted_at: datetime = field(default_factory=datetime.now)
 
 
