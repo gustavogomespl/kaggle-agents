@@ -777,3 +777,457 @@ IMPLEMENT_PLAN_PROMPT = """Implement the improvement plan.
 {priority}
 
 Generate improved code implementing the plan."""
+
+
+# ==================== Dynamic Instructions Builder ====================
+
+
+def build_budget_instructions(timeout_hint: int | None) -> list[str]:
+    """Build time budget instructions."""
+    if not isinstance(timeout_hint, (int, float)):
+        return []
+
+    return [
+        "\n⏱️ TIME BUDGET (CRITICAL):",
+        f"  - Component must complete within ~{int(timeout_hint)}s (env: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S).",
+        "  - Implement a soft-deadline (e.g., budget-45s): if exceeded, stop training, save best artifacts, and still print the final metric line.",
+        "  - Read env vars: KAGGLE_AGENTS_FAST_MODE and KAGGLE_AGENTS_CV_FOLDS to reduce compute when needed.",
+    ]
+
+
+def build_mlebench_objective_instructions() -> list[str]:
+    """Build MLE-bench objective instructions."""
+    return [
+        "\n🏁 MLE-BENCH OBJECTIVE:",
+        "  - Optimize for MLE-bench medal: prioritize fast end-to-end runtime + robust valid submission.",
+        "  - Prefer cheaper training (fewer folds/epochs) and inference-time tricks (TTA) over expensive CV sweeps.",
+    ]
+
+
+def build_iteration_context(current_iteration: int, refinement_guidance: dict) -> list[str]:
+    """Build iteration context instructions."""
+    instructions = []
+
+    if current_iteration > 0:
+        instructions.append(f"\n⚡ REFINEMENT ITERATION {current_iteration}")
+        instructions.append("Focus on improvements that address previous shortcomings.")
+
+    if refinement_guidance and refinement_guidance.get("developer_guidance"):
+        instructions.append("\nMETA-EVALUATOR GUIDANCE:")
+        instructions.append(f"  {refinement_guidance['developer_guidance']}")
+
+    if refinement_guidance and refinement_guidance.get("priority_fixes"):
+        instructions.append("\nAVOID THESE ERROR PATTERNS:")
+        for error in refinement_guidance["priority_fixes"][:3]:
+            instructions.append(f"  - {error}")
+
+    return instructions
+
+
+def build_previous_results_context(dev_results: list) -> list[str]:
+    """Build context from previous development results."""
+    if not dev_results:
+        return []
+
+    instructions = []
+    successful_components = [r for r in dev_results if r.success]
+    failed_components = [r for r in dev_results if not r.success]
+
+    if successful_components:
+        instructions.append("\n✅ SUCCESSFUL PATTERNS FROM PREVIOUS COMPONENTS:")
+        for result in successful_components[-2:]:
+            if "LightGBM" in result.code:
+                instructions.append("  - LightGBM implementation worked well")
+            if "StratifiedKFold" in result.code:
+                instructions.append("  - StratifiedKFold cross-validation successful")
+            if "predict_proba" in result.code:
+                instructions.append("  - predict_proba() for probabilities confirmed working")
+
+    if failed_components:
+        instructions.append("\nAVOID THESE ERRORS FROM PREVIOUS ATTEMPTS:")
+        for result in failed_components[-2:]:
+            if result.errors:
+                error_msg = result.errors[0][:300]
+                instructions.append(f"  - {error_msg}")
+
+    return instructions
+
+
+def build_performance_gap_instructions(
+    current_score: float,
+    target_score: float | None,
+    metric_name: str,
+) -> list[str]:
+    """Build performance gap instructions."""
+    if current_score <= 0 or target_score is None:
+        return []
+
+    gap = float(target_score) - float(current_score)
+    instructions = [
+        f"\nPERFORMANCE GAP: {gap:.4f} to reach target ({float(target_score):.4f})"
+    ]
+
+    if gap < 0.01:
+        instructions.append("  - Small gap: Focus on fine-tuning hyperparameters")
+    elif gap < 0.05:
+        instructions.append("  - Medium gap: Consider feature engineering or ensemble methods")
+    else:
+        instructions.append("  - Large gap: May need different model architecture or approach")
+
+    return instructions
+
+
+def build_cv_instructions(working_dir: str, component_name: str) -> list[str]:
+    """Build cross-validation instructions."""
+    return [
+        "\n🔄 CONSISTENT CROSS-VALIDATION (CRITICAL):",
+        f"  - Check if '{working_dir}/folds.csv' exists.",
+        "  - IF EXISTS: Load it and use the 'fold' column for splitting.",
+        "    ```python",
+        "    folds = pd.read_csv('folds.csv')",
+        "    # Assuming X is aligned with folds (reset_index if needed)",
+        "    for fold in sorted(folds['fold'].unique()):",
+        "        val_idx = folds[folds['fold'] == fold].index",
+        "        train_idx = folds[folds['fold'] != fold].index",
+        "        # ... train/val split ...",
+        "    ```",
+        "  - IF NOT EXISTS: Use StratifiedKFold(n_splits=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','5')), shuffle=True, random_state=42)",
+        f"  - CRITICAL: MUST save Out-of-Fold (OOF) predictions during CV to models/oof_{component_name}.npy",
+        "  - OOF predictions enable proper stacking ensemble (meta-model trained on OOF)",
+        "  - MUST print 'Final Validation Performance: {score}'",
+        "  - If metric is NaN/inf, replace with 0.0 before printing Final Validation Performance",
+        "  - MUST handle class imbalance with class_weight='balanced'",
+    ]
+
+
+def build_stacking_oof_instructions(working_dir: str, component_name: str) -> list[str]:
+    """Build stacking/OOF instructions."""
+    return [
+        "\nSTACKING & OOF REQUIREMENTS (CRITICAL):",
+        "  1. Initialize `oof_preds` array of zeros with length of train set.",
+        "  2. Initialize `test_preds` array of zeros with length of test set.",
+        "  3. During CV loop:",
+        "     - Fill `oof_preds[val_idx]` with predictions for validation fold.",
+        "     - Predict on test set and accumulate: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`",
+        f"  4. Save OOF predictions: `np.save(str(Path('{working_dir}') / 'models' / 'oof_{component_name}.npy'), oof_preds)`",
+        f"  5. Save Test predictions: `np.save(str(Path('{working_dir}') / 'models' / 'test_{component_name}.npy'), test_preds)`",
+        "  6. This enables the Ensemble Agent to use Stacking later.",
+    ]
+
+
+def build_optuna_tuning_instructions(n_trials: int = 5, timeout: int = 540) -> list[str]:
+    """Build Optuna hyperparameter tuning instructions."""
+    return [
+        "\nHYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:",
+        "  - MUST use 'optuna' library for hyperparameter search",
+        f"  - Run AT MOST {n_trials} trials (n_trials={n_trials}) and timeout={timeout}s to prevent timeouts",
+        "  - CRITICAL: Check if 'optuna-integration' is available with try/except:",
+        "    try:",
+        "        from optuna.integration import OptunaSearchCV",
+        "    except ImportError:",
+        "        # Use manual Optuna with study.optimize() instead",
+        "  - If optuna-integration is missing, use manual Optuna tuning with study.optimize()",
+        "  - Use 'TPESampler' for efficient sampling",
+        "  - CRITICAL: Do NOT pass 'callbacks' or 'early_stopping_rounds' to .fit() for XGBoost/LightGBM/CatBoost sklearn API; use fixed n_estimators",
+        "  - Optimize for the competition metric (minimize RMSE/LogLoss or maximize AUC/Accuracy)",
+        "  - Print the best parameters found",
+        "  - Train final model with best parameters",
+        "\n⚡ SPEED OPTIMIZATION (CRITICAL TO AVOID TIMEOUT):",
+        "  - **SUBSAMPLE FOR TUNING**: If train dataset > 10,000 rows:",
+        "    1. Create tuning subset with train_test_split",
+        "    2. For CLASSIFICATION only: pass stratify=y when sampling (y discrete: y.nunique() < 20 or dtype category/object)",
+        "    3. For REGRESSION (continuous y): DO NOT use stratify parameter",
+        "    4. Run Optuna study on 25% sample (reduce to 15% if memory errors occur)",
+        "    5. After finding best_params, retrain on FULL dataset",
+        "  - **REDUCE ESTIMATORS DURING TUNING**:",
+        "    - Inside objective(): Use n_estimators=150-200 (fast convergence)",
+        "    - Final model: Use n_estimators=1000 with early_stopping_rounds=50 (if supported)",
+        "  - **TIMEOUT BUDGET**: Set study.optimize(n_trials=5, timeout=600) for max 10 min tuning",
+        "  - **MEMORY SAFETY (PREVENT OOM CRASHES)**:",
+        "    - ALWAYS set n_jobs=1 in model __init__ (LGBMClassifier, XGBClassifier, etc.)",
+        "    - ALWAYS set n_jobs=1 in cross_val_score (avoid nested parallelism → memory explosion)",
+        "    - Add 'import gc; gc.collect()' inside objective() after computing score",
+        "    - Delete model object explicitly: 'del model' before gc.collect()",
+        "    - If memory errors persist, reduce train_size from 0.25 → 0.15 (15% of data)",
+        "  - **ROBUST TRIALS**: Wrap objective logic in try/except; on exception log and return 0.0 so trials finish",
+        "  - **NO-COMPLETION GUARD**: After study.optimize, if NO trials completed, fall back to safe default params instead of study.best_params",
+    ]
+
+
+def build_feature_engineering_instructions() -> list[str]:
+    """Build feature engineering instructions."""
+    return [
+        "\n🔧 FEATURE ENGINEERING REQUIREMENTS:",
+        "  - Create NEW features from existing ones",
+        "  - IMPLEMENT SOTA TECHNIQUES:",
+        "    - Target Encoding: MUST be done inside Cross-Validation (fit on train folds, transform val fold) to prevent leakage.",
+        "    - Frequency Encoding: Map categorical features to their frequency/count.",
+        "    - Aggregations: Mean/Count of numeric features grouped by categorical features.",
+        "  - Save engineered features to file for model components",
+        "  - NO model training in this component",
+        "  - Print feature importance or correlation metrics",
+        "\nFEATURE SELECTION (CRITICAL):",
+        "  - After creating new features, perform selection to remove noise:",
+        "  1. Train a quick LightGBM/XGBoost on the new feature set.",
+        "  2. Calculate feature importance (gain/split).",
+        "  3. Drop features with 0 importance or very low importance (< 1e-4).",
+        "  4. Save ONLY the selected features to 'train_engineered.csv' and 'test_engineered.csv'.",
+        "  5. Print list of dropped features.",
+    ]
+
+
+def build_ensemble_instructions(target_col: str = "target") -> list[str]:
+    """Build ensemble instructions."""
+    return [
+        "\nENSEMBLE REQUIREMENTS:",
+        "  - Combine predictions from multiple models",
+        "  - PREFERRED STRATEGY: Stacking Ensemble (best performance)",
+        "    - Load OOF predictions from models/oof_*.npy files",
+        "    - Stack OOF predictions: oof_stack = np.column_stack([oof1, oof2, ...])",
+        "    - Train meta-model (LogisticRegression/Ridge) on stacked OOF",
+        "    - Load test predictions from each model and stack them",
+        "    - Use meta-model to predict on stacked test predictions",
+        "  - FALLBACK: Weighted average if OOF files missing",
+        "    - Load submission files from each model",
+        "    - Combine with weights: final = w1*pred1 + w2*pred2 + ...",
+        "  - Generate final submission.csv",
+        f"  - CRITICAL: Use target_col from dataset info (target_col='{target_col}' if available)",
+        "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target' or 'prediction')",
+        "  - Print which models were used and their contribution/weights",
+    ]
+
+
+def build_standard_requirements() -> list[str]:
+    """Build standard requirements."""
+    return [
+        "\nSTANDARD REQUIREMENTS:",
+        "  - Save models to models/ directory",
+        "  - Print progress and metrics throughout execution",
+        "  - NO sys.exit() or exit() calls",
+        "  - CRITICAL: Do NOT use deprecated 'pandas.append()'. Use 'pd.concat()' instead.",
+        "  - Complete, executable single-file Python program",
+    ]
+
+
+def build_image_model_instructions(is_image_to_image: bool, data_files: dict | None) -> list[str]:
+    """Build image model instructions."""
+    instructions = [
+        "\n🖼️ IMAGE MODELLING (SPEED-ORIENTED):",
+        "  - Use a pretrained backbone (torchvision/timm). In FAST_MODE: freeze backbone and train a small head for 1-2 epochs.",
+        "  - Use mixed precision (torch.cuda.amp) if CUDA available; keep augmentations lightweight.",
+        "  - Use fewer folds when budgeted: n_folds=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','3'))",
+    ]
+
+    if isinstance(data_files, dict) and data_files.get("train_csv"):
+        instructions.append(f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)")
+
+    if is_image_to_image:
+        clean_path = ""
+        if isinstance(data_files, dict):
+            clean_path = data_files.get("clean_train", "") or ""
+
+        instructions.extend([
+            "\n🧽 IMAGE-TO-IMAGE (PIXEL-LEVEL) REQUIREMENTS:",
+            "  - MUST learn noisy->clean mapping. Use train/ as noisy inputs and clean targets from clean_train.",
+            "  - If using a pretrained backbone, use it ONLY as an encoder; discard classification heads.",
+        ])
+
+        if clean_path:
+            instructions.append(f"  - Clean target dir (paired with train/): {clean_path}")
+
+        instructions.append("  - Output full-resolution (or resized) images, then flatten to pixel-level CSV using sample_submission IDs.")
+
+    return instructions
+
+
+def build_model_component_instructions(
+    component,
+    state: dict,
+    working_dir: str,
+    is_image: bool,
+    is_image_to_image: bool,
+    is_classification: bool,
+    sample_integer_labels: bool,
+    target_col: str = "target",
+) -> list[str]:
+    """Build model component instructions."""
+    instructions = [
+        "\nMODEL COMPONENT REQUIREMENTS:",
+        "  - MUST train a model and generate predictions",
+    ]
+
+    if is_image_to_image:
+        instructions.extend([
+            "  - MUST train on (noisy -> clean) image pairs and output FULL images (H x W), NOT a single scalar.",
+            "  - MUST write pixel-level submission.csv matching sample_submission (id format: image_row_col).",
+            "  - Use an encoder-decoder (U-Net/autoencoder). DO NOT use a classifier head or global pooling.",
+        ])
+    elif is_classification:
+        if sample_integer_labels:
+            instructions.append("  - MUST create submission.csv with integer class labels (0..K-1) matching sample_submission")
+        else:
+            instructions.append("  - MUST create submission.csv with probability predictions (0.0-1.0)")
+    else:
+        instructions.append("  - MUST create submission.csv with numeric predictions (regression)")
+
+    instructions.append("  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')")
+
+    if not is_image:
+        instructions.extend([
+            f"  - CRITICAL: Use target_col from dataset info (target_col='{target_col}' if available)",
+            "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder",
+            "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')",
+            "  - CatBoost is the ONLY exception that handles categorical features natively",
+            "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)",
+        ])
+    else:
+        data_files = state.get("data_files", {}) if state else {}
+        instructions.extend(build_image_model_instructions(is_image_to_image, data_files))
+
+    # Add CV and OOF instructions
+    component_name = getattr(component, "name", "component")
+    instructions.extend(build_cv_instructions(working_dir, component_name))
+    instructions.extend(build_stacking_oof_instructions(working_dir, component_name))
+
+    return instructions
+
+
+def build_dynamic_instructions(
+    component,
+    state: dict,
+    config,
+    working_dir: str,
+) -> str:
+    """
+    Build dynamic instructions based on current state (MLE-STAR pattern).
+
+    Creates context-aware guidance by analyzing:
+    - Previous component results (what worked/failed)
+    - Current iteration number (more specific in later iterations)
+    - Performance trends
+    - Common error patterns
+
+    Args:
+        component: Component being implemented
+        state: Current workflow state
+        config: Agent configuration
+        working_dir: Working directory path
+
+    Returns:
+        Dynamic instructions string
+    """
+    instructions = []
+
+    instructions.append(f"Implement {component.component_type}: {component.name}")
+
+    run_mode = str(state.get("run_mode", "")).lower()
+    objective = str(state.get("objective", "")).lower()
+    domain = str(state.get("domain_detected", state.get("domain", "tabular"))).lower()
+    submission_format_type = str(state.get("submission_format_type") or "").lower()
+    is_image = domain.startswith("image") or domain in {"computer_vision", "vision"}
+    is_image_to_image = domain == "image_to_image" or submission_format_type == "pixel_level"
+
+    # Detect problem type
+    problem_type = ""
+    try:
+        comp_info = state.get("competition_info")
+        problem_type = comp_info.problem_type if comp_info else ""
+    except Exception:
+        problem_type = ""
+    is_classification = "class" in str(problem_type).lower()
+
+    # Check sample submission for integer labels
+    sample_integer_labels = False
+    sample_submission_path = state.get("sample_submission_path")
+    if sample_submission_path:
+        try:
+            import pandas as pd
+            import numpy as np
+
+            sample_sub = pd.read_csv(sample_submission_path)
+            if sample_sub.shape[1] >= 2:
+                sample_vals = sample_sub.iloc[:, 1]
+                if pd.api.types.is_numeric_dtype(sample_vals):
+                    vals = sample_vals.to_numpy()
+                    if vals.size:
+                        sample_integer_labels = np.allclose(vals, np.round(vals))
+        except Exception:
+            sample_integer_labels = False
+
+    # Get timeout hint
+    timeout_hint = state.get("timeout_per_component")
+    if not isinstance(timeout_hint, (int, float)):
+        try:
+            timeout_hint = int(timeout_hint) if timeout_hint is not None else None
+        except Exception:
+            timeout_hint = None
+
+    target_col = state.get("target_col", "target")
+    current_iteration = state.get("current_iteration", 0)
+    refinement_guidance = state.get("refinement_guidance", {})
+    dev_results = state.get("development_results", [])
+    current_score = state.get("current_performance_score", 0.0)
+    target_score = state.get("target_score")
+
+    if isinstance(target_score, str):
+        try:
+            target_score = float(target_score)
+        except ValueError:
+            target_score = None
+
+    competition_info = state.get("competition_info")
+    metric_name = competition_info.evaluation_metric if competition_info else ""
+
+    # Build budget instructions
+    instructions.extend(build_budget_instructions(timeout_hint))
+
+    # Build MLE-bench instructions if applicable
+    if run_mode == "mlebench" or "medal" in objective:
+        instructions.extend(build_mlebench_objective_instructions())
+
+    # Build iteration context
+    instructions.extend(build_iteration_context(current_iteration, refinement_guidance))
+
+    # Build refinement guidance
+    if refinement_guidance and "component_type_guidance" in refinement_guidance:
+        comp_guidance = refinement_guidance["component_type_guidance"].get(component.component_type)
+        if comp_guidance:
+            instructions.append(f"\n🎯 {component.component_type.upper()} SPECIFIC GUIDANCE:")
+            instructions.append(f"  {comp_guidance}")
+
+    # Build previous results context
+    instructions.extend(build_previous_results_context(dev_results))
+
+    # Build performance gap instructions
+    instructions.extend(build_performance_gap_instructions(current_score, target_score, metric_name))
+
+    # Component-type specific instructions
+    if component.component_type == "model":
+        instructions.extend(build_model_component_instructions(
+            component=component,
+            state=state,
+            working_dir=working_dir,
+            is_image=is_image,
+            is_image_to_image=is_image_to_image,
+            is_classification=is_classification,
+            sample_integer_labels=sample_integer_labels,
+            target_col=target_col,
+        ))
+
+        # Optuna instructions if component name suggests tuning
+        name_lower = component.name.lower()
+        if "optuna" in name_lower or "tuned" in name_lower or "optimized" in name_lower:
+            n_trials = getattr(getattr(config, "ablation", None), "optuna_trials", 5) if config else 5
+            timeout = (getattr(getattr(config, "ablation", None), "testing_timeout", 600) if config else 600) - 60
+            instructions.extend(build_optuna_tuning_instructions(n_trials, timeout))
+
+    elif component.component_type == "feature_engineering":
+        instructions.extend(build_feature_engineering_instructions())
+
+    elif component.component_type == "ensemble":
+        instructions.extend(build_ensemble_instructions(target_col))
+
+    # Standard requirements
+    instructions.extend(build_standard_requirements())
+
+    return "\n".join(instructions)
