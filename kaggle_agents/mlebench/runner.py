@@ -286,8 +286,15 @@ class MLEBenchRunner:
             # MLE-bench speed optimizations
             state["cv_folds"] = 3  # Reduce from 5 to 3 for faster iteration
             state["fast_mode"] = True  # Enable speed-first mode in agents
-            # Use an aggressive target for medal-seeking; workflows can override per run.
-            state["target_score"] = 1.0
+            # Use explicit target score only if provided via environment.
+            target_score_env = os.getenv("KAGGLE_AGENTS_TARGET_SCORE") or os.getenv("TARGET_SCORE")
+            if target_score_env:
+                try:
+                    state["target_score"] = float(target_score_env)
+                except ValueError:
+                    state["target_score"] = None
+            else:
+                state["target_score"] = None
 
             # Step 3: Run MLE-bench workflow
             _log("Step 3: Running workflow")

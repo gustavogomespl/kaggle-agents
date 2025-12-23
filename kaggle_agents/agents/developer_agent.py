@@ -1828,7 +1828,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         run_mode = str(state.get("run_mode", "")).lower()
         objective = str(state.get("objective", "")).lower()
         domain = str(state.get("domain_detected", state.get("domain", "tabular"))).lower()
+        submission_format_type = str(state.get("submission_format_type") or "").lower()
         is_image = domain.startswith("image") or domain in {"computer_vision", "vision"}
+        is_image_to_image = domain == "image_to_image" or submission_format_type == "pixel_level"
         problem_type = ""
         try:
             comp_info = state.get("competition_info")
@@ -1967,7 +1969,17 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         if component.component_type == "model":
             instructions.append("\nMODEL COMPONENT REQUIREMENTS:")
             instructions.append("  - MUST train a model and generate predictions")
-            if is_classification:
+            if is_image_to_image:
+                instructions.append(
+                    "  - MUST train on (noisy -> clean) image pairs and output FULL images (H x W), NOT a single scalar."
+                )
+                instructions.append(
+                    "  - MUST write pixel-level submission.csv matching sample_submission (id format: image_row_col)."
+                )
+                instructions.append(
+                    "  - Use an encoder-decoder (U-Net/autoencoder). DO NOT use a classifier head or global pooling."
+                )
+            elif is_classification:
                 if sample_integer_labels:
                     instructions.append(
                         "  - MUST create submission.csv with integer class labels (0..K-1) matching sample_submission"
@@ -2015,6 +2027,30 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 if isinstance(data_files, dict) and data_files.get("train_csv"):
                     instructions.append(
                         f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)"
+                    )
+                if is_image_to_image:
+                    clean_path = ""
+                    if isinstance(data_files, dict):
+                        clean_path = data_files.get("clean_train", "") or ""
+                    instructions.append("\n🧽 IMAGE-TO-IMAGE (PIXEL-LEVEL) REQUIREMENTS:")
+                    instructions.append(
+                        "  - MUST learn noisy->clean mapping. Use train/ as noisy inputs and clean targets from clean_train."
+                    )
+                    instructions.append(
+                        "  - If using a pretrained backbone, use it ONLY as an encoder; discard classification heads."
+                    )
+                    if clean_path:
+                        instructions.append(f"  - Clean target dir (paired with train/): {clean_path}")
+                    sub_meta = state.get("submission_format_metadata", {}) if state else {}
+                    if isinstance(sub_meta, dict) and sub_meta:
+                        exp_rows = sub_meta.get("expected_rows")
+                        id_pattern = sub_meta.get("id_pattern")
+                        if exp_rows:
+                            instructions.append(f"  - Expected submission rows: {exp_rows}")
+                        if id_pattern:
+                            instructions.append(f"  - ID pattern: {id_pattern}")
+                    instructions.append(
+                        "  - Output full-resolution (or resized) images, then flatten to pixel-level CSV using sample_submission IDs."
                     )
 
             instructions.append("\n🔄 CONSISTENT CROSS-VALIDATION (CRITICAL):")
@@ -2491,6 +2527,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         data_files = state.get("data_files", {}) if state else {}
         train_csv_path = data_files.get("train_csv", "")
         test_csv_path = data_files.get("test_csv", "")
+        clean_train_path = data_files.get("clean_train", "")
 
         competition_context = f"""
         Name: {competition_info.name}
@@ -2501,6 +2538,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         data_paths = f"""
         Train: {resolved_train_path}
+        Clean Train: {clean_train_path}
         Train CSV: {train_csv_path}
         Test: {resolved_test_path}
         Test CSV: {test_csv_path}
@@ -2530,6 +2568,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         # Prepare paths dictionary
         paths = {
             "train": str(resolved_train_path),
+            "clean_train": str(clean_train_path),
             "train_csv": str(train_csv_path),
             "test": str(resolved_test_path),
             "test_csv": str(test_csv_path),

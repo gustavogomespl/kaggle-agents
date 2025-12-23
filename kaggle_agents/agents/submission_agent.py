@@ -79,15 +79,19 @@ class SubmissionAgent:
         # Validate submission
         # Determine problem type for validation heuristics
         problem_type = None
+        metric_name = None
         try:
             problem_type = state["competition_info"].problem_type
+            metric_name = state["competition_info"].evaluation_metric
         except Exception:
             problem_type = None
+            metric_name = None
 
         is_valid, message = self._validate_submission(
             submission_path,
             sample_submission_path,
             problem_type=problem_type,
+            metric_name=metric_name,
         )
 
         if not is_valid:
@@ -266,6 +270,7 @@ class SubmissionAgent:
         submission_path: Path,
         sample_submission_path: Path | None,
         problem_type: str | None = None,
+        metric_name: str | None = None,
     ) -> tuple[bool, str]:
         """
         Validate submission file format.
@@ -386,13 +391,63 @@ DO NOT USE:
             # For classification/probabilities, enforce [0,1]; for regression, allow any numeric range
             if is_classification:
                 vals = preds.astype(float).to_numpy()
-                integer_like = np.all(np.isclose(vals, np.round(vals)))
-                if integer_like:
-                    if (vals < 0).any():
-                        return False, "Class labels must be >= 0"
-                else:
-                    if (vals < 0).any() or (vals > 1).any():
+                if (vals < 0).any():
+                    return False, "Predictions must be >= 0"
+
+                metric_lower = (metric_name or "").lower()
+                prob_metrics = (
+                    "logloss",
+                    "log_loss",
+                    "log loss",
+                    "cross_entropy",
+                    "brier",
+                    "auc",
+                    "roc",
+                    "prc",
+                    "average_precision",
+                )
+                label_metrics = (
+                    "accuracy",
+                    "f1",
+                    "precision",
+                    "recall",
+                    "kappa",
+                    "qwk",
+                    "quadratic_weighted_kappa",
+                    "mcc",
+                )
+                expects_prob = any(m in metric_lower for m in prob_metrics)
+                expects_label = any(m in metric_lower for m in label_metrics)
+
+                sample_suggests_prob = False
+                sample_suggests_label = False
+                if sample_submission_path and Path(sample_submission_path).exists():
+                    try:
+                        sample_sub = pd.read_csv(sample_submission_path)
+                        if sample_sub.shape[1] > 2:
+                            sample_suggests_prob = True
+                        elif sample_sub.shape[1] >= 2:
+                            sample_vals = sample_sub.iloc[:, 1]
+                            if pd.api.types.is_numeric_dtype(sample_vals):
+                                svals = sample_vals.to_numpy()
+                                if svals.size:
+                                    if (svals < 0).any() or (svals > 1).any():
+                                        sample_suggests_label = True
+                                    elif not np.allclose(svals, np.round(svals)):
+                                        sample_suggests_prob = True
+                    except Exception:
+                        pass
+
+                # Final decision: prefer metric signal; fall back to sample hints.
+                if expects_prob or (not expects_label and sample_suggests_prob):
+                    if (vals > 1).any():
                         return False, f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})"
+                elif expects_label or sample_suggests_label:
+                    # Accept label-style outputs without coercion.
+                    pass
+                else:
+                    # Ambiguous: allow both label-style (values > 1) and probability-style outputs.
+                    pass
 
             if not preds.replace([float("inf"), float("-inf")], pd.NA).notna().all():
                 return False, "Predictions contain inf or NaN values"

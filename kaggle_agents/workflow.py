@@ -162,6 +162,9 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     data_type = (state.get("data_files") or {}).get("data_type")
     problem_type = (competition_info.problem_type or "").lower()
 
+    submission_format_type = None
+    submission_format_metadata: dict[str, Any] = {}
+
     if data_type in {"image", "audio", "text"}:
         if data_type == "image":
             # Check for image-to-image indicators FIRST
@@ -196,6 +199,8 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
                     test_path if test_path else None,
                     competition_info
                 )
+                submission_format_type = sub_format
+                submission_format_metadata = sub_meta
                 if sub_format == "pixel_level":
                     is_image_to_image = True
                     print(f"   Detected pixel-level submission format -> image_to_image")
@@ -240,6 +245,11 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     return {
         "domain_detected": domain,
         "domain_confidence": confidence,
+        "submission_format_type": submission_format_type,
+        "submission_format_metadata": submission_format_metadata,
+        "submission_format": {"type": submission_format_type, **submission_format_metadata}
+        if submission_format_type
+        else {},
         "last_updated": datetime.now(),
     }
 
