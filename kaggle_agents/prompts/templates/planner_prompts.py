@@ -38,7 +38,7 @@ CRITICAL RULES:
 """
 
 # Template for creating initial ablation plan
-CREATE_ABLATION_PLAN_PROMPT = """Given the following competition information and SOTA solutions, create an ablation plan.
+CREATE_ABLATION_PLAN_PROMPT = """Given the competition info and specific SOTA solutions, create a high-performance ablation plan.
 
 ## Competition Information
 {competition_info}
@@ -46,101 +46,133 @@ CREATE_ABLATION_PLAN_PROMPT = """Given the following competition information and
 ## Domain
 {domain}
 
-## SOTA Solutions Summary
+## TOP SOTA SOLUTIONS (Reference Implementation)
+{sota_details}
+
+## SOTA Patterns Summary
 {sota_summary}
+
+## Your Task: "Adopt & Improve" Strategy
+
+### Step 1: Analyze SOTA Candidates
+Look at the "TOP SOTA SOLUTIONS" above and evaluate:
+- **Quality Proxy**: Use 'Votes' as a proxy for score quality (higher votes = better solution)
+- **Time Estimation**: Use 'Estimated Complexity' to assess runtime (Low/Medium/High)
+
+### Step 2: Select Baseline
+Choose the BEST solution from the list to be your primary "model" component:
+- If `Votes` are high (>20) and complexity is Low/Medium, prioritize it
+- If the code is too complex (High complexity with huge ensembles), simplify it
+- Extract the key model and hyperparameters from the code snippet
+
+### Step 3: Create Components Using "Adopt & Improve"
+- **Component 1 (The Winner)**: Implement the strategy of the BEST SOTA solution found above.
+  Copy its specific models, hyperparameters, and techniques from the code snippet.
+- **Component 2 (The Challenger)**: Create a DIVERSE alternative approach.
+  If SOTA uses tree-based models, try Neural Network (or vice-versa).
+- **Component 3 (Improvement)**: Add Feature Engineering or Ensemble that addresses SOTA weaknesses.
+  Look for missing techniques in the SOTA code (e.g., no target encoding, no stacking).
 
 ## CRITICAL COMPONENT TYPE RULES
 
 ### preprocessing
 - Data cleaning, missing value handling, basic scaling/encoding
 - **NO MODEL TRAINING** - only prepare data
-- Examples: StandardScaler, SimpleImputer, basic feature selection
 
 ### feature_engineering
 - Create NEW features from existing ones
 - **NO MODEL TRAINING** - only create features
-- Examples: polynomial features, interaction terms, domain-specific features
 
 ### model
 - **MUST TRAIN A MODEL and GENERATE PREDICTIONS**
 - **MUST CREATE submission.csv**
-- Use simple, fast models (LightGBM, XGBoost, RandomForest)
-- Examples: LGBMClassifier with simple hyperparameters
 
 ### ensemble
 - Combine predictions from multiple models
-- Create weighted average or stacking ensemble
 
-## Your Task
-Create a list of 3-5 HIGH-QUALITY ablation components. **REQUIREMENTS:**
-- **QUALITY OVER QUANTITY** - Focus on most impactful components only
-- **AT LEAST 2 components MUST be type "model"** (to generate diverse predictions for ensembling)
-- Include: 0-1 preprocessing + 2-3 models + 0-1 ensemble
-- Prioritize ONLY high-impact components (>0.10 estimated impact)
-- Each component must be significantly different from others
+## Requirements
+- Create 3-5 HIGH-QUALITY components
+- **AT LEAST 2 components MUST be type "model"**
+- Prioritize high-impact components (>0.10 estimated impact)
+- **EXPLICITLY reference which SOTA solution inspired each component**
 
 For each component provide:
-
-1. **Name**: Short descriptive name (e.g., "xgboost_baseline", "missing_value_imputation")
+1. **Name**: Short descriptive name (e.g., "sota_clone_lightgbm", "challenger_nn")
 2. **Type**: One of [feature_engineering, model, preprocessing, ensemble]
-3. **Description**: What this component does (be specific)
-4. **Estimated Impact**: Float 0-1 (e.g., 0.15 = 15% expected improvement)
-5. **Rationale**: Why you think this will help based on SOTA
-6. **Code Outline**: Brief pseudocode or description
+3. **Description**: Technical details. *Mention which SOTA solution this is based on if applicable*
+4. **Estimated Impact**: Float 0-1
+5. **Rationale**: Why this will help, referencing SOTA patterns
+6. **Code Outline**: Specific implementation details extracted from SOTA snippets
 
 ## Output Format
-Return ONLY a valid JSON list (no markdown, no explanation). Example for a tabular regression competition:
+Return ONLY a valid JSON list (no markdown, no explanation):
 
-```json
 [
   {{
-    "name": "advanced_feature_engineering",
-    "component_type": "feature_engineering",
-    "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
-    "estimated_impact": 0.15,
-    "rationale": "SOTA solutions show comprehensive feature engineering improves RMSE by 10-20%. Polynomial features capture non-linear relationships, target encoding handles high-cardinality categoricals effectively.",
-    "code_outline": "Use PolynomialFeatures(degree=2, interaction_only=True), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder with smoothing"
+    "name": "sota_clone_lightgbm",
+    "component_type": "model",
+    "description": "LightGBM based on SOTA Candidate 1 (highest votes). Using exact hyperparameters from code: n_estimators=2000, max_depth=8, learning_rate=0.03",
+    "estimated_impact": 0.22,
+    "rationale": "Candidate 1 has 45 votes and Medium complexity. Proven approach for this competition type.",
+    "code_outline": "LGBMRegressor with params from SOTA snippet, 5-fold CV, early_stopping"
   }},
   {{
-    "name": "lightgbm_tuned",
+    "name": "challenger_xgboost",
     "component_type": "model",
-    "description": "LightGBM regression with tuned hyperparameters: n_estimators=2000, max_depth=8, learning_rate=0.03, num_leaves=63",
-    "estimated_impact": 0.20,
-    "rationale": "LightGBM consistently wins tabular competitions. Deeper trees (depth=8) and more leaves capture complex patterns. Lower learning rate with early stopping prevents overfitting.",
-    "code_outline": "LGBMRegressor with 5-fold CV, early_stopping_rounds=100, eval_metric=rmse"
-  }},
-  {{
-    "name": "xgboost_tuned",
-    "component_type": "model",
-    "description": "XGBoost regression with tuned hyperparameters: n_estimators=2000, max_depth=7, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8",
+    "description": "XGBoost as alternative to LightGBM for ensemble diversity",
     "estimated_impact": 0.18,
-    "rationale": "XGBoost provides different regularization than LightGBM, enabling better ensemble diversity. Mid-depth trees with subsampling prevent overfitting on tabular data.",
-    "code_outline": "XGBRegressor with 5-fold CV, early_stopping_rounds=50, eval_metric=rmse"
+    "rationale": "Different regularization than LightGBM provides ensemble diversity",
+    "code_outline": "XGBRegressor with similar CV setup but different tree structure"
   }},
   {{
-    "name": "catboost_tuned",
-    "component_type": "model",
-    "description": "CatBoost regression with native categorical handling: iterations=2000, depth=7, learning_rate=0.03",
-    "estimated_impact": 0.17,
-    "rationale": "CatBoost handles categorical features natively without encoding, often outperforms other GBDTs. Adds diversity to ensemble.",
-    "code_outline": "CatBoostRegressor with cat_features parameter, 5-fold CV, early_stopping_rounds=50"
-  }},
-  {{
-    "name": "stacking_ensemble",
-    "component_type": "ensemble",
-    "description": "Stack LightGBM, XGBoost, and CatBoost predictions using Ridge regression as meta-learner with 5-fold out-of-fold predictions",
+    "name": "improvement_target_encoding",
+    "component_type": "feature_engineering",
+    "description": "Add target encoding missing from SOTA solutions",
     "estimated_impact": 0.12,
-    "rationale": "Stacking combines diverse models and typically improves RMSE by 5-10%. Ridge meta-learner prevents overfitting to base model predictions.",
-    "code_outline": "StackingRegressor with base_estimators=[lgb, xgb, catboost], final_estimator=Ridge(alpha=10), cv=5"
+    "rationale": "SOTA code snippets show no target encoding - this is a common improvement",
+    "code_outline": "TargetEncoder with smoothing, applied to categorical columns"
   }}
 ]
-```
 
-**IMPORTANT**: Return ONLY the JSON array, nothing else. No markdown code blocks, no explanations.
+**IMPORTANT**: Return ONLY the JSON array, nothing else.
+"""
+
+# Template for analyzing gaps and root causes before planning
+ANALYZE_GAPS_PROMPT = """Analyze the gaps between the current results and the goal.
+
+## Previous Plan & Implementation
+{previous_plan}
+
+## Actual Results
+{test_results}
+
+## Competition Goal
+Metric: {metric}
+Current Best Score: {current_score}
+Target (SOTA): {target_score}
+
+## Your Task
+Perform a simplified Root Cause Analysis (RCA) and Gap Analysis.
+Identify:
+1. **Root Causes of Failure**: Why did components fail? (e.g., OOM, logic error, weak signal, overfitting)
+2. **Missed Opportunities**: What SOTA techniques or basic baselines are we missing?
+3. **Strategic Gap**: Are we optimizing the wrong thing? (e.g., using regression for classification)
+
+Return a JSON with your analysis:
+```json
+{{
+    "root_causes": ["High impact component ‘XGBoost’ failed due to memory error"],
+    "missed_opportunities": ["Did not attempt TransformedTargetRegressor for skewed target"],
+    "improvement_strategy": "Fix memory constraints first, then implement target transformation"
+}}
+```
 """
 
 # Template for refining ablation plan based on results
-REFINE_ABLATION_PLAN_PROMPT = """You previously created an ablation plan. Now refine it based on actual results.
+REFINE_ABLATION_PLAN_PROMPT = """You previously created an ablation plan. Now refine it based on actual results and gap analysis.
+
+## Gap Analysis (ROOT CAUSE & STRATEGY)
+{gap_analysis}
 
 ## Previous Plan
 {previous_plan}

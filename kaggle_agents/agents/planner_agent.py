@@ -20,6 +20,7 @@ from ..prompts.templates.planner_prompts import (
     CREATE_ABLATION_PLAN_PROMPT,
     PLANNER_SYSTEM_PROMPT,
     REFINE_ABLATION_PLAN_PROMPT,
+    ANALYZE_GAPS_PROMPT,
     get_domain_guidance,
 )
 from ..utils.llm_utils import get_text_content
@@ -32,11 +33,12 @@ class AblationPlannerSignature(dspy.Signature):
 
     competition_info: str = dspy.InputField(desc="Competition metadata and description")
     domain: str = dspy.InputField(desc="Competition domain (tabular, CV, NLP, etc.)")
-    sota_summary: str = dspy.InputField(desc="Summary of SOTA solutions and strategies")
+    sota_details: str = dspy.InputField(desc="Detailed SOTA solutions with code snippets, votes, and complexity")
+    sota_summary: str = dspy.InputField(desc="Summary of SOTA patterns (models, features, ensembles)")
     domain_guidance: str = dspy.InputField(desc="Domain-specific guidance and priorities")
 
-    ablation_plan: str = dspy.OutputField(desc="JSON list of ablation components")
-    analysis: str = dspy.OutputField(desc="Analysis of SOTA patterns and rationale for plan")
+    ablation_plan: str = dspy.OutputField(desc="JSON list of ablation components using Adopt & Improve strategy")
+    analysis: str = dspy.OutputField(desc="Analysis of which SOTA solution was adopted and why")
 
 
 class SOTAAnalysisSignature(dspy.Signature):
@@ -60,11 +62,12 @@ class AblationPlannerModule(dspy.Module):
         super().__init__()
         self.generate_plan = dspy.ChainOfThought(AblationPlannerSignature)
 
-    def forward(self, competition_info, domain, sota_summary, domain_guidance):
-        """Generate ablation plan."""
+    def forward(self, competition_info, domain, sota_details, sota_summary, domain_guidance):
+        """Generate ablation plan using Adopt & Improve strategy."""
         return self.generate_plan(
             competition_info=competition_info,
             domain=domain,
+            sota_details=sota_details,
             sota_summary=sota_summary,
             domain_guidance=domain_guidance,
         )
@@ -106,28 +109,23 @@ class PlannerAgent:
         self.config = get_config()
         self.use_dspy = use_dspy and self.config.dspy.enabled
 
+        # ALWAYS initialize self.llm (used by _analyze_gaps, _analyze_sota_solutions, etc.)
+        self.llm = get_llm_for_role(
+            role="planner",
+            temperature=self.config.llm.temperature,
+            max_tokens=self.config.llm.max_tokens,
+        )
+
         if self.use_dspy:
-            # Try to load optimized module, fallback to base; if none, fall back to direct LLM
+            # Try to load optimized module, fallback to direct LLM path
             optimizer = create_optimizer()
             self.planner_module = optimizer.load_optimized_prompt("planner")
 
             if self.planner_module is None:
                 print("   No optimized planner module found -> using direct LLM path")
                 self.use_dspy = False
-                self.llm = get_llm_for_role(
-                    role="planner",
-                    temperature=self.config.llm.temperature,
-                    max_tokens=self.config.llm.max_tokens,
-                )
             else:
                 self.sota_analyzer = SOTAAnalyzerModule()
-        else:
-            # Use direct LLM calls
-            self.llm = get_llm_for_role(
-                role="planner",
-                temperature=self.config.llm.temperature,
-                max_tokens=self.config.llm.max_tokens,
-            )
 
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -379,6 +377,10 @@ class PlannerAgent:
         # Extract curriculum learning insights from previous iterations
         curriculum_insights = self._extract_curriculum_insights(state)
 
+        # Get raw SOTA solutions for "Adopt & Improve" strategy
+        sota_solutions = state.get("sota_solutions", [])
+        sota_details = self._format_sota_details(sota_solutions)
+
         # Prepare inputs
         comp_info_str = f"""
 Name: {competition_info.name}
@@ -396,12 +398,13 @@ Domain: {domain}
             print(curriculum_insights)
 
         if self.use_dspy:
-            # DSPy path: Use AblationPlannerModule (with fallback if it generates too few components)
-            print("  🧠 Using DSPy for ablation plan generation...")
+            # DSPy path: Use AblationPlannerModule with Adopt & Improve strategy
+            print("  🧠 Using DSPy for ablation plan generation (Adopt & Improve)...")
             try:
                 result = self.planner_module(
                     competition_info=comp_info_str,
                     domain=domain,
+                    sota_details=sota_details,
                     sota_summary=sota_summary,
                     domain_guidance=domain_guidance,
                 )
@@ -414,10 +417,11 @@ Domain: {domain}
                 plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
 
         else:
-            # Use direct LLM call
+            # Use direct LLM call with Adopt & Improve strategy
             prompt = CREATE_ABLATION_PLAN_PROMPT.format(
                 competition_info=comp_info_str,
                 domain=domain,
+                sota_details=sota_details,
                 sota_summary=sota_summary,
             )
 
@@ -447,7 +451,7 @@ Return a JSON array with 3-5 components. Each component must have:
             ]
 
             # Invoke LLM and parse response
-            print("  🧠 Using LLM for ablation plan generation (SOTA-aware)...")
+            print("  🧠 Using LLM for ablation plan generation (Adopt & Improve strategy)...")
             try:
                 response = self.llm.invoke(messages)
                 # Normalize response content to text (handles list/dict responses from some LLM backends)
@@ -565,8 +569,20 @@ Return a JSON array with 3-5 components. Each component must have:
         # Format test results
         test_results_str = json.dumps(test_results_summary, indent=2)
 
+
+        # Perform Gap Analysis (NEW STEP)
+        print("  🔍 Performing Gap Analysis...")
+        gap_analysis = self._analyze_gaps(
+            state=state,
+            previous_plan_str=previous_plan_str,
+            test_results_str=test_results_str
+        )
+        gap_analysis_str = json.dumps(gap_analysis, indent=2)
+        print(f"  🔍 Gap Analysis: {gap_analysis.get('improvement_strategy', 'No strategy found')}")
+
         # Use the refinement prompt
         prompt = REFINE_ABLATION_PLAN_PROMPT.format(
+            gap_analysis=gap_analysis_str,
             previous_plan=previous_plan_str,
             test_results=test_results_str,
             current_score=current_score
@@ -798,6 +814,7 @@ Return a JSON array with 3-5 components. Each component must have:
         objective = str((state or {}).get("objective", "")).lower()
         domain = str((state or {}).get("domain_detected", "tabular")).lower()
         timeout_cap = (state or {}).get("timeout_per_component")
+
         if isinstance(timeout_cap, str):
             try:
                 timeout_cap = int(timeout_cap)
@@ -893,6 +910,56 @@ Return a JSON array with 3-5 components. Each component must have:
 
         return valid_plan
 
+    def _analyze_gaps(
+        self, 
+        state: KaggleState, 
+        previous_plan_str: str, 
+        test_results_str: str
+    ) -> dict[str, Any]:
+        """
+        Analyze gaps between results and goal.
+        
+        Args:
+            state: Current state
+            previous_plan_str: JSON string of previous plan
+            test_results_str: JSON string of test results
+            
+        Returns:
+            Dictionary with gap analysis
+        """
+        competition_info = state["competition_info"]
+        current_score = state.get("current_performance_score", 0.0)
+        
+        prompt = ANALYZE_GAPS_PROMPT.format(
+            previous_plan=previous_plan_str,
+            test_results=test_results_str,
+            metric=competition_info.evaluation_metric,
+            current_score=current_score,
+            target_score="SOTA (typically Top 10%)"
+        )
+        
+        messages = [
+            SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
+        
+        try:
+            response = self.llm.invoke(messages)
+            content = get_text_content(response.content).strip()
+            
+            if "```json" in content:
+                content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+            elif content.startswith("```") and content.endswith("```"):
+                content = content.strip("` \n")
+                
+            return json.loads(content)
+        except Exception as e:
+            print(f"  ⚠️ Gap analysis failed: {e}")
+            return {
+                "root_causes": ["Unknown (analysis failed)"],
+                "missed_opportunities": ["Standard baselines"],
+                "improvement_strategy": "Focus on fixing any errors shown in logs."
+            }
 
     def _parse_llm_plan_response(
         self,
@@ -1441,7 +1508,7 @@ This provides model diversity for ensemble.""",
         ]
 
     def _format_sota_solutions(self, solutions: list[SOTASolution]) -> str:
-        """Format SOTA solutions for prompts."""
+        """Format SOTA solutions for prompts (summary version without code)."""
         formatted = []
         for sol in solutions[:5]:  # Top 5
             formatted.append(f"""
@@ -1452,6 +1519,95 @@ Features: {', '.join(sol.feature_engineering) if sol.feature_engineering else 'N
 Ensemble: {sol.ensemble_approach or 'N/A'}
 """)
         return "\n---\n".join(formatted)
+
+    def _estimate_complexity(self, sol: SOTASolution) -> str:
+        """
+        Estimate time complexity based on code patterns.
+
+        Args:
+            sol: SOTA solution to analyze
+
+        Returns:
+            Complexity level: "Low", "Medium", or "High" with explanation
+        """
+        high_complexity_signals = [
+            "Ensemble", "Stacking", "stacking", "VotingClassifier",
+            "BaggingClassifier", "StackingClassifier", "StackingRegressor",
+            "neural", "deep", "LSTM", "Transformer", "BERT", "CNN",
+            "optuna", "hyperopt", "GridSearchCV", "RandomizedSearchCV",
+            "n_estimators=5000", "n_estimators=10000", "epochs=100",
+        ]
+
+        medium_complexity_signals = [
+            "XGBoost", "LightGBM", "CatBoost", "RandomForest",
+            "n_estimators=1000", "n_estimators=2000",
+            "cross_val", "KFold", "StratifiedKFold",
+        ]
+
+        # Build text to check from all solution fields
+        text_to_check = " ".join(sol.models_used or [])
+        text_to_check += " " + (sol.ensemble_approach or "")
+        text_to_check += " " + " ".join(sol.strategies or [])
+        if sol.code_snippets:
+            text_to_check += " " + " ".join(sol.code_snippets[:2])
+
+        text_lower = text_to_check.lower()
+
+        # Count signals
+        high_count = sum(1 for signal in high_complexity_signals if signal.lower() in text_lower)
+        medium_count = sum(1 for signal in medium_complexity_signals if signal.lower() in text_lower)
+
+        if high_count >= 3:
+            return "High (likely slow - heavy ensembles/optimization/deep learning)"
+        elif high_count >= 1 or medium_count >= 2:
+            return "Medium (moderate training time - standard ML pipeline)"
+        else:
+            return "Low (fast - simple models, quick iteration)"
+
+    def _format_sota_details(self, solutions: list[SOTASolution]) -> str:
+        """
+        Format SOTA solutions with code snippets, votes, and complexity estimation.
+
+        This provides detailed information for the "Adopt & Improve" strategy,
+        allowing the planner to directly copy successful approaches.
+
+        Args:
+            solutions: List of SOTA solutions from search
+
+        Returns:
+            Formatted string with detailed solution info including code snippets
+        """
+        if not solutions:
+            return "No SOTA solutions found. Create a baseline plan using domain best practices."
+
+        details = []
+        for i, sol in enumerate(solutions[:3], 1):  # Top 3 to save tokens
+            # Estimate complexity based on code patterns
+            complexity = self._estimate_complexity(sol)
+
+            # Get code snippet (truncated to 1500 chars as per user preference)
+            code_snippet = ""
+            if sol.code_snippets:
+                code_snippet = sol.code_snippets[0][:1500]
+                if len(sol.code_snippets[0]) > 1500:
+                    code_snippet += "\n... (truncated)"
+
+            details.append(f"""
+### Candidate {i}: {sol.title}
+- **Votes**: {sol.votes} (Quality Signal - higher is better)
+- **Estimated Complexity**: {complexity}
+- **Models Used**: {', '.join(sol.models_used) if sol.models_used else 'N/A'}
+- **Feature Engineering**: {', '.join(sol.feature_engineering) if sol.feature_engineering else 'N/A'}
+- **Ensemble Approach**: {sol.ensemble_approach or 'N/A'}
+- **Key Strategies**: {', '.join(sol.strategies[:3]) if sol.strategies else 'N/A'}
+
+**Code Snippet** (use this as reference for your implementation):
+```python
+{code_snippet if code_snippet else "# No code available"}
+```
+""")
+
+        return "\n".join(details)
 
     def _print_summary(self, plan: list[AblationComponent]) -> None:
         """Print plan summary."""
