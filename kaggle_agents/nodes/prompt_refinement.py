@@ -41,6 +41,41 @@ class PromptRefinementDecider:
         self.min_training_examples = min_training_examples
         self.training_collector = create_training_collector()
 
+    def _analyze_performance_gaps(self, state: KaggleState) -> dict[str, bool]:
+        """
+        Analyze performance gaps to trigger adaptive optimization.
+        
+        Returns:
+            Dict[str, bool]: {agent_name: should_trigger_immediately}
+        """
+        dev_results = state.get("development_results", [])
+        if not dev_results:
+            return {"planner": False, "developer": False}
+
+        # Developer Check: High failure rate
+        recent_results = dev_results[-5:]  # Look at last 5 attempts
+        usage_count = len(recent_results)
+        success_count = sum(1 for r in recent_results if r.success)
+        
+        developer_struggling = False
+        if usage_count >= 3:
+            success_rate = success_count / usage_count
+            if success_rate < 0.3:  # Less than 30% success
+                print(f"   ⚠️ Adaptive Trigger: Developer success rate low ({success_rate:.0%})")
+                developer_struggling = True
+
+        # Planner Check: Empty or invalid plans
+        # We infer planner struggle if multiple components completely fail to implement
+        # or if the plan was empty (though that usually crashes earlier)
+        planner_struggling = False
+        if usage_count >= 3 and success_count == 0:
+             # If EVERYTHING failed recently, maybe the plan is bad?
+             # This is a heuristic; consistent failure suggests bad strategy.
+             print("   ⚠️ Adaptive Trigger: Consistent failure suggests strategic (Planner) issues")
+             planner_struggling = True
+
+        return {"planner": planner_struggling, "developer": developer_struggling}
+
     def should_optimize(self, state: KaggleState) -> dict[str, bool]:
         """
         Decide which agents should have prompts optimized.
@@ -57,10 +92,13 @@ class PromptRefinementDecider:
         if current_iteration < 2:
             return {"planner": False, "developer": False}
 
+        # Check for adaptive triggers (performance gaps)
+        gaps = self._analyze_performance_gaps(state)
+
         # Check if it's time for periodic optimization
         is_optimization_cycle = (current_iteration % self.optimization_frequency == 0)
 
-        if not is_optimization_cycle:
+        if not is_optimization_cycle and not any(gaps.values()):
             return {"planner": False, "developer": False}
 
         print(f"\n🔄 Iteration {current_iteration}: Checking prompt optimization eligibility...")
@@ -72,24 +110,27 @@ class PromptRefinementDecider:
             "planner",
             min_score=0.3,
         )
-        decisions["planner"] = len(planner_examples) >= self.min_training_examples
+        # optimize if (cycle OR gap) AND enough data
+        decisions["planner"] = (is_optimization_cycle or gaps["planner"]) and len(planner_examples) >= self.min_training_examples
 
         if decisions["planner"]:
-            print(f"   ✓ Planner: {len(planner_examples)} training examples available")
+            reason = "Gap detected" if gaps["planner"] else "Cycle"
+            print(f"   ✓ Planner: Optimize ({reason}), {len(planner_examples)} examples available")
         else:
-            print(f"   ⏭️ Planner: Only {len(planner_examples)} examples (need {self.min_training_examples})")
+            print(f"   ⏭️ Planner: Skipped (Data: {len(planner_examples)}/{self.min_training_examples})")
 
         # Check developer
         developer_examples = self.training_collector.convert_to_dspy_examples(
             "developer_generator",
             min_score=0.5,
         )
-        decisions["developer"] = len(developer_examples) >= self.min_training_examples
+        decisions["developer"] = (is_optimization_cycle or gaps["developer"]) and len(developer_examples) >= self.min_training_examples
 
         if decisions["developer"]:
-            print(f"   ✓ Developer: {len(developer_examples)} training examples available")
+             reason = "Gap detected" if gaps["developer"] else "Cycle"
+             print(f"   ✓ Developer: Optimize ({reason}), {len(developer_examples)} examples available")
         else:
-            print(f"   ⏭️ Developer: Only {len(developer_examples)} examples (need {self.min_training_examples})")
+            print(f"   ⏭️ Developer: Skipped (Data: {len(developer_examples)}/{self.min_training_examples})")
 
         return decisions
 
