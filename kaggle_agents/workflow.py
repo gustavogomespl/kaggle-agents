@@ -164,8 +164,60 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
 
     if data_type in {"image", "audio", "text"}:
         if data_type == "image":
-            domain = "image_regression" if "regression" in problem_type else "image_classification"
-            confidence = 0.95
+            # Check for image-to-image indicators FIRST
+            is_image_to_image = False
+            data_files = state.get("data_files") or {}
+
+            # 1. Check for clean/target directory (e.g., train_cleaned for denoising)
+            clean_train_path = data_files.get("clean_train", "")
+            if clean_train_path and Path(clean_train_path).exists():
+                is_image_to_image = True
+                print("   Detected clean/target directory -> image_to_image")
+
+            # 2. Check competition name for image-to-image keywords
+            comp_name = (competition_info.name or "").lower()
+            comp_desc = (competition_info.description or "").lower()
+            image_to_image_keywords = [
+                "denois", "deblur", "super-resolution", "superresolution",
+                "inpaint", "coloriz", "colouri", "restoration", "enhance",
+                "noise", "clean", "dirty", "blur", "artifact"
+            ]
+            if any(kw in comp_name or kw in comp_desc for kw in image_to_image_keywords):
+                is_image_to_image = True
+                print(f"   Detected image-to-image keyword in competition name/description")
+
+            # 3. Check for pixel-level submission format (many rows per image)
+            sample_sub_path = data_files.get("sample_submission", "") or state.get("sample_submission_path", "")
+            test_path = data_files.get("test", "") or state.get("test_data_path", "")
+            if sample_sub_path and Path(sample_sub_path).exists():
+                from .domain import detect_submission_format
+                sub_format, sub_meta = detect_submission_format(
+                    sample_sub_path,
+                    test_path if test_path else None,
+                    competition_info
+                )
+                if sub_format == "pixel_level":
+                    is_image_to_image = True
+                    print(f"   Detected pixel-level submission format -> image_to_image")
+                    print(f"      Expected rows: {sub_meta.get('expected_rows', 'unknown')}")
+                    print(f"      ID pattern: {sub_meta.get('id_pattern', 'unknown')}")
+
+            if is_image_to_image:
+                domain = "image_to_image"
+                confidence = 0.95
+            elif "segment" in comp_desc or "segment" in comp_name:
+                domain = "image_segmentation"
+                confidence = 0.95
+            elif "detect" in comp_desc or "object" in comp_desc:
+                domain = "object_detection"
+                confidence = 0.95
+            elif "regression" in problem_type:
+                domain = "image_regression"
+                confidence = 0.95
+            else:
+                domain = "image_classification"
+                confidence = 0.95
+
         elif data_type == "audio":
             domain = "audio_regression" if "regression" in problem_type else "audio_classification"
             confidence = 0.95
