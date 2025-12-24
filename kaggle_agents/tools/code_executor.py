@@ -809,9 +809,22 @@ class CodeExecutor:
         stderr_filtered = self._filter_tqdm_logs(stderr_filtered)
         if stderr_filtered:
             stderr_lines = []
+            skip_next_context = False
             for line in stderr_filtered.splitlines():
-                if "Warning" in line or "WARNING" in line:
+                clean_line = line
+                if clean_line.startswith("⚠️"):
+                    clean_line = clean_line[len("⚠️"):]
+
+                if skip_next_context:
+                    if clean_line.strip() and clean_line[:1].isspace():
+                        skip_next_context = False
+                        continue
+                    skip_next_context = False
+
+                if "Warning" in clean_line or "WARNING" in clean_line:
+                    skip_next_context = True
                     continue
+
                 stderr_lines.append(line)
             stderr_filtered = "\n".join(stderr_lines).strip()
 
@@ -859,7 +872,13 @@ class CodeExecutor:
             if not errors and stderr_filtered.strip():
                 # Double-check it's not just leftover Optuna formatting
                 if not re.match(r'^\s*\[.*?\]\s*$', stderr_filtered.strip()):
-                    errors.append(f"Error: {stderr_filtered.strip()[:200]}")
+                    error_hint = re.search(
+                        r"(Traceback|Error|Exception|Segmentation fault|SIGSEGV|Killed|Out of memory|OOM|CUDA error)",
+                        stderr_filtered,
+                        re.IGNORECASE,
+                    )
+                    if error_hint:
+                        errors.append(f"Error: {stderr_filtered.strip()[:200]}")
 
         # Do not treat warnings as errors.
 
