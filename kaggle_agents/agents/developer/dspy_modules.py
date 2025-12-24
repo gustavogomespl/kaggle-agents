@@ -6,7 +6,11 @@ import dspy
 
 
 class CodeGeneratorSignature(dspy.Signature):
-    """Signature for code generation."""
+    """Signature for code generation.
+
+    Note: ChainOfThought automatically adds 'reasoning' field, so we don't need
+    a separate 'explanation' field. Only 'code' is required as output.
+    """
 
     component_details: str = dspy.InputField(desc="Component to implement")
     competition_context: str = dspy.InputField(desc="Competition metadata")
@@ -14,18 +18,20 @@ class CodeGeneratorSignature(dspy.Signature):
     requirements: str = dspy.InputField(desc="Implementation requirements")
 
     code: str = dspy.OutputField(desc="Complete Python code")
-    explanation: str = dspy.OutputField(desc="Brief explanation of implementation")
 
 
 class CodeFixerSignature(dspy.Signature):
-    """Signature for code fixing."""
+    """Signature for code fixing.
+
+    Note: ChainOfThought automatically adds 'reasoning' field, so we don't need
+    a separate 'changes_made' field. Only 'fixed_code' is required as output.
+    """
 
     code: str = dspy.InputField(desc="Code with errors")
     error: str = dspy.InputField(desc="Error message")
     error_type: str = dspy.InputField(desc="Type of error")
 
     fixed_code: str = dspy.OutputField(desc="Fixed Python code")
-    changes_made: str = dspy.OutputField(desc="Description of fixes")
 
 
 class CodeGeneratorModule(dspy.Module):
