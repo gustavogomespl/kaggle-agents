@@ -283,9 +283,11 @@ class MLEBenchRunner:
             state["timeout_per_component"] = timeout_per_component
             state["enable_checkpoint_recovery"] = enable_checkpoint_recovery
 
-            # MLE-bench speed optimizations
-            state["cv_folds"] = 3  # Reduce from 5 to 3 for faster iteration
-            state["fast_mode"] = True  # Enable speed-first mode in agents
+            # MLE-bench training configuration - start aggressive, adapt if timeout
+            state["cv_folds"] = int(os.getenv("KAGGLE_AGENTS_CV_FOLDS", "5"))
+            state["fast_mode"] = False  # Disabled - use adaptive epoch budget instead
+            state["epoch_budget"] = int(os.getenv("KAGGLE_AGENTS_MAX_EPOCHS", "50"))
+            state["timeout_history"] = []  # Track timeouts for adaptive reduction
             # Use explicit target score only if provided via environment.
             target_score_env = os.getenv("KAGGLE_AGENTS_TARGET_SCORE") or os.getenv("TARGET_SCORE")
             if target_score_env:

@@ -810,6 +810,9 @@ Return a JSON array with 3-5 components. Each component must have:
         Returns:
             Validated plan
         """
+        # Normalize any raw dict entries before applying validation rules.
+        plan = self._coerce_components(plan)
+
         run_mode = str((state or {}).get("run_mode", "")).lower()
         objective = str((state or {}).get("objective", "")).lower()
         domain = str((state or {}).get("domain_detected", "tabular")).lower()
@@ -944,6 +947,12 @@ Return a JSON array with 3-5 components. Each component must have:
         ]
         
         try:
+            if not getattr(self, "llm", None):
+                self.llm = get_llm_for_role(
+                    role="planner",
+                    temperature=self.config.llm.temperature,
+                    max_tokens=self.config.llm.max_tokens,
+                )
             response = self.llm.invoke(messages)
             content = get_text_content(response.content).strip()
             

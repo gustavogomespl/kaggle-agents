@@ -138,6 +138,10 @@ class DynamicContext:
     objective: str = ""
     timeout_per_component: Optional[int] = None
     fast_mode: bool = False
+    # Adaptive training fields
+    epoch_budget: int = 50  # Maximum epochs for current iteration
+    timeout_occurred: bool = False  # Whether timeout occurred in last attempt
+    suggested_epochs: int = 50  # Suggested epochs based on timeout history
 
 
 def build_context(state: dict[str, Any], component: Optional[Any] = None) -> DynamicContext:
@@ -165,11 +169,7 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
     context.target_score = state.get("target_score")
     context.run_mode = str(state.get("run_mode", ""))
     context.objective = str(state.get("objective", ""))
-    context.fast_mode = (
-        str(state.get("run_mode", "")).lower() == "mlebench"
-        or str(os.getenv("KAGGLE_AGENTS_FAST_MODE", "")).lower() in {"1", "true", "yes"}
-        or str(os.getenv("FAST_MODE", "")).lower() in {"1", "true", "yes"}
-    )
+    # Get timeout configuration
     timeout_val = state.get("timeout_per_component")
     if isinstance(timeout_val, str):
         try:
@@ -177,6 +177,41 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
         except ValueError:
             timeout_val = None
     context.timeout_per_component = timeout_val if isinstance(timeout_val, int) else None
+
+    # Adaptive training: detect epoch budget and timeout history
+    context.epoch_budget = int(state.get("epoch_budget", 50))
+    min_epochs = int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "5"))
+
+    # Check if timeout occurred in last execution
+    dev_results = state.get("development_results", [])
+    if dev_results:
+        last_result = dev_results[-1]
+        last_stdout = str(getattr(last_result, "stdout", "") or "").lower()
+        last_stderr = str(getattr(last_result, "stderr", "") or "").lower()
+        last_exec_time = getattr(last_result, "execution_time", 0) or 0
+
+        # Detect timeout via multiple signals
+        timeout_component = context.timeout_per_component or 3600
+        context.timeout_occurred = (
+            "timeout" in last_stderr
+            or "deadline" in last_stdout
+            or "[timeout]" in last_stdout
+            or last_exec_time >= timeout_component * 0.95
+        )
+
+    # Calculate suggested epochs (reduce 50% if timeout occurred)
+    if context.timeout_occurred:
+        reduction_factor = float(os.getenv("KAGGLE_AGENTS_EPOCH_REDUCTION", "0.5"))
+        context.suggested_epochs = max(min_epochs, int(context.epoch_budget * reduction_factor))
+    else:
+        context.suggested_epochs = context.epoch_budget
+
+    # fast_mode only activates when epochs are very low
+    context.fast_mode = (
+        context.suggested_epochs <= min_epochs
+        or str(os.getenv("KAGGLE_AGENTS_FAST_MODE", "")).lower() in {"1", "true", "yes"}
+        or str(os.getenv("FAST_MODE", "")).lower() in {"1", "true", "yes"}
+    )
 
     # Extract SOTA patterns from search results
     sota_solutions = state.get("sota_solutions", [])
@@ -390,17 +425,42 @@ def compose_generate_prompt(
             parts.append(f"- timeout_per_component_seconds: {context.timeout_per_component}")
         parts.append("- Env knobs: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, KAGGLE_AGENTS_CV_FOLDS, KAGGLE_AGENTS_FAST_MODE")
 
-    # MLE-bench specific guidance for medal optimization
+    # Adaptive training guidance (GPU-accelerated, reduces epochs if timeout)
     if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():
         parts.append("")
-        parts.append("## MLE-BENCH MEDAL OPTIMIZATION (CRITICAL)")
-        parts.append("- GOAL: Achieve at least a Bronze medal")
-        parts.append("- TIME BUDGET: Complete within timeout - IMPLEMENT soft-deadline pattern")
-        parts.append("- CV FOLDS: Use 2-3 folds max (speed over precision)")
-        parts.append("- EARLY STOPPING: Stop training early if deadline approaches")
-        parts.append("- SUBMISSION: MUST generate valid submission even if training incomplete")
-        parts.append("- FALLBACK: If time runs out, use best checkpoint so far")
-        parts.append("- For image models: freeze backbone, train head only, 2-3 epochs max")
+        parts.append("## NEURAL NETWORK TRAINING (GPU-ACCELERATED)")
+        parts.append(f"- **EPOCHS**: Train for up to {context.suggested_epochs} epochs with early stopping")
+        parts.append("- **GPU**: MUST use CUDA if available: `device = 'cuda' if torch.cuda.is_available() else 'cpu'`")
+        parts.append("- **BACKBONE**: Full fine-tuning for maximum performance (do NOT freeze layers)")
+        parts.append("- **LEARNING RATE**: Use warmup (5% of epochs) + cosine annealing schedule")
+        parts.append("- **AUGMENTATION**: Apply heavy augmentation (Cutmix, Mixup, RandAugment)")
+        parts.append("- **EARLY STOPPING**: Stop if validation loss doesn't improve for 5 epochs")
+        parts.append("- **CHECKPOINTING**: Save best model checkpoint by validation metric")
+        parts.append("- **MIXED PRECISION**: Use torch.cuda.amp.autocast() for faster training")
+
+        if context.timeout_occurred:
+            parts.append("")
+            parts.append("⚠️ TIMEOUT DETECTED IN PREVIOUS RUN - ADJUSTMENTS:")
+            parts.append(f"- REDUCED epochs from {context.epoch_budget} to {context.suggested_epochs}")
+            parts.append("- Use smaller batch size if memory issues")
+            parts.append("- Consider freezing early backbone layers if still too slow")
+            parts.append("- STILL prioritize completing training over speed")
+
+        parts.append("")
+        parts.append("## SOFT-DEADLINE PATTERN (MANDATORY)")
+        timeout_s = context.timeout_per_component or 3600
+        parts.append("```python")
+        parts.append("import time")
+        parts.append("_START = time.time()")
+        parts.append(f"_TIMEOUT = {timeout_s}")
+        parts.append("_SOFT_DEADLINE = _TIMEOUT - 120  # Reserve 2min for saving")
+        parts.append("")
+        parts.append("for epoch in range(MAX_EPOCHS):")
+        parts.append("    if time.time() - _START >= _SOFT_DEADLINE:")
+        parts.append("        print('[TIMEOUT] Soft deadline reached, saving best model')")
+        parts.append("        break")
+        parts.append("    # ... train epoch ...")
+        parts.append("```")
 
     # ADAPTIVE: First iteration = SOTA heavy
     if context.iteration_num == 0:
@@ -1009,14 +1069,22 @@ def build_standard_requirements() -> list[str]:
     ]
 
 
-def build_image_model_instructions(is_image_to_image: bool, data_files: dict | None) -> list[str]:
-    """Build image model instructions."""
+def build_image_model_instructions(is_image_to_image: bool, data_files: dict | None, suggested_epochs: int = 50) -> list[str]:
+    """Build image model instructions with adaptive epoch budget."""
     instructions = [
-        "\n🖼️ IMAGE MODELLING (SPEED-ORIENTED):",
-        "  - Use a pretrained backbone (torchvision/timm). In FAST_MODE: freeze backbone and train a small head for 1-2 epochs.",
-        "  - Use mixed precision (torch.cuda.amp) if CUDA available; keep augmentations lightweight.",
-        "  - Use fewer folds when budgeted: n_folds=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','3'))",
+        "\n🖼️ IMAGE MODELLING (DEEP TRAINING):",
+        f"  - Train for up to {suggested_epochs} epochs with early stopping (patience=5)",
+        "  - MUST use GPU: device = 'cuda' if torch.cuda.is_available() else 'cpu'",
+        "  - Use mixed precision: torch.cuda.amp.autocast() for 2x faster training",
+        "  - Full backbone fine-tuning for maximum performance (do NOT freeze layers)",
+        "  - Learning rate schedule: warmup for 5% of epochs, then cosine decay to 1e-6",
+        "  - Use pretrained backbone (torchvision/timm) - efficientnet_b0 or resnet50 recommended",
+        "  - Save checkpoint every epoch, keep best by validation metric",
     ]
+
+    if suggested_epochs < 20:
+        instructions.append(f"  - ⚠️ Reduced epochs ({suggested_epochs}) due to previous timeout")
+        instructions.append("  - Consider using smaller model (efficientnet_b0) or lower resolution if still slow")
 
     if isinstance(data_files, dict) and data_files.get("train_csv"):
         instructions.append(f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)")
@@ -1049,8 +1117,9 @@ def build_model_component_instructions(
     is_classification: bool,
     sample_integer_labels: bool,
     target_col: str = "target",
+    suggested_epochs: int = 50,
 ) -> list[str]:
-    """Build model component instructions."""
+    """Build model component instructions with adaptive epoch budget."""
     instructions = [
         "\nMODEL COMPONENT REQUIREMENTS:",
         "  - MUST train a model and generate predictions",
@@ -1082,7 +1151,7 @@ def build_model_component_instructions(
         ])
     else:
         data_files = state.get("data_files", {}) if state else {}
-        instructions.extend(build_image_model_instructions(is_image_to_image, data_files))
+        instructions.extend(build_image_model_instructions(is_image_to_image, data_files, suggested_epochs))
 
     # Add CV and OOF instructions
     component_name = getattr(component, "name", "component")
@@ -1201,6 +1270,29 @@ def build_dynamic_instructions(
     # Build performance gap instructions
     instructions.extend(build_performance_gap_instructions(current_score, target_score, metric_name))
 
+    # Get adaptive epoch budget from state
+    epoch_budget = int(state.get("epoch_budget", 50))
+    min_epochs = int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "5"))
+
+    # Check if last run timed out and reduce epochs
+    suggested_epochs = epoch_budget
+    if dev_results:
+        last_result = dev_results[-1]
+        last_stdout = str(getattr(last_result, "stdout", "") or "").lower()
+        last_stderr = str(getattr(last_result, "stderr", "") or "").lower()
+        last_exec_time = getattr(last_result, "execution_time", 0) or 0
+        timeout_component = timeout_hint or 3600
+
+        timed_out = (
+            "timeout" in last_stderr
+            or "deadline" in last_stdout
+            or "[timeout]" in last_stdout
+            or last_exec_time >= timeout_component * 0.95
+        )
+        if timed_out:
+            reduction_factor = float(os.getenv("KAGGLE_AGENTS_EPOCH_REDUCTION", "0.5"))
+            suggested_epochs = max(min_epochs, int(epoch_budget * reduction_factor))
+
     # Component-type specific instructions
     if component.component_type == "model":
         instructions.extend(build_model_component_instructions(
@@ -1212,6 +1304,7 @@ def build_dynamic_instructions(
             is_classification=is_classification,
             sample_integer_labels=sample_integer_labels,
             target_col=target_col,
+            suggested_epochs=suggested_epochs,
         ))
 
         # Optuna instructions if component name suggests tuning

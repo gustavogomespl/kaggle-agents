@@ -852,11 +852,14 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         # Provide runtime knobs to generated code (optional but strongly encouraged).
         run_mode = str(state.get("run_mode", "")).lower()
         objective = str(state.get("objective", ""))
-        fast_mode = bool(state.get("fast_mode")) or (
-            run_mode == "mlebench"
-            or os.getenv("KAGGLE_AGENTS_FAST_MODE", "").lower() in {"1", "true", "yes"}
-            or os.getenv("FAST_MODE", "").lower() in {"1", "true", "yes"}
-        )
+        fast_mode_state = state.get("fast_mode")
+        fast_mode_env_raw = os.getenv("KAGGLE_AGENTS_FAST_MODE") or os.getenv("FAST_MODE") or ""
+        if fast_mode_env_raw:
+            fast_mode = fast_mode_env_raw.lower() in {"1", "true", "yes"}
+        elif fast_mode_state is not None:
+            fast_mode = bool(fast_mode_state)
+        else:
+            fast_mode = run_mode == "mlebench"
         cv_folds_override = os.getenv("KAGGLE_AGENTS_CV_FOLDS")
         cv_folds: int
         state_cv_folds = state.get("cv_folds")
