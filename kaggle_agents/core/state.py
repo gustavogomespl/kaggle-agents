@@ -153,6 +153,8 @@ class SubmissionResult:
     percentile: Optional[float] = None
     cv_score: Optional[float] = None
     file_path: Optional[str] = None
+    valid: bool = True
+    error: Optional[str] = None
     submitted_at: datetime = field(default_factory=datetime.now)
 
 
@@ -325,6 +327,8 @@ class KaggleState(TypedDict):
     best_single_model_score: Optional[float]
     best_single_model_name: Optional[str]
     baseline_cv_score: Optional[float]
+    submission_validation_error: Optional[str]  # Error from last submission validation
+    retry_submission_count: int  # Counter for submission retries
 
     # Iteration Control
     current_iteration: int
@@ -477,6 +481,8 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         best_single_model_score=None,
         best_single_model_name=None,
         baseline_cv_score=None,
+        submission_validation_error=None,
+        retry_submission_count=0,
 
         # Iteration Control
         current_iteration=0,

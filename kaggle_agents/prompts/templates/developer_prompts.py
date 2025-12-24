@@ -35,6 +35,8 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 7. Print "Final Validation Performance: {score:.6f}" at the end (CRITICAL: Meta-Evaluator depends on this exact string)
 8. Set random_state=42 everywhere for reproducibility
 9. MANDATORY SOFT-DEADLINE PATTERN (prevents hard timeout kills):
+
+   For sklearn/manual training loops:
    ```python
    import os, time
    _START_TIME = time.time()
@@ -54,6 +56,57 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 
    # ALWAYS print final metric even if stopped early
    print(f"Final Validation Performance: {cv_score:.6f}")
+   ```
+
+   For Keras/TensorFlow model.fit() - MUST use callback:
+   ```python
+   import tensorflow as tf
+   import time
+
+   class DeadlineCallback(tf.keras.callbacks.Callback):
+       '''Stops training when soft deadline is reached.'''
+       def __init__(self, start_time, soft_deadline_s):
+           super().__init__()
+           self.start_time = start_time
+           self.soft_deadline_s = soft_deadline_s
+
+       def on_epoch_end(self, epoch, logs=None):
+           if time.time() - self.start_time >= self.soft_deadline_s:
+               print(f"[TIMEOUT] Soft deadline reached at epoch {epoch+1}, stopping training")
+               self.model.stop_training = True
+
+   # Setup deadline
+   _START_TIME = time.time()
+   _TIMEOUT_S = int(os.getenv("KAGGLE_AGENTS_COMPONENT_TIMEOUT_S", "3300"))
+   _SOFT_DEADLINE_S = _TIMEOUT_S - 120  # Reserve 2min for saving
+
+   # Use with model.fit():
+   callbacks = [
+       DeadlineCallback(_START_TIME, _SOFT_DEADLINE_S),
+       EarlyStopping(patience=30, restore_best_weights=True),
+       ModelCheckpoint("best_model.h5", save_best_only=True),
+   ]
+   model.fit(..., callbacks=callbacks)
+
+   # ALWAYS print final metric even if stopped early
+   print(f"Final Validation Performance: {val_loss:.6f}")
+   ```
+
+   For PyTorch manual training loops:
+   ```python
+   import time
+   _START_TIME = time.time()
+   _TIMEOUT_S = int(os.getenv("KAGGLE_AGENTS_COMPONENT_TIMEOUT_S", "3300"))
+   _SOFT_DEADLINE_S = _TIMEOUT_S - 120
+
+   for epoch in range(max_epochs):
+       if time.time() - _START_TIME >= _SOFT_DEADLINE_S:
+           print(f"[TIMEOUT] Soft deadline reached at epoch {epoch+1}")
+           break
+       # ... train epoch ...
+
+   # ALWAYS print final metric
+   print(f"Final Validation Performance: {best_val_loss:.6f}")
    ```
 
 ## MUST NOT:
@@ -143,6 +196,8 @@ class DynamicContext:
     timeout_occurred: bool = False  # Whether timeout occurred in last attempt
     suggested_epochs: int = 300  # Suggested epochs based on timeout history
     early_stopping_patience: int = 30  # SOTA uses patience=30
+    # Submission validation retry
+    submission_validation_error: Optional[str] = None  # Error from last invalid submission
 
 
 def build_context(state: dict[str, Any], component: Optional[Any] = None) -> DynamicContext:
@@ -181,7 +236,7 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
 
     # Adaptive training: detect epoch budget, patience, and timeout history
     context.epoch_budget = int(state.get("epoch_budget", 600))  # SOTA uses 600
-    context.early_stopping_patience = int(state.get("early_stopping_patience", 60))  # SOTA uses 30
+    context.early_stopping_patience = int(state.get("early_stopping_patience", 30))  # SOTA uses 30
     min_epochs = int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "5"))
 
     # Check if timeout occurred in last execution
@@ -312,6 +367,9 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
         if selected:
             context.attempt_feedback = _format_attempts_for_prompt(selected)
 
+    # Extract submission validation error for retry context
+    context.submission_validation_error = state.get("submission_validation_error")
+
     return context
 
 
@@ -426,6 +484,25 @@ def compose_generate_prompt(
         if context.timeout_per_component is not None:
             parts.append(f"- timeout_per_component_seconds: {context.timeout_per_component}")
         parts.append("- Env knobs: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, KAGGLE_AGENTS_CV_FOLDS, KAGGLE_AGENTS_FAST_MODE")
+
+    # Submission validation error (must be fixed immediately).
+    if context.submission_validation_error:
+        parts.append("")
+        parts.append("## CRITICAL: SUBMISSION FORMAT ERROR (MUST FIX)")
+        parts.append(f"Previous submission failed validation: {context.submission_validation_error}")
+        parts.append("")
+        parts.append("Fix requirements:")
+        parts.append("1. Read sample_submission.csv to match ID values and column order exactly")
+        parts.append("2. Match row count exactly (no truncation/padding)")
+        parts.append("3. Preserve ID order from sample_submission.csv")
+        parts.append("4. For image-to-image: flatten per-pixel predictions to the sample submission ID format")
+        parts.append("5. Use assertions before saving")
+        parts.append("```python")
+        parts.append("sample = pd.read_csv(sample_submission_path)")
+        parts.append("assert list(submission.columns) == list(sample.columns)")
+        parts.append("assert len(submission) == len(sample)")
+        parts.append("assert (submission[sample.columns[0]].values == sample[sample.columns[0]].values).all()")
+        parts.append("```")
 
     # Adaptive training guidance (GPU-accelerated, reduces epochs if timeout)
     if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():
@@ -548,7 +625,9 @@ def _get_component_guidance(component_type: str) -> str:
     """Get minimal, type-specific guidance."""
     guidance = {
         "model": """## Model Component Requirements
-- IMPLEMENT soft-deadline pattern (see HARD_CONSTRAINTS #9) - check _check_deadline() INSIDE fold loop
+- IMPLEMENT soft-deadline pattern (see HARD_CONSTRAINTS #9)
+  - For Keras/TensorFlow: MUST use DeadlineCallback in model.fit() callbacks
+  - For sklearn/PyTorch manual loops: check _check_deadline() inside fold loop
 - Train model with StratifiedKFold CV using n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5"))
 - Save OOF predictions to models/oof_{name}.npy for stacking
 - Handle class imbalance if ratio > 2:1 (class_weight or scale_pos_weight)
@@ -1091,6 +1170,7 @@ def build_image_model_instructions(is_image_to_image: bool, data_files: dict | N
         "  - Full backbone fine-tuning for maximum performance (do NOT freeze layers)",
         "  - Learning rate schedule: warmup for 5% of epochs, then cosine decay to 1e-6",
         "  - Use pretrained backbone (torchvision/timm) - efficientnet_b0 or resnet50 recommended",
+        "  - For Keras: use DeadlineCallback in model.fit() callbacks (see HARD_CONSTRAINTS)",
         "  - Save checkpoint every epoch, keep best by validation metric",
     ]
 

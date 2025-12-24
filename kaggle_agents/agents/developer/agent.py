@@ -1106,6 +1106,21 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             "submission": str(sample_submission_path),
         }
 
+        def _generate_with_llm() -> str:
+            prompt = compose_generate_prompt(
+                component=component,
+                competition_info=competition_info,
+                paths=paths,
+                context=context,
+            )
+
+            messages = [
+                HumanMessage(content=prompt),
+            ]
+
+            response = self.llm.invoke(messages)
+            return self._extract_code_from_response(get_text_content(response.content))
+
         if self.use_dspy:
             requirements_with_context = requirements
             if context.iteration_num == 0 and context.sota_patterns:
@@ -1125,28 +1140,19 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     "\n\n## Meta-Evaluator Guidance\n" + context.reward_guidance[:800]
                 )
 
-            result = self.generator_module(
-                component_details=component_details,
-                competition_context=competition_context,
-                data_paths=data_paths,
-                requirements=requirements_with_context,
-            )
-            code = self._extract_code_from_response(result.code)
+            try:
+                result = self.generator_module(
+                    component_details=component_details,
+                    competition_context=competition_context,
+                    data_paths=data_paths,
+                    requirements=requirements_with_context,
+                )
+                code = self._extract_code_from_response(result.code)
+            except Exception as exc:
+                print(f"⚠️ DSPy generation failed, falling back to base prompt: {exc}")
+                code = _generate_with_llm()
         else:
-            # Use new compose_generate_prompt with dynamic context
-            prompt = compose_generate_prompt(
-                component=component,
-                competition_info=competition_info,
-                paths=paths,
-                context=context,
-            )
-
-            messages = [
-                HumanMessage(content=prompt),
-            ]
-
-            response = self.llm.invoke(messages)
-            code = self._extract_code_from_response(get_text_content(response.content))
+            code = _generate_with_llm()
 
         return code
 

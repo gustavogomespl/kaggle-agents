@@ -571,6 +571,16 @@ class MetaEvaluatorAgent:
                 context += '\n'.join(code_lines[-10:])  # Last 10 lines
             context += "\n```\n"
             context += f"**Total Lines**: {len(code_lines)}\n"
+            stdout_tail = res.stdout[-3000:] if res.stdout else ""
+            stderr_tail = res.stderr[-1500:] if res.stderr else ""
+            if stdout_tail:
+                context += "**STDOUT (tail)**:\n```text\n"
+                context += stdout_tail
+                context += "\n```\n"
+            if stderr_tail:
+                context += "**STDERR (tail)**:\n```text\n"
+                context += stderr_tail
+                context += "\n```\n"
             context += "-" * 40 + "\n"
 
         context += "\n## Reward Signals\n"

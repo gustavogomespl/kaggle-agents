@@ -72,6 +72,7 @@ class SubmissionAgent:
             print("❌ No submission file found")
             return {
                 "last_updated": datetime.now(),
+                "submission_validation_error": "No submission file found",
             }
 
         print(f"\n📄 Submission file: {submission_path.name}")
@@ -96,8 +97,20 @@ class SubmissionAgent:
 
         if not is_valid:
             print(f"❌ Validation failed: {message}")
+            submission_result = SubmissionResult(
+                submission_id=None,
+                public_score=None,
+                private_score=None,
+                percentile=None,
+                cv_score=None,
+                file_path=str(submission_path),
+                valid=False,
+                error=message,
+            )
             return {
                 "last_updated": datetime.now(),
+                "submissions": [submission_result],
+                "submission_validation_error": message,
             }
 
         print("✅ Validation passed")
@@ -143,6 +156,8 @@ class SubmissionAgent:
                     percentile=None,
                     cv_score=None,
                     file_path=str(versioned_path) if versioned_path else None,
+                    valid=True,
+                    error=None,
                     submitted_at=datetime.now(),
                 )
                 updated_best = compare_scores(
@@ -155,6 +170,8 @@ class SubmissionAgent:
                     "best_score": updated_best,
                     "current_performance_score": float(score),
                     "mlebench_grade": grading,
+                    "submission_validation_error": None,
+                    "retry_submission_count": 0,
                     "last_updated": datetime.now(),
                 }
 
@@ -193,6 +210,8 @@ class SubmissionAgent:
         return {
             "submissions": [submission_result],
             "best_score": updated_best,  # Guaranteed to be float
+            "submission_validation_error": None,
+            "retry_submission_count": 0,
             "last_updated": datetime.now(),
             **({"mlebench_grade": mlebench_grade} if mlebench_grade is not None else {}),
         }

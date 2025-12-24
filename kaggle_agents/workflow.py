@@ -520,6 +520,61 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     return "end"
 
 
+def route_after_submission(state: KaggleState) -> Literal["retry_developer", "continue"]:
+    """
+    Route after submission agent - retry if submission is invalid.
+
+    Checks if the submission passed validation. If not, routes back to
+    the developer to regenerate with the error context.
+
+    Args:
+        state: Current state
+
+    Returns:
+        "retry_developer" if submission invalid and retries remaining,
+        "continue" otherwise
+    """
+    submissions = state.get("submissions", [])
+
+    if not submissions:
+        # No submission generated at all - retry
+        retry_count = state.get("retry_submission_count", 0)
+        if retry_count < 3:
+            state["retry_submission_count"] = retry_count + 1
+            state["submission_validation_error"] = "No submission file generated"
+            print(f"⚠️ No submission generated, retrying... ({retry_count + 1}/3)")
+            return "retry_developer"
+        return "continue"
+
+    last_submission = submissions[-1]
+
+    # Check if submission is valid (handle both dict and object)
+    is_valid = True
+    error_msg = None
+
+    if isinstance(last_submission, dict):
+        is_valid = last_submission.get("valid", True)
+        error_msg = last_submission.get("error")
+    else:
+        # Object with attributes
+        is_valid = getattr(last_submission, "valid", True)
+        error_msg = getattr(last_submission, "error", None)
+
+    if not is_valid and error_msg:
+        retry_count = state.get("retry_submission_count", 0)
+
+        if retry_count < 3:
+            state["retry_submission_count"] = retry_count + 1
+            state["submission_validation_error"] = error_msg
+            print(f"⚠️ Invalid submission: {error_msg[:100]}...")
+            print(f"   Retrying with error context... ({retry_count + 1}/3)")
+            return "retry_developer"
+        else:
+            print("⚠️ Max submission retries reached, continuing...")
+
+    return "continue"
+
+
 def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"]:
     """
     Route after iteration control - decide if we refine or end.
@@ -686,8 +741,15 @@ def create_workflow() -> StateGraph:
     # Ensemble → Submission
     workflow.add_edge("ensemble", "submission")
 
-    # Submission → Performance Evaluation
-    workflow.add_edge("submission", "performance_evaluation")
+    # Submission → Conditional (valid or retry?)
+    workflow.add_conditional_edges(
+        "submission",
+        route_after_submission,
+        {
+            "retry_developer": "developer",  # Invalid submission → regenerate
+            "continue": "performance_evaluation",  # Valid → continue
+        }
+    )
 
     # Performance Evaluation → Meta-Evaluator (RL analysis)
     workflow.add_edge("performance_evaluation", "meta_evaluator")

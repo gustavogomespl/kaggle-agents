@@ -807,6 +807,7 @@ class CodeExecutor:
         # Optuna and tqdm commonly log to stderr even on successful runs.
         stderr_filtered = self._filter_optuna_logs(stderr) if stderr else ""
         stderr_filtered = self._filter_tqdm_logs(stderr_filtered)
+        stderr_filtered = self._filter_framework_logs(stderr_filtered)
         if stderr_filtered:
             stderr_lines = []
             skip_next_context = False
@@ -883,6 +884,30 @@ class CodeExecutor:
         # Do not treat warnings as errors.
 
         return errors
+
+    def _filter_framework_logs(self, output: str) -> str:
+        """
+        Filter out common non-fatal ML framework stderr noise.
+
+        These messages are typically warnings or informational logs that
+        shouldn't cause execution failure (e.g., cuFFT factory registration).
+        """
+        if not output:
+            return ""
+
+        drop_patterns = [
+            r"Unable to register cuFFT factory",
+            r"Unable to register cuDNN factory",
+            r"Unable to register cuBLAS factory",
+        ]
+
+        kept_lines: list[str] = []
+        for line in output.splitlines():
+            if any(re.search(pattern, line) for pattern in drop_patterns):
+                continue
+            kept_lines.append(line)
+
+        return "\n".join(kept_lines).strip()
 
 
 class ArtifactValidator:
