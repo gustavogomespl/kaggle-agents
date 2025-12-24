@@ -283,10 +283,11 @@ class MLEBenchRunner:
             state["timeout_per_component"] = timeout_per_component
             state["enable_checkpoint_recovery"] = enable_checkpoint_recovery
 
-            # MLE-bench training configuration - start aggressive, adapt if timeout
+            # MLE-bench training configuration - start aggressive like SOTA (600 epochs, patience=30)
             state["cv_folds"] = int(os.getenv("KAGGLE_AGENTS_CV_FOLDS", "5"))
             state["fast_mode"] = False  # Disabled - use adaptive epoch budget instead
-            state["epoch_budget"] = int(os.getenv("KAGGLE_AGENTS_MAX_EPOCHS", "50"))
+            state["epoch_budget"] = int(os.getenv("KAGGLE_AGENTS_MAX_EPOCHS", "600"))  # SOTA uses 600
+            state["early_stopping_patience"] = int(os.getenv("KAGGLE_AGENTS_PATIENCE", "60"))  # SOTA uses 30
             state["timeout_history"] = []  # Track timeouts for adaptive reduction
             # Use explicit target score only if provided via environment.
             target_score_env = os.getenv("KAGGLE_AGENTS_TARGET_SCORE") or os.getenv("TARGET_SCORE")

@@ -139,9 +139,10 @@ class DynamicContext:
     timeout_per_component: Optional[int] = None
     fast_mode: bool = False
     # Adaptive training fields
-    epoch_budget: int = 50  # Maximum epochs for current iteration
+    epoch_budget: int = 300  # Maximum epochs for current iteration (SOTA uses 600)
     timeout_occurred: bool = False  # Whether timeout occurred in last attempt
-    suggested_epochs: int = 50  # Suggested epochs based on timeout history
+    suggested_epochs: int = 300  # Suggested epochs based on timeout history
+    early_stopping_patience: int = 30  # SOTA uses patience=30
 
 
 def build_context(state: dict[str, Any], component: Optional[Any] = None) -> DynamicContext:
@@ -178,8 +179,9 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
             timeout_val = None
     context.timeout_per_component = timeout_val if isinstance(timeout_val, int) else None
 
-    # Adaptive training: detect epoch budget and timeout history
-    context.epoch_budget = int(state.get("epoch_budget", 50))
+    # Adaptive training: detect epoch budget, patience, and timeout history
+    context.epoch_budget = int(state.get("epoch_budget", 600))  # SOTA uses 600
+    context.early_stopping_patience = int(state.get("early_stopping_patience", 60))  # SOTA uses 30
     min_epochs = int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "5"))
 
     # Check if timeout occurred in last execution
@@ -434,7 +436,7 @@ def compose_generate_prompt(
         parts.append("- **BACKBONE**: Full fine-tuning for maximum performance (do NOT freeze layers)")
         parts.append("- **LEARNING RATE**: Use warmup (5% of epochs) + cosine annealing schedule")
         parts.append("- **AUGMENTATION**: Apply heavy augmentation (Cutmix, Mixup, RandAugment)")
-        parts.append("- **EARLY STOPPING**: Stop if validation loss doesn't improve for 5 epochs")
+        parts.append(f"- **EARLY STOPPING**: Stop if validation loss doesn't improve for {context.early_stopping_patience} epochs (SOTA uses patience=30)")
         parts.append("- **CHECKPOINTING**: Save best model checkpoint by validation metric")
         parts.append("- **MIXED PRECISION**: Use torch.cuda.amp.autocast() for faster training")
 
@@ -1069,11 +1071,11 @@ def build_standard_requirements() -> list[str]:
     ]
 
 
-def build_image_model_instructions(is_image_to_image: bool, data_files: dict | None, suggested_epochs: int = 50) -> list[str]:
-    """Build image model instructions with adaptive epoch budget."""
+def build_image_model_instructions(is_image_to_image: bool, data_files: dict | None, suggested_epochs: int = 600, early_stopping_patience: int = 60) -> list[str]:
+    """Build image model instructions with adaptive epoch budget and patience."""
     instructions = [
-        "\n🖼️ IMAGE MODELLING (DEEP TRAINING):",
-        f"  - Train for up to {suggested_epochs} epochs with early stopping (patience=5)",
+        "\n🖼️ IMAGE MODELLING (DEEP TRAINING - SOTA Pattern):",
+        f"  - Train for up to {suggested_epochs} epochs with early stopping (patience={early_stopping_patience})",
         "  - MUST use GPU: device = 'cuda' if torch.cuda.is_available() else 'cpu'",
         "  - Use mixed precision: torch.cuda.amp.autocast() for 2x faster training",
         "  - Full backbone fine-tuning for maximum performance (do NOT freeze layers)",
@@ -1117,9 +1119,10 @@ def build_model_component_instructions(
     is_classification: bool,
     sample_integer_labels: bool,
     target_col: str = "target",
-    suggested_epochs: int = 50,
+    suggested_epochs: int = 600,
+    early_stopping_patience: int = 30,
 ) -> list[str]:
-    """Build model component instructions with adaptive epoch budget."""
+    """Build model component instructions with adaptive epoch budget and patience (SOTA pattern)."""
     instructions = [
         "\nMODEL COMPONENT REQUIREMENTS:",
         "  - MUST train a model and generate predictions",
@@ -1151,7 +1154,7 @@ def build_model_component_instructions(
         ])
     else:
         data_files = state.get("data_files", {}) if state else {}
-        instructions.extend(build_image_model_instructions(is_image_to_image, data_files, suggested_epochs))
+        instructions.extend(build_image_model_instructions(is_image_to_image, data_files, suggested_epochs, early_stopping_patience))
 
     # Add CV and OOF instructions
     component_name = getattr(component, "name", "component")
@@ -1270,8 +1273,9 @@ def build_dynamic_instructions(
     # Build performance gap instructions
     instructions.extend(build_performance_gap_instructions(current_score, target_score, metric_name))
 
-    # Get adaptive epoch budget from state
-    epoch_budget = int(state.get("epoch_budget", 50))
+    # Get adaptive epoch budget and patience from state (SOTA pattern)
+    epoch_budget = int(state.get("epoch_budget", 600))  # SOTA uses 600
+    early_stopping_patience = int(state.get("early_stopping_patience", 30))  # SOTA uses 30
     min_epochs = int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "5"))
 
     # Check if last run timed out and reduce epochs
@@ -1305,6 +1309,7 @@ def build_dynamic_instructions(
             sample_integer_labels=sample_integer_labels,
             target_col=target_col,
             suggested_epochs=suggested_epochs,
+            early_stopping_patience=early_stopping_patience,
         ))
 
         # Optuna instructions if component name suggests tuning
