@@ -109,6 +109,34 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
    print(f"Final Validation Performance: {best_val_loss:.6f}")
    ```
 
+10. MODEL CHECKPOINTING FOR ENSEMBLE COMPATIBILITY:
+    When saving model checkpoints that may be loaded by other components (e.g., ensemble):
+
+    PREFER TorchScript (preserves architecture - no class definition needed to reload):
+    ```python
+    # ❌ WRONG - state_dict requires EXACT class definition to reload:
+    torch.save(model.state_dict(), "model.pth")
+
+    # ✅ CORRECT - TorchScript preserves full architecture:
+    scripted_model = torch.jit.script(model)
+    torch.jit.save(scripted_model, "model.pt")
+
+    # Loading in ensemble (no class needed):
+    model = torch.jit.load("model.pt", map_location=device)
+    model.eval()
+    ```
+
+    If state_dict MUST be used, ALSO save model config:
+    ```python
+    import json
+    config = {"class_name": "DnCNN", "depth": 15, "channels": 64, "container_attr": "net"}
+    with open("model_config.json", "w") as f:
+        json.dump(config, f)
+    ```
+
+    WHY: Ensemble components cannot load state_dicts if the model class definition
+    differs (e.g., self.net vs self.model, depth=15 vs depth=17). TorchScript avoids this.
+
 ## MUST NOT:
 - sys.exit(), exit(), quit(), raise SystemExit, os._exit()
 - try-except blocks that swallow errors (let them surface)
@@ -634,7 +662,12 @@ def _get_component_guidance(component_type: str) -> str:
 - Print per-fold scores: [LOG:FOLD] fold={n} score={s:.6f}
 - Use GPU if available (check torch.cuda.is_available())
 - Create submission.csv with probabilities [0,1]
-- ALWAYS print "Final Validation Performance: {score}" even if stopped early due to deadline""",
+- ALWAYS print "Final Validation Performance: {score}" even if stopped early due to deadline
+- SAVE PyTorch checkpoints with TorchScript for ensemble compatibility (see HARD_CONSTRAINTS #10):
+  ```python
+  scripted_model = torch.jit.script(model)
+  torch.jit.save(scripted_model, f"models/{component_name}_fold{fold_idx}.pt")
+  ```""",
 
         "feature_engineering": """## Feature Engineering Requirements
 - Transform train and test consistently
@@ -644,11 +677,39 @@ def _get_component_guidance(component_type: str) -> str:
 - Print "Final Validation Performance: 1.0" on completion""",
 
         "ensemble": """## Ensemble Requirements
+
+### LOADING PREVIOUS MODELS (CRITICAL - READ CAREFULLY):
+1. **TorchScript Loading** (PREFERRED - no class definition needed):
+   ```python
+   model = torch.jit.load(checkpoint_path, map_location=device)
+   model.eval()
+   ```
+
+2. **State Dict Fallback** (ONLY if TorchScript fails):
+   - You MUST define the EXACT same model class as used in training
+   - Inspect checkpoint keys to determine architecture:
+   ```python
+   state_dict = torch.load(path, map_location=device)
+   # Look at key names: "net.0.weight" means self.net, NOT self.model
+   # Look at number of layers to infer depth
+   print([k for k in state_dict.keys()][:10])
+   ```
+
+### COMMON PITFALLS (WILL CAUSE state_dict LOADING TO FAIL):
+- ❌ Defining model with `self.model` when checkpoint uses `self.net`
+- ❌ Using different depth/channels than training component
+- ❌ Missing dropout layers that exist in original
+- ❌ Different layer ordering or architecture
+
+### OOF-Based Stacking (no checkpoint loading needed):
 - Load OOF predictions from models/oof_*.npy files
 - Preferred: Stacking with LogisticRegression/Ridge meta-learner
 - Fallback: Weighted average if OOF files missing
 - Can use correlation analysis to select diverse models
-- Create submission.csv with final ensemble predictions""",
+
+### Final Output:
+- Create submission.csv with final ensemble predictions
+- Print "Final Validation Performance: {score}" at the end""",
 
         "preprocessing": """## Preprocessing Requirements
 - Clean data, handle missing values, encode categoricals
