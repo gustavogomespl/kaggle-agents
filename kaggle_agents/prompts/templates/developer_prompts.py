@@ -157,6 +157,67 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 ## PyTorch Gotchas:
 - Dataset __getitem__ must return tensors/arrays (never None) so DataLoader can collate
 
+## IMAGE DATA PIPELINE CRITICAL FIXES (MANDATORY FOR IMAGE TASKS):
+
+### 1. VARIABLE IMAGE DIMENSIONS (stack error prevention):
+Images in Kaggle datasets often have DIFFERENT sizes (e.g., 258x540 vs 420x540).
+The default DataLoader collate_fn uses torch.stack() which FAILS on tensors of different sizes.
+
+SOLUTIONS:
+- **TRAINING**: Use `transforms.RandomCrop(256, 256)` or `transforms.Resize((256, 256))` to ensure all tensors have equal size
+  ```python
+  train_transform = transforms.Compose([
+      transforms.RandomCrop(256, 256),  # Guarantees fixed size for batching
+      transforms.ToTensor(),
+  ])
+  ```
+- **VALIDATION/TEST**: Use `batch_size=1` to avoid stacking errors. Process one image at a time.
+  ```python
+  val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+  test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+  ```
+- **ALTERNATIVE**: Implement a custom collate_fn that pads images to the max size in the batch
+
+### 2. NEGATIVE STRIDES (numpy/torch conversion error):
+Using `np.flip()`, `np.rot90()`, or array slicing with negative steps creates arrays with negative strides.
+PyTorch's `torch.from_numpy()` CANNOT handle negative strides.
+
+ERROR: `ValueError: At least one stride in the given numpy array is negative`
+
+FIX: ALWAYS call `.copy()` or `np.ascontiguousarray()` AFTER any numpy augmentation:
+```python
+def apply_augmentation(img: np.ndarray) -> np.ndarray:
+    if random.random() > 0.5:
+        img = np.flip(img, axis=1)  # Creates negative stride!
+    if random.random() > 0.5:
+        img = np.rot90(img, k=random.randint(0, 3))  # Creates negative stride!
+    return np.ascontiguousarray(img)  # MANDATORY: fixes strides before torch.from_numpy()
+```
+
+### 3. NO TRAIN.CSV FOR IMAGE-TO-IMAGE TASKS:
+Many image-to-image competitions (denoising, super-resolution) do NOT have a train.csv file.
+Data is stored in paired directories: `train/` (noisy) and `train_cleaned/` (clean targets).
+
+DO NOT: `pd.read_csv('train.csv')`  # Will fail with FileNotFoundError
+
+DO THIS INSTEAD:
+```python
+from pathlib import Path
+
+train_dir = Path('/path/to/train')
+clean_dir = Path('/path/to/train_cleaned')
+
+# List files directly from directories
+noisy_files = sorted(train_dir.glob('*.png'))
+pairs = []
+for noisy_path in noisy_files:
+    clean_path = clean_dir / noisy_path.name
+    if clean_path.exists():
+        pairs.append((noisy_path, clean_path))
+
+print(f"Found {len(pairs)} paired training samples.")
+```
+
 ## IMAGE-TO-IMAGE / PIXEL-LEVEL TASKS (CRITICAL):
 If domain is image_to_image, image_segmentation, or submission format is pixel_level:
 1. Output must be a FULL IMAGE (same HxW as input), NOT a single value per image
@@ -721,6 +782,48 @@ def _get_component_guidance(component_type: str) -> str:
         "image_to_image_model": """## Image-to-Image Model Requirements (CRITICAL)
 This is a PIXEL-LEVEL prediction task. Your model must output FULL IMAGES, not single values.
 
+### DATA PIPELINE FIXES (MANDATORY - PREVENTS COMMON CRASHES):
+
+1. **VARIABLE IMAGE DIMENSIONS** (torch.stack error):
+   Images often have different sizes. Use these solutions:
+   ```python
+   # TRAINING: Use RandomCrop for consistent tensor sizes
+   train_transform = transforms.Compose([
+       transforms.RandomCrop(256, 256),  # Fixed size for batching
+       transforms.ToTensor(),
+   ])
+   train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)  # batch_size > 1 OK
+
+   # VALIDATION/TEST: Use batch_size=1 to handle any size
+   val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
+   test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
+   ```
+
+2. **NEGATIVE STRIDES** (numpy/torch conversion error):
+   ```python
+   # WRONG - creates negative strides:
+   img = np.flip(img, axis=1)
+   tensor = torch.from_numpy(img)  # CRASHES!
+
+   # CORRECT - fix strides after augmentation:
+   img = np.flip(img, axis=1)
+   img = np.ascontiguousarray(img)  # FIX STRIDES
+   tensor = torch.from_numpy(img)   # Now works!
+   ```
+
+3. **NO TRAIN.CSV** (FileNotFoundError):
+   Many image-to-image competitions have NO CSV. Load from directories:
+   ```python
+   # DO NOT: pd.read_csv('train.csv')
+
+   # DO THIS:
+   train_dir = Path('/path/to/train')
+   clean_dir = Path('/path/to/train_cleaned')
+   noisy_files = sorted(train_dir.glob('*.png'))
+   pairs = [(nf, clean_dir / nf.name) for nf in noisy_files if (clean_dir / nf.name).exists()]
+   print(f"Found {len(pairs)} paired training samples.")
+   ```
+
 ### Architecture (MUST USE):
 - U-Net: encoder-decoder with skip connections
 - Autoencoder: encoder-decoder without skip connections
@@ -1257,6 +1360,21 @@ def build_image_model_instructions(is_image_to_image: bool, data_files: dict | N
             instructions.append(f"  - Clean target dir (paired with train/): {clean_path}")
 
         instructions.append("  - Output full-resolution (or resized) images, then flatten to pixel-level CSV using sample_submission IDs.")
+
+        # Add critical data pipeline fixes for image-to-image
+        instructions.extend([
+            "\n⚠️ DATA PIPELINE REQUIREMENTS (CRITICAL - SEE HARD_CONSTRAINTS):",
+            "  - **VARIABLE DIMENSIONS**: Images may have different sizes (e.g., 258x540 vs 420x540)",
+            "    - TRAINING: Use `transforms.RandomCrop(256, 256)` or `transforms.Resize((256, 256))` for consistent tensor sizes",
+            "    - VALIDATION/TEST: Use `batch_size=1` in DataLoader to avoid torch.stack() errors",
+            "  - **NEGATIVE STRIDES**: Call `np.ascontiguousarray()` or `.copy()` after `np.flip()`/`np.rot90()` augmentations",
+            "  - **NO TRAIN.CSV**: Load image pairs directly from directories with `glob`/`pathlib`, NOT from CSV files:",
+            "    ```python",
+            "    noisy_files = sorted(train_dir.glob('*.png'))",
+            "    pairs = [(nf, clean_dir / nf.name) for nf in noisy_files if (clean_dir / nf.name).exists()]",
+            "    ```",
+            "  - **LARGER BATCH FOR TRAINING**: Once dimensions are fixed with RandomCrop, use batch_size=16 or 32 for faster training",
+        ])
 
     return instructions
 
