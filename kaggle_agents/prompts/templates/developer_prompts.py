@@ -246,7 +246,44 @@ If domain is image_to_image, image_segmentation, or submission format is pixel_l
    assert len(submission_rows) == expected_rows, f"Expected {expected_rows} rows, got {len(submission_rows)}"
    pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
    ```
-7. Verify submission shape BEFORE saving: if row count doesn't match sample_submission, your model architecture is WRONG"""
+7. Verify submission shape BEFORE saving: if row count doesn't match sample_submission, your model architecture is WRONG
+
+## SUBMISSION FORMAT CRITICAL FIX (MANDATORY FOR ALL TASKS):
+
+### Problem: CV score is good but public score is random (0.5)
+This happens when submission.csv has correct predictions but WRONG ID ORDER.
+Kaggle evaluates predictions by ID, so wrong order = wrong score.
+
+### MANDATORY PATTERN - Use this exact code:
+```python
+# 1. ALWAYS start from sample_submission.csv (preserves ID order)
+sample_sub = pd.read_csv(sample_submission_path)
+
+# 2. Create a mapping from ID to prediction
+id_to_pred = {}
+for i, row in test_df.iterrows():
+    id_val = row[id_col]  # Get the ID from test data
+    pred = predictions[i]  # Get corresponding prediction
+    id_to_pred[id_val] = pred
+
+# 3. Fill submission using sample_sub's ID order (CRITICAL)
+submission = sample_sub.copy()
+target_col = sample_sub.columns[1]  # Usually 'target' or similar
+submission[target_col] = submission[sample_sub.columns[0]].map(id_to_pred)
+
+# 4. VALIDATE before saving
+assert len(submission) == len(sample_sub), f"Row count mismatch"
+assert submission[target_col].isna().sum() == 0, "Missing predictions for some IDs"
+assert (submission[sample_sub.columns[0]].values == sample_sub[sample_sub.columns[0]].values).all(), "ID order mismatch"
+
+submission.to_csv('submission.csv', index=False)
+```
+
+### DO NOT:
+- Create submission DataFrame from scratch
+- Iterate over test files in arbitrary order
+- Use test_df index directly without mapping to sample_sub IDs
+- Sort submission by ID (sample_sub may have specific order)"""
 
 
 # ==================== Logging Format ====================
@@ -723,6 +760,13 @@ def _get_component_guidance(component_type: str) -> str:
 - Print per-fold scores: [LOG:FOLD] fold={n} score={s:.6f}
 - Use GPU if available (check torch.cuda.is_available())
 - Create submission.csv with probabilities [0,1]
+- SUBMISSION ORDER: Start from sample_submission.csv to preserve ID order:
+  ```python
+  sample_sub = pd.read_csv(sample_submission_path)
+  id_to_pred = dict(zip(test_ids, predictions))
+  sample_sub[target_col] = sample_sub[id_col].map(id_to_pred)
+  sample_sub.to_csv('submission.csv', index=False)
+  ```
 - ALWAYS print "Final Validation Performance: {score}" even if stopped early due to deadline
 - SAVE PyTorch checkpoints with TorchScript for ensemble compatibility (see HARD_CONSTRAINTS #10):
   ```python
@@ -1429,6 +1473,16 @@ def build_model_component_instructions(
     component_name = getattr(component, "name", "component")
     instructions.extend(build_cv_instructions(working_dir, component_name))
     instructions.extend(build_stacking_oof_instructions(working_dir, component_name))
+
+    # Add submission format instructions (CRITICAL for CV vs public score match)
+    instructions.extend([
+        "\n⚠️ SUBMISSION FORMAT (CRITICAL - SEE HARD_CONSTRAINTS):",
+        "  - ALWAYS start from sample_submission.csv (preserves ID order)",
+        "  - Map predictions to IDs using a dictionary: id_to_pred = dict(zip(test_ids, predictions))",
+        "  - Fill sample_sub: sample_sub[target_col] = sample_sub[id_col].map(id_to_pred)",
+        "  - DO NOT create submission from scratch or iterate in arbitrary order",
+        "  - VALIDATE: assert (submission[id_col].values == sample_sub[id_col].values).all()",
+    ])
 
     return instructions
 
