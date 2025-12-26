@@ -250,40 +250,53 @@ If domain is image_to_image, image_segmentation, or submission format is pixel_l
 
 ## SUBMISSION FORMAT CRITICAL FIX (MANDATORY FOR ALL TASKS):
 
-### Problem: CV score is good but public score is random (0.5)
-This happens when submission.csv has correct predictions but WRONG ID ORDER.
-Kaggle evaluates predictions by ID, so wrong order = wrong score.
+### Problem: Predictions going to WRONG COLUMN (causes score=0.5)
+The target column is NOT always `sample_sub.columns[1]`!
+Example: "detecting-insults" has columns [Insult, Date, Comment] where Insult (column 0) is the target.
+If you put predictions in columns[1] (Date), you get score=0.5 even with perfect CV!
 
-### MANDATORY PATTERN - Use this exact code:
+### MANDATORY PATTERN - Identify target column correctly:
 ```python
-# 1. ALWAYS start from sample_submission.csv (preserves ID order)
+# 1. Load sample submission and INSPECT it
 sample_sub = pd.read_csv(sample_submission_path)
+print("Sample submission columns:", sample_sub.columns.tolist())
+print("Sample submission head:\n", sample_sub.head(2))
 
-# 2. Create a mapping from ID to prediction
-id_to_pred = {}
-for i, row in test_df.iterrows():
-    id_val = row[id_col]  # Get the ID from test data
-    pred = predictions[i]  # Get corresponding prediction
-    id_to_pred[id_val] = pred
+# 2. CRITICAL: Identify the TARGET column (DO NOT assume columns[1]!)
+# The target column has the SAME NAME as the target in train.csv
+# Common names: 'target', 'Insult', 'label', 'prediction', 'value', etc.
+train_df = pd.read_csv(train_path)
+target_col = train_df.columns[0]  # Usually the first column in train is the target
 
-# 3. Fill submission using sample_sub's ID order (CRITICAL)
-submission = sample_sub.copy()
-target_col = sample_sub.columns[1]  # Usually 'target' or similar
-submission[target_col] = submission[sample_sub.columns[0]].map(id_to_pred)
+# Verify target_col exists in sample_sub
+if target_col not in sample_sub.columns:
+    # Fallback: if only 2 columns, use columns[1]; otherwise find numeric column
+    if len(sample_sub.columns) == 2:
+        target_col = sample_sub.columns[1]
+    else:
+        # Look for common target names
+        for col in ['target', 'label', 'prediction', 'value', 'Insult']:
+            if col in sample_sub.columns:
+                target_col = col
+                break
+
+print(f"Using target column: {target_col}")
+
+# 3. Fill ONLY the target column with predictions (preserve all other columns!)
+sample_sub[target_col] = predictions  # predictions must be in same order as sample_sub rows
 
 # 4. VALIDATE before saving
-assert len(submission) == len(sample_sub), f"Row count mismatch"
-assert submission[target_col].isna().sum() == 0, "Missing predictions for some IDs"
-assert (submission[sample_sub.columns[0]].values == sample_sub[sample_sub.columns[0]].values).all(), "ID order mismatch"
+print(f"Predictions sample: {sample_sub[target_col].head()}")
+assert len(sample_sub) == len(predictions), f"Row count mismatch: {len(sample_sub)} vs {len(predictions)}"
 
-submission.to_csv('submission.csv', index=False)
+sample_sub.to_csv('submission.csv', index=False)
 ```
 
-### DO NOT:
-- Create submission DataFrame from scratch
-- Iterate over test files in arbitrary order
-- Use test_df index directly without mapping to sample_sub IDs
-- Sort submission by ID (sample_sub may have specific order)"""
+### CRITICAL CHECKS:
+1. Print sample_sub.columns to see ALL column names before assuming anything
+2. The target column name MUST match the target from train.csv
+3. DO NOT overwrite non-target columns (like Date, Comment, ID, etc.)
+4. If sample_sub has 3+ columns, columns[1] is probably NOT the target!"""
 
 
 # ==================== Logging Format ====================
@@ -760,11 +773,13 @@ def _get_component_guidance(component_type: str) -> str:
 - Print per-fold scores: [LOG:FOLD] fold={n} score={s:.6f}
 - Use GPU if available (check torch.cuda.is_available())
 - Create submission.csv with probabilities [0,1]
-- SUBMISSION ORDER: Start from sample_submission.csv to preserve ID order:
+- SUBMISSION FORMAT: Target column is NOT always columns[1]!
   ```python
   sample_sub = pd.read_csv(sample_submission_path)
-  id_to_pred = dict(zip(test_ids, predictions))
-  sample_sub[target_col] = sample_sub[id_col].map(id_to_pred)
+  print("Columns:", sample_sub.columns.tolist())  # ALWAYS check column names!
+  # Use SAME target column name as in train.csv (e.g., 'Insult', 'target', 'label')
+  target_col = train_df.columns[0]  # First column of train.csv is usually the target
+  sample_sub[target_col] = predictions  # Fill ONLY the target column
   sample_sub.to_csv('submission.csv', index=False)
   ```
 - ALWAYS print "Final Validation Performance: {score}" even if stopped early due to deadline
@@ -1477,11 +1492,12 @@ def build_model_component_instructions(
     # Add submission format instructions (CRITICAL for CV vs public score match)
     instructions.extend([
         "\n⚠️ SUBMISSION FORMAT (CRITICAL - SEE HARD_CONSTRAINTS):",
-        "  - ALWAYS start from sample_submission.csv (preserves ID order)",
-        "  - Map predictions to IDs using a dictionary: id_to_pred = dict(zip(test_ids, predictions))",
-        "  - Fill sample_sub: sample_sub[target_col] = sample_sub[id_col].map(id_to_pred)",
-        "  - DO NOT create submission from scratch or iterate in arbitrary order",
-        "  - VALIDATE: assert (submission[id_col].values == sample_sub[id_col].values).all()",
+        "  - Target column is NOT always sample_sub.columns[1]!",
+        "  - First: print(sample_sub.columns) to see ALL column names",
+        "  - The target column has SAME NAME as target in train.csv (e.g., 'Insult', 'target', 'label')",
+        "  - Example: 'detecting-insults' has target='Insult' at columns[0], NOT columns[1]",
+        "  - ONLY fill the target column: sample_sub[target_col] = predictions",
+        "  - DO NOT overwrite non-target columns (Date, Comment, ID, etc.)",
     ])
 
     return instructions
