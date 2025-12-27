@@ -296,7 +296,44 @@ sample_sub.to_csv('submission.csv', index=False)
 1. Print sample_sub.columns to see ALL column names before assuming anything
 2. The target column name MUST match the target from train.csv
 3. DO NOT overwrite non-target columns (like Date, Comment, ID, etc.)
-4. If sample_sub has 3+ columns, columns[1] is probably NOT the target!"""
+4. If sample_sub has 3+ columns, columns[1] is probably NOT the target!
+
+## TABULAR MODELS REQUIRE TABULAR FEATURES (MANDATORY):
+
+LightGBM, XGBoost, CatBoost, and other tree-based models need REAL tabular features.
+If train.csv only has [id, label] columns → This is an IMAGE competition!
+
+CRITICAL: DO NOT create dummy/random features - this gives terrible scores!
+
+```python
+# CHECK BEFORE USING TABULAR MODELS:
+train_df = pd.read_csv('train.csv')
+print(f"Train columns: {train_df.columns.tolist()}")
+print(f"Number of columns: {len(train_df.columns)}")
+
+if len(train_df.columns) <= 2:
+    raise ValueError(
+        "No tabular features found! train.csv has only id+label columns. "
+        "This appears to be an IMAGE competition. "
+        "Use CNN models (EfficientNet, ResNet) with transfer learning, "
+        "NOT tree models (LightGBM, XGBoost, CatBoost)."
+    )
+```
+
+### Example: dog-breed-identification
+- train.csv has only [id, breed] columns - NO tabular features!
+- WRONG: LightGBM with dummy random features → score 4.78 (terrible)
+- RIGHT: EfficientNet-B0 with transfer learning → score < 1.0
+
+### Model Selection Guide:
+- IMAGE competition (train/ has images, train.csv has only id+label):
+  → Use: EfficientNet, ResNet, VGG with ImageNet pretrained weights
+  → DO NOT use: LightGBM, XGBoost, CatBoost (they need tabular features!)
+
+- TABULAR competition (train.csv has many feature columns):
+  → Use: LightGBM, XGBoost, CatBoost with hyperparameter tuning
+
+NEVER create dummy/random features to feed into tree models!"""
 
 
 # ==================== Logging Format ====================

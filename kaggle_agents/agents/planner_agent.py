@@ -1038,6 +1038,65 @@ Return a JSON array with 3-5 components. Each component must have:
         # If JSON parsing fails, return empty (caller will use fallback)
         return []
 
+    def _is_image_competition_without_features(self, state: Optional[KaggleState]) -> bool:
+        """
+        Detect if competition is image-based but has no tabular features.
+
+        This catches cases where domain detection fails but the competition
+        is clearly image-based (has image files and minimal train.csv columns).
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            True if this appears to be an image competition without tabular features
+        """
+        if state is None:
+            return False
+
+        # Check for image files in data directory
+        data_dir = state.get("data_dir", "")
+        has_images = False
+        if data_dir:
+            from pathlib import Path
+            data_path = Path(data_dir)
+            if data_path.exists():
+                # Check for common image directories (train/, test/, images/)
+                for subdir in ["train", "test", "images", "train_images", "test_images"]:
+                    subdir_path = data_path / subdir
+                    if subdir_path.exists() and subdir_path.is_dir():
+                        # Check if directory contains image files
+                        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+                        for f in subdir_path.iterdir():
+                            if f.suffix.lower() in image_extensions:
+                                has_images = True
+                                break
+                    if has_images:
+                        break
+
+        # Check if train.csv has minimal columns (only id + label)
+        train_csv_minimal = False
+        train_csv_path = state.get("train_csv_path", "")
+        if train_csv_path:
+            from pathlib import Path
+            import pandas as pd
+            train_path = Path(train_csv_path)
+            if train_path.exists():
+                try:
+                    train_df = pd.read_csv(train_path, nrows=5)  # Only read header
+                    # If train.csv has 2 or fewer columns, it's likely just id + label
+                    train_csv_minimal = len(train_df.columns) <= 2
+                except Exception:
+                    pass
+
+        if has_images and train_csv_minimal:
+            print(f"  [WARNING] Detected IMAGE competition without tabular features!")
+            print(f"            - Has image files: {has_images}")
+            print(f"            - train.csv minimal (<=2 cols): {train_csv_minimal}")
+            return True
+
+        return False
+
     def _create_fallback_plan(
         self,
         domain: str,
@@ -1059,6 +1118,17 @@ Return a JSON array with 3-5 components. Each component must have:
         Returns:
             List of component dictionaries (3-5 components depending on domain)
         """
+        print(f"  [DEBUG] Creating fallback plan for domain: '{domain}'")
+
+        # SAFETY CHECK: Prevent tabular models for image competitions
+        # This catches cases where domain detection fails but we can clearly see
+        # image files exist and train.csv has minimal columns (just id + label)
+        if self._is_image_competition_without_features(state):
+            print("  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)")
+            print("            Tree models (LightGBM/XGBoost) require tabular features!")
+            # Force image classification fallback
+            return self._create_image_fallback_plan("image_classification", sota_analysis, fast_mode=False)
+
         run_mode = str((state or {}).get("run_mode", "")).lower()
         objective = str((state or {}).get("objective", "")).lower()
         timeout_cap = (state or {}).get("timeout_per_component")

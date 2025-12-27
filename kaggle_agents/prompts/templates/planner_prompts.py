@@ -35,6 +35,24 @@ CRITICAL RULES:
 - USE reward signals from prior CV/LB scores: keep top-2 arms, replace lowest ROI arm with a new variant only if needed
 - CONTROL cost: reserve expensive models for planner/critic phases; choose cheaper-but-solid models for bulk developer runs
 - ENSURE each component is significantly different from others
+
+## CRITICAL: MODEL SELECTION BASED ON DATA TYPE
+
+### For IMAGE competitions (train/ folder has images, train.csv has only id+label):
+- USE: EfficientNet, ResNet, VGG with ImageNet pretrained weights (transfer learning)
+- DO NOT USE: LightGBM, XGBoost, CatBoost (these require tabular features!)
+
+### For TABULAR competitions (train.csv has many feature columns):
+- USE: LightGBM, XGBoost, CatBoost with Optuna hyperparameter tuning
+- Neural Networks can add ensemble diversity
+
+### CRITICAL: NEVER suggest tree models (LightGBM/XGBoost/CatBoost) for image competitions!
+Tree-based models require tabular features. If train.csv only has id+label columns,
+this is an IMAGE competition and MUST use CNN models with transfer learning.
+
+Example: dog-breed-identification has only [id, breed] in train.csv
+- WRONG: LightGBM with dummy features → score 4.78 (terrible)
+- RIGHT: EfficientNet with transfer learning → score < 1.0
 """
 
 # Template for creating initial ablation plan
