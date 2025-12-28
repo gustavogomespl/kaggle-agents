@@ -1205,16 +1205,25 @@ Return a JSON array with 3-5 components. Each component must have:
             or (isinstance(timeout_cap, int) and timeout_cap <= 1200)
         )
 
+        # Define domain sets for routing
+        IMAGE_DOMAINS = {
+            "image_classification", "image_regression", "object_detection",
+            "image_to_image", "image_segmentation"
+        }
+        TEXT_DOMAINS = {"text_classification", "text_regression", "seq_to_seq"}
+        AUDIO_DOMAINS = {"audio_classification", "audio_regression"}
+
         # Route to domain-specific fallback method
-        if domain == "image_to_image" or domain == "image_segmentation":
+        if domain in ("image_to_image", "image_segmentation"):
             # CRITICAL: Image-to-image tasks require pixel-level predictions
             # Use specialized fallback plan with encoder-decoder architectures
             return self._create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
-        elif domain.startswith("image_"):
+        elif domain in IMAGE_DOMAINS or domain.startswith("image_"):
+            # Includes object_detection which uses CNN-based approaches
             return self._create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
-        elif domain.startswith("text_") or domain == "seq_to_seq":
+        elif domain in TEXT_DOMAINS or domain.startswith("text_"):
             return self._create_text_fallback_plan(domain, sota_analysis)
-        elif domain.startswith("audio_"):
+        elif domain in AUDIO_DOMAINS or domain.startswith("audio_"):
             return self._create_audio_fallback_plan(domain, sota_analysis)
         else:
             # Tabular (existing logic)

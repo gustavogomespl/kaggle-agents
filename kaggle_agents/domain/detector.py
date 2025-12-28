@@ -212,13 +212,68 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             return ("tabular_regression", 0.50)
         return ("tabular_classification", 0.50)
 
+    def _detect_data_type(self, data_dir: Path) -> str:
+        """
+        Detect the primary data type from file structure.
+
+        Returns one of: "image", "audio", "text", "tabular"
+        """
+        if not data_dir.exists():
+            return "tabular"
+
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+        text_exts = {".txt", ".json"}
+
+        counts: dict[str, int] = {"image": 0, "audio": 0, "text": 0, "tabular": 0}
+
+        # Check direct files and subdirectories
+        for path in data_dir.iterdir():
+            if path.is_file():
+                ext = path.suffix.lower()
+                if ext in image_exts:
+                    counts["image"] += 1
+                elif ext in audio_exts:
+                    counts["audio"] += 1
+                elif ext in text_exts:
+                    counts["text"] += 1
+                elif ext in {".csv", ".parquet"}:
+                    counts["tabular"] += 1
+            elif path.is_dir():
+                # Sample first 100 files in subdirectory
+                for i, subfile in enumerate(path.rglob("*")):
+                    if i >= 100:
+                        break
+                    if subfile.is_file():
+                        ext = subfile.suffix.lower()
+                        if ext in image_exts:
+                            counts["image"] += 10  # Weight directories higher
+                        elif ext in audio_exts:
+                            counts["audio"] += 10
+                        elif ext in text_exts:
+                            counts["text"] += 10
+
+        # Return dominant type
+        if counts["image"] > max(counts["audio"], counts["text"], counts["tabular"]):
+            return "image"
+        elif counts["audio"] > max(counts["text"], counts["tabular"]):
+            return "audio"
+        elif counts["text"] > counts["tabular"]:
+            return "text"
+        return "tabular"
+
     def detect(
         self,
         competition_info: CompetitionInfo,
         data_directory: Path | str,
     ) -> tuple[DomainType, float]:
         """
-        Detect the domain type of a competition using LLM.
+        Detect the domain type of a competition using LLM-First approach.
+
+        Strategy:
+        1. If no LLM, use structural heuristics (_detect_from_structure)
+        2. If LLM available, use it for granular domain classification
+        3. Fallback to structural heuristics if LLM fails
 
         Args:
             competition_info: Competition metadata
@@ -229,66 +284,16 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         """
         data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
 
-        # Heuristic detection works even without LLM
-        heuristic_domain, heuristic_conf = self._detect_from_structure(competition_info, data_dir)
-        if self.llm is None or heuristic_conf >= 0.8:
-            return heuristic_domain, heuristic_conf
+        # Step 1: If no LLM, use sophisticated structural heuristics
+        # (detects image_to_image, segmentation, time_series, etc.)
+        if self.llm is None:
+            return self._detect_from_structure(competition_info, data_dir)
 
-        # Heuristic fast-path: Use metadata from data pipeline if available
-        metadata_type = None
-        if hasattr(competition_info, 'data_files_metadata'):
-            metadata_type = competition_info.data_files_metadata.get('data_type')
+        # Step 2: Detect data type for context (used in LLM prompt)
+        data_type = self._detect_data_type(data_dir)
 
-        if metadata_type == "image":
-            desc_lower = (competition_info.description or "").lower()
-            name_lower = (competition_info.name or "").lower()
-            if any(
-                kw in desc_lower or kw in name_lower
-                for kw in (
-                    "denoise",
-                    "denoising",
-                    "deblur",
-                    "deblurring",
-                    "super-resolution",
-                    "super resolution",
-                    "inpaint",
-                    "inpainting",
-                    "colorize",
-                    "colourize",
-                    "restoration",
-                    "noise",
-                    "clean",
-                )
-            ):
-                return "image_to_image", 0.92
-            if "segment" in desc_lower:
-                return "image_segmentation", 0.95
-            elif "detect" in desc_lower or "object" in desc_lower:
-                return "object_detection", 0.95
-            elif "regression" in desc_lower:
-                return "image_regression", 0.90
-            else:
-                return "image_classification", 0.90
-
-        elif metadata_type == "audio":
-            desc_lower = (competition_info.description or "").lower()
-            if "regression" in desc_lower:
-                return "audio_regression", 0.90
-            else:
-                return "audio_classification", 0.90
-
-        elif metadata_type == "text":
-            desc_lower = (competition_info.description or "").lower()
-            if "translate" in desc_lower or "normalize" in desc_lower or "summarize" in desc_lower:
-                return "seq_to_seq", 0.90
-            elif "regression" in desc_lower:
-                return "text_regression", 0.90
-            else:
-                return "text_classification", 0.90
-
-        # No fast-path match, continue with LLM detection
-
-        # Scan both files AND directories to get full picture
+        # Step 3: Use LLM for granular domain classification (LLM-First)
+        # Scan files to provide context to LLM
         files = []
         if data_dir.exists():
             for path in data_dir.glob("*"):
@@ -307,11 +312,37 @@ Respond with ONLY the category name, nothing else. Example: image_classification
                             files.append(f"{path.name}/ ({len(contents)} files, mostly {dominant[0]})")
             files = files[:20]  # Limit to 20 entries
 
-        prompt = self.PROMPT.format(
-            name=competition_info.name,
-            description=(competition_info.description or "")[:500],
-            files=files if files else ["No files found"],
-        )
+        # Enhanced prompt with data type hint
+        prompt = f"""Classify this Kaggle competition into exactly ONE category.
+
+Categories:
+- image_classification: Classify images into categories (dog breeds, cancer detection, plant diseases, species identification)
+- image_regression: Predict continuous values from images (age estimation, severity scores)
+- image_to_image: Transform images (denoising, super-resolution, style transfer) or pixel-level predictions
+- image_segmentation: Pixel-wise classification of images (mask prediction)
+- object_detection: Locate AND classify objects with bounding boxes in images
+- text_classification: Classify text (sentiment, toxicity, spam, author identification)
+- seq_to_seq: Sequence to sequence (translation, text normalization, summarization)
+- text_regression: Predict continuous values from text
+- audio_classification: Classify audio signals (speaker, music genre, species by sound)
+- audio_regression: Predict continuous values from audio
+- tabular_classification: Classify rows in structured CSV data
+- tabular_regression: Predict continuous values from structured CSV data
+- time_series_forecasting: Predict future values from temporal sequences
+- multi_modal: Combination of multiple data types (images + text + tabular)
+
+Competition Name: {competition_info.name}
+Description: {(competition_info.description or "")[:800]}
+Data Files: {files if files else ["No files found"]}
+Detected Data Type: {data_type}
+
+IMPORTANT CLASSIFICATION RULES:
+1. "breed", "species", "identify", "classify", "categorize" → usually image_classification or text_classification
+2. object_detection REQUIRES bounding box predictions (x, y, width, height)
+3. image_segmentation REQUIRES pixel-wise masks or RLE encoding
+4. If task is to identify/classify items in images WITHOUT bounding boxes → image_classification
+
+Respond with ONLY the category name, nothing else. Example: image_classification"""
 
         try:
             response = self.llm.invoke(prompt)
@@ -319,12 +350,14 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             domain = content.strip().lower().replace(" ", "_")
 
             if domain in self.DOMAINS:
-                return domain, 0.9  # type: ignore
+                return domain, 0.95  # type: ignore
             else:
-                return "tabular_classification", 0.6
+                # LLM returned invalid domain, use structural heuristics
+                return self._detect_from_structure(competition_info, data_dir)
 
         except Exception:
-            return "tabular_classification", 0.5
+            # LLM failed, use structural heuristics
+            return self._detect_from_structure(competition_info, data_dir)
 
     def get_domain_description(self, domain: DomainType) -> str:
         """Get a human-readable description of a domain."""
