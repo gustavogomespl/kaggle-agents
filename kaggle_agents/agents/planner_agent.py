@@ -445,6 +445,18 @@ Return a JSON array with 3-5 components. Each component must have:
 - estimated_impact: float 0.0-1.0
 - code_outline: brief implementation sketch"""
 
+            # INJECT FAILURE ANALYSIS (if available from previous runs)
+            failure_analysis = state.get("failure_analysis", {})
+            if failure_analysis:
+                error_patterns = failure_analysis.get("error_patterns", [])
+                if error_patterns:
+                    failure_text = "\n\n## ⚠️ ERROR PATTERNS FROM PREVIOUS RUNS\n"
+                    failure_text += "Avoid these known issues when planning components:\n"
+                    for pattern in error_patterns[:5]:
+                        failure_text += f"- {pattern}\n"
+                    enhanced_prompt += failure_text
+                    print(f"  ⚠️ Added {len(error_patterns[:5])} error patterns to initial plan")
+
             messages = [
                 SystemMessage(content=PLANNER_SYSTEM_PROMPT + "\n\n" + domain_guidance),
                 HumanMessage(content=enhanced_prompt),
@@ -587,6 +599,36 @@ Return a JSON array with 3-5 components. Each component must have:
             test_results=test_results_str,
             current_score=current_score
         )
+
+        # INJECT FAILURE ANALYSIS DIRECTLY (for explicit error prevention)
+        failure_analysis = state.get("failure_analysis", {})
+        if failure_analysis:
+            error_patterns = failure_analysis.get("error_patterns", [])
+            failed_components = failure_analysis.get("failed_components", [])
+
+            if error_patterns or failed_components:
+                failure_text = "\n\n## ⚠️ ERROR PATTERNS TO PREVENT (from MetaEvaluator analysis)\n\n"
+                failure_text += "These errors occurred in previous components - plan to AVOID them:\n\n"
+
+                if error_patterns:
+                    failure_text += "**Recurring Error Types:**\n"
+                    for i, pattern in enumerate(error_patterns[:5], 1):
+                        failure_text += f"{i}. {pattern}\n"
+                    failure_text += "\n"
+
+                if failed_components:
+                    failure_text += "**Failed Components (DO NOT repeat similar approaches):**\n"
+                    for comp in failed_components[:5]:
+                        comp_name = comp.get("name", "Unknown")
+                        comp_type = comp.get("type", "unknown")
+                        error = comp.get("error", "Unknown error")[:100]
+                        failure_text += f"- {comp_name} ({comp_type}): {error}\n"
+                    failure_text += "\n"
+
+                failure_text += "**CRITICAL**: When generating new components, ensure they handle these cases properly.\n"
+
+                prompt += failure_text
+                print(f"  ⚠️ Injected {len(error_patterns)} error patterns into prompt")
 
         # INJECT META-EVALUATOR GUIDANCE (RL Pattern)
         refinement_guidance = state.get("refinement_guidance", {})

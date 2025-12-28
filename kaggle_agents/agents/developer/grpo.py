@@ -3,10 +3,13 @@ GRPO: Reasoning-First Code Generation.
 
 Implements Group Relative Policy Optimization style reasoning traces
 that are generated before code generation to improve code quality.
+
+Also provides Chain-of-Thought (CoT) reasoning for complex code generation tasks.
 """
 
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -17,6 +20,22 @@ from ...utils.llm_utils import get_text_content
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
+
+
+@dataclass
+class ChainOfThoughtResult:
+    """Result of Chain-of-Thought reasoning before code generation."""
+    data_analysis: str          # Analysis of input data format and characteristics
+    transformation_plan: str    # Planned data transformations
+    model_architecture: str     # Model/algorithm selection reasoning
+    validation_strategy: str    # Cross-validation and evaluation strategy
+    output_format: str          # Submission format requirements
+    thinking_summary: str       # Overall reasoning summary
+    timestamp: datetime = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now()
 
 
 class GRPOMixin:
@@ -274,4 +293,295 @@ Provide an IMPROVED version focusing on the weak areas. Return JSON:
 {validation_str}
 
 **IMPORTANT**: Follow this reasoning trace. Address ALL identified issues in your implementation.
+"""
+
+    def _verify_code_alignment(
+        self,
+        code: str,
+        trace: ReasoningTrace,
+        state: KaggleState,
+    ) -> tuple[float, list[str]]:
+        """
+        GRPO Enforcement: Verify that generated code aligns with reasoning trace.
+
+        Checks:
+        1. Validation checklist items are addressed in code
+        2. Identified issues have corresponding safeguards
+        3. Implementation follows planned approach
+
+        Args:
+            code: Generated code
+            trace: Reasoning trace that guided generation
+            state: Current workflow state
+
+        Returns:
+            Tuple of (alignment_score, list of missing items)
+        """
+        if not trace or not code:
+            return 0.5, []
+
+        code_lower = code.lower()
+        missing_items = []
+        checks_passed = 0
+        total_checks = 0
+
+        # 1. Check validation checklist items (most important)
+        for check in trace.validation_checklist:
+            total_checks += 1
+            # Extract key concepts from checklist item
+            concepts = [w.strip().lower() for w in check.split() if len(w) > 3]
+            if any(c in code_lower for c in concepts[:3]):
+                checks_passed += 1
+            else:
+                missing_items.append(f"Missing validation: {check}")
+
+        # 2. Check if potential issues are addressed
+        issue_keywords = {
+            "timeout": ["timeout", "time_limit", "deadline", "max_time"],
+            "memory": ["memory", "gc.collect", "del ", "chunk"],
+            "overflow": ["clip", "nan", "inf", "overflow"],
+            "cross-validation": ["kfold", "stratified", "cv", "fold"],
+            "prediction": ["predict", "predict_proba", "submission"],
+            "save": ["save", "dump", "pickle", "np.save", "to_csv"],
+        }
+
+        for issue in trace.potential_issues:
+            issue_lower = issue.lower()
+            for key, patterns in issue_keywords.items():
+                if key in issue_lower:
+                    total_checks += 1
+                    if any(p in code_lower for p in patterns):
+                        checks_passed += 1
+                    else:
+                        missing_items.append(f"Issue not addressed: {issue[:50]}")
+                    break
+
+        # 3. Check implementation plan steps
+        if trace.implementation_plan:
+            steps = [s.strip() for s in trace.implementation_plan.split("\n") if s.strip()]
+            for step in steps[:5]:  # Check first 5 steps
+                # Extract action verbs and nouns
+                keywords = [w.lower() for w in step.split() if len(w) > 4][:3]
+                if keywords:
+                    total_checks += 1
+                    if any(k in code_lower for k in keywords):
+                        checks_passed += 1
+                    else:
+                        missing_items.append(f"Step not found: {step[:40]}")
+
+        # Calculate alignment score
+        alignment_score = checks_passed / max(total_checks, 1)
+
+        return alignment_score, missing_items
+
+    def _regenerate_with_strict_enforcement(
+        self,
+        original_code: str,
+        trace: ReasoningTrace,
+        missing_items: list[str],
+        component: AblationComponent,
+        state: KaggleState,
+    ) -> str:
+        """
+        GRPO Enforcement: Regenerate code with strict alignment to reasoning trace.
+
+        When initial code doesn't align well with the reasoning trace, this
+        method regenerates with explicit requirements for each missing item.
+
+        Args:
+            original_code: Original generated code
+            trace: Reasoning trace
+            missing_items: Items that were not addressed
+            component: Component being implemented
+            state: Current workflow state
+
+        Returns:
+            Regenerated code with better alignment
+        """
+        print(f"   🔄 GRPO Enforcement: Regenerating with strict alignment...")
+        print(f"   Missing items to address: {len(missing_items)}")
+
+        missing_str = "\n".join(f"  - {item}" for item in missing_items[:10])
+
+        enforcement_prompt = f"""You generated code that does NOT fully align with the reasoning trace.
+
+## MISSING REQUIREMENTS (MUST address each one):
+{missing_str}
+
+## ORIGINAL REASONING TRACE TO FOLLOW:
+
+### Requirements
+{trace.requirements_analysis}
+
+### Potential Issues (MUST handle)
+{chr(10).join('- ' + issue for issue in trace.potential_issues)}
+
+### Validation Checklist (MUST implement)
+{chr(10).join('- ' + check for check in trace.validation_checklist)}
+
+## ORIGINAL CODE (incomplete):
+```python
+{original_code[:3000]}
+```
+
+## YOUR TASK:
+Modify the code above to address ALL missing requirements.
+For each missing item, add explicit handling:
+1. If a validation check is missing, add it
+2. If an issue isn't handled, add safeguards
+3. If a step is missing, implement it
+
+Return the COMPLETE, corrected Python code.
+Wrap your code in ```python ... ```"""
+
+        messages = [
+            SystemMessage(content="You are an expert ML engineer enforcing code quality requirements. Address ALL missing items explicitly."),
+            HumanMessage(content=enforcement_prompt),
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+            content = get_text_content(response.content)
+
+            # Extract code from response
+            if "```python" in content:
+                code = content.split("```python")[1].split("```")[0]
+            elif "```" in content:
+                code = content.split("```")[1].split("```")[0]
+            else:
+                code = content
+
+            return code.strip()
+
+        except Exception as e:
+            print(f"   ⚠️ GRPO enforcement failed: {e}")
+            return original_code
+
+    def _generate_chain_of_thought(
+        self,
+        component: AblationComponent,
+        state: KaggleState,
+        data_info: str = "",
+    ) -> ChainOfThoughtResult:
+        """
+        Generate explicit Chain-of-Thought reasoning before code generation.
+
+        This provides step-by-step reasoning about:
+        1. What data format will be received
+        2. What transformations are needed
+        3. What model architecture fits the task
+        4. What validation strategy prevents overfitting
+        5. What output format the submission needs
+
+        Args:
+            component: Component to implement
+            state: Current workflow state
+            data_info: Optional dataset information
+
+        Returns:
+            ChainOfThoughtResult with structured reasoning
+        """
+        competition_info = state.get("competition_info")
+        domain = state.get("domain_detected", "tabular")
+        metric = competition_info.evaluation_metric if competition_info else "unknown"
+        problem_type = competition_info.problem_type if competition_info else "unknown"
+
+        prompt = f"""Before writing code, think step-by-step about the implementation:
+
+## TASK CONTEXT
+Component: {component.name} ({component.component_type})
+Competition: {competition_info.name if competition_info else 'Unknown'}
+Domain: {domain}
+Problem Type: {problem_type}
+Metric: {metric}
+Description: {component.code[:300] if component.code else 'No description'}
+
+{f'## DATA INFO{chr(10)}{data_info}' if data_info else ''}
+
+## THINK STEP BY STEP
+
+Answer each question carefully:
+
+1. DATA ANALYSIS: What is the expected input data format? What are the key columns/features? What data types are involved? What preprocessing might be needed?
+
+2. TRANSFORMATION PLAN: What specific transformations will you apply? Feature engineering steps? Encoding strategies? Handling missing values?
+
+3. MODEL ARCHITECTURE: What model/algorithm is most appropriate for this task and domain? What hyperparameters should be considered? Why is this model suitable?
+
+4. VALIDATION STRATEGY: How will you implement cross-validation? How many folds? StratifiedKFold for classification? What prevents overfitting?
+
+5. OUTPUT FORMAT: What is the exact submission format required? How will predictions be saved? What columns are expected?
+
+Return your reasoning in JSON format:
+{{
+    "data_analysis": "Your analysis of the input data...",
+    "transformation_plan": "Specific transformations to apply...",
+    "model_architecture": "Model choice and reasoning...",
+    "validation_strategy": "CV strategy and overfitting prevention...",
+    "output_format": "Exact submission requirements...",
+    "thinking_summary": "Overall approach in 2-3 sentences"
+}}"""
+
+        messages = [
+            SystemMessage(content="You are an expert ML engineer planning an implementation. Think carefully before coding."),
+            HumanMessage(content=prompt),
+        ]
+
+        try:
+            response = self.llm.invoke(messages)
+            content = get_text_content(response.content).strip()
+
+            json_match = re.search(r'\{[\s\S]*\}', content)
+            if json_match:
+                result = json.loads(json_match.group())
+
+                return ChainOfThoughtResult(
+                    data_analysis=result.get("data_analysis", ""),
+                    transformation_plan=result.get("transformation_plan", ""),
+                    model_architecture=result.get("model_architecture", ""),
+                    validation_strategy=result.get("validation_strategy", ""),
+                    output_format=result.get("output_format", ""),
+                    thinking_summary=result.get("thinking_summary", ""),
+                )
+
+        except Exception as e:
+            print(f"   ⚠️ Chain-of-Thought generation failed: {e}")
+
+        # Default fallback
+        return ChainOfThoughtResult(
+            data_analysis=f"Implement {component.component_type} for {domain} domain",
+            transformation_plan="Apply standard preprocessing",
+            model_architecture="Use appropriate model for task",
+            validation_strategy="Use StratifiedKFold cross-validation",
+            output_format="Standard submission.csv format",
+            thinking_summary="Standard implementation approach",
+        )
+
+    def _format_cot_for_prompt(self, cot: ChainOfThoughtResult) -> str:
+        """Format Chain-of-Thought result for injection into code generation prompt."""
+        if not cot:
+            return ""
+
+        return f"""
+## Chain-of-Thought Analysis (FOLLOW THIS PLAN)
+
+### 1. Data Analysis
+{cot.data_analysis}
+
+### 2. Transformation Plan
+{cot.transformation_plan}
+
+### 3. Model Architecture
+{cot.model_architecture}
+
+### 4. Validation Strategy
+{cot.validation_strategy}
+
+### 5. Output Format
+{cot.output_format}
+
+### Summary
+{cot.thinking_summary}
+
+**IMPORTANT**: Follow this reasoning in your implementation. Each section above should be reflected in your code.
 """

@@ -3,6 +3,10 @@ Multi-level retry, debug, and fix logic.
 
 Provides capabilities for retrying code execution with increasing
 levels of intervention (fix, debug, simplify).
+
+Uses dynamic temperature strategy:
+- Higher temperatures for error fixing (0.25-0.5) to encourage creative solutions
+- Lower temperatures for initial generation (0.1) for consistency
 """
 
 from dataclasses import replace
@@ -11,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from ...core.config import get_llm_for_role
 from ...core.state import AblationComponent, DevelopmentResult, KaggleState
 from ...prompts.templates.developer_prompts import (
     DEBUG_CODE_PROMPT,
@@ -20,6 +25,7 @@ from ...prompts.templates.developer_prompts import (
     format_error_info,
 )
 from ...utils.llm_utils import get_text_content
+from .agent import get_dynamic_temperature
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -165,14 +171,20 @@ class RetryMixin:
                 simplified_code = self._fix_code_error(
                     simplified_code,
                     exec_result.errors[0] if exec_result.errors else exec_result.stderr,
+                    attempt=attempt,
                 )
 
         print("❌ All retry levels exhausted (original + debug + simplified)")
         return simplified_code, False
 
-    def _fix_syntax_error(self, code: str, error: str) -> str:
-        """Fix syntax error in code."""
-        return self._fix_code_error(code, f"SyntaxError: {error}")
+    def _fix_syntax_error(self, code: str, error: str, component_type: str = "model") -> str:
+        """Fix syntax error in code with dynamic temperature."""
+        return self._fix_code_error(
+            code,
+            f"SyntaxError: {error}",
+            attempt=0,  # Syntax errors are usually first-pass issues
+            component_type=component_type,
+        )
 
     def _get_meta_feedback(self, code: str, error: str, component_name: str) -> str:
         """
@@ -227,12 +239,48 @@ class RetryMixin:
         error: str,
         *,
         meta_feedback: str | None = None,
+        attempt: int = 0,
+        component_type: str = "model",
+        state: dict | None = None,
     ) -> str:
-        """Fix code based on error."""
+        """
+        Fix code based on error with dynamic temperature.
+
+        Uses higher temperature for fixing (0.25-0.5) to encourage
+        creative problem-solving, escalating with each failed attempt.
+
+        Also injects meta-evaluator guidance for strategic error fixing.
+
+        Args:
+            code: Code that failed
+            error: Error message
+            meta_feedback: Optional meta-evaluator feedback
+            attempt: Current fix attempt (0-indexed), used for temperature escalation
+            component_type: Type of component being fixed
+            state: Optional state dict for meta-evaluator guidance
+
+        Returns:
+            Fixed code
+        """
         error_info = format_error_info(error)
         error_text = error_info["error"]
         if meta_feedback:
             error_text = f"{error_text}\n\nMeta-Feedback:\n{meta_feedback}"
+
+        # META-EVAL FEEDBACK LOOP: Inject refinement guidance if available
+        if state:
+            refinement_guidance = state.get("refinement_guidance", {})
+            developer_guidance = refinement_guidance.get("developer_guidance", "")
+            if developer_guidance:
+                error_text = f"{error_text}\n\n## Meta-Evaluator Strategy:\n{developer_guidance}"
+
+        # Get dynamic temperature based on attempt number
+        fix_temperature = get_dynamic_temperature(
+            context="fixing",
+            attempt=attempt,
+            component_type=component_type,
+        )
+        print(f"   🌡️  Fix temperature: {fix_temperature} (attempt {attempt + 1})")
 
         if self.use_dspy:
             result = self.fixer_module(
@@ -255,7 +303,13 @@ class RetryMixin:
                 HumanMessage(content=prompt),
             ]
 
-            response = self.llm.invoke(messages)
+            # Create LLM with dynamic temperature for fixing
+            fix_llm = get_llm_for_role(
+                role="developer",
+                temperature=fix_temperature,
+                max_tokens=self.config.llm.max_tokens,
+            )
+            response = fix_llm.invoke(messages)
             fixed_code = self._extract_code_from_response(get_text_content(response.content))
 
         return fixed_code
@@ -269,8 +323,16 @@ class RetryMixin:
         meta_feedback: str | None = None,
         component_name: str = "",
         component_type: str = "",
+        state: dict | None = None,
     ) -> tuple[str, "ExecutionResult", bool]:
-        """Debug code iteratively with loop-safety and configurable timeouts."""
+        """
+        Debug code iteratively with loop-safety, configurable timeouts, and dynamic temperature.
+
+        Uses higher temperature (0.45) in debug mode to encourage creative solutions
+        when standard fixes have failed.
+
+        Also injects meta-evaluator guidance from state for strategic debugging direction.
+        """
         # DPO: Store original code for preference pair collection
         original_code = code
         original_error = exec_result.errors[0] if exec_result.errors else exec_result.stderr[:500]
@@ -280,6 +342,38 @@ class RetryMixin:
         if original_timeout is not None:
             self.executor.timeout = min(original_timeout, debug_timeout)
             print(f"   Debug timeout set to: {self.executor.timeout}s ({self.executor.timeout / 60:.1f} min)")
+
+        # META-EVAL FEEDBACK LOOP: Inject refinement guidance from MetaEvaluator
+        if state:
+            refinement_guidance = state.get("refinement_guidance", {})
+            developer_guidance = refinement_guidance.get("developer_guidance", "")
+            priority_fixes = refinement_guidance.get("priority_fixes", [])
+
+            if developer_guidance or priority_fixes:
+                meta_eval_context = "\n\n## Meta-Evaluator Strategic Guidance:\n"
+                if developer_guidance:
+                    meta_eval_context += f"{developer_guidance}\n"
+                if priority_fixes:
+                    meta_eval_context += "Priority error patterns to avoid:\n"
+                    for fix in priority_fixes[:3]:
+                        meta_eval_context += f"  - {fix}\n"
+
+                meta_feedback = (meta_feedback or "") + meta_eval_context
+                print("   🧠 Injected Meta-Evaluator guidance into debug context")
+
+        # Get debug temperature (higher for creative problem-solving)
+        debug_temperature = get_dynamic_temperature(
+            context="debug",
+            component_type=component_type,
+        )
+        print(f"   🌡️  Debug temperature: {debug_temperature}")
+
+        # Create LLM with debug temperature
+        debug_llm = get_llm_for_role(
+            role="developer",
+            temperature=debug_temperature,
+            max_tokens=self.config.llm.max_tokens,
+        )
 
         last_error_sig = None
 
@@ -302,7 +396,7 @@ class RetryMixin:
                 HumanMessage(content=prompt),
             ]
 
-            response = self.llm.invoke(messages)
+            response = debug_llm.invoke(messages)
             debugged_code = self._extract_code_from_response(get_text_content(response.content))
 
             test_result = self.executor.execute(debugged_code, working_dir)

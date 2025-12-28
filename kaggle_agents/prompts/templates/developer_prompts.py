@@ -377,6 +377,8 @@ class DynamicContext:
     early_stopping_patience: int = 30  # SOTA uses patience=30
     # Submission validation retry
     submission_validation_error: Optional[str] = None  # Error from last invalid submission
+    # DPO: Preference pairs for contrastive learning
+    dpo_examples: str = ""  # Formatted DPO pairs (good vs bad code examples)
 
 
 def build_context(state: dict[str, Any], component: Optional[Any] = None) -> DynamicContext:
@@ -549,7 +551,84 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
     # Extract submission validation error for retry context
     context.submission_validation_error = state.get("submission_validation_error")
 
+    # DPO: Extract preference pairs for contrastive learning
+    preference_pairs = state.get("preference_pairs", [])
+    if preference_pairs:
+        context.dpo_examples = _format_dpo_for_prompt(preference_pairs, component)
+
     return context
+
+
+def _format_dpo_for_prompt(pairs: list, component: Optional[Any] = None) -> str:
+    """
+    Format DPO preference pairs as contrastive examples for prompts.
+
+    Shows what code patterns succeeded vs failed, helping the model
+    learn from past mistakes and successes.
+
+    Args:
+        pairs: List of PreferencePair objects
+        component: Optional component to filter relevant pairs
+
+    Returns:
+        Formatted string with contrastive examples
+    """
+    if not pairs:
+        return ""
+
+    # Filter pairs by component type if available
+    component_type = getattr(component, "component_type", None) if component else None
+    if component_type:
+        relevant_pairs = [p for p in pairs if getattr(p, "component_type", "") == component_type]
+        if not relevant_pairs:
+            relevant_pairs = pairs  # Fall back to all pairs
+    else:
+        relevant_pairs = pairs
+
+    # Sort by margin (most informative examples first)
+    def get_margin(p):
+        return getattr(p, "margin", 0.0)
+
+    sorted_pairs = sorted(relevant_pairs, key=get_margin, reverse=True)
+
+    # Take top 3 most informative pairs
+    selected = sorted_pairs[:3]
+
+    lines = ["## DPO: Learned Code Preferences (from past fixes)\n"]
+    lines.append("Learn from these successful fixes - avoid the rejected patterns, follow the chosen patterns:\n")
+
+    for i, pair in enumerate(selected, 1):
+        context_desc = getattr(pair, "context", "Code fix")[:50]
+        margin = getattr(pair, "margin", 0.0)
+
+        # Get code snippets (truncated for prompt efficiency)
+        rejected = getattr(pair, "rejected", "")
+        chosen = getattr(pair, "chosen", "")
+
+        # Extract key differences (first 150 chars of each)
+        rejected_snippet = rejected[:150].strip()
+        chosen_snippet = chosen[:150].strip()
+
+        if rejected_snippet and chosen_snippet:
+            lines.append(f"### Example {i}: {context_desc}")
+            lines.append(f"**Improvement margin:** {margin:.2f}")
+            lines.append("")
+            lines.append("**❌ AVOID (this pattern failed):**")
+            lines.append(f"```python")
+            lines.append(rejected_snippet + "...")
+            lines.append("```")
+            lines.append("")
+            lines.append("**✅ PREFER (this pattern succeeded):**")
+            lines.append(f"```python")
+            lines.append(chosen_snippet + "...")
+            lines.append("```")
+            lines.append("")
+
+    if len(lines) > 2:  # More than just header
+        lines.append("**INSTRUCTION**: When implementing similar code, follow the preferred patterns above.")
+        return "\n".join(lines)
+
+    return ""
 
 
 def _format_sota_for_prompt(solutions: list, max_solutions: int = 3) -> str:
@@ -625,6 +704,7 @@ def compose_generate_prompt(
     competition_info,
     paths: dict[str, str],
     context: DynamicContext,
+    use_modular_constraints: bool = True,
 ) -> str:
     """
     Compose a dynamic, context-aware code generation prompt.
@@ -633,19 +713,35 @@ def compose_generate_prompt(
     - Iteration 0: SOTA-heavy (learn from winners)
     - Later iterations: Feedback-heavy + truncated SOTA reference
 
+    Now supports modular constraints to reduce token usage (40-60% reduction).
+
     Args:
         component: AblationComponent to implement
         competition_info: CompetitionInfo with metadata
         paths: Dictionary with train, test, submission, models paths
         context: DynamicContext with SOTA, feedback, rewards
+        use_modular_constraints: If True, load domain-specific constraints only
 
     Returns:
         Composed prompt string
     """
+    # Get domain-specific constraints (modular) or full constraints
+    if use_modular_constraints:
+        try:
+            from .constraints import get_constraints_for_domain
+            # Handle None domain by defaulting to "tabular"
+            domain = getattr(competition_info, "domain", None) or "tabular"
+            constraints = get_constraints_for_domain(domain)
+            print(f"   📦 Loaded modular constraints for domain: {domain}")
+        except Exception:
+            constraints = HARD_CONSTRAINTS  # Fallback to full constraints
+    else:
+        constraints = HARD_CONSTRAINTS
+
     parts = [
         DEVELOPER_CORE_IDENTITY,
         "",
-        HARD_CONSTRAINTS,
+        constraints,
         "",
         LOGGING_FORMAT,
         "",
@@ -754,6 +850,11 @@ def compose_generate_prompt(
             parts.append("")
             parts.append("## What Worked (Keep these approaches):")
             parts.append("\n".join(f"- {w}" for w in context.what_worked[:5]))
+
+        # DPO: Inject contrastive learning examples (good vs bad code)
+        if context.dpo_examples:
+            parts.append("")
+            parts.append(context.dpo_examples)
 
         # Still include truncated SOTA as reference
         if context.sota_patterns:

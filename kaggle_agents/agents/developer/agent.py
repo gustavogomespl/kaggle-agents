@@ -19,6 +19,64 @@ from ...core.config import (
     get_llm_for_role,
     is_metric_minimization,
 )
+
+# Dynamic temperature settings for different contexts
+TEMPERATURE_SETTINGS = {
+    "initial_generation": 0.1,      # Conservative for initial code generation
+    "error_fixing_attempt_1": 0.25, # Slightly more creative for first fix
+    "error_fixing_attempt_2": 0.4,  # More creative after first attempt fails
+    "error_fixing_attempt_3": 0.5,  # Maximum creativity for persistent errors
+    "debug_mode": 0.45,             # Higher creativity in debug mode
+    "ensemble": 0.3,                # Moderate creativity for ensemble strategies
+    "feature_engineering": 0.2,     # Some creativity for feature ideas
+    "refinement": 0.35,             # Moderate for refinement iterations
+}
+
+
+def get_dynamic_temperature(
+    context: str,
+    attempt: int = 0,
+    component_type: str = "model",
+) -> float:
+    """
+    Get dynamic temperature based on generation context.
+
+    Higher temperatures encourage creativity (useful for error fixing),
+    lower temperatures encourage consistency (useful for initial generation).
+
+    Args:
+        context: One of 'generation', 'fixing', 'debug', 'refinement'
+        attempt: Current attempt number (0-indexed)
+        component_type: Type of component being generated
+
+    Returns:
+        Appropriate temperature value
+    """
+    if context == "generation":
+        # Use component-specific temperature for generation
+        if component_type == "ensemble":
+            return TEMPERATURE_SETTINGS["ensemble"]
+        elif component_type == "feature_engineering":
+            return TEMPERATURE_SETTINGS["feature_engineering"]
+        return TEMPERATURE_SETTINGS["initial_generation"]
+
+    elif context == "fixing":
+        # Escalate temperature with each failed attempt
+        if attempt <= 0:
+            return TEMPERATURE_SETTINGS["error_fixing_attempt_1"]
+        elif attempt == 1:
+            return TEMPERATURE_SETTINGS["error_fixing_attempt_2"]
+        else:
+            return TEMPERATURE_SETTINGS["error_fixing_attempt_3"]
+
+    elif context == "debug":
+        return TEMPERATURE_SETTINGS["debug_mode"]
+
+    elif context == "refinement":
+        return TEMPERATURE_SETTINGS["refinement"]
+
+    # Default fallback
+    return TEMPERATURE_SETTINGS["initial_generation"]
 from ...core.state import (
     AblationComponent,
     CodeAttempt,
@@ -737,6 +795,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         # GRPO: Generate reasoning trace before code generation
         reasoning_trace = None
+        cot_result = None
         run_mode = str(state.get("run_mode", "")).lower()
         use_grpo = run_mode != "mlebench" and not state.get("fast_mode", False)
 
@@ -772,11 +831,53 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             # Store for state persistence
             self._last_reasoning_trace = reasoning_trace
 
+            # Chain-of-Thought: Generate explicit step-by-step thinking
+            print("\n💭 Chain-of-Thought: Step-by-step reasoning...")
+            dataset_info = self._get_dataset_info(working_dir, state)
+            cot_result = self._generate_chain_of_thought(
+                component, state, data_info=dataset_info
+            )
+            print(f"   Summary: {cot_result.thinking_summary[:100]}...")
+
+            # Store CoT in state for debugging
+            state["last_cot_thinking"] = {
+                "data_analysis": cot_result.data_analysis,
+                "transformation_plan": cot_result.transformation_plan,
+                "model_architecture": cot_result.model_architecture,
+                "validation_strategy": cot_result.validation_strategy,
+                "output_format": cot_result.output_format,
+                "summary": cot_result.thinking_summary,
+            }
+
         print("\nGenerating code...")
         code = self._generate_code(
             component, competition_info, working_dir, domain, state,
             reasoning_trace=reasoning_trace,
+            cot_result=cot_result,
         )
+
+        # GRPO Enforcement: Verify code alignment with reasoning trace
+        if use_grpo and reasoning_trace:
+            print("\n🎯 GRPO Enforcement: Verifying code alignment...")
+            alignment_score, missing_items = self._verify_code_alignment(
+                code, reasoning_trace, state
+            )
+            print(f"   Alignment score: {alignment_score:.2f}")
+
+            # If alignment is below threshold, regenerate with strict enforcement
+            if alignment_score < 0.6 and missing_items:
+                print(f"   ⚠️ Low alignment detected ({len(missing_items)} missing items)")
+                code = self._regenerate_with_strict_enforcement(
+                    original_code=code,
+                    trace=reasoning_trace,
+                    missing_items=missing_items,
+                    component=component,
+                    state=state,
+                )
+                # Re-verify after enforcement
+                new_score, _ = self._verify_code_alignment(code, reasoning_trace, state)
+                print(f"   Post-enforcement alignment: {new_score:.2f}")
+
         attempt_records.append(
             CodeAttempt(
                 component_name=component.name,
@@ -818,32 +919,56 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         is_valid, syntax_error = self.executor.validate_syntax(code)
         if not is_valid:
             print(f"Syntax error detected: {syntax_error}")
-            code = self._fix_syntax_error(code, syntax_error)
+            code = self._fix_syntax_error(code, syntax_error, component.component_type)
 
-        # Quiet-STaR: Self-evaluate code before execution
+        # Quiet-STaR: ITERATIVE self-evaluation loop before execution
         use_quiet_star = run_mode != "mlebench" and not state.get("fast_mode", False)
+        MAX_QUIET_STAR_ITERATIONS = 3
+        CONFIDENCE_THRESHOLD = 0.7
 
         if use_quiet_star:
-            print("\n🔮 Quiet-STaR: Self-evaluating code...")
-            self_eval = self._self_evaluate_code(code, component, state)
-            print(f"   Confidence: {self_eval.confidence:.2f}, Proceed: {self_eval.proceed}")
+            print("\n🔮 Quiet-STaR: Iterative self-evaluation loop...")
 
-            if self_eval.concerns:
-                print(f"   Concerns: {', '.join(self_eval.concerns[:3])}")
+            best_code = code
+            best_confidence = 0.0
 
-            # Store for state persistence
-            self._last_self_evaluation = self_eval
+            for qs_iter in range(MAX_QUIET_STAR_ITERATIONS):
+                print(f"   Iteration {qs_iter + 1}/{MAX_QUIET_STAR_ITERATIONS}")
 
-            # Decision checkpoint: apply fixes if confidence is low or proceed=False
-            if self_eval.confidence < 0.5 or not self_eval.proceed:
+                self_eval = self._self_evaluate_code(code, component, state)
+                print(f"   Confidence: {self_eval.confidence:.2f}, Proceed: {self_eval.proceed}")
+
+                if self_eval.concerns:
+                    print(f"   Concerns: {', '.join(self_eval.concerns[:3])}")
+
+                # Track best code version
+                if self_eval.confidence > best_confidence:
+                    best_confidence = self_eval.confidence
+                    best_code = code
+
+                # Store for state persistence
+                self._last_self_evaluation = self_eval
+
+                # Exit condition: confidence is good enough
+                if self_eval.confidence >= CONFIDENCE_THRESHOLD and self_eval.proceed:
+                    print(f"   ✓ Confidence threshold reached ({self_eval.confidence:.2f} >= {CONFIDENCE_THRESHOLD})")
+                    break
+
+                # Apply fixes if available
                 if self_eval.suggested_fixes:
                     print("   🔧 Applying self-evaluation fixes...")
                     code = self._apply_self_evaluation_fixes(code, self_eval, component)
+                else:
+                    # No fixes to apply, can't improve further
+                    print("   ℹ️ No suggested fixes available, stopping iteration")
+                    break
 
-                    # Re-evaluate after fixes
-                    self_eval = self._self_evaluate_code(code, component, state)
-                    self._last_self_evaluation = self_eval
-                    print(f"   Post-fix confidence: {self_eval.confidence:.2f}")
+            # Use the best code version we found
+            if best_confidence > self_eval.confidence:
+                print(f"   Using best code version (confidence: {best_confidence:.2f})")
+                code = best_code
+
+            print(f"   Final Quiet-STaR confidence: {max(best_confidence, self_eval.confidence):.2f}")
 
         print("\nExecuting code...")
         max_retries = 3
@@ -965,7 +1090,14 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     snippet = error_msg.replace("\n", " ")[:400]
                     print(f"Passing error context to fixer: {snippet}")
                 print("Attempting to fix...")
-                code = self._fix_code_error(code, error_msg, meta_feedback=meta_feedback)
+                code = self._fix_code_error(
+                    code,
+                    error_msg,
+                    meta_feedback=meta_feedback,
+                    attempt=attempt,
+                    component_type=component.component_type,
+                    state=state,  # Pass state for Meta-Evaluator guidance
+                )
 
         # If all retries failed, try debug iterations
         print("\nEntering debug mode...")
@@ -978,6 +1110,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         code, exec_result, debug_success = self._debug_code(
             code, exec_result, working_dir, max_iterations=5, meta_feedback=meta_feedback,
             component_name=component.name, component_type=component.component_type,
+            state=state,  # Pass state for Meta-Evaluator guidance injection
         )
 
         attempt_records.append(
@@ -1019,8 +1152,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         domain: str,
         state: KaggleState = None,
         reasoning_trace: ReasoningTrace = None,
+        cot_result=None,  # ChainOfThoughtResult from GRPO
     ) -> str:
-        """Generate code for a component with optional GRPO reasoning trace."""
+        """Generate code for a component with optional GRPO reasoning trace and CoT."""
         component_details = format_component_details(component)
 
         dataset_info = self._get_dataset_info(working_dir, state)
@@ -1092,6 +1226,11 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         if reasoning_trace:
             reasoning_guidance = self._format_reasoning_for_prompt(reasoning_trace)
             requirements = reasoning_guidance + "\n\n" + requirements
+
+        # Chain-of-Thought: Inject step-by-step thinking into requirements
+        if cot_result:
+            cot_guidance = self._format_cot_for_prompt(cot_result)
+            requirements = cot_guidance + "\n\n" + requirements
 
         # Build dynamic context from state (SOTA, feedback, rewards)
         context = build_context(state, component=component) if state else build_context({})
