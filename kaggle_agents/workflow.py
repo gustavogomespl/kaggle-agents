@@ -143,7 +143,7 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
 
 def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     """
-    Detect competition domain.
+    Detect competition domain using LLM-First approach.
 
     Args:
         state: Current state
@@ -158,86 +158,50 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     competition_info = state["competition_info"]
     working_dir = state["working_directory"]
 
-    # Fast-path: in MLE-bench mode (and some pipelines) we already know the raw data type
-    data_type = (state.get("data_files") or {}).get("data_type")
-    problem_type = (competition_info.problem_type or "").lower()
-
     submission_format_type = None
     submission_format_metadata: dict[str, Any] = {}
 
-    if data_type in {"image", "audio", "text"}:
-        if data_type == "image":
-            # Check for image-to-image indicators FIRST
-            is_image_to_image = False
-            data_files = state.get("data_files") or {}
+    # Get LLM for domain detection (use planner's LLM with low temperature)
+    from .core.config import get_llm_for_role
+    try:
+        llm = get_llm_for_role(role="planner", temperature=0.0)
+    except Exception as e:
+        print(f"   Warning: Could not get LLM for domain detection: {e}")
+        llm = None
 
-            # 1. Check for clean/target directory (e.g., train_cleaned for denoising)
-            clean_train_path = data_files.get("clean_train", "")
-            if clean_train_path and Path(clean_train_path).exists():
-                is_image_to_image = True
-                print("   Detected clean/target directory -> image_to_image")
+    # Use LLM-First domain detection (delegated to detector.py)
+    domain, confidence = detect_competition_domain(competition_info, working_dir, llm=llm)
 
-            # 2. Check competition name for image-to-image keywords
-            comp_name = (competition_info.name or "").lower()
-            comp_desc = (competition_info.description or "").lower()
-            image_to_image_keywords = [
-                "denois", "deblur", "super-resolution", "superresolution",
-                "inpaint", "coloriz", "colouri", "restoration", "enhance",
-                "noise", "clean", "dirty", "blur", "artifact"
-            ]
-            if any(kw in comp_name or kw in comp_desc for kw in image_to_image_keywords):
-                is_image_to_image = True
-                print(f"   Detected image-to-image keyword in competition name/description")
+    # Check for image-to-image overrides (pixel-level submission format)
+    data_files = state.get("data_files") or {}
+    data_type = data_files.get("data_type")
 
-            # 3. Check for pixel-level submission format (many rows per image)
-            sample_sub_path = data_files.get("sample_submission", "") or state.get("sample_submission_path", "")
-            test_path = data_files.get("test", "") or state.get("test_data_path", "")
-            if sample_sub_path and Path(sample_sub_path).exists():
-                from .domain import detect_submission_format
-                sub_format, sub_meta = detect_submission_format(
-                    sample_sub_path,
-                    test_path if test_path else None,
-                    competition_info
-                )
-                submission_format_type = sub_format
-                submission_format_metadata = sub_meta
-                if sub_format == "pixel_level":
-                    is_image_to_image = True
-                    print(f"   Detected pixel-level submission format -> image_to_image")
-                    print(f"      Expected rows: {sub_meta.get('expected_rows', 'unknown')}")
-                    print(f"      ID pattern: {sub_meta.get('id_pattern', 'unknown')}")
+    if data_type == "image":
+        # Check for clean/target directory (e.g., train_cleaned for denoising)
+        clean_train_path = data_files.get("clean_train", "")
+        if clean_train_path and Path(clean_train_path).exists():
+            domain = "image_to_image"
+            confidence = 0.95
+            print("   Override: Detected clean/target directory -> image_to_image")
 
-            if is_image_to_image:
+        # Check for pixel-level submission format (many rows per image)
+        sample_sub_path = data_files.get("sample_submission", "") or state.get("sample_submission_path", "")
+        test_path = data_files.get("test", "") or state.get("test_data_path", "")
+        if sample_sub_path and Path(sample_sub_path).exists():
+            from .domain import detect_submission_format
+            sub_format, sub_meta = detect_submission_format(
+                sample_sub_path,
+                test_path if test_path else None,
+                competition_info
+            )
+            submission_format_type = sub_format
+            submission_format_metadata = sub_meta
+            if sub_format == "pixel_level":
                 domain = "image_to_image"
                 confidence = 0.95
-            elif "segment" in comp_desc or "segment" in comp_name:
-                domain = "image_segmentation"
-                confidence = 0.95
-            elif "detect" in comp_desc or "object" in comp_desc:
-                domain = "object_detection"
-                confidence = 0.95
-            elif "regression" in problem_type:
-                domain = "image_regression"
-                confidence = 0.95
-            else:
-                domain = "image_classification"
-                confidence = 0.95
-
-        elif data_type == "audio":
-            domain = "audio_regression" if "regression" in problem_type else "audio_classification"
-            confidence = 0.95
-        else:  # text
-            if "seq" in problem_type or "seq2seq" in problem_type:
-                domain = "seq_to_seq"
-                confidence = 0.95
-            elif "regression" in problem_type:
-                domain = "text_regression"
-                confidence = 0.95
-            else:
-                domain = "text_classification"
-                confidence = 0.95
-    else:
-        domain, confidence = detect_competition_domain(competition_info, working_dir)
+                print(f"   Override: Detected pixel-level submission format -> image_to_image")
+                print(f"      Expected rows: {sub_meta.get('expected_rows', 'unknown')}")
+                print(f"      ID pattern: {sub_meta.get('id_pattern', 'unknown')}")
 
     print(f"\n Domain Detected: {domain}")
     print(f"   Confidence: {confidence:.1%}")
