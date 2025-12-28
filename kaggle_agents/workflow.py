@@ -341,14 +341,33 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     if submissions:
         latest_sub = submissions[-1]
         public_score = latest_sub.public_score
-        if public_score:
+        if public_score is not None:
             print(f"\n📊 Public Score: {public_score:.4f}")
-            # Use public score if available
-            current_score = max(current_score, public_score)
+            # Use metric direction for score selection
+            from .core.config import compare_scores
+            if current_score == 0.0:
+                current_score = public_score
+            else:
+                try:
+                    metric_name = state["competition_info"].evaluation_metric
+                except Exception:
+                    metric_name = ""
+                current_score = compare_scores(current_score, public_score, metric_name)
+
+    from .core.config import is_metric_minimization
+
+    metric_name = ""
+    try:
+        metric_name = state["competition_info"].evaluation_metric
+    except Exception:
+        metric_name = ""
+
+    minimize = is_metric_minimization(metric_name)
+    gap = (current_score - target_score) if minimize else (target_score - current_score)
 
     print(f"\nCurrent Score: {current_score:.4f}")
     print(f"Target Score:  {target_score:.4f}")
-    print(f"Gap:           {target_score - current_score:.4f}")
+    print(f"Gap:           {gap:.4f} ({'minimize' if minimize else 'maximize'})")
 
     # Analyze component performance
     dev_results = state.get("development_results", [])
@@ -360,15 +379,21 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     needs_refinement = False
     refinement_reason = None
 
-    if current_score >= target_score:
-        print(f"\n🎉 Target achieved! ({current_score:.4f} >= {target_score:.4f})")
+    if minimize:
+        target_achieved = current_score <= target_score
+    else:
+        target_achieved = current_score >= target_score
+
+    if target_achieved:
+        comparator = "<=" if minimize else ">="
+        print(f"\n🎉 Target achieved! ({current_score:.4f} {comparator} {target_score:.4f})")
         needs_refinement = False
     elif current_iteration >= max_iterations:
         print(f"\n⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
         needs_refinement = False
     else:
         # Check if we have room for improvement
-        improvement_potential = target_score - current_score
+        improvement_potential = gap
 
         if improvement_potential > 0.001:  # 0.1% gap
             print(f"\n🔄 Refinement needed (gap: {improvement_potential:.4f})")

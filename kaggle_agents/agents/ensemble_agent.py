@@ -21,6 +21,76 @@ class EnsembleAgent:
         """Initialize ensemble agent."""
         pass
 
+    def _find_prediction_pairs(self, models_dir: Path) -> dict[str, tuple[Path, Path]]:
+        """Find matching OOF/Test prediction pairs under models/."""
+        oof_files = sorted(models_dir.glob("oof_*.npy"))
+        pairs: dict[str, tuple[Path, Path]] = {}
+        for oof_path in oof_files:
+            name = oof_path.stem.replace("oof_", "", 1)
+            test_path = models_dir / f"test_{name}.npy"
+            if test_path.exists():
+                pairs[name] = (oof_path, test_path)
+        return pairs
+
+    def _ensemble_from_predictions(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        sample_submission_path: Path,
+        output_path: Path,
+    ) -> bool:
+        """Create a simple average ensemble directly from saved predictions."""
+        if not sample_submission_path.exists():
+            print("   ❌ Sample submission not found, cannot build prediction ensemble")
+            return False
+
+        sample_sub = pd.read_csv(sample_submission_path)
+        preds_list = []
+        names = []
+
+        for name, (_, test_path) in prediction_pairs.items():
+            preds = np.load(test_path)
+            preds = np.asarray(preds, dtype=np.float32)
+            if preds.ndim == 1:
+                preds = preds.reshape(-1, 1)
+            preds_list.append(preds)
+            names.append(name)
+
+        if len(preds_list) < 2:
+            print("   ⚠️  Not enough prediction pairs for ensemble")
+            return False
+
+        # Ensure consistent shapes
+        shapes = {p.shape for p in preds_list}
+        if len(shapes) != 1:
+            print(f"   ❌ Prediction shapes mismatch: {shapes}")
+            return False
+
+        stacked = np.stack(preds_list, axis=0)  # (n_models, n_samples, n_cols)
+        ensemble_preds = stacked.mean(axis=0)
+
+        if ensemble_preds.shape[0] != len(sample_sub):
+            print(
+                f"   ❌ Prediction length mismatch: preds={ensemble_preds.shape[0]}, sample={len(sample_sub)}"
+            )
+            return False
+
+        if ensemble_preds.shape[1] == 1:
+            sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+        else:
+            if ensemble_preds.shape[1] != (len(sample_sub.columns) - 1):
+                print(
+                    "   ❌ Prediction column mismatch: "
+                    f"preds={ensemble_preds.shape[1]}, sample_cols={len(sample_sub.columns) - 1}"
+                )
+                return False
+            sample_sub.iloc[:, 1:] = ensemble_preds
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_sub.to_csv(output_path, index=False)
+        print(f"   ✅ Saved prediction-only ensemble to {output_path.name}")
+        print(f"   ✅ Models used: {', '.join(names)}")
+        return True
+
     def create_stacking_ensemble(
         self,
         models: list[Any],
@@ -611,6 +681,7 @@ Return a JSON object:
             working_dir = Path(working_dir_value) if working_dir_value else Path()
             test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
             sample_submission_path = state.get("sample_submission_path", "") if isinstance(state, dict) else state.sample_submission_path
+            models_dir = working_dir / "models"
             
             # Access metric name safely from competition_info
             comp_info = state.get("competition_info") if isinstance(state, dict) else getattr(state, "competition_info", None)
@@ -633,8 +704,27 @@ Return a JSON object:
 
             # Check if we have multiple models
             if len(models_trained) < 2:
+                prediction_pairs = self._find_prediction_pairs(models_dir)
+                if prediction_pairs:
+                    missing_tests = [
+                        p.stem.replace("oof_", "", 1)
+                        for p in models_dir.glob("oof_*.npy")
+                        if not (models_dir / f"test_{p.stem.replace('oof_', '', 1)}.npy").exists()
+                    ]
+                    if missing_tests:
+                        print(f"   ⚠️ Missing test_* for: {', '.join(missing_tests[:5])}")
+                    if len(prediction_pairs) >= 2:
+                        print("\n   ✅ Using prediction-only ensemble from OOF/Test pairs")
+                        output_path = working_dir / "submission.csv"
+                        sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
+                        if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path):
+                            return {
+                                "ensemble_created": True,
+                                "ensemble_method": "prediction_average",
+                            }
+
                 print(f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})")
-                print("      Reason: Ensemble requires at least 2 trained models")
+                print("      Reason: Ensemble requires at least 2 trained models or 2 OOF/Test pairs")
                 print("      Skipping ensemble step")
                 return {
                     "ensemble_skipped": True,

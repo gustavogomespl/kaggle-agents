@@ -834,6 +834,24 @@ Return a JSON array with 3-5 components. Each component must have:
         # Filter out invalid components
         valid_plan = [c for c in plan if c.estimated_impact >= min_impact]
 
+        # Guardrail: block tabular models for image competitions without features.
+        if self._is_image_competition_without_features(state):
+            tabular_signals = [
+                "lightgbm", "lgbm", "xgboost", "catboost", "randomforest",
+                "logistic", "svm", "naive", "optuna", "stacking", "ridge",
+            ]
+            filtered_plan = []
+            removed = []
+            for comp in valid_plan:
+                text = f"{comp.name} {comp.code}".lower()
+                if any(sig in text for sig in tabular_signals):
+                    removed.append(comp.name)
+                    continue
+                filtered_plan.append(comp)
+            if removed:
+                print(f"  ⚠️  Removed tabular components for image competition without features: {', '.join(removed)}")
+                valid_plan = filtered_plan
+
         # Limit components (quality over quantity)
         max_components = 3 if fast_mode else 6
         if len(valid_plan) > max_components:
@@ -1788,7 +1806,7 @@ Preferred approaches: {', '.join(strategy['model_preference'])}
 """
 
         # Use fallback plan generation with strategy bias
-        plan = self._create_fallback_plan(domain, sota_analysis)
+        plan = self._create_fallback_plan(domain, sota_analysis, state=state)
         plan = self._coerce_components(plan)
 
         # Modify plan based on strategy

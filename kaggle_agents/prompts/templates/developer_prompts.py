@@ -10,6 +10,8 @@ import random
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ...core.config import is_metric_minimization
+
 # ==================== Core Identity ====================
 
 DEVELOPER_CORE_IDENTITY = """You are a Kaggle Grandmaster implementing ML components.
@@ -144,6 +146,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 - Subsample training data unless `KAGGLE_AGENTS_FAST_MODE=1` (FAST_MODE may subsample to meet budget, but keep determinism)
 - `pin_memory=True` in DataLoader (causes warnings/crashes). USE `pin_memory=False`.
 - `num_workers > 0` in DataLoader (safe default is 0 to avoid fork/spawn issues).
+- Overwrite sample_submission.csv (always write to submission.csv)
 
 ## API Gotchas:
 - OneHotEncoder: sparse_output=False (NOT sparse=False) for sklearn 1.2+
@@ -1273,9 +1276,12 @@ def build_performance_gap_instructions(
     if current_score <= 0 or target_score is None:
         return []
 
-    gap = float(target_score) - float(current_score)
+    minimize = is_metric_minimization(metric_name)
+    gap = (float(current_score) - float(target_score)) if minimize else (float(target_score) - float(current_score))
+    if gap <= 0:
+        return []
     instructions = [
-        f"\nPERFORMANCE GAP: {gap:.4f} to reach target ({float(target_score):.4f})"
+        f"\nPERFORMANCE GAP: {gap:.4f} to reach target ({float(target_score):.4f}, {'minimize' if minimize else 'maximize'})"
     ]
 
     if gap < 0.01:
@@ -1322,7 +1328,8 @@ def build_stacking_oof_instructions(working_dir: str, component_name: str) -> li
         "     - Predict on test set and accumulate: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`",
         f"  4. Save OOF predictions: `np.save(str(Path('{working_dir}') / 'models' / 'oof_{component_name}.npy'), oof_preds)`",
         f"  5. Save Test predictions: `np.save(str(Path('{working_dir}') / 'models' / 'test_{component_name}.npy'), test_preds)`",
-        "  6. This enables the Ensemble Agent to use Stacking later.",
+        "  6. Ensemble will ONLY run if BOTH oof_{name}.npy AND test_{name}.npy exist for at least 2 models.",
+        "  7. This enables the Ensemble Agent to use Stacking later.",
     ]
 
 
@@ -1431,6 +1438,7 @@ def build_image_model_instructions(is_image_to_image: bool, data_files: dict | N
         "  - Learning rate schedule: warmup for 5% of epochs, then cosine decay to 1e-6",
         "  - Use pretrained backbone (torchvision/timm) - efficientnet_b0 or resnet50 recommended",
         "  - For Keras: use DeadlineCallback in model.fit() callbacks (see HARD_CONSTRAINTS)",
+        "  - Do NOT run full test inference inside each fold; run once after training best checkpoint",
         "  - Save checkpoint every epoch, keep best by validation metric",
     ]
 
@@ -1520,6 +1528,14 @@ def build_model_component_instructions(
     else:
         data_files = state.get("data_files", {}) if state else {}
         instructions.extend(build_image_model_instructions(is_image_to_image, data_files, suggested_epochs, early_stopping_patience))
+        if not is_image_to_image:
+            train_csv_path = data_files.get("train_csv", "") if isinstance(data_files, dict) else ""
+            instructions.extend([
+                "  - CRITICAL: This is an image competition. Do NOT use tabular models unless you have real numeric features.",
+                "    - If train.csv only has id+label (<=2 cols), you MUST train an image model (CNN/transformer) or add an embedding extractor first.",
+            ])
+            if train_csv_path:
+                instructions.append(f"  - Train CSV path (check columns): {train_csv_path}")
 
     # Add CV and OOF instructions
     component_name = getattr(component, "name", "component")

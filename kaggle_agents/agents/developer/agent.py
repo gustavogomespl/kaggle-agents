@@ -1048,6 +1048,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             if state and state.get("sample_submission_path")
             else working_dir / "sample_submission.csv"
         )
+        submission_output_path = working_dir / "submission.csv"
         models_dir = working_dir / "models"
         data_files = state.get("data_files", {}) if state else {}
         train_csv_path = data_files.get("train_csv", "")
@@ -1069,7 +1070,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         Test CSV: {test_csv_path}
         Models: {models_dir}
         Sample Submission: {sample_submission_path}
-        Submission Output: {sample_submission_path}
+        Submission Output: {submission_output_path}
         """
 
         if state is not None:
@@ -1103,7 +1104,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             "test": str(resolved_test_path),
             "test_csv": str(test_csv_path),
             "models": str(models_dir),
-            "submission": str(sample_submission_path),
+            "submission": str(submission_output_path),
         }
 
         def _generate_with_llm() -> str:
