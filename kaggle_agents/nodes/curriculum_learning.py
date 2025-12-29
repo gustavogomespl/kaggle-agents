@@ -238,7 +238,10 @@ def generate_subtask_with_llm(
     state: KaggleState,
 ) -> SubTask:
     """
-    Generate a SubTask using LLM for more sophisticated analysis.
+    Generate a SubTask using LLM for sophisticated error analysis.
+
+    Uses the LLM to analyze the error context and generate targeted
+    resolution guidance, including code snippets when applicable.
 
     Args:
         error_type: Type of error
@@ -249,51 +252,111 @@ def generate_subtask_with_llm(
     Returns:
         SubTask with LLM-generated guidance
     """
-    config = get_config()
     llm = get_llm_for_role("evaluator")
 
     # Get context from state
     domain = state.get("domain_detected", "unknown")
     competition_info = state.get("competition_info")
     comp_name = competition_info.name if competition_info else "unknown"
+    metric = competition_info.evaluation_metric if competition_info else "unknown"
 
-    prompt = f"""
-    Analyze this failure and generate a specific sub-task to resolve it:
+    # Get recent code if available
+    dev_results = state.get("development_results", [])
+    recent_code = ""
+    if dev_results:
+        last_result = dev_results[-1]
+        code_lines = (last_result.code or "").split('\n')
+        if len(code_lines) > 40:
+            recent_code = '\n'.join(code_lines[:20]) + '\n...\n' + '\n'.join(code_lines[-10:])
+        else:
+            recent_code = last_result.code or ""
+        recent_code = recent_code[:2000]
 
-    COMPETITION: {comp_name}
-    DOMAIN: {domain}
-    COMPONENT: {parent_component}
-    ERROR TYPE: {error_type}
-    ERROR MESSAGE: {error_message[:500]}
+    prompt = f"""You are an expert ML engineer analyzing a failure in a Kaggle competition pipeline.
 
-    Generate a JSON response with:
-    {{
-        "task_description": "Specific task to resolve this error",
-        "priority": 1-5 (1 = critical, 5 = minor),
-        "resolution_steps": ["Step 1...", "Step 2...", ...],
-        "code_snippet": "Example code to fix this issue"
-    }}
-    """
+## Context
+- **Competition**: {comp_name}
+- **Domain**: {domain}
+- **Metric**: {metric}
+- **Failed Component**: {parent_component}
+- **Error Type**: {error_type}
+
+## Error Message
+```
+{error_message[:1000]}
+```
+
+## Recent Code (if available)
+```python
+{recent_code}
+```
+
+## Your Task
+Generate a specific sub-task to resolve this error. Consider:
+1. The root cause of the error
+2. The competition context and domain
+3. Best practices for the specific ML framework involved
+4. Concrete code changes needed
+
+## Response Format
+Return a JSON object:
+{{
+    "task_description": "Clear, actionable description of what needs to be done (1-2 sentences)",
+    "priority": 1-5 (1 = critical/blocking, 2 = high, 3 = medium, 4 = low, 5 = minor),
+    "resolution_steps": [
+        "Step 1: Specific action",
+        "Step 2: Another action",
+        "Step 3: Verification"
+    ],
+    "code_snippet": "```python\\n# Example fix code here\\n```",
+    "rationale": "Brief explanation of why this fix works"
+}}
+
+Be specific and actionable. Include parameter values, function names, and code patterns."""
 
     try:
         response = llm.invoke([HumanMessage(content=prompt)])
-        content = get_text_content(response.content)
+        content = get_text_content(response.content).strip()
+
+        # Parse JSON response
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0].strip()
+        elif "```" in content:
+            # Try to find JSON block
+            parts = content.split("```")
+            for part in parts:
+                if part.strip().startswith("{"):
+                    content = part.strip()
+                    break
 
         import json
         result = json.loads(content)
+
+        # Build guidance from steps and rationale
+        steps = result.get("resolution_steps", [])
+        rationale = result.get("rationale", "")
+        guidance = "\n".join(f"- {step}" for step in steps)
+        if rationale:
+            guidance += f"\n\nRationale: {rationale}"
 
         return SubTask(
             parent_component=parent_component,
             failure_type=error_type,
             task_description=result.get("task_description", f"Fix {error_type}"),
             priority=result.get("priority", 2),
-            resolution_guidance="\n".join(result.get("resolution_steps", [])),
+            resolution_guidance=guidance,
             resolution_code=result.get("code_snippet"),
         )
     except Exception as e:
-        # Fallback to template-based generation
-        print(f"   LLM subtask generation failed: {e}, using template")
-        return generate_subtask_from_error(error_type, parent_component, error_message, state)
+        # Fallback to simple description
+        print(f"   LLM subtask generation failed: {e}, using fallback")
+        return SubTask(
+            parent_component=parent_component,
+            failure_type=error_type,
+            task_description=f"Fix {error_type} in {parent_component}",
+            priority=2,
+            resolution_guidance=f"Error: {error_message[:200]}",
+        )
 
 
 # ==================== Curriculum Learning Node ====================

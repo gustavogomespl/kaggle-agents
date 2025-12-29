@@ -25,6 +25,60 @@ from ..prompts.templates.planner_prompts import get_domain_guidance
 from ..utils.llm_utils import get_text_content
 
 
+# ==================== Semantic Log Analysis Prompt ====================
+
+SEMANTIC_LOG_ANALYSIS_PROMPT = """You are an expert ML engineer analyzing execution logs from a Kaggle competition pipeline.
+
+## Execution Logs (stdout + stderr)
+```
+{logs}
+```
+
+## Code Summary
+```python
+{code_summary}
+```
+
+## Your Task
+Analyze these logs to identify:
+1. **Training Issues**: Any warnings or errors from ML libraries (LightGBM, XGBoost, CatBoost, sklearn, PyTorch, TensorFlow)
+2. **Hyperparameter Problems**: Signs of misconfigured parameters (e.g., "best gain: -inf", "no valid split", memory issues)
+3. **Data Issues**: NaN, missing values, shape mismatches, type errors
+4. **Resource Issues**: Memory, timeout, GPU problems
+
+## Response Format
+Return a JSON object:
+{{
+    "detected_issues": [
+        {{
+            "pattern": "exact text pattern found in logs",
+            "root_cause": "what is causing this issue",
+            "diagnosis": "detailed explanation of why this happens",
+            "solutions": ["solution 1", "solution 2", "solution 3"]
+        }}
+    ],
+    "planner_directives": [
+        "High-level directive for the Planner agent to avoid this issue in next iteration"
+    ],
+    "developer_directives": [
+        "Specific code-level fixes the Developer agent should apply"
+    ],
+    "severity": "critical" | "warning" | "info",
+    "summary": "1-2 sentence summary of the main issues found"
+}}
+
+If no issues found, return:
+{{
+    "detected_issues": [],
+    "planner_directives": [],
+    "developer_directives": [],
+    "severity": "info",
+    "summary": "No significant issues detected in execution logs."
+}}
+
+IMPORTANT: Be specific. Quote the exact error messages. Provide actionable solutions."""
+
+
 # ==================== Meta-Evaluator Agent ====================
 
 class MetaEvaluatorAgent:
@@ -221,6 +275,30 @@ class MetaEvaluatorAgent:
 
         error_lower = error_msg.lower()
 
+        # LightGBM/XGBoost/CatBoost specific errors (check first for specificity)
+        if "best gain: -inf" in error_lower:
+            return "lightgbm_split_failure"
+        if "no more leaves" in error_lower:
+            return "lightgbm_leaf_constraint"
+        if "no valid split" in error_lower:
+            return "xgboost_split_failure"
+        if "min_child" in error_lower or "min_data_in_leaf" in error_lower:
+            return "hyperparameter_constraint"
+        if "can't calculate leaf values" in error_lower:
+            return "catboost_leaf_failure"
+        if "not enough samples for bootstrap" in error_lower:
+            return "catboost_bootstrap_failure"
+
+        # Neural network specific errors
+        if "cuda out of memory" in error_lower:
+            return "gpu_oom"
+        if "exploding gradient" in error_lower or "gradient explosion" in error_lower:
+            return "exploding_gradients"
+        if "vanishing gradient" in error_lower:
+            return "vanishing_gradients"
+        if "nan" in error_lower and ("loss" in error_lower or "gradient" in error_lower):
+            return "nn_nan_loss"
+
         # Common error patterns
         if "importerror" in error_lower or "modulenotfounderror" in error_lower:
             return "import_error"
@@ -250,7 +328,100 @@ class MetaEvaluatorAgent:
             return "validation_error"
         if "final validation performance" in error_lower:
             return "missing_output_format"
+        if "convergence" in error_lower and "warning" in error_lower:
+            return "convergence_warning"
         return "runtime_error"
+
+    def _analyze_execution_logs(self, state: KaggleState) -> dict[str, Any]:
+        """
+        Analyze execution logs using LLM for semantic error detection.
+
+        Uses the LLM to parse stdout/stderr and identify model training
+        issues, providing dynamic and context-aware feedback.
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            Dictionary with detected issues and remediation guidance
+        """
+        dev_results = state.get("development_results", [])
+
+        if not dev_results:
+            return {
+                "detected_issues": [],
+                "planner_directives": [],
+                "developer_directives": [],
+                "has_semantic_errors": False,
+                "severity": "info",
+                "summary": "No execution results to analyze.",
+            }
+
+        # Collect logs from all results (limit to avoid token overflow)
+        all_logs = []
+        code_summaries = []
+
+        for i, result in enumerate(dev_results[-3:]):  # Last 3 components
+            stdout = (result.stdout or "")[-2000:]  # Last 2000 chars
+            stderr = (result.stderr or "")[-1000:]  # Last 1000 chars
+            logs = f"=== Component {i+1} ===\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+            all_logs.append(logs)
+
+            # Code summary (first 30 lines + last 10 lines)
+            code_lines = (result.code or "").split('\n')
+            if len(code_lines) > 50:
+                code_summary = '\n'.join(code_lines[:30]) + '\n...\n' + '\n'.join(code_lines[-10:])
+            else:
+                code_summary = result.code or ""
+            code_summaries.append(code_summary[:1500])
+
+        combined_logs = '\n\n'.join(all_logs)[-6000:]  # Limit total logs
+        combined_code = '\n---\n'.join(code_summaries)[-3000:]
+
+        # Use LLM to analyze logs
+        prompt = SEMANTIC_LOG_ANALYSIS_PROMPT.format(
+            logs=combined_logs,
+            code_summary=combined_code,
+        )
+
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            content = get_text_content(response.content).strip()
+
+            # Parse JSON response
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            analysis = json.loads(content)
+
+            # Ensure all expected keys exist
+            analysis.setdefault("detected_issues", [])
+            analysis.setdefault("planner_directives", [])
+            analysis.setdefault("developer_directives", [])
+            analysis.setdefault("severity", "info")
+            analysis.setdefault("summary", "")
+            analysis["has_semantic_errors"] = len(analysis["detected_issues"]) > 0
+
+            # Print summary
+            if analysis["has_semantic_errors"]:
+                print(f"   ⚠️  Semantic Analysis: {analysis['summary']}")
+                for issue in analysis["detected_issues"][:3]:
+                    print(f"      - {issue.get('pattern', 'Unknown')}: {issue.get('root_cause', '')}")
+
+            return analysis
+
+        except Exception as e:
+            print(f"   ⚠️  LLM log analysis failed: {e}")
+            return {
+                "detected_issues": [],
+                "planner_directives": [],
+                "developer_directives": [],
+                "has_semantic_errors": False,
+                "severity": "info",
+                "summary": f"Log analysis failed: {e}",
+            }
 
     def _calculate_reward_signals(
         self,
@@ -420,7 +591,8 @@ class MetaEvaluatorAgent:
         Generate refinement guidance for prompt optimization (PREFACE pattern).
 
         Uses LLM to analyze failures and generate strategic guidance
-        for improving prompts in next iteration.
+        for improving prompts in next iteration. Integrates semantic
+        log analysis for deeper insights.
 
         Args:
             state: Current workflow state
@@ -432,10 +604,38 @@ class MetaEvaluatorAgent:
         """
         print("\n   🎯 Generating refinement guidance...")
 
+        # Analyze execution logs for semantic errors (LLM-driven)
+        log_analysis = self._analyze_execution_logs(state)
+
         # Build context for LLM
         context = self._build_evaluation_context(state, failure_analysis, reward_signals)
 
-        # Generate guidance using superior model (GPT-5)
+        # Inject semantic analysis into context
+        if log_analysis.get("has_semantic_errors"):
+            context += "\n\n## Semantic Log Analysis (from LLM)\n"
+            context += f"**Severity**: {log_analysis.get('severity', 'unknown')}\n"
+            context += f"**Summary**: {log_analysis.get('summary', '')}\n\n"
+
+            for issue in log_analysis.get("detected_issues", [])[:5]:
+                context += f"### Issue: `{issue.get('pattern', 'Unknown')}`\n"
+                context += f"- **Root Cause**: {issue.get('root_cause', '')}\n"
+                context += f"- **Diagnosis**: {issue.get('diagnosis', '')}\n"
+                context += "- **Solutions**:\n"
+                for sol in issue.get("solutions", []):
+                    context += f"  - {sol}\n"
+                context += "\n"
+
+            if log_analysis.get("planner_directives"):
+                context += "**Planner Directives (from log analysis)**:\n"
+                for directive in log_analysis["planner_directives"]:
+                    context += f"- {directive}\n"
+
+            if log_analysis.get("developer_directives"):
+                context += "\n**Developer Directives (from log analysis)**:\n"
+                for directive in log_analysis["developer_directives"]:
+                    context += f"- {directive}\n"
+
+        # Generate guidance using LLM
         prompt = self._build_refinement_prompt(context)
 
         messages = [
@@ -455,6 +655,20 @@ class MetaEvaluatorAgent:
                 "developer_guidance": "Ensure code follows all requirements and outputs correct format.",
                 "priority_fixes": failure_analysis["error_patterns"],
             }
+
+        # Inject semantic directives into guidance (high priority)
+        if log_analysis.get("planner_directives"):
+            semantic_guidance = " | ".join(log_analysis["planner_directives"])
+            existing = guidance.get("planner_guidance", "")
+            guidance["planner_guidance"] = f"PRIORITY: {semantic_guidance}. {existing}"
+
+        if log_analysis.get("developer_directives"):
+            existing_dev = guidance.get("developer_guidance", "")
+            dev_directives = " | ".join(log_analysis["developer_directives"])
+            guidance["developer_guidance"] = f"PRIORITY: {dev_directives}. {existing_dev}"
+
+        # Store full analysis for downstream use
+        guidance["semantic_analysis"] = log_analysis
 
         print("   ✓ Generated guidance for Planner and Developer")
 

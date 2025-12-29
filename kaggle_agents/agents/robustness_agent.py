@@ -1,5 +1,5 @@
 """
-Robustness Agent with 4 Validation Modules.
+Robustness Agent with 5 Validation Modules.
 
 This agent implements the robustness validation strategy from Google ADK,
 ensuring code quality and preventing common ML mistakes.
@@ -17,15 +17,84 @@ from ..core.state import KaggleState, ValidationResult
 from ..utils.llm_utils import get_text_content
 
 
+# ==================== Hyperparameter Validation Prompt ====================
+
+HYPERPARAMETER_VALIDATION_PROMPT = """You are an expert ML engineer reviewing code and execution logs for hyperparameter issues.
+
+## Code
+```python
+{code}
+```
+
+## Execution Logs
+**STDOUT (last 2000 chars)**:
+```
+{stdout}
+```
+
+**STDERR (last 1000 chars)**:
+```
+{stderr}
+```
+
+## Your Task
+Analyze the code and logs to detect hyperparameter configuration issues:
+
+1. **Tree Model Issues**: LightGBM, XGBoost, CatBoost, Random Forest
+   - min_child_samples/min_data_in_leaf too restrictive
+   - num_leaves/max_depth misconfiguration
+   - Split failures ("best gain: -inf", "no valid split")
+
+2. **Neural Network Issues**: PyTorch, TensorFlow, Keras
+   - Learning rate problems (too high/low)
+   - Batch size issues (OOM, instability)
+   - Gradient issues (exploding/vanishing)
+
+3. **General Issues**:
+   - Memory problems
+   - Class imbalance not handled
+   - Convergence warnings
+
+## Response Format
+Return a JSON object:
+{{
+    "issues": [
+        "Issue 1 description",
+        "Issue 2 description"
+    ],
+    "suggestions": [
+        "Suggestion 1",
+        "Suggestion 2"
+    ],
+    "severity": "critical" | "warning" | "info",
+    "score": 0.0 to 1.0 (1.0 = no issues, 0.7 = warnings, <0.7 = critical),
+    "details": {{
+        "key": "value for any relevant extracted parameters"
+    }}
+}}
+
+If no issues found:
+{{
+    "issues": [],
+    "suggestions": [],
+    "severity": "info",
+    "score": 1.0,
+    "details": {{}}
+}}
+
+Be specific and actionable. Reference exact parameter values when possible."""
+
+
 class RobustnessAgent:
     """
     Agent responsible for validating code robustness.
 
-    Implements 4 validation modules (from Google ADK):
+    Implements 5 validation modules (from Google ADK):
     1. Debugging: Auto-fix common errors
     2. Data Leakage: Detect target leakage
     3. Data Usage: Ensure all data is used
     4. Format Compliance: Validate submission format
+    5. Hyperparameters: Detect model configuration issues
     """
 
     def __init__(self):
@@ -85,6 +154,11 @@ class RobustnessAgent:
         format_result = self._validate_format(latest_result, working_dir, state)
         validation_results.append(format_result)
         self._print_validation(format_result)
+
+        # 5. Hyperparameter Sanity Module (warning-only)
+        hyperparam_result = self._validate_hyperparameters(latest_result, working_dir, state)
+        validation_results.append(hyperparam_result)
+        self._print_validation(hyperparam_result)
 
         # Calculate overall score
         overall_score = sum(r.score for r in validation_results) / len(validation_results)
@@ -400,6 +474,89 @@ IMPORTANT:
             score=score,
             issues=issues,
             suggestions=suggestions,
+        )
+
+    def _validate_hyperparameters(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
+        """
+        Module 5: LLM-driven hyperparameter sanity validation.
+
+        Uses LLM to analyze code and execution logs for hyperparameter
+        issues across all ML frameworks (LightGBM, XGBoost, CatBoost,
+        sklearn, PyTorch, TensorFlow).
+
+        Note: This is warning-only (does not block validation).
+        """
+        import json
+
+        from langchain_core.messages import HumanMessage
+
+        code = dev_result.code or ""
+        stdout = (dev_result.stdout or "")[-2000:]  # Last 2000 chars
+        stderr = (dev_result.stderr or "")[-1000:]  # Last 1000 chars
+
+        # Prepare code summary (first 50 lines + last 20 lines if long)
+        code_lines = code.split('\n')
+        if len(code_lines) > 80:
+            code_summary = '\n'.join(code_lines[:50]) + '\n...\n' + '\n'.join(code_lines[-20:])
+        else:
+            code_summary = code
+        code_summary = code_summary[:4000]  # Limit token usage
+
+        # Build prompt
+        prompt = HYPERPARAMETER_VALIDATION_PROMPT.format(
+            code=code_summary,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+        try:
+            response = self.llm.invoke([HumanMessage(content=prompt)])
+            content = get_text_content(response.content).strip()
+
+            # Parse JSON response
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+
+            result = json.loads(content)
+
+            issues = result.get("issues", [])
+            suggestions = result.get("suggestions", [])
+            severity = result.get("severity", "info")
+            score = result.get("score", 1.0)
+            details = result.get("details", {})
+
+            # Ensure score is in valid range
+            score = max(0.0, min(1.0, float(score)))
+
+            # Print summary if issues found
+            if issues:
+                print(f"   ⚠️  Hyperparameter Analysis ({severity}):")
+                for issue in issues[:3]:
+                    print(f"      - {issue}")
+
+        except Exception as e:
+            print(f"   ⚠️  LLM hyperparameter analysis failed: {e}")
+            # Fallback to no issues
+            issues = []
+            suggestions = []
+            score = 1.0
+            details = {"llm_error": str(e)}
+
+        # Warning-only: ensure minimum score of 0.7 (doesn't block validation)
+        score = max(score, 0.7)
+        passed = True  # Warning-only module
+
+        return ValidationResult(
+            module="hyperparameters",
+            passed=passed,
+            score=score,
+            issues=issues,
+            suggestions=suggestions,
+            details=details,
         )
 
     def _print_validation(self, result: ValidationResult):
