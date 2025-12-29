@@ -375,25 +375,64 @@ DO NOT USE:
                             return False, f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})"
 
                     if df.columns.tolist() != sample_sub.columns.tolist():
-                        return False, f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}"
+                        if set(df.columns) == set(sample_sub.columns):
+                            # Auto-fix column order to match sample_submission
+                            df = df[sample_sub.columns]
+                            df.to_csv(submission_path, index=False)
+                            print("⚠️ Column order mismatch fixed: reordered columns to match sample_submission")
+                        else:
+                            return False, f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}"
 
-                    # Check ID column match (case-insensitive column name)
+                    # Check ID column match if sample_submission includes an ID column
                     id_col = None
-                    for col in df.columns:
-                        if col.lower() == "id":
-                            id_col = col
-                            break
+                    if sample_sub.shape[1] >= 2:
+                        # Prefer explicit ID-like column names
+                        for col in sample_sub.columns:
+                            col_lower = col.lower()
+                            if col_lower == "id" or col_lower.endswith("_id") or col_lower.endswith("id"):
+                                id_col = col
+                                break
+                        # Fallback to first column only when multi-column sample looks like it has IDs
+                        if id_col is None:
+                            first_col = sample_sub.columns[0]
+                            if sample_sub[first_col].nunique(dropna=False) == len(sample_sub):
+                                id_col = first_col
 
-                    if id_col and not df[id_col].astype(str).equals(sample_sub[sample_sub.columns[0]].astype(str)):
+                    if id_col and id_col not in df.columns:
+                        return False, f"ID column '{id_col}' missing from submission"
+
+                    if id_col and not df[id_col].astype(str).equals(sample_sub[id_col].astype(str)):
                         # Check if it's just an ordering issue vs completely wrong IDs
                         sub_ids = set(df[id_col].astype(str))
-                        sample_ids = set(sample_sub[sample_sub.columns[0]].astype(str))
+                        sample_ids = set(sample_sub[id_col].astype(str))
                         if sub_ids != sample_ids:
                             missing = sample_ids - sub_ids
                             extra = sub_ids - sample_ids
                             return False, f"ID values don't match sample_submission. Missing {len(missing)} IDs, {len(extra)} unexpected IDs."
                         else:
-                            return False, "ID column order doesn't match sample_submission (values are correct but order is wrong)"
+                            # Auto-fix ID order to match sample_submission
+                            sample_ids_order = sample_sub[id_col].astype(str).to_list()
+                            df_indexed = df.set_index(df[id_col].astype(str))
+                            try:
+                                df = df_indexed.loc[sample_ids_order].reset_index()
+                            except KeyError as exc:
+                                return False, f"Failed to reorder submission IDs: {exc!s}"
+                            # Ensure column order matches sample_submission (ID first)
+                            df = df[sample_sub.columns]
+                            df.to_csv(submission_path, index=False)
+                            print("⚠️ ID order mismatch fixed: reordered rows to match sample_submission")
+
+                    # Warn if multi-class probabilities do not sum to 1
+                    if problem_type and "class" in problem_type.lower() and sample_sub.shape[1] > 2:
+                        target_cols = sample_sub.columns[1:]
+                        try:
+                            vals = df[target_cols].astype(float).to_numpy()
+                            if (vals >= 0).all() and (vals <= 1).all():
+                                row_sums = vals.sum(axis=1)
+                                if not np.allclose(row_sums, 1.0, atol=1e-2):
+                                    print("⚠️ Warning: row probabilities do not sum to 1.0. If multi-class, apply softmax; if multi-label, this is expected.")
+                        except Exception:
+                            pass
 
                 except Exception as e:
                     return False, f"Failed to compare with sample_submission: {e!s}"

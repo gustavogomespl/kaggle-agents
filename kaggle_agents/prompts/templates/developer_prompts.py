@@ -1426,7 +1426,10 @@ def build_stacking_oof_instructions(working_dir: str, component_name: str) -> li
         "  2. Initialize `test_preds` array of zeros with length of test set.",
         "  3. During CV loop:",
         "     - Fill `oof_preds[val_idx]` with predictions for validation fold.",
-        "     - Predict on test set and accumulate: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`",
+        "     - Predict on test set and accumulate:",
+        "       - Binary: `test_preds += model.predict_proba(X_test)[:, 1] / n_folds`",
+        "       - Multi-class: `test_preds += model.predict_proba(X_test) / n_folds`",
+        "       - Regression: `test_preds += model.predict(X_test) / n_folds`",
         f"  4. Save OOF predictions: `np.save(str(Path('{working_dir}') / 'models' / 'oof_{component_name}.npy'), oof_preds)`",
         f"  5. Save Test predictions: `np.save(str(Path('{working_dir}') / 'models' / 'test_{component_name}.npy'), test_preds)`",
         "  6. Ensemble will ONLY run if BOTH oof_{name}.npy AND test_{name}.npy exist for at least 2 models.",
@@ -1510,8 +1513,10 @@ def build_ensemble_instructions(target_col: str = "target") -> list[str]:
         "    - Load submission files from each model",
         "    - Combine with weights: final = w1*pred1 + w2*pred2 + ...",
         "  - Generate final submission.csv",
-        f"  - CRITICAL: Use target_col from dataset info (target_col='{target_col}' if available)",
-        "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target' or 'prediction')",
+        f"  - CRITICAL: Use target_col from dataset info when sample_submission has 2 columns (target_col='{target_col}' if available)",
+        "  - CRITICAL: submission columns MUST match sample_submission columns and order",
+        "    - If sample has 2 cols: fill columns[1] only",
+        "    - If sample has >2 cols: fill ALL target columns in order (columns[1:])",
         "  - Print which models were used and their contribution/weights",
     ]
 
@@ -1538,9 +1543,13 @@ def build_image_model_instructions(is_image_to_image: bool, data_files: dict | N
         "  - Full backbone fine-tuning for maximum performance (do NOT freeze layers)",
         "  - Learning rate schedule: warmup for 5% of epochs, then cosine decay to 1e-6",
         "  - Use pretrained backbone (torchvision/timm) - efficientnet_b0 or resnet50 recommended",
+        "  - For multi-class: use softmax outputs and ensure probabilities sum to 1 per row",
+        "  - For log_loss: use label_smoothing (0.05-0.1) + MixUp/CutMix; clip probs to [1e-15, 1-1e-15]",
+        "  - Map class indices to sample_submission columns order (do NOT sort labels independently)",
         "  - For Keras: use DeadlineCallback in model.fit() callbacks (see HARD_CONSTRAINTS)",
         "  - Do NOT run full test inference inside each fold; run once after training best checkpoint",
         "  - Save checkpoint every epoch, keep best by validation metric",
+        "  - If dataset is huge (many images or >5GB), prefer 1 holdout split + smaller resolution (224/256) to avoid timeouts",
     ]
 
     if suggested_epochs < 20:
@@ -1589,6 +1598,7 @@ def build_model_component_instructions(
     state: dict,
     working_dir: str,
     is_image: bool,
+    is_audio: bool,
     is_image_to_image: bool,
     is_classification: bool,
     sample_integer_labels: bool,
@@ -1613,6 +1623,14 @@ def build_model_component_instructions(
             instructions.append("  - MUST create submission.csv with integer class labels (0..K-1) matching sample_submission")
         else:
             instructions.append("  - MUST create submission.csv with probability predictions (0.0-1.0)")
+        instructions.extend([
+            "  - If sample_submission has >2 target columns, determine multi-class vs multi-label using train labels:",
+            "    - Multi-class: exactly one positive per row -> softmax",
+            "    - Multi-label: multiple positives per row -> sigmoid per class (no normalization)",
+            "  - For multi-class log_loss: probabilities must sum to 1 per row (clip to [1e-15, 1-1e-15])",
+            "  - For log_loss: avoid overconfidence (label_smoothing / calibration) and clip probabilities",
+            "  - Map class index order to sample_submission columns (do NOT sort labels independently)",
+        ])
     else:
         instructions.append("  - MUST create submission.csv with numeric predictions (regression)")
 
@@ -1625,10 +1643,19 @@ def build_model_component_instructions(
             "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')",
             "  - CatBoost is the ONLY exception that handles categorical features natively",
             "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)",
+            "  - If X has 0 real features after preprocessing, STOP with a clear error (do NOT create dummy features)",
         ])
     else:
         data_files = state.get("data_files", {}) if state else {}
         instructions.extend(build_image_model_instructions(is_image_to_image, data_files, suggested_epochs, early_stopping_patience))
+        if is_audio:
+            instructions.extend([
+                "\n🔊 AUDIO MODELLING (CLASSIFICATION/REGRESSION):",
+                "  - Convert audio to log-mel spectrograms (librosa) and treat as image inputs",
+                "  - Use fixed duration: pad/trim to a consistent length per sample",
+                "  - Ensure consistent sample rate (e.g., 32k or 44.1k) for all files",
+                "  - Cache spectrograms to disk if repeated epochs to avoid recompute",
+            ])
         if not is_image_to_image:
             train_csv_path = data_files.get("train_csv", "") if isinstance(data_files, dict) else ""
             instructions.extend([
@@ -1646,12 +1673,11 @@ def build_model_component_instructions(
     # Add submission format instructions (CRITICAL for CV vs public score match)
     instructions.extend([
         "\n⚠️ SUBMISSION FORMAT (CRITICAL - SEE HARD_CONSTRAINTS):",
-        "  - Target column is NOT always sample_sub.columns[1]!",
-        "  - First: print(sample_sub.columns) to see ALL column names",
-        "  - The target column has SAME NAME as target in train.csv (e.g., 'Insult', 'target', 'label')",
-        "  - Example: 'detecting-insults' has target='Insult' at columns[0], NOT columns[1]",
-        "  - ONLY fill the target column: sample_sub[target_col] = predictions",
-        "  - DO NOT overwrite non-target columns (Date, Comment, ID, etc.)",
+        "  - ALWAYS read sample_submission.csv and use its columns and order",
+        "  - If sample has 2 columns: fill sample.columns[1] only",
+        "  - If sample has >2 columns: fill ALL target columns (columns[1:]) in order",
+        "  - Keep ID column values and order exactly as in sample_submission",
+        "  - DO NOT add/drop columns or reorder rows",
     ])
 
     return instructions
@@ -1689,7 +1715,8 @@ def build_dynamic_instructions(
     objective = str(state.get("objective", "")).lower()
     domain = str(state.get("domain_detected", state.get("domain", "tabular"))).lower()
     submission_format_type = str(state.get("submission_format_type") or "").lower()
-    is_image = domain.startswith("image") or domain in {"computer_vision", "vision"}
+    is_audio = domain.startswith("audio")
+    is_image = domain.startswith("image") or domain in {"computer_vision", "vision"} or is_audio
     is_image_to_image = domain == "image_to_image" or submission_format_type == "pixel_level"
 
     # Detect problem type
@@ -1797,6 +1824,7 @@ def build_dynamic_instructions(
             state=state,
             working_dir=working_dir,
             is_image=is_image,
+            is_audio=is_audio,
             is_image_to_image=is_image_to_image,
             is_classification=is_classification,
             sample_integer_labels=sample_integer_labels,
