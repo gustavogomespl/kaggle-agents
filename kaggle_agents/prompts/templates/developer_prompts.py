@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from ...core.config import is_metric_minimization
+from ...core.state import get_memory_summary_for_planning
 
 # ==================== Core Identity ====================
 
@@ -377,6 +378,8 @@ class DynamicContext:
     early_stopping_patience: int = 30  # SOTA uses patience=30
     # Submission validation retry
     submission_validation_error: Optional[str] = None  # Error from last invalid submission
+    # Memory summary (best models/HPs/errors/strategies)
+    memory_summary: Optional[str] = None
     # DPO: Preference pairs for contrastive learning
     dpo_examples: str = ""  # Formatted DPO pairs (good vs bad code examples)
 
@@ -550,6 +553,12 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
 
     # Extract submission validation error for retry context
     context.submission_validation_error = state.get("submission_validation_error")
+
+    # Memory summary from structured state (best HPs, errors, strategies)
+    try:
+        context.memory_summary = get_memory_summary_for_planning(state)
+    except Exception:
+        context.memory_summary = None
 
     # DPO: Extract preference pairs for contrastive learning
     preference_pairs = state.get("preference_pairs", [])
@@ -759,6 +768,12 @@ def compose_generate_prompt(
         if context.timeout_per_component is not None:
             parts.append(f"- timeout_per_component_seconds: {context.timeout_per_component}")
         parts.append("- Env knobs: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, KAGGLE_AGENTS_CV_FOLDS, KAGGLE_AGENTS_FAST_MODE")
+
+    # Memory insights from past runs (best HPs, errors, strategies)
+    if context.memory_summary and context.memory_summary != "No memory insights available yet.":
+        parts.append("")
+        parts.append("## Memory Insights (Use these to avoid repeats and reuse best configs)")
+        parts.append(context.memory_summary)
 
     # Submission validation error (must be fixed immediately).
     if context.submission_validation_error:

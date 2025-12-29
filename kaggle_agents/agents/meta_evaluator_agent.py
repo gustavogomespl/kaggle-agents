@@ -18,7 +18,7 @@ from typing import Any
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.config import calculate_score_improvement, get_config, get_llm_for_role
-from ..core.state import IterationMemory, KaggleState
+from ..core.state import IterationMemory, KaggleState, get_memory_summary_for_planning
 from ..optimization import create_training_collector
 from ..prompts.templates.developer_prompts import format_component_details
 from ..prompts.templates.planner_prompts import get_domain_guidance
@@ -1067,6 +1067,7 @@ Focus on actionable, specific improvements based on error patterns and performan
             sota_summary = "No SOTA solutions available."
 
         domain_guidance = get_domain_guidance(str(domain))
+        memory_summary = get_memory_summary_for_planning(state)
 
         # Collect planner example
         plan_quality_score = reward_signals["r_combined"]
@@ -1078,6 +1079,7 @@ Focus on actionable, specific improvements based on error patterns and performan
                 "domain": str(domain),
                 "sota_summary": sota_summary,
                 "domain_guidance": domain_guidance,
+                "memory_summary": memory_summary,
             },
             outputs={
                 "ablation_plan": json.dumps(

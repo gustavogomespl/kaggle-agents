@@ -70,6 +70,9 @@ CREATE_ABLATION_PLAN_PROMPT = """Given the competition info and specific SOTA so
 ## SOTA Patterns Summary
 {sota_summary}
 
+## Memory Insights (Past Results, Errors, Best Hyperparameters)
+{memory_summary}
+
 ## Your Task: "Adopt & Improve" Strategy
 
 ### Step 1: Analyze SOTA Candidates
@@ -164,6 +167,9 @@ ANALYZE_GAPS_PROMPT = """Analyze the gaps between the current results and the go
 ## Actual Results
 {test_results}
 
+## Memory Insights (Past Results, Errors, Best Hyperparameters)
+{memory_summary}
+
 ## Competition Goal
 Metric: {metric}
 Current Best Score: {current_score}
@@ -197,6 +203,9 @@ REFINE_ABLATION_PLAN_PROMPT = """You previously created an ablation plan. Now re
 
 ## Test Results
 {test_results}
+
+## Memory Insights (Past Results, Errors, Best Hyperparameters)
+{memory_summary}
 
 ## Current Best Score
 {current_score}

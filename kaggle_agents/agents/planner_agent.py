@@ -13,7 +13,13 @@ import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ..core.config import get_config, get_llm_for_role
-from ..core.state import AblationComponent, DevelopmentResult, KaggleState, SOTASolution
+from ..core.state import (
+    AblationComponent,
+    DevelopmentResult,
+    KaggleState,
+    SOTASolution,
+    get_memory_summary_for_planning,
+)
 from ..optimization import create_optimizer
 from ..prompts.templates.planner_prompts import (
     ANALYZE_SOTA_PROMPT,
@@ -36,6 +42,7 @@ class AblationPlannerSignature(dspy.Signature):
     sota_details: str = dspy.InputField(desc="Detailed SOTA solutions with code snippets, votes, and complexity")
     sota_summary: str = dspy.InputField(desc="Summary of SOTA patterns (models, features, ensembles)")
     domain_guidance: str = dspy.InputField(desc="Domain-specific guidance and priorities")
+    memory_summary: str = dspy.InputField(desc="Memory summary of past results, errors, and best hyperparameters")
 
     ablation_plan: str = dspy.OutputField(desc="JSON list of ablation components using Adopt & Improve strategy")
     analysis: str = dspy.OutputField(desc="Analysis of which SOTA solution was adopted and why")
@@ -62,7 +69,7 @@ class AblationPlannerModule(dspy.Module):
         super().__init__()
         self.generate_plan = dspy.ChainOfThought(AblationPlannerSignature)
 
-    def forward(self, competition_info, domain, sota_details, sota_summary, domain_guidance):
+    def forward(self, competition_info, domain, sota_details, sota_summary, domain_guidance, memory_summary):
         """Generate ablation plan using Adopt & Improve strategy."""
         return self.generate_plan(
             competition_info=competition_info,
@@ -70,6 +77,7 @@ class AblationPlannerModule(dspy.Module):
             sota_details=sota_details,
             sota_summary=sota_summary,
             domain_guidance=domain_guidance,
+            memory_summary=memory_summary,
         )
 
 
@@ -380,6 +388,7 @@ class PlannerAgent:
         # Get raw SOTA solutions for "Adopt & Improve" strategy
         sota_solutions = state.get("sota_solutions", [])
         sota_details = self._format_sota_details(sota_solutions)
+        memory_summary = get_memory_summary_for_planning(state)
 
         # Prepare inputs
         comp_info_str = f"""
@@ -401,13 +410,24 @@ Domain: {domain}
             # DSPy path: Use AblationPlannerModule with Adopt & Improve strategy
             print("  🧠 Using DSPy for ablation plan generation (Adopt & Improve)...")
             try:
-                result = self.planner_module(
-                    competition_info=comp_info_str,
-                    domain=domain,
-                    sota_details=sota_details,
-                    sota_summary=sota_summary,
-                    domain_guidance=domain_guidance,
-                )
+                try:
+                    result = self.planner_module(
+                        competition_info=comp_info_str,
+                        domain=domain,
+                        sota_details=sota_details,
+                        sota_summary=sota_summary,
+                        domain_guidance=domain_guidance,
+                        memory_summary=memory_summary,
+                    )
+                except TypeError:
+                    # Backward-compatible fallback for older optimized signatures
+                    result = self.planner_module(
+                        competition_info=comp_info_str,
+                        domain=domain,
+                        sota_details=sota_details,
+                        sota_summary=sota_summary,
+                        domain_guidance=domain_guidance,
+                    )
                 plan_data = self._parse_llm_plan_response(result.ablation_plan, sota_analysis)
                 if len(plan_data) < 3:
                     print(f"  ⚠️ DSPy generated only {len(plan_data)} components, using fallback")
@@ -423,6 +443,7 @@ Domain: {domain}
                 domain=domain,
                 sota_details=sota_details,
                 sota_summary=sota_summary,
+                memory_summary=memory_summary,
             )
 
             # Inject curriculum learning insights
@@ -597,7 +618,8 @@ Return a JSON array with 3-5 components. Each component must have:
             gap_analysis=gap_analysis_str,
             previous_plan=previous_plan_str,
             test_results=test_results_str,
-            current_score=current_score
+            current_score=current_score,
+            memory_summary=get_memory_summary_for_planning(state),
         )
 
         # INJECT FAILURE ANALYSIS DIRECTLY (for explicit error prevention)
@@ -998,7 +1020,8 @@ Return a JSON array with 3-5 components. Each component must have:
             test_results=test_results_str,
             metric=competition_info.evaluation_metric,
             current_score=current_score,
-            target_score="SOTA (typically Top 10%)"
+            target_score="SOTA (typically Top 10%)",
+            memory_summary=get_memory_summary_for_planning(state),
         )
         
         messages = [
