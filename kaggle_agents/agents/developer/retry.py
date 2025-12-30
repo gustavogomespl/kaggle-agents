@@ -27,7 +27,7 @@ from ...prompts.templates.developer_prompts import (
     format_error_info,
 )
 from ...utils.llm_utils import get_text_content
-from .agent import get_dynamic_temperature
+from .code_generator import get_dynamic_temperature
 
 
 if TYPE_CHECKING:
