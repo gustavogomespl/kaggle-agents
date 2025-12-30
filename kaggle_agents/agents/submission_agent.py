@@ -5,6 +5,8 @@ This agent handles submission creation, Kaggle upload, leaderboard monitoring,
 and score-based iteration decisions.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import shutil

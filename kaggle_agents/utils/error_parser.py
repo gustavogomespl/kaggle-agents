@@ -5,6 +5,8 @@ Advanced error parsing and classification for code execution failures.
 Implements PREFACE pattern for error-guided prompt repair.
 """
 
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass
 

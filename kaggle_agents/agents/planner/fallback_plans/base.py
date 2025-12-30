@@ -2,6 +2,8 @@
 Base utilities and router for fallback plans.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 

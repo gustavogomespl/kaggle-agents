@@ -9,6 +9,8 @@ Uses dynamic temperature strategy:
 - Lower temperatures for initial generation (0.1) for consistency
 """
 
+from __future__ import annotations
+
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any

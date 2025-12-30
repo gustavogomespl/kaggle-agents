@@ -4,6 +4,8 @@ Domain Detection Module for Kaggle Competitions.
 Uses LLM to classify competition domain based on description and file metadata.
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 

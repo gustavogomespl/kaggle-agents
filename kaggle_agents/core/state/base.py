@@ -2,6 +2,8 @@
 Main KaggleState TypedDict and initialization.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from operator import add
 from typing import Annotated, Any, TypedDict

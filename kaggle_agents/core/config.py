@@ -5,6 +5,8 @@ This module provides a clean, type-safe configuration system following
 best practices with environment variable support and validation.
 """
 
+from __future__ import annotations
+
 import os
 import sys
 from dataclasses import dataclass, field

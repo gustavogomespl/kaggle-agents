@@ -2,6 +2,8 @@
 Result data structures from various workflow stages.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal

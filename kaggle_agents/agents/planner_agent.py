@@ -5,6 +5,8 @@ This agent implements the ablation planning strategy from Google ADK,
 identifying high-impact components for systematic improvement.
 """
 
+from __future__ import annotations
+
 import json
 from datetime import datetime
 from typing import Any

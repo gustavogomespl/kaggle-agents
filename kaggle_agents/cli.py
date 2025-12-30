@@ -4,6 +4,8 @@ Enhanced CLI for Kaggle Agents.
 Simple, clean, and efficient command-line interface with Rich output.
 """
 
+from __future__ import annotations
+
 import sys
 
 from rich.console import Console

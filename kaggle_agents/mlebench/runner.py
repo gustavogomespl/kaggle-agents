@@ -5,6 +5,8 @@ This module provides the main entry point for running kaggle-agents
 on MLE-bench competitions with proper data handling and grading.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import subprocess

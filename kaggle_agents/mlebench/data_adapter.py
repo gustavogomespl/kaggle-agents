@@ -5,6 +5,8 @@ This module provides utilities to adapt MLE-bench prepared data
 to the kaggle-agents expected format.
 """
 
+from __future__ import annotations
+
 import os
 import zipfile
 from dataclasses import dataclass, field

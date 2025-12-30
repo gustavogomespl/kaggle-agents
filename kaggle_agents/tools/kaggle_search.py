@@ -5,6 +5,8 @@ This module provides functionality to search and retrieve state-of-the-art
 solutions from Kaggle competitions via the official API and web scraping.
 """
 
+from __future__ import annotations
+
 import json
 import re
 import time

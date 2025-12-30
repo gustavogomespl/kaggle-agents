@@ -8,6 +8,8 @@ problem before proceeding, improving resilience and learning.
 Based on: WEBRL - Training LLM Web Agents via Self-Evolving Curriculum
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal

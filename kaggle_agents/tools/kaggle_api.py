@@ -4,6 +4,8 @@ Follows official Kaggle API documentation:
 https://github.com/Kaggle/kaggle-api
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 from typing import Any
 

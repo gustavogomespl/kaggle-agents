@@ -12,6 +12,8 @@ Key concepts:
 - PreferenceRewardModel: Scores code based on learned preferences
 """
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Any
 

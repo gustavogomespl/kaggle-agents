@@ -5,6 +5,8 @@ This module provides automatic prompt optimization using DSPy's MIPROv2
 optimizer and custom reward models based on Kaggle competition scores.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import pickle

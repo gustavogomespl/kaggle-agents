@@ -5,6 +5,8 @@ This agent generates Python code to implement ablation components,
 with automatic retry and debugging capabilities.
 """
 
+from __future__ import annotations
+
 import os
 import shutil
 from datetime import datetime
