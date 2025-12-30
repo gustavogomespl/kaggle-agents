@@ -460,7 +460,3 @@ class RetryMixin:
             code = response
 
         return code.strip()
-
-    def _generate_code(self, *args, **kwargs) -> str:
-        """Placeholder - implemented in main agent class."""
-        raise NotImplementedError("_generate_code must be implemented in main agent class")
