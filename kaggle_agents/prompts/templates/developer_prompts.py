@@ -265,7 +265,7 @@ Image IDs in CSV may not include file extensions. Validate paths before creating
 from pathlib import Path
 
 def validate_image_paths(image_ids: list, base_dir: Path, extensions=('.jpg', '.jpeg', '.png', '.tif', '.tiff')) -> list:
-    """Validate and resolve image paths, trying multiple extensions."""
+    # Validate and resolve image paths, trying multiple extensions.
     valid_paths = []
     missing = []
 
