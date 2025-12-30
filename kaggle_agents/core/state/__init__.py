@@ -1,47 +1,58 @@
 """
 Unified State Management for Kaggle Agents.
 
-COMPATIBILITY LAYER: This file re-exports from the new modular structure.
-All types and functions are now defined in kaggle_agents.core.state/
-
-For new code, prefer importing from the submodules directly:
-    from kaggle_agents.core.state import KaggleState
-    from kaggle_agents.core.state.memory import ModelPerformanceRecord
+This module defines the central state structure that flows through
+the LangGraph workflow, containing all data needed for autonomous
+Kaggle competition solving.
 """
 
-# Re-export everything from the new modular structure
-from .state import (
-    # Types
-    DomainType,
-    SubmissionFormatType,
-    # Competition
+# Type definitions
+from .types import DomainType, SubmissionFormatType
+
+# Competition types
+from .competition import (
     AblationComponent,
     CompetitionInfo,
     SOTASolution,
     merge_competition_info,
-    # Results
+)
+
+# Result types
+from .results import (
     CodeAttempt,
     DevelopmentResult,
     SubmissionResult,
     ValidationResult,
-    # Memory
+)
+
+# Memory types
+from .memory import (
     DataInsights,
     ErrorPatternMemory,
     HyperparameterHistory,
     IterationMemory,
     ModelPerformanceRecord,
     merge_error_pattern_memory,
-    # Learning
+)
+
+# Learning types (RL)
+from .learning import (
     CandidatePlan,
     PreferencePair,
     ReasoningTrace,
     SelfEvaluation,
     SubTask,
-    # Main state
+)
+
+# Main state
+from .base import (
     KaggleState,
     create_initial_state,
     merge_dict,
-    # Memory managers
+)
+
+# Memory managers
+from .memory_managers import (
     aggregate_feature_importance,
     get_best_hyperparameters,
     get_memory_summary_for_planning,
