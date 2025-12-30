@@ -59,4 +59,42 @@ class DeadlineCallback(tf.keras.callbacks.Callback):
             print(f"[TIMEOUT] Soft deadline reached at epoch {epoch+1}")
             self.model.stop_training = True
 ```
+
+### 7. PyTorch Loss Function Safety (AMP Compatibility)
+NEVER use `nn.BCELoss()` with `torch.cuda.amp.autocast()` - it causes RuntimeError.
+ALWAYS use `nn.BCEWithLogitsLoss()` which is AMP-safe:
+
+```python
+# WRONG - crashes with autocast:
+criterion = nn.BCELoss()
+with torch.cuda.amp.autocast():
+    loss = criterion(sigmoid(logits), targets)  # RuntimeError!
+
+# CORRECT - AMP-safe:
+criterion = nn.BCEWithLogitsLoss()
+with torch.cuda.amp.autocast():
+    loss = criterion(logits, targets)  # Works! (applies sigmoid internally)
+```
+
+Note: With BCEWithLogitsLoss, model output should be RAW LOGITS (no sigmoid layer).
+The loss function applies sigmoid internally for numerical stability.
+
+### 8. Submission Format by Metric Type (CRITICAL)
+For AUC-ROC, LogLoss, or any probability-based metric:
+- ALWAYS submit RAW PROBABILITIES (float between 0 and 1)
+- NEVER convert to hard labels - this destroys your score!
+
+```python
+# WRONG for AUC/LogLoss (Score will be ~0.5 - terrible!):
+sample_sub[target_col] = (predictions > 0.5).astype(int)
+
+# CORRECT - keep as float probabilities:
+sample_sub[target_col] = predictions  # e.g., 0.73, 0.12, 0.89
+
+# Also WRONG - rounding:
+sample_sub[target_col] = np.round(predictions)  # Still destroys AUC!
+```
+
+WHY: AUC measures ranking ability. Hard labels (0/1) lose all ranking information.
+A model with 0.51 confidence and 0.99 confidence both become "1", destroying the metric.
 """

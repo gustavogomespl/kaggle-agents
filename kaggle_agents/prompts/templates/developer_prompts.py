@@ -95,59 +95,69 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
    print(f"Final Validation Performance: {val_loss:.6f}")
    ```
 
-   For PyTorch manual training loops:
+   For PyTorch manual training loops - check EVERY BATCH for long epochs:
    ```python
    import time
    _START_TIME = time.time()
-   _TIMEOUT_S = int(os.getenv("KAGGLE_AGENTS_COMPONENT_TIMEOUT_S", "3300"))
-   _SOFT_DEADLINE_S = _TIMEOUT_S - 120
+   _TIMEOUT_S = int(os.getenv("KAGGLE_AGENTS_COMPONENT_TIMEOUT_S", "600"))
+   _SOFT_DEADLINE_S = _TIMEOUT_S - 50  # Reserve 50s for cleanup/save
+
+   def _check_deadline() -> bool:
+       return (time.time() - _START_TIME) >= _SOFT_DEADLINE_S
 
    for epoch in range(max_epochs):
-       if time.time() - _START_TIME >= _SOFT_DEADLINE_S:
-           print(f"[TIMEOUT] Soft deadline reached at epoch {epoch+1}")
+       for batch_idx, batch in enumerate(dataloader):
+           if batch_idx % 10 == 0 and _check_deadline():  # Check every 10 batches
+               print(f"[TIMEOUT] Soft deadline at epoch {epoch}, batch {batch_idx}")
+               torch.save(model, 'model_emergency.pth')  # Emergency save FULL model
+               break
+           # ... train batch ...
+       if _check_deadline():
            break
-       # ... train epoch ...
 
    # ALWAYS print final metric
    print(f"Final Validation Performance: {best_val_loss:.6f}")
    ```
 
-10. MODEL CHECKPOINTING FOR ENSEMBLE COMPATIBILITY:
-    When saving model checkpoints that may be loaded by other components (e.g., ensemble):
+10. MODEL CHECKPOINTING - FULL MODEL SAVE (CRITICAL):
+    Due to disjointed train/inference environments, ALWAYS save the FULL MODEL object.
 
-    PREFER TorchScript (preserves architecture - no class definition needed to reload):
     ```python
-    # ❌ WRONG - state_dict requires EXACT class definition to reload:
-    torch.save(model.state_dict(), "model.pth")
+    # ✅ CORRECT (MANDATORY): Full model save - preserves architecture + weights
+    torch.save(model, 'model.pth')
 
-    # ✅ CORRECT - TorchScript preserves full architecture:
-    scripted_model = torch.jit.script(model)
-    torch.jit.save(scripted_model, "model.pt")
-
-    # Loading in ensemble (no class needed):
-    model = torch.jit.load("model.pt", map_location=device)
+    # Loading (works without class definition):
+    model = torch.load('model.pth', map_location=device)
     model.eval()
     ```
 
-    If state_dict MUST be used, ALSO save model config:
+    NEVER use state_dict alone:
     ```python
-    import json
-    config = {"class_name": "DnCNN", "depth": 15, "channels": 64, "container_attr": "net"}
-    with open("model_config.json", "w") as f:
-        json.dump(config, f)
+    # ❌ WRONG - causes "size mismatch" or "missing keys" errors:
+    torch.save(model.state_dict(), 'model.pth')
     ```
 
-    WHY: Ensemble components cannot load state_dicts if the model class definition
-    differs (e.g., self.net vs self.model, depth=15 vs depth=17). TorchScript avoids this.
+    WHY THIS MATTERS:
+    - Training agent defines: `self.net = nn.Sequential(...)`
+    - Inference agent defines: `self.layers = nn.Sequential(...)`
+    - state_dict keys are "net.0.weight" vs "layers.0.weight" = MISMATCH!
+    - Full model save avoids this entirely.
+
+    NOTE: TorchScript (`torch.jit.script`) is an alternative but fails with dynamic control flow.
+    Prefer `torch.save(model, ...)` for simplicity and reliability.
 
 ## MUST NOT:
 - sys.exit(), exit(), quit(), raise SystemExit, os._exit()
-- try-except blocks that swallow errors (let them surface)
+- try-except blocks that swallow errors silently (let them surface for debugging)
 - early_stopping_rounds as direct fit() parameter (use callbacks)
 - Subsample training data unless `KAGGLE_AGENTS_FAST_MODE=1` (FAST_MODE may subsample to meet budget, but keep determinism)
 - `pin_memory=True` in DataLoader (causes warnings/crashes). USE `pin_memory=False`.
 - `num_workers > 0` in DataLoader (safe default is 0 to avoid fork/spawn issues).
 - Overwrite sample_submission.csv (always write to submission.csv)
+- `nn.BCELoss()` with `torch.cuda.amp.autocast()` (use `nn.BCEWithLogitsLoss()` - it's AMP-safe)
+- Convert predictions to integers for AUC/LogLoss metrics: NEVER `(predictions > 0.5).astype(int)`
+- Create dummy/fallback submissions with constant values (0.5, mean, zeros) when errors occur
+- Use broad `except Exception` clauses that hide FileNotFoundError, RuntimeError, ValueError
 
 ## API Gotchas:
 - OneHotEncoder: sparse_output=False (NOT sparse=False) for sklearn 1.2+
@@ -160,6 +170,32 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 
 ## PyTorch Gotchas:
 - Dataset __getitem__ must return tensors/arrays (never None) so DataLoader can collate
+
+## FAIL FAST PRINCIPLE (CRITICAL):
+Do NOT create dummy submissions or fallback predictions when errors occur.
+Let errors surface so the Meta-Evaluator can diagnose and fix them.
+
+WRONG - masks the real error (Score will be ~0.5 and error is hidden):
+```python
+try:
+    model = torch.load('model.pth')
+    predictions = model(X_test)
+except Exception:
+    print("Warning: Model not found. Creating dummy submission.")
+    predictions = np.full(len(test_df), 0.5)  # BAD! Error is hidden.
+```
+
+CORRECT - let error surface (Meta-Evaluator can read and fix):
+```python
+model = torch.load('model.pth')  # Raises FileNotFoundError if missing
+predictions = model(X_test)
+# If this fails, the Meta-Evaluator sees the error and can fix the path
+```
+
+NEVER catch and hide these errors:
+- FileNotFoundError (model/data not found) → Meta-Evaluator will fix the path
+- RuntimeError (architecture mismatch) → Meta-Evaluator will fix the model definition
+- ValueError (empty arrays, shape mismatch) → Meta-Evaluator will fix the data pipeline
 
 ## IMAGE DATA PIPELINE CRITICAL FIXES (MANDATORY FOR IMAGE TASKS):
 
@@ -221,6 +257,44 @@ for noisy_path in noisy_files:
 
 print(f"Found {len(pairs)} paired training samples.")
 ```
+
+### 4. DATA PATH VALIDATION (MANDATORY before DataLoader creation):
+Image IDs in CSV may not include file extensions. Validate paths before creating Dataset.
+
+```python
+from pathlib import Path
+
+def validate_image_paths(image_ids: list, base_dir: Path, extensions=('.jpg', '.jpeg', '.png', '.tif', '.tiff')) -> list:
+    """Validate and resolve image paths, trying multiple extensions."""
+    valid_paths = []
+    missing = []
+
+    for img_id in image_ids:
+        found = False
+        # Try exact path first (in case extension is included in ID)
+        for ext in [''] + list(extensions):
+            path = base_dir / f"{img_id}{ext}"
+            if path.exists():
+                valid_paths.append(path)
+                found = True
+                break
+        if not found:
+            missing.append(img_id)
+
+    if missing:
+        print(f"[LOG:WARNING] {len(missing)} images not found: {missing[:5]}...")
+        raise FileNotFoundError(f"Missing {len(missing)} images. Check paths and extensions.")
+
+    print(f"[LOG:INFO] Validated {len(valid_paths)} image paths")
+    return valid_paths
+
+# USE BEFORE CREATING DATASET:
+train_images = validate_image_paths(train_df['id'].tolist(), Path('train/'))
+test_images = validate_image_paths(test_df['id'].tolist(), Path('test/'))
+```
+
+WHY: CSV often has IDs like "abc123" but files are "abc123.tif". Without validation,
+Dataset returns empty and training silently fails with "Found array with 0 sample(s)".
 
 ## IMAGE-TO-IMAGE / PIXEL-LEVEL TASKS (CRITICAL):
 If domain is image_to_image, image_segmentation, or submission format is pixel_level:

@@ -17,21 +17,33 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 - Match sample_submission.csv exactly: columns, IDs, shape
 
 ### 3. Soft-Deadline Pattern (MANDATORY)
+CRITICAL: The environment may kill your process at any time. Monitor time actively!
+
 ```python
 import os, time
 _START_TIME = time.time()
 _TIMEOUT_S = int(os.getenv("KAGGLE_AGENTS_COMPONENT_TIMEOUT_S", "600"))
-_SOFT_DEADLINE_S = _TIMEOUT_S - 45  # Reserve 45s for cleanup
+_SOFT_DEADLINE_S = _TIMEOUT_S - 50  # Reserve 50s for cleanup/save
 
 def _check_deadline() -> bool:
     return (time.time() - _START_TIME) >= _SOFT_DEADLINE_S
 
-# In training loops:
+# For sklearn/fold-based: Check at start of each fold
 for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
     if _check_deadline():
         print("[LOG:WARNING] Soft deadline reached, stopping early")
         break
     # ... train fold ...
+
+# For PyTorch: Check EVERY BATCH (not just epoch) for long training
+for epoch in range(max_epochs):
+    for batch_idx, batch in enumerate(dataloader):
+        if batch_idx % 10 == 0 and _check_deadline():  # Check every 10 batches
+            print(f"[TIMEOUT] Soft deadline at epoch {epoch}, batch {batch_idx}")
+            torch.save(model, 'model_emergency.pth')  # Emergency save FULL model
+            break
+    if _check_deadline():
+        break
 ```
 
 ### 4. Reproducibility
@@ -40,8 +52,12 @@ for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
 
 ### 5. MUST NOT:
 - `sys.exit()`, `exit()`, `quit()`, `raise SystemExit`, `os._exit()`
-- try-except blocks that swallow errors
+- try-except blocks that swallow errors silently (let them surface for debugging)
 - Overwrite sample_submission.csv (write to submission.csv)
+- `nn.BCELoss()` with `torch.cuda.amp.autocast()` (use `nn.BCEWithLogitsLoss()` - it's AMP-safe)
+- Convert predictions to integers for AUC/LogLoss metrics: NEVER `(predictions > 0.5).astype(int)`
+- Create dummy/fallback submissions with constant values (0.5, mean, zeros) when errors occur
+- Use broad `except Exception` clauses that hide FileNotFoundError, RuntimeError, ValueError
 
 ### 6. API Gotchas
 - OneHotEncoder: `sparse_output=False` (sklearn 1.2+)
