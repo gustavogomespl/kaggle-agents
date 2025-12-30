@@ -24,6 +24,7 @@ from ...prompts.templates.developer_prompts import (
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
 
+
 if TYPE_CHECKING:
     from .agent import DeveloperAgent
 
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
 class RefinementMixin:
     """Mixin providing refinement capabilities to DeveloperAgent."""
 
-    def _get_refinement_iterations(self: "DeveloperAgent", state: KaggleState) -> int:
+    def _get_refinement_iterations(self: DeveloperAgent, state: KaggleState) -> int:
         """Number of refinement iterations (can be reduced for fast/mlebench runs)."""
         run_mode = str(state.get("run_mode", "")).lower()
         if run_mode == "mlebench":
@@ -42,7 +43,7 @@ class RefinementMixin:
             return 2
 
     def _should_run_refinement(
-        self: "DeveloperAgent",
+        self: DeveloperAgent,
         component: AblationComponent,
         state: KaggleState,
         new_cv_score: float | None,
@@ -77,18 +78,21 @@ class RefinementMixin:
                 target_score = None
 
         if isinstance(target_score, (int, float)) and isinstance(new_cv_score, (int, float)):
-            metric_name = state.get("competition_info").evaluation_metric if state.get("competition_info") else ""
+            metric_name = (
+                state.get("competition_info").evaluation_metric
+                if state.get("competition_info")
+                else ""
+            )
             if is_metric_minimization(metric_name):
                 if float(new_cv_score) <= float(target_score):
                     return False
-            else:
-                if float(new_cv_score) >= float(target_score):
-                    return False
+            elif float(new_cv_score) >= float(target_score):
+                return False
 
         return True
 
     def _run_refinement_loop(
-        self: "DeveloperAgent",
+        self: DeveloperAgent,
         result: DevelopmentResult,
         component: AblationComponent,
         state: KaggleState,
@@ -130,9 +134,13 @@ class RefinementMixin:
                 print("📊 Training feedback extracted from logs")
 
                 if training_feedback.fold_scores:
-                    print(f"   CV: {training_feedback.cv_mean:.4f} ± {training_feedback.cv_std:.4f}")
+                    print(
+                        f"   CV: {training_feedback.cv_mean:.4f} ± {training_feedback.cv_std:.4f}"
+                    )
                 if training_feedback.best_optuna_trial:
-                    print(f"   Best Optuna trial: {training_feedback.best_optuna_trial.get('score', 0):.4f}")
+                    print(
+                        f"   Best Optuna trial: {training_feedback.best_optuna_trial.get('score', 0):.4f}"
+                    )
                 if training_feedback.slowest_step:
                     print(f"   Slowest step: {training_feedback.slowest_step}")
 
@@ -202,9 +210,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                             state_updates["current_code"] = best_code
                             state_updates["baseline_cv_score"] = best_score
                         else:
-                            print(
-                                f"No improvement ({refined_score:.6f} vs {best_score:.6f})"
-                            )
+                            print(f"No improvement ({refined_score:.6f} vs {best_score:.6f})")
                     else:
                         print("Could not extract score from refined code")
                 else:

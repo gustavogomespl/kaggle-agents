@@ -7,6 +7,7 @@ Provides helper methods for dataset info extraction and code parsing.
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+
 if TYPE_CHECKING:
     from ...core.state import KaggleState
 
@@ -59,9 +60,7 @@ class DeveloperUtilsMixin:
                 ]
                 target_col = target_candidates[0] if target_candidates else "UNKNOWN"
 
-            numeric_cols = [
-                c for c, dtype in dtypes.items() if dtype in ["int64", "float64"]
-            ]
+            numeric_cols = [c for c, dtype in dtypes.items() if dtype in ["int64", "float64"]]
             categorical_cols = [c for c, dtype in dtypes.items() if dtype == "object"]
 
             return f"""

@@ -53,7 +53,9 @@ class AdvancedFeatureEngineer:
                 train[ind_col] = missing_train.astype(int)
                 test[ind_col] = missing_test.astype(int)
 
-            if pd.api.types.is_numeric_dtype(train[col]) or pd.api.types.is_numeric_dtype(test[col]):
+            if pd.api.types.is_numeric_dtype(train[col]) or pd.api.types.is_numeric_dtype(
+                test[col]
+            ):
                 median = pd.to_numeric(train[col], errors="coerce").median()
                 if pd.isna(median):
                     median = 0.0
@@ -111,12 +113,7 @@ class AdvancedFeatureEngineer:
                 mapping = {v: int(i) for i, v in enumerate(uniques)}
                 train[col] = codes.astype(int)
                 test[col] = (
-                    test[col]
-                    .astype("object")
-                    .fillna("missing")
-                    .map(mapping)
-                    .fillna(-1)
-                    .astype(int)
+                    test[col].astype("object").fillna("missing").map(mapping).fillna(-1).astype(int)
                 )
 
         if y is not None:
@@ -141,9 +138,7 @@ class AdvancedFeatureEngineer:
         test = test_df.copy()
 
         numeric_cols = [
-            c
-            for c in train.select_dtypes(include=[np.number]).columns
-            if c != target_col
+            c for c in train.select_dtypes(include=[np.number]).columns if c != target_col
         ][: max(1, int(max_features))]
 
         for i, col_a in enumerate(numeric_cols):
@@ -172,9 +167,7 @@ class AdvancedFeatureEngineer:
         test = test_df.copy()
 
         numeric_cols = [
-            c
-            for c in train.select_dtypes(include=[np.number]).columns
-            if c != target_col
+            c for c in train.select_dtypes(include=[np.number]).columns if c != target_col
         ]
         if not numeric_cols:
             train["numeric_sum"] = 0.0
@@ -186,7 +179,11 @@ class AdvancedFeatureEngineer:
             return train, test
 
         train_num = train[numeric_cols]
-        test_num = test[numeric_cols] if all(c in test.columns for c in numeric_cols) else test.reindex(columns=numeric_cols, fill_value=0.0)
+        test_num = (
+            test[numeric_cols]
+            if all(c in test.columns for c in numeric_cols)
+            else test.reindex(columns=numeric_cols, fill_value=0.0)
+        )
 
         train["numeric_sum"] = train_num.sum(axis=1)
         train["numeric_mean"] = train_num.mean(axis=1)
@@ -207,7 +204,9 @@ class AdvancedFeatureEngineer:
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """Scale numeric features using statistics from train."""
         if method.lower() != "standard":
-            raise ValueError("Only method='standard' is supported in the lightweight implementation")
+            raise ValueError(
+                "Only method='standard' is supported in the lightweight implementation"
+            )
 
         train = train_df.copy()
         test = test_df.copy()
@@ -219,4 +218,3 @@ class AdvancedFeatureEngineer:
         test_scaled = (test - means) / stds
 
         return train_scaled, test_scaled
-

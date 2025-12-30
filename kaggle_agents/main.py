@@ -6,12 +6,12 @@ import sys
 
 # Fix matplotlib backend for Google Colab and other environments
 # This must be set before any imports that use matplotlib (e.g., LightGBM)
-if 'MPLBACKEND' in os.environ:
-    if os.environ['MPLBACKEND'] == 'module://matplotlib_inline.backend_inline':
-        os.environ['MPLBACKEND'] = 'Agg'
+if "MPLBACKEND" in os.environ:
+    if os.environ["MPLBACKEND"] == "module://matplotlib_inline.backend_inline":
+        os.environ["MPLBACKEND"] = "Agg"
 else:
     # Set a safe default backend for headless environments
-    os.environ.setdefault('MPLBACKEND', 'Agg')
+    os.environ.setdefault("MPLBACKEND", "Agg")
 
 import argparse
 import logging
@@ -121,15 +121,15 @@ def extract_competition_slug(competition_input: str) -> str:
         'https://www.kaggle.com/c/titanic' -> 'titanic'
     """
     # Remove trailing slash
-    competition_input = competition_input.rstrip('/')
+    competition_input = competition_input.rstrip("/")
 
     # If it's a URL, extract the slug
-    if 'kaggle.com' in competition_input:
+    if "kaggle.com" in competition_input:
         # Handle both /competitions/ and /c/ URLs
-        parts = competition_input.split('/')
+        parts = competition_input.split("/")
         # Find 'competitions' or 'c' in the URL
         for i, part in enumerate(parts):
-            if part in ('competitions', 'c') and i + 1 < len(parts):
+            if part in ("competitions", "c") and i + 1 < len(parts):
                 return parts[i + 1]
 
     # Otherwise, assume it's already a slug
@@ -141,8 +141,8 @@ def main():
     # Configure logging to show INFO level messages
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[logging.StreamHandler(sys.stdout)]
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
     parser = argparse.ArgumentParser(
@@ -213,14 +213,9 @@ def main():
     # Create workflow based on mode
     if args.mode == "enhanced":
         print("Using ENHANCED mode with multi-agent system and feedback loops")
-        workflow = create_enhanced_workflow(
-            competition_name=competition_slug,
-            model=args.model
-        )
+        workflow = create_enhanced_workflow(competition_name=competition_slug, model=args.model)
         initial_state = initialize_enhanced_state(
-            competition_slug,
-            Config.DATA_DIR,
-            args.max_iterations
+            competition_slug, Config.DATA_DIR, args.max_iterations
         )
     else:
         print("Using SIMPLE mode with basic LangGraph workflow")
@@ -231,6 +226,7 @@ def main():
     if args.visualize:
         try:
             from IPython.display import Image, display
+
             display(Image(workflow.get_graph().draw_mermaid_png()))
         except ImportError:
             print("Warning: Visualization requires IPython. Install with: uv add ipython")
@@ -270,6 +266,7 @@ def main():
     except Exception as e:
         print(f"\n\nWorkflow failed: {e!s}")
         import traceback
+
         traceback.print_exc()
 
 

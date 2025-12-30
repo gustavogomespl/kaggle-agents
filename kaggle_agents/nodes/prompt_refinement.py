@@ -44,7 +44,7 @@ class PromptRefinementDecider:
     def _analyze_performance_gaps(self, state: KaggleState) -> dict[str, bool]:
         """
         Analyze performance gaps to trigger adaptive optimization.
-        
+
         Returns:
             Dict[str, bool]: {agent_name: should_trigger_immediately}
         """
@@ -56,7 +56,7 @@ class PromptRefinementDecider:
         recent_results = dev_results[-5:]  # Look at last 5 attempts
         usage_count = len(recent_results)
         success_count = sum(1 for r in recent_results if r.success)
-        
+
         developer_struggling = False
         if usage_count >= 3:
             success_rate = success_count / usage_count
@@ -69,10 +69,10 @@ class PromptRefinementDecider:
         # or if the plan was empty (though that usually crashes earlier)
         planner_struggling = False
         if usage_count >= 3 and success_count == 0:
-             # If EVERYTHING failed recently, maybe the plan is bad?
-             # This is a heuristic; consistent failure suggests bad strategy.
-             print("   ⚠️ Adaptive Trigger: Consistent failure suggests strategic (Planner) issues")
-             planner_struggling = True
+            # If EVERYTHING failed recently, maybe the plan is bad?
+            # This is a heuristic; consistent failure suggests bad strategy.
+            print("   ⚠️ Adaptive Trigger: Consistent failure suggests strategic (Planner) issues")
+            planner_struggling = True
 
         return {"planner": planner_struggling, "developer": developer_struggling}
 
@@ -96,7 +96,7 @@ class PromptRefinementDecider:
         gaps = self._analyze_performance_gaps(state)
 
         # Check if it's time for periodic optimization
-        is_optimization_cycle = (current_iteration % self.optimization_frequency == 0)
+        is_optimization_cycle = current_iteration % self.optimization_frequency == 0
 
         if not is_optimization_cycle and not any(gaps.values()):
             return {"planner": False, "developer": False}
@@ -111,26 +111,36 @@ class PromptRefinementDecider:
             min_score=0.3,
         )
         # optimize if (cycle OR gap) AND enough data
-        decisions["planner"] = (is_optimization_cycle or gaps["planner"]) and len(planner_examples) >= self.min_training_examples
+        decisions["planner"] = (is_optimization_cycle or gaps["planner"]) and len(
+            planner_examples
+        ) >= self.min_training_examples
 
         if decisions["planner"]:
             reason = "Gap detected" if gaps["planner"] else "Cycle"
             print(f"   ✓ Planner: Optimize ({reason}), {len(planner_examples)} examples available")
         else:
-            print(f"   ⏭️ Planner: Skipped (Data: {len(planner_examples)}/{self.min_training_examples})")
+            print(
+                f"   ⏭️ Planner: Skipped (Data: {len(planner_examples)}/{self.min_training_examples})"
+            )
 
         # Check developer
         developer_examples = self.training_collector.convert_to_dspy_examples(
             "developer_generator",
             min_score=0.5,
         )
-        decisions["developer"] = (is_optimization_cycle or gaps["developer"]) and len(developer_examples) >= self.min_training_examples
+        decisions["developer"] = (is_optimization_cycle or gaps["developer"]) and len(
+            developer_examples
+        ) >= self.min_training_examples
 
         if decisions["developer"]:
-             reason = "Gap detected" if gaps["developer"] else "Cycle"
-             print(f"   ✓ Developer: Optimize ({reason}), {len(developer_examples)} examples available")
+            reason = "Gap detected" if gaps["developer"] else "Cycle"
+            print(
+                f"   ✓ Developer: Optimize ({reason}), {len(developer_examples)} examples available"
+            )
         else:
-            print(f"   ⏭️ Developer: Skipped (Data: {len(developer_examples)}/{self.min_training_examples})")
+            print(
+                f"   ⏭️ Developer: Skipped (Data: {len(developer_examples)}/{self.min_training_examples})"
+            )
 
         return decisions
 
@@ -246,6 +256,7 @@ class PromptOptimizer:
 
 # ==================== Node Function ====================
 
+
 def prompt_refinement_node(state: KaggleState) -> dict[str, Any]:
     """
     Check if prompts should be refined and optimize if needed.
@@ -256,9 +267,9 @@ def prompt_refinement_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("= PROMPT REFINEMENT: RL-based Optimization")
-    print("="*60)
+    print("=" * 60)
 
     # Decide if optimization is needed
     decider = PromptRefinementDecider()
@@ -311,4 +322,4 @@ def should_refine_prompts(state: KaggleState) -> bool:
     if current_iteration < 2:
         return False
 
-    return (current_iteration % 5 == 0)
+    return current_iteration % 5 == 0

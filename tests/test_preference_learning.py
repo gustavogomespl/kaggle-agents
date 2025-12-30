@@ -4,16 +4,14 @@ Tests for DPO-style Preference Learning.
 Tests PreferenceCollector and PreferenceRewardModel functionality.
 """
 
-import pytest
-from datetime import datetime
 
+from kaggle_agents.core.state import PreferencePair
 from kaggle_agents.optimization.preference_learning import (
     PreferenceCollector,
     PreferenceRewardModel,
     create_preference_collector,
     create_preference_reward_model,
 )
-from kaggle_agents.core.state import PreferencePair
 
 
 class TestPreferenceCollector:
@@ -349,4 +347,3 @@ gc.collect()
         # Generate guidance
         guidance = model.get_guidance_for_prompt()
         assert len(guidance) > 0
-

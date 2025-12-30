@@ -7,7 +7,12 @@ Kaggle competition solving.
 """
 
 # Type definitions
-from .types import DomainType, SubmissionFormatType
+# Main state
+from .base import (
+    KaggleState,
+    create_initial_state,
+    merge_dict,
+)
 
 # Competition types
 from .competition import (
@@ -17,12 +22,13 @@ from .competition import (
     merge_competition_info,
 )
 
-# Result types
-from .results import (
-    CodeAttempt,
-    DevelopmentResult,
-    SubmissionResult,
-    ValidationResult,
+# Learning types (RL)
+from .learning import (
+    CandidatePlan,
+    PreferencePair,
+    ReasoningTrace,
+    SelfEvaluation,
+    SubTask,
 )
 
 # Memory types
@@ -35,22 +41,6 @@ from .memory import (
     merge_error_pattern_memory,
 )
 
-# Learning types (RL)
-from .learning import (
-    CandidatePlan,
-    PreferencePair,
-    ReasoningTrace,
-    SelfEvaluation,
-    SubTask,
-)
-
-# Main state
-from .base import (
-    KaggleState,
-    create_initial_state,
-    merge_dict,
-)
-
 # Memory managers
 from .memory_managers import (
     aggregate_feature_importance,
@@ -61,6 +51,16 @@ from .memory_managers import (
     update_model_performance,
     update_strategy_effectiveness,
 )
+
+# Result types
+from .results import (
+    CodeAttempt,
+    DevelopmentResult,
+    SubmissionResult,
+    ValidationResult,
+)
+from .types import DomainType, SubmissionFormatType
+
 
 __all__ = [
     # Types

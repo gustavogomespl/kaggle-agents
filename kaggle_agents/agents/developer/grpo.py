@@ -11,12 +11,13 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...core.state import AblationComponent, KaggleState, ReasoningTrace
 from ...utils.llm_utils import get_text_content
+
 
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
@@ -25,12 +26,13 @@ if TYPE_CHECKING:
 @dataclass
 class ChainOfThoughtResult:
     """Result of Chain-of-Thought reasoning before code generation."""
-    data_analysis: str          # Analysis of input data format and characteristics
-    transformation_plan: str    # Planned data transformations
-    model_architecture: str     # Model/algorithm selection reasoning
-    validation_strategy: str    # Cross-validation and evaluation strategy
-    output_format: str          # Submission format requirements
-    thinking_summary: str       # Overall reasoning summary
+
+    data_analysis: str  # Analysis of input data format and characteristics
+    transformation_plan: str  # Planned data transformations
+    model_architecture: str  # Model/algorithm selection reasoning
+    validation_strategy: str  # Cross-validation and evaluation strategy
+    output_format: str  # Submission format requirements
+    thinking_summary: str  # Overall reasoning summary
     timestamp: datetime = None
 
     def __post_init__(self):
@@ -71,14 +73,14 @@ class GRPOMixin:
 
         prompt = f"""Before implementing {component.name} ({component.component_type}), analyze the task:
 
-COMPETITION: {competition_info.name if competition_info else 'Unknown'}
+COMPETITION: {competition_info.name if competition_info else "Unknown"}
 DOMAIN: {domain}
-METRIC: {competition_info.evaluation_metric if competition_info else 'Unknown'}
+METRIC: {competition_info.evaluation_metric if competition_info else "Unknown"}
 COMPONENT: {component.name}
 TYPE: {component.component_type}
-DESCRIPTION: {component.code[:500] if component.code else 'No description'}
+DESCRIPTION: {component.code[:500] if component.code else "No description"}
 
-KNOWN ERROR PATTERNS TO AVOID: {', '.join(known_errors) if known_errors else 'None'}
+KNOWN ERROR PATTERNS TO AVOID: {", ".join(known_errors) if known_errors else "None"}
 
 Provide a structured analysis in JSON format:
 {{
@@ -92,7 +94,9 @@ Provide a structured analysis in JSON format:
 Be specific and actionable. Focus on preventing common failures."""
 
         messages = [
-            SystemMessage(content="You are an expert ML engineer analyzing implementation requirements."),
+            SystemMessage(
+                content="You are an expert ML engineer analyzing implementation requirements."
+            ),
             HumanMessage(content=prompt),
         ]
 
@@ -100,7 +104,7 @@ Be specific and actionable. Focus on preventing common failures."""
             response = self.llm.invoke(messages)
             content = get_text_content(response.content).strip()
 
-            json_match = re.search(r'\{[\s\S]*\}', content)
+            json_match = re.search(r"\{[\s\S]*\}", content)
             if json_match:
                 result = json.loads(json_match.group())
             else:
@@ -217,7 +221,7 @@ Be specific and actionable. Focus on preventing common failures."""
 
         print(f"   🔄 Refining reasoning (weak areas: {weak_areas})")
 
-        refinement_prompt = f"""The following reasoning trace needs improvement in: {', '.join(weak_areas)}
+        refinement_prompt = f"""The following reasoning trace needs improvement in: {", ".join(weak_areas)}
 
 ORIGINAL TRACE:
 - Requirements: {trace.requirements_analysis}
@@ -227,7 +231,7 @@ ORIGINAL TRACE:
 - Validation: {trace.validation_checklist}
 
 WEAK AREAS TO IMPROVE:
-{chr(10).join(f'- {area}: Score {step_scores.get(area, 0):.2f}/1.0' for area in weak_areas)}
+{chr(10).join(f"- {area}: Score {step_scores.get(area, 0):.2f}/1.0" for area in weak_areas)}
 
 Provide an IMPROVED version focusing on the weak areas. Return JSON:
 {{
@@ -247,18 +251,25 @@ Provide an IMPROVED version focusing on the weak areas. Return JSON:
             response = self.llm.invoke(messages)
             content = get_text_content(response.content).strip()
 
-            json_match = re.search(r'\{[\s\S]*\}', content)
+            json_match = re.search(r"\{[\s\S]*\}", content)
             if json_match:
                 result = json.loads(json_match.group())
 
                 from dataclasses import replace
+
                 return replace(
                     trace,
-                    requirements_analysis=result.get("requirements_analysis", trace.requirements_analysis),
+                    requirements_analysis=result.get(
+                        "requirements_analysis", trace.requirements_analysis
+                    ),
                     potential_issues=result.get("potential_issues", trace.potential_issues),
                     solution_approach=result.get("solution_approach", trace.solution_approach),
-                    implementation_plan=result.get("implementation_plan", trace.implementation_plan),
-                    validation_checklist=result.get("validation_checklist", trace.validation_checklist),
+                    implementation_plan=result.get(
+                        "implementation_plan", trace.implementation_plan
+                    ),
+                    validation_checklist=result.get(
+                        "validation_checklist", trace.validation_checklist
+                    ),
                 )
 
         except Exception as e:
@@ -398,7 +409,7 @@ Provide an IMPROVED version focusing on the weak areas. Return JSON:
         Returns:
             Regenerated code with better alignment
         """
-        print(f"   🔄 GRPO Enforcement: Regenerating with strict alignment...")
+        print("   🔄 GRPO Enforcement: Regenerating with strict alignment...")
         print(f"   Missing items to address: {len(missing_items)}")
 
         missing_str = "\n".join(f"  - {item}" for item in missing_items[:10])
@@ -414,10 +425,10 @@ Provide an IMPROVED version focusing on the weak areas. Return JSON:
 {trace.requirements_analysis}
 
 ### Potential Issues (MUST handle)
-{chr(10).join('- ' + issue for issue in trace.potential_issues)}
+{chr(10).join("- " + issue for issue in trace.potential_issues)}
 
 ### Validation Checklist (MUST implement)
-{chr(10).join('- ' + check for check in trace.validation_checklist)}
+{chr(10).join("- " + check for check in trace.validation_checklist)}
 
 ## ORIGINAL CODE (incomplete):
 ```python
@@ -435,7 +446,9 @@ Return the COMPLETE, corrected Python code.
 Wrap your code in ```python ... ```"""
 
         messages = [
-            SystemMessage(content="You are an expert ML engineer enforcing code quality requirements. Address ALL missing items explicitly."),
+            SystemMessage(
+                content="You are an expert ML engineer enforcing code quality requirements. Address ALL missing items explicitly."
+            ),
             HumanMessage(content=enforcement_prompt),
         ]
 
@@ -490,13 +503,13 @@ Wrap your code in ```python ... ```"""
 
 ## TASK CONTEXT
 Component: {component.name} ({component.component_type})
-Competition: {competition_info.name if competition_info else 'Unknown'}
+Competition: {competition_info.name if competition_info else "Unknown"}
 Domain: {domain}
 Problem Type: {problem_type}
 Metric: {metric}
-Description: {component.code[:300] if component.code else 'No description'}
+Description: {component.code[:300] if component.code else "No description"}
 
-{f'## DATA INFO{chr(10)}{data_info}' if data_info else ''}
+{f"## DATA INFO{chr(10)}{data_info}" if data_info else ""}
 
 ## THINK STEP BY STEP
 
@@ -523,7 +536,9 @@ Return your reasoning in JSON format:
 }}"""
 
         messages = [
-            SystemMessage(content="You are an expert ML engineer planning an implementation. Think carefully before coding."),
+            SystemMessage(
+                content="You are an expert ML engineer planning an implementation. Think carefully before coding."
+            ),
             HumanMessage(content=prompt),
         ]
 
@@ -531,7 +546,7 @@ Return your reasoning in JSON format:
             response = self.llm.invoke(messages)
             content = get_text_content(response.content).strip()
 
-            json_match = re.search(r'\{[\s\S]*\}', content)
+            json_match = re.search(r"\{[\s\S]*\}", content)
             if json_match:
                 result = json.loads(json_match.group())
 

@@ -44,6 +44,7 @@ class SearchAgent:
             )
         elif self.config.llm.provider == "gemini":
             from langchain_google_genai import ChatGoogleGenerativeAI
+
             self.llm = ChatGoogleGenerativeAI(
                 model=self.config.llm.model,
                 temperature=self.config.llm.temperature,
@@ -64,9 +65,9 @@ class SearchAgent:
         Returns:
             State updates with SOTA solutions
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("SEARCH AGENT: Retrieving SOTA Solutions")
-        print("="*60)
+        print("=" * 60)
 
         competition_name = state["competition_info"].name
         state.get("domain_detected", "tabular")
@@ -169,6 +170,7 @@ class SearchAgent:
         Returns:
             Ranked list of solutions
         """
+
         def score_solution(sol: SOTASolution) -> float:
             score = 0.0
 
@@ -220,7 +222,7 @@ class SearchAgent:
         # Analyze top 3 solutions with LLM
         for i, sol in enumerate(solutions[:3]):
             if sol.code_snippets:
-                print(f"      Analyzing solution {i+1}: {sol.title[:50]}...")
+                print(f"      Analyzing solution {i + 1}: {sol.title[:50]}...")
                 analysis = self._analyze_code_snippets(sol)
                 if analysis:
                     # Enrich solution with extracted insights
@@ -229,12 +231,16 @@ class SearchAgent:
                         new_models = [m for m in analysis["models"] if m not in sol.models_used]
                         sol.models_used.extend(new_models)
                     if analysis.get("features"):
-                        new_features = [f for f in analysis["features"] if f not in sol.feature_engineering]
+                        new_features = [
+                            f for f in analysis["features"] if f not in sol.feature_engineering
+                        ]
                         sol.feature_engineering.extend(new_features)
                     if analysis.get("ensemble") and not sol.ensemble_approach:
                         sol.ensemble_approach = analysis["ensemble"]
                     if analysis.get("strategies"):
-                        new_strategies = [s for s in analysis["strategies"] if s not in sol.strategies]
+                        new_strategies = [
+                            s for s in analysis["strategies"] if s not in sol.strategies
+                        ]
                         sol.strategies.extend(new_strategies)
 
         return solutions
@@ -250,9 +256,7 @@ class SearchAgent:
             Dictionary with extracted models, features, ensemble, strategies
         """
         # Prepare code snippets (limit to first 3, truncate each to 1000 chars)
-        snippets_text = "\n\n---\n\n".join(
-            snippet[:1000] for snippet in solution.code_snippets[:3]
-        )
+        snippets_text = "\n\n---\n\n".join(snippet[:1000] for snippet in solution.code_snippets[:3])
 
         prompt = f"""Analyze these Kaggle solution code snippets and extract key patterns.
 
@@ -311,10 +315,11 @@ Return ONLY valid JSON, no explanation or markdown."""
                 print(f"   Ensemble: {sol.ensemble_approach}")
             print(f"   Code Snippets: {len(sol.code_snippets)}")
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def search_agent_node(state: KaggleState) -> dict[str, Any]:
     """

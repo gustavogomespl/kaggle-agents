@@ -39,9 +39,9 @@ DomainType = Literal[
 # ==================== Submission Format Types ====================
 
 SubmissionFormatType = Literal[
-    "standard",      # One row per sample (classification/regression)
-    "pixel_level",   # One row per pixel (image-to-image, segmentation)
-    "multi_label",   # Multiple rows per sample
-    "ranking",       # Ranking format
-    "rle_encoded",   # Run-length encoded masks (segmentation)
+    "standard",  # One row per sample (classification/regression)
+    "pixel_level",  # One row per pixel (image-to-image, segmentation)
+    "multi_label",  # Multiple rows per sample
+    "ranking",  # Ranking format
+    "rle_encoded",  # Run-length encoded masks (segmentation)
 ]

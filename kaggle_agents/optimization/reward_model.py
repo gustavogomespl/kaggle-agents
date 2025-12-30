@@ -10,8 +10,8 @@ Enhanced with:
 - Ablation study signals
 """
 
-import re
 import json
+import re
 from typing import Any
 
 import dspy
@@ -30,7 +30,12 @@ class PlannerRewardModel:
     - Feasibility (components are implementable)
     """
 
-    def __init__(self, weight_diversity: float = 0.3, weight_impact: float = 0.4, weight_completeness: float = 0.3):
+    def __init__(
+        self,
+        weight_diversity: float = 0.3,
+        weight_impact: float = 0.4,
+        weight_completeness: float = 0.3,
+    ):
         """
         Initialize reward model.
 
@@ -55,7 +60,7 @@ class PlannerRewardModel:
             Reward score (0-1)
         """
         # Extract ablation plan from prediction (may be JSON string)
-        plan = prediction.ablation_plan if hasattr(prediction, 'ablation_plan') else []
+        plan = prediction.ablation_plan if hasattr(prediction, "ablation_plan") else []
         if isinstance(plan, str):
             try:
                 parsed = json.loads(plan)
@@ -73,11 +78,10 @@ class PlannerRewardModel:
 
         # Weighted average
         return (
-            self.weight_diversity * diversity_score +
-            self.weight_impact * impact_score +
-            self.weight_completeness * completeness_score
+            self.weight_diversity * diversity_score
+            + self.weight_impact * impact_score
+            + self.weight_completeness * completeness_score
         )
-
 
     def _evaluate_diversity(self, plan: list) -> float:
         """
@@ -109,7 +113,6 @@ class PlannerRewardModel:
 
         # Diversity = proportion of expected types covered
         return len(plan_types & expected_types) / len(expected_types)
-
 
     def _evaluate_impact_estimates(self, plan: list) -> float:
         """
@@ -190,7 +193,7 @@ class DeveloperRewardModel:
         Returns:
             Reward score (0-1)
         """
-        code = prediction.code if hasattr(prediction, 'code') else ""
+        code = prediction.code if hasattr(prediction, "code") else ""
 
         if not code:
             return 0.0
@@ -201,7 +204,6 @@ class DeveloperRewardModel:
 
         # Average
         return (syntax_score + structure_score) / 2
-
 
     def _check_syntax(self, code: str) -> float:
         """
@@ -214,7 +216,7 @@ class DeveloperRewardModel:
             1.0 if valid syntax, 0.0 otherwise
         """
         try:
-            compile(code, '<string>', 'exec')
+            compile(code, "<string>", "exec")
             return 1.0
         except SyntaxError:
             return 0.0
@@ -232,11 +234,11 @@ class DeveloperRewardModel:
         score = 0.0
 
         # Has imports
-        if re.search(r'^import\s+\w+', code, re.MULTILINE):
+        if re.search(r"^import\s+\w+", code, re.MULTILINE):
             score += 0.3
 
         # Has function definitions
-        if re.search(r'^def\s+\w+', code, re.MULTILINE):
+        if re.search(r"^def\s+\w+", code, re.MULTILINE):
             score += 0.3
 
         # Has main execution logic
@@ -271,7 +273,7 @@ class ValidationRewardModel:
         Returns:
             Reward score (0-1)
         """
-        results = prediction.validation_results if hasattr(prediction, 'validation_results') else []
+        results = prediction.validation_results if hasattr(prediction, "validation_results") else []
 
         if not results:
             return 0.0
@@ -284,7 +286,6 @@ class ValidationRewardModel:
 
         # Pass rate
         return passed_count / total_count
-
 
     def _get_passed(self, result) -> bool:
         """Extract 'passed' field from result."""
@@ -327,7 +328,7 @@ class KaggleScoreRewardModel:
             Reward score (0-1)
         """
         # Get submission result
-        submission = prediction.submission if hasattr(prediction, 'submission') else None
+        submission = prediction.submission if hasattr(prediction, "submission") else None
 
         if not submission:
             return 0.0
@@ -349,7 +350,9 @@ class KaggleScoreRewardModel:
         if percentile <= self.target_percentile:
             return 1.0
         # Scale from 1.0 at target to 0.0 at 100%
-        return max(0.0, 1.0 - (percentile - self.target_percentile) / (100 - self.target_percentile))
+        return max(
+            0.0, 1.0 - (percentile - self.target_percentile) / (100 - self.target_percentile)
+        )
 
 
 class CombinedRewardModel:
@@ -403,16 +406,16 @@ class CombinedRewardModel:
 
         # CV score component (if available)
         cv_score = 0.0
-        if hasattr(prediction, 'cv_score') and prediction.cv_score is not None:
+        if hasattr(prediction, "cv_score") and prediction.cv_score is not None:
             # Normalize CV score (assume higher is better)
             # This would need competition-specific normalization
             cv_score = min(prediction.cv_score, 1.0)
 
         # Weighted combination
         return (
-            self.weight_kaggle * kaggle_score +
-            self.weight_quality * quality_score +
-            self.weight_cv * cv_score
+            self.weight_kaggle * kaggle_score
+            + self.weight_quality * quality_score
+            + self.weight_cv * cv_score
         )
 
 
@@ -555,12 +558,12 @@ class ExecutionFeedbackRewardModel:
 
         # Calculate combined reward
         combined = (
-            self.weight_cv_score * rewards["cv_score"] +
-            self.weight_cv_stability * rewards["cv_stability"] +
-            self.weight_improvement * rewards["improvement"] +
-            self.weight_efficiency * rewards["efficiency"] +
-            self.weight_feature_quality * rewards["feature_quality"] +
-            rewards["optuna_bonus"]
+            self.weight_cv_score * rewards["cv_score"]
+            + self.weight_cv_stability * rewards["cv_stability"]
+            + self.weight_improvement * rewards["improvement"]
+            + self.weight_efficiency * rewards["efficiency"]
+            + self.weight_feature_quality * rewards["feature_quality"]
+            + rewards["optuna_bonus"]
         )
 
         rewards["combined"] = min(max(combined, 0.0), 1.0)
@@ -673,11 +676,16 @@ class AblationRewardModel:
             score += 0.2
 
         # Check for comparative analysis
-        if any(word in ablation_results.lower() for word in ["better", "worse", "improvement", "decrease"]):
+        if any(
+            word in ablation_results.lower()
+            for word in ["better", "worse", "improvement", "decrease"]
+        ):
             score += 0.2
 
         # Check for actionable suggestions
-        if any(word in ablation_results.lower() for word in ["should", "recommend", "try", "consider"]):
+        if any(
+            word in ablation_results.lower() for word in ["should", "recommend", "try", "consider"]
+        ):
             score += 0.2
 
         # Check for code modifications identified
@@ -770,9 +778,9 @@ class ImprovementTrackingRewardModel:
 
         # Combined
         rewards["combined"] = (
-            0.5 * rewards["improvement"] +
-            0.3 * rewards["absolute_score"] +
-            0.2 * rewards["is_best"]
+            0.5 * rewards["improvement"]
+            + 0.3 * rewards["absolute_score"]
+            + 0.2 * rewards["is_best"]
         )
 
         iteration["rewards"] = rewards
@@ -805,8 +813,8 @@ class ImprovementTrackingRewardModel:
         self.best_solution_idx = -1
 
 
-
 # ==================== Convenience Functions ====================
+
 
 def create_planner_metric() -> PlannerRewardModel:
     """Create a planner reward model."""

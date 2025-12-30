@@ -37,7 +37,10 @@ class PromptOptimizer:
     def _is_reasoning_model(self, model: str) -> bool:
         """Check if the model is an OpenAI reasoning model that requires special config."""
         reasoning_patterns = [
-            "o-1", "o1-", "o-3", "o3-",  # o-1, o-3 series
+            "o-1",
+            "o1-",
+            "o-3",
+            "o3-",  # o-1, o-3 series
             "gpt-5",  # gpt-5 series (including gpt-5-mini)
         ]
         model_lower = model.lower()
@@ -56,7 +59,10 @@ class PromptOptimizer:
             if self._is_reasoning_model(model):
                 temperature = 1.0
                 max_tokens = max(max_tokens or 16000, 16000)
-                print(f"[DSPy] Detected reasoning model '{model}', using temperature=1.0, max_tokens={max_tokens}", flush=True)
+                print(
+                    f"[DSPy] Detected reasoning model '{model}', using temperature=1.0, max_tokens={max_tokens}",
+                    flush=True,
+                )
 
             lm = dspy.LM(
                 model=f"openai/{model}",
@@ -142,7 +148,7 @@ class PromptOptimizer:
 
         save_path.parent.mkdir(parents=True, exist_ok=True)
 
-        with open(save_path, 'wb') as f:
+        with open(save_path, "wb") as f:
             pickle.dump(optimized_module, f)
 
         print(f" Optimized prompts saved to {save_path}")
@@ -172,7 +178,7 @@ class PromptOptimizer:
             return None
 
         try:
-            with open(load_path, 'rb') as f:
+            with open(load_path, "rb") as f:
                 module = pickle.load(f)
             print(f" Loaded optimized prompts for {agent_name}")
             return module
@@ -260,7 +266,7 @@ class TrainingDataCollector:
         examples.append(example)
 
         # Save
-        with open(examples_file, 'w') as f:
+        with open(examples_file, "w") as f:
             json.dump(examples, f, indent=2, default=str)
 
         print(f" Added training example for {agent_name} (score: {score:.4f})")
@@ -352,6 +358,7 @@ class TrainingDataCollector:
 
 
 # ==================== Convenience Functions ====================
+
 
 def create_optimizer() -> PromptOptimizer:
     """

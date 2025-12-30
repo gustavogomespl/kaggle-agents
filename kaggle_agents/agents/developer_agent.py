@@ -14,9 +14,10 @@ from .developer import (
     developer_agent_node,
 )
 
+
 __all__ = [
+    "CodeFixerModule",
+    "CodeGeneratorModule",
     "DeveloperAgent",
     "developer_agent_node",
-    "CodeGeneratorModule",
-    "CodeFixerModule",
 ]

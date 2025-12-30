@@ -59,59 +59,65 @@ def create_tabular_fallback_plan(
     plan = []
 
     # ALWAYS add feature engineering first (high impact)
-    plan.append({
-        "name": "advanced_feature_engineering",
-        "component_type": "feature_engineering",
-        "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
-        "estimated_impact": 0.15,
-        "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
-        "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder"
-    })
+    plan.append(
+        {
+            "name": "advanced_feature_engineering",
+            "component_type": "feature_engineering",
+            "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
+            "estimated_impact": 0.15,
+            "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
+            "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder",
+        }
+    )
 
     # ALWAYS add 3 diverse models for ensemble diversity
-    plan.extend([
-        {
-            "name": "lightgbm_optuna_tuned",
-            "component_type": "model",
-            "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
-            "estimated_impact": 0.22,
-            "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
-            "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100"
-        },
-        {
-            "name": "xgboost_optuna_tuned",
-            "component_type": "model",
-            "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
-            "estimated_impact": 0.20,
-            "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
-            "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50"
-        },
-        {
-            "name": "catboost_optuna_tuned",
-            "component_type": "model",
-            "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
-            "estimated_impact": 0.19,
-            "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
-            "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV"
-        },
-        {
-            "name": "neural_network_mlp",
-            "component_type": "model",
-            "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
-            "estimated_impact": 0.15,
-            "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
-            "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping."
-        }
-    ])
+    plan.extend(
+        [
+            {
+                "name": "lightgbm_optuna_tuned",
+                "component_type": "model",
+                "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
+                "estimated_impact": 0.22,
+                "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
+                "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100",
+            },
+            {
+                "name": "xgboost_optuna_tuned",
+                "component_type": "model",
+                "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
+                "estimated_impact": 0.20,
+                "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
+                "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50",
+            },
+            {
+                "name": "catboost_optuna_tuned",
+                "component_type": "model",
+                "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
+                "estimated_impact": 0.19,
+                "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
+                "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV",
+            },
+            {
+                "name": "neural_network_mlp",
+                "component_type": "model",
+                "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
+                "estimated_impact": 0.15,
+                "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
+                "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping.",
+            },
+        ]
+    )
 
     # ALWAYS add stacking ensemble (combines the 4 models above)
-    plan.append({
-        "name": "stacking_ensemble",
-        "component_type": "ensemble",
-        "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
-        "estimated_impact": 0.25,
-        "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
-        "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5"
-    })
+    plan.append(
+        {
+            "name": "stacking_ensemble",
+            "component_type": "ensemble",
+            "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
+            "estimated_impact": 0.25,
+            "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
+            "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5",
+        }
+    )
 
     return plan

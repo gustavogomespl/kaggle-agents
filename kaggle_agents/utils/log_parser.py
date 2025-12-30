@@ -16,10 +16,10 @@ Log Format:
 - [LOG:ERROR] message=...
 """
 
-import re
 import ast
+import re
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -33,7 +33,7 @@ class TrainingFeedback:
 
     # Optuna Trials
     optuna_trials: list[dict[str, Any]] = field(default_factory=list)
-    best_optuna_trial: Optional[dict[str, Any]] = None
+    best_optuna_trial: dict[str, Any] | None = None
 
     # Feature Importances
     top_features: list[str] = field(default_factory=list)
@@ -62,10 +62,7 @@ class TrainingFeedback:
     def has_data(self) -> bool:
         """Check if any meaningful data was parsed."""
         return bool(
-            self.fold_scores
-            or self.optuna_trials
-            or self.timing_breakdown
-            or self.hyperparams
+            self.fold_scores or self.optuna_trials or self.timing_breakdown or self.hyperparams
         )
 
     def get_improvement_suggestions(self) -> list[str]:
@@ -337,6 +334,7 @@ def parse_training_logs(stdout: str) -> TrainingFeedback:
     if feedback.fold_scores:
         if not feedback.cv_mean:
             import numpy as np
+
             feedback.cv_mean = float(np.mean(feedback.fold_scores))
             feedback.cv_std = float(np.std(feedback.fold_scores))
 
@@ -382,11 +380,11 @@ def format_feedback_for_llm(feedback: TrainingFeedback) -> str:
         sections.append(f"- **Mean Score**: {feedback.cv_mean:.6f}")
         sections.append(f"- **Std Dev**: {feedback.cv_std:.6f}")
         sections.append(f"- **Per-fold scores**: {[round(s, 4) for s in feedback.fold_scores]}")
-        
+
         if feedback.cv_std > 0.02:
-            sections.append(f"- ⚠️ **High variance detected** (std > 0.02)")
+            sections.append("- ⚠️ **High variance detected** (std > 0.02)")
         if feedback.cv_std < 0.005 and feedback.cv_mean > 0.8:
-            sections.append(f"- ✅ **Stable and good performance**")
+            sections.append("- ✅ **Stable and good performance**")
         sections.append("")
 
     # Optuna Section
@@ -394,10 +392,12 @@ def format_feedback_for_llm(feedback: TrainingFeedback) -> str:
         sections.append("### Optuna Tuning Results")
         sections.append(f"- **Trials completed**: {len(feedback.optuna_trials)}")
         if feedback.best_optuna_trial:
-            sections.append(f"- **Best trial**: Trial {feedback.best_optuna_trial.get('trial', '?')}")
+            sections.append(
+                f"- **Best trial**: Trial {feedback.best_optuna_trial.get('trial', '?')}"
+            )
             sections.append(f"- **Best score**: {feedback.best_optuna_trial.get('score', 0):.6f}")
             sections.append(f"- **Best params**: {feedback.best_optuna_trial.get('params', {})}")
-        
+
         # Show score progression
         scores = [t.get("score", 0) for t in feedback.optuna_trials]
         sections.append(f"- **Score range**: {min(scores):.4f} - {max(scores):.4f}")
@@ -417,9 +417,9 @@ def format_feedback_for_llm(feedback: TrainingFeedback) -> str:
             zip(feedback.top_features[:10], feedback.feature_importances[:10]), 1
         ):
             sections.append(f"{i}. `{feat}`: {imp:.4f}")
-        
+
         if feedback.zero_importance_features:
-            sections.append(f"\n⚠️ **Zero-importance features** (consider removing):")
+            sections.append("\n⚠️ **Zero-importance features** (consider removing):")
             for feat in feedback.zero_importance_features[:10]:
                 sections.append(f"- `{feat}`")
         sections.append("")

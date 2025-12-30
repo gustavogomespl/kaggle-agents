@@ -7,27 +7,12 @@ Inspired by Claude Code's concise style.
 Builder functions are now in the builders/ submodule for better organization.
 """
 
-from typing import Any, Optional
 
 # Re-export builders for backward compatibility
 from .builders import (
     DynamicContext,
-    build_budget_instructions,
-    build_context,
-    build_cv_instructions,
-    build_dynamic_instructions,
-    build_ensemble_instructions,
-    build_feature_engineering_instructions,
-    build_image_model_instructions,
-    build_iteration_context,
-    build_mlebench_objective_instructions,
-    build_model_component_instructions,
-    build_optuna_tuning_instructions,
-    build_performance_gap_instructions,
-    build_previous_results_context,
-    build_stacking_oof_instructions,
-    build_standard_requirements,
 )
+
 
 # ==================== Core Identity ====================
 
@@ -444,6 +429,7 @@ LOGGING_FORMAT = """## Structured Logs (required for feedback loop):
 
 # ==================== Prompt Composition ====================
 
+
 def compose_generate_prompt(
     component,
     competition_info,
@@ -474,6 +460,7 @@ def compose_generate_prompt(
     if use_modular_constraints:
         try:
             from .constraints import get_constraints_for_domain
+
             # Handle None domain by defaulting to "tabular"
             domain = getattr(competition_info, "domain", None) or "tabular"
             constraints = get_constraints_for_domain(domain)
@@ -503,7 +490,9 @@ def compose_generate_prompt(
             parts.append(f"- objective: {context.objective}")
         if context.timeout_per_component is not None:
             parts.append(f"- timeout_per_component_seconds: {context.timeout_per_component}")
-        parts.append("- Env knobs: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, KAGGLE_AGENTS_CV_FOLDS, KAGGLE_AGENTS_FAST_MODE")
+        parts.append(
+            "- Env knobs: KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, KAGGLE_AGENTS_CV_FOLDS, KAGGLE_AGENTS_FAST_MODE"
+        )
 
     # Memory insights from past runs (best HPs, errors, strategies)
     if context.memory_summary and context.memory_summary != "No memory insights available yet.":
@@ -515,38 +504,54 @@ def compose_generate_prompt(
     if context.submission_validation_error:
         parts.append("")
         parts.append("## CRITICAL: SUBMISSION FORMAT ERROR (MUST FIX)")
-        parts.append(f"Previous submission failed validation: {context.submission_validation_error}")
+        parts.append(
+            f"Previous submission failed validation: {context.submission_validation_error}"
+        )
         parts.append("")
         parts.append("Fix requirements:")
         parts.append("1. Read sample_submission.csv to match ID values and column order exactly")
         parts.append("2. Match row count exactly (no truncation/padding)")
         parts.append("3. Preserve ID order from sample_submission.csv")
-        parts.append("4. For image-to-image: flatten per-pixel predictions to the sample submission ID format")
+        parts.append(
+            "4. For image-to-image: flatten per-pixel predictions to the sample submission ID format"
+        )
         parts.append("5. Use assertions before saving")
         parts.append("```python")
         parts.append("sample = pd.read_csv(sample_submission_path)")
         parts.append("assert list(submission.columns) == list(sample.columns)")
         parts.append("assert len(submission) == len(sample)")
-        parts.append("assert (submission[sample.columns[0]].values == sample[sample.columns[0]].values).all()")
+        parts.append(
+            "assert (submission[sample.columns[0]].values == sample[sample.columns[0]].values).all()"
+        )
         parts.append("```")
 
     # Adaptive training guidance (GPU-accelerated, reduces epochs if timeout)
     if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():
         parts.append("")
         parts.append("## NEURAL NETWORK TRAINING (GPU-ACCELERATED)")
-        parts.append(f"- **EPOCHS**: Train for up to {context.suggested_epochs} epochs with early stopping")
-        parts.append("- **GPU**: MUST use CUDA if available: `device = 'cuda' if torch.cuda.is_available() else 'cpu'`")
-        parts.append("- **BACKBONE**: Full fine-tuning for maximum performance (do NOT freeze layers)")
+        parts.append(
+            f"- **EPOCHS**: Train for up to {context.suggested_epochs} epochs with early stopping"
+        )
+        parts.append(
+            "- **GPU**: MUST use CUDA if available: `device = 'cuda' if torch.cuda.is_available() else 'cpu'`"
+        )
+        parts.append(
+            "- **BACKBONE**: Full fine-tuning for maximum performance (do NOT freeze layers)"
+        )
         parts.append("- **LEARNING RATE**: Use warmup (5% of epochs) + cosine annealing schedule")
         parts.append("- **AUGMENTATION**: Apply heavy augmentation (Cutmix, Mixup, RandAugment)")
-        parts.append(f"- **EARLY STOPPING**: Stop if validation loss doesn't improve for {context.early_stopping_patience} epochs (SOTA uses patience=30)")
+        parts.append(
+            f"- **EARLY STOPPING**: Stop if validation loss doesn't improve for {context.early_stopping_patience} epochs (SOTA uses patience=30)"
+        )
         parts.append("- **CHECKPOINTING**: Save best model checkpoint by validation metric")
         parts.append("- **MIXED PRECISION**: Use torch.cuda.amp.autocast() for faster training")
 
         if context.timeout_occurred:
             parts.append("")
             parts.append("⚠️ TIMEOUT DETECTED IN PREVIOUS RUN - ADJUSTMENTS:")
-            parts.append(f"- REDUCED epochs from {context.epoch_budget} to {context.suggested_epochs}")
+            parts.append(
+                f"- REDUCED epochs from {context.epoch_budget} to {context.suggested_epochs}"
+            )
             parts.append("- Use smaller batch size if memory issues")
             parts.append("- Consider freezing early backbone layers if still too slow")
             parts.append("- STILL prioritize completing training over speed")
@@ -646,10 +651,10 @@ Problem Type: {problem_type}
 Metric: {metric}
 
 ## Paths
-Train: {paths.get('train', 'train.csv')}
-Test: {paths.get('test', 'test.csv')}
-Models: {paths.get('models', 'models/')}
-Submission: {paths.get('submission', 'submission.csv')}"""
+Train: {paths.get("train", "train.csv")}
+Test: {paths.get("test", "test.csv")}
+Models: {paths.get("models", "models/")}
+Submission: {paths.get("submission", "submission.csv")}"""
 
 
 def _get_component_guidance(component_type: str) -> str:
@@ -680,14 +685,12 @@ def _get_component_guidance(component_type: str) -> str:
   scripted_model = torch.jit.script(model)
   torch.jit.save(scripted_model, f"models/{component_name}_fold{fold_idx}.pt")
   ```""",
-
         "feature_engineering": """## Feature Engineering Requirements
 - Transform train and test consistently
 - NO model training in this component
 - Save to train_engineered.csv, test_engineered.csv if creating new files
 - Fast execution (<30 seconds)
 - Print "Final Validation Performance: 1.0" on completion""",
-
         "ensemble": """## Ensemble Requirements
 
 ### LOADING PREVIOUS MODELS (CRITICAL - READ CAREFULLY):
@@ -722,14 +725,12 @@ def _get_component_guidance(component_type: str) -> str:
 ### Final Output:
 - Create submission.csv with final ensemble predictions
 - Print "Final Validation Performance: {score}" at the end""",
-
         "preprocessing": """## Preprocessing Requirements
 - Clean data, handle missing values, encode categoricals
 - NO model training
 - Fast execution (<10 seconds)
 - Save processed data for subsequent components
 - Print "Final Validation Performance: 1.0" on completion""",
-
         "image_to_image_model": """## Image-to-Image Model Requirements (CRITICAL)
 This is a PIXEL-LEVEL prediction task. Your model must output FULL IMAGES, not single values.
 
@@ -908,6 +909,7 @@ Return the complete improved code."""
 
 
 # ==================== Utility Functions ====================
+
 
 def format_component_details(component) -> str:
     """Format component details for prompts."""

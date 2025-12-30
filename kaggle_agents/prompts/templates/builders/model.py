@@ -5,15 +5,14 @@ Model component and dynamic instruction builders.
 from __future__ import annotations
 
 import os
-from typing import Any
 
 from ....core.config import is_metric_minimization
 from .budget import build_budget_instructions, build_mlebench_objective_instructions
 from .cv import build_cv_instructions, build_stacking_oof_instructions
-from .optuna import build_optuna_tuning_instructions
-from .feature_eng import build_feature_engineering_instructions
 from .ensemble import build_ensemble_instructions
+from .feature_eng import build_feature_engineering_instructions
 from .image_model import build_image_model_instructions
+from .optuna import build_optuna_tuning_instructions
 
 
 def build_iteration_context(current_iteration: int, refinement_guidance: dict) -> list[str]:
@@ -75,7 +74,11 @@ def build_performance_gap_instructions(
         return []
 
     minimize = is_metric_minimization(metric_name)
-    gap = (float(current_score) - float(target_score)) if minimize else (float(target_score) - float(current_score))
+    gap = (
+        (float(current_score) - float(target_score))
+        if minimize
+        else (float(target_score) - float(current_score))
+    )
     if gap <= 0:
         return []
     instructions = [
@@ -124,55 +127,75 @@ def build_model_component_instructions(
     ]
 
     if is_image_to_image:
-        instructions.extend([
-            "  - MUST train on (noisy -> clean) image pairs and output FULL images (H x W), NOT a single scalar.",
-            "  - MUST write pixel-level submission.csv matching sample_submission (id format: image_row_col).",
-            "  - Use an encoder-decoder (U-Net/autoencoder). DO NOT use a classifier head or global pooling.",
-        ])
+        instructions.extend(
+            [
+                "  - MUST train on (noisy -> clean) image pairs and output FULL images (H x W), NOT a single scalar.",
+                "  - MUST write pixel-level submission.csv matching sample_submission (id format: image_row_col).",
+                "  - Use an encoder-decoder (U-Net/autoencoder). DO NOT use a classifier head or global pooling.",
+            ]
+        )
     elif is_classification:
         if sample_integer_labels:
-            instructions.append("  - MUST create submission.csv with integer class labels (0..K-1) matching sample_submission")
+            instructions.append(
+                "  - MUST create submission.csv with integer class labels (0..K-1) matching sample_submission"
+            )
         else:
-            instructions.append("  - MUST create submission.csv with probability predictions (0.0-1.0)")
-        instructions.extend([
-            "  - If sample_submission has >2 target columns, determine multi-class vs multi-label using train labels:",
-            "    - Multi-class: exactly one positive per row -> softmax",
-            "    - Multi-label: multiple positives per row -> sigmoid per class (no normalization)",
-            "  - For multi-class log_loss: probabilities must sum to 1 per row (clip to [1e-15, 1-1e-15])",
-            "  - For log_loss: avoid overconfidence (label_smoothing / calibration) and clip probabilities",
-            "  - Map class index order to sample_submission columns (do NOT sort labels independently)",
-        ])
+            instructions.append(
+                "  - MUST create submission.csv with probability predictions (0.0-1.0)"
+            )
+        instructions.extend(
+            [
+                "  - If sample_submission has >2 target columns, determine multi-class vs multi-label using train labels:",
+                "    - Multi-class: exactly one positive per row -> softmax",
+                "    - Multi-label: multiple positives per row -> sigmoid per class (no normalization)",
+                "  - For multi-class log_loss: probabilities must sum to 1 per row (clip to [1e-15, 1-1e-15])",
+                "  - For log_loss: avoid overconfidence (label_smoothing / calibration) and clip probabilities",
+                "  - Map class index order to sample_submission columns (do NOT sort labels independently)",
+            ]
+        )
     else:
         instructions.append("  - MUST create submission.csv with numeric predictions (regression)")
 
-    instructions.append("  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')")
+    instructions.append(
+        "  - CRITICAL: submission column name MUST match sample_submission.columns[1] (DO NOT hardcode 'target')"
+    )
 
     if not is_image:
-        instructions.extend([
-            f"  - CRITICAL: Use target_col from dataset info (target_col='{target_col}' if available)",
-            "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder",
-            "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')",
-            "  - CatBoost is the ONLY exception that handles categorical features natively",
-            "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)",
-            "  - If X has 0 real features after preprocessing, STOP with a clear error (do NOT create dummy features)",
-        ])
+        instructions.extend(
+            [
+                f"  - CRITICAL: Use target_col from dataset info (target_col='{target_col}' if available)",
+                "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder",
+                "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')",
+                "  - CatBoost is the ONLY exception that handles categorical features natively",
+                "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)",
+                "  - If X has 0 real features after preprocessing, STOP with a clear error (do NOT create dummy features)",
+            ]
+        )
     else:
         data_files = state.get("data_files", {}) if state else {}
-        instructions.extend(build_image_model_instructions(is_image_to_image, data_files, suggested_epochs, early_stopping_patience))
+        instructions.extend(
+            build_image_model_instructions(
+                is_image_to_image, data_files, suggested_epochs, early_stopping_patience
+            )
+        )
         if is_audio:
-            instructions.extend([
-                "\n🔊 AUDIO MODELLING (CLASSIFICATION/REGRESSION):",
-                "  - Convert audio to log-mel spectrograms (librosa) and treat as image inputs",
-                "  - Use fixed duration: pad/trim to a consistent length per sample",
-                "  - Ensure consistent sample rate (e.g., 32k or 44.1k) for all files",
-                "  - Cache spectrograms to disk if repeated epochs to avoid recompute",
-            ])
+            instructions.extend(
+                [
+                    "\n🔊 AUDIO MODELLING (CLASSIFICATION/REGRESSION):",
+                    "  - Convert audio to log-mel spectrograms (librosa) and treat as image inputs",
+                    "  - Use fixed duration: pad/trim to a consistent length per sample",
+                    "  - Ensure consistent sample rate (e.g., 32k or 44.1k) for all files",
+                    "  - Cache spectrograms to disk if repeated epochs to avoid recompute",
+                ]
+            )
         if not is_image_to_image:
             train_csv_path = data_files.get("train_csv", "") if isinstance(data_files, dict) else ""
-            instructions.extend([
-                "  - CRITICAL: This is an image competition. Do NOT use tabular models unless you have real numeric features.",
-                "    - If train.csv only has id+label (<=2 cols), you MUST train an image model (CNN/transformer) or add an embedding extractor first.",
-            ])
+            instructions.extend(
+                [
+                    "  - CRITICAL: This is an image competition. Do NOT use tabular models unless you have real numeric features.",
+                    "    - If train.csv only has id+label (<=2 cols), you MUST train an image model (CNN/transformer) or add an embedding extractor first.",
+                ]
+            )
             if train_csv_path:
                 instructions.append(f"  - Train CSV path (check columns): {train_csv_path}")
 
@@ -182,14 +205,16 @@ def build_model_component_instructions(
     instructions.extend(build_stacking_oof_instructions(working_dir, component_name))
 
     # Add submission format instructions (CRITICAL for CV vs public score match)
-    instructions.extend([
-        "\n⚠️ SUBMISSION FORMAT (CRITICAL - SEE HARD_CONSTRAINTS):",
-        "  - ALWAYS read sample_submission.csv and use its columns and order",
-        "  - If sample has 2 columns: fill sample.columns[1] only",
-        "  - If sample has >2 columns: fill ALL target columns (columns[1:]) in order",
-        "  - Keep ID column values and order exactly as in sample_submission",
-        "  - DO NOT add/drop columns or reorder rows",
-    ])
+    instructions.extend(
+        [
+            "\n⚠️ SUBMISSION FORMAT (CRITICAL - SEE HARD_CONSTRAINTS):",
+            "  - ALWAYS read sample_submission.csv and use its columns and order",
+            "  - If sample has 2 columns: fill sample.columns[1] only",
+            "  - If sample has >2 columns: fill ALL target columns (columns[1:]) in order",
+            "  - Keep ID column values and order exactly as in sample_submission",
+            "  - DO NOT add/drop columns or reorder rows",
+        ]
+    )
 
     return instructions
 
@@ -244,8 +269,8 @@ def build_dynamic_instructions(
     sample_submission_path = state.get("sample_submission_path")
     if sample_submission_path:
         try:
-            import pandas as pd
             import numpy as np
+            import pandas as pd
 
             sample_sub = pd.read_csv(sample_submission_path)
             if sample_sub.shape[1] >= 2:
@@ -302,7 +327,9 @@ def build_dynamic_instructions(
     instructions.extend(build_previous_results_context(dev_results))
 
     # Build performance gap instructions
-    instructions.extend(build_performance_gap_instructions(current_score, target_score, metric_name))
+    instructions.extend(
+        build_performance_gap_instructions(current_score, target_score, metric_name)
+    )
 
     # Get adaptive epoch budget and patience from state (SOTA pattern)
     epoch_budget = int(state.get("epoch_budget", 600))  # SOTA uses 600
@@ -330,25 +357,33 @@ def build_dynamic_instructions(
 
     # Component-type specific instructions
     if component.component_type == "model":
-        instructions.extend(build_model_component_instructions(
-            component=component,
-            state=state,
-            working_dir=working_dir,
-            is_image=is_image,
-            is_audio=is_audio,
-            is_image_to_image=is_image_to_image,
-            is_classification=is_classification,
-            sample_integer_labels=sample_integer_labels,
-            target_col=target_col,
-            suggested_epochs=suggested_epochs,
-            early_stopping_patience=early_stopping_patience,
-        ))
+        instructions.extend(
+            build_model_component_instructions(
+                component=component,
+                state=state,
+                working_dir=working_dir,
+                is_image=is_image,
+                is_audio=is_audio,
+                is_image_to_image=is_image_to_image,
+                is_classification=is_classification,
+                sample_integer_labels=sample_integer_labels,
+                target_col=target_col,
+                suggested_epochs=suggested_epochs,
+                early_stopping_patience=early_stopping_patience,
+            )
+        )
 
         # Optuna instructions if component name suggests tuning
         name_lower = component.name.lower()
         if "optuna" in name_lower or "tuned" in name_lower or "optimized" in name_lower:
-            n_trials = getattr(getattr(config, "ablation", None), "optuna_trials", 5) if config else 5
-            timeout = (getattr(getattr(config, "ablation", None), "testing_timeout", 600) if config else 600) - 60
+            n_trials = (
+                getattr(getattr(config, "ablation", None), "optuna_trials", 5) if config else 5
+            )
+            timeout = (
+                getattr(getattr(config, "ablation", None), "testing_timeout", 600)
+                if config
+                else 600
+            ) - 60
             instructions.extend(build_optuna_tuning_instructions(n_trials, timeout))
 
     elif component.component_type == "feature_engineering":

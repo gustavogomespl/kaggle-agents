@@ -4,7 +4,7 @@ Main KaggleState TypedDict and initialization.
 
 from datetime import datetime
 from operator import add
-from typing import Annotated, Any, Optional, TypedDict
+from typing import Annotated, Any, TypedDict
 
 from .competition import AblationComponent, CompetitionInfo, SOTASolution
 from .learning import CandidatePlan, PreferencePair, ReasoningTrace, SelfEvaluation
@@ -33,17 +33,17 @@ class KaggleState(TypedDict):
     working_directory: str
     run_mode: str  # e.g. "kaggle" | "mlebench"
     objective: str  # e.g. "top20" | "mlebench_medal"
-    timeout_per_component: Optional[int]
+    timeout_per_component: int | None
     enable_checkpoint_recovery: bool
-    cv_folds: Optional[int]
+    cv_folds: int | None
     fast_mode: bool
-    target_score: Optional[float]
+    target_score: float | None
     current_performance_score: float
-    mlebench_grade: Optional[dict[str, Any]]
+    mlebench_grade: dict[str, Any] | None
     skip_remaining_components: bool
     errors: Annotated[list[str], add]
-    current_train_path: Optional[str]
-    current_test_path: Optional[str]
+    current_train_path: str | None
+    current_test_path: str | None
     train_data_path: str
     test_data_path: str
     sample_submission_path: str
@@ -51,7 +51,7 @@ class KaggleState(TypedDict):
     data_files: dict[str, Any]
 
     # Domain Detection
-    domain_detected: Optional[DomainType]
+    domain_detected: DomainType | None
     domain_confidence: float
 
     # Search Phase
@@ -75,17 +75,17 @@ class KaggleState(TypedDict):
     critical_issues: Annotated[list[str], add]
 
     # Ensemble Phase
-    ensemble_strategy: Optional[str]
+    ensemble_strategy: str | None
     ensemble_weights: dict[str, float]
 
     # Submission Phase
     submissions: Annotated[list[SubmissionResult], add]
     best_score: float
     target_percentile: float
-    best_single_model_score: Optional[float]
-    best_single_model_name: Optional[str]
-    baseline_cv_score: Optional[float]
-    submission_validation_error: Optional[str]
+    best_single_model_score: float | None
+    best_single_model_name: str | None
+    baseline_cv_score: float | None
+    submission_validation_error: str | None
     retry_submission_count: int
 
     # Iteration Control
@@ -93,14 +93,14 @@ class KaggleState(TypedDict):
     max_iterations: int
     should_continue: bool
     needs_refinement: bool
-    termination_reason: Optional[str]
+    termination_reason: str | None
 
     # Memory & Learning
     iteration_memory: Annotated[list[IterationMemory], add]
     learned_patterns: dict[str, Any]
 
     # Structured Memory
-    data_insights: Optional[DataInsights]
+    data_insights: DataInsights | None
     model_performance_history: Annotated[list[ModelPerformanceRecord], add]
     best_models_by_type: dict[str, Any]
     error_pattern_memory: Annotated[list[ErrorPatternMemory], merge_error_pattern_memory]
@@ -133,14 +133,14 @@ class KaggleState(TypedDict):
 
     # GRPO: Reasoning Traces
     reasoning_traces: Annotated[list[ReasoningTrace], add]
-    current_reasoning: Optional[ReasoningTrace]
+    current_reasoning: ReasoningTrace | None
 
     # DPO: Preference Learning
     preference_pairs: Annotated[list[PreferencePair], add]
 
     # Quiet-STaR: Self-Evaluation
     self_evaluations: Annotated[list[SelfEvaluation], add]
-    last_self_evaluation: Optional[SelfEvaluation]
+    last_self_evaluation: SelfEvaluation | None
 
     # Metadata
     workflow_start_time: datetime
@@ -192,35 +192,28 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         sample_submission_path="",
         target_col="",
         data_files={},
-
         # Domain Detection
         domain_detected=None,
         domain_confidence=0.0,
-
         # Search Phase
         sota_solutions=[],
         search_queries_used=[],
-
         # Planning Phase
         ablation_plan=[],
         current_component_index=0,
         optimization_strategy="",
-
         # Development Phase
         development_results=[],
         current_code="",
         code_retry_count=0,
         code_attempts=[],
-
         # Validation Phase
         validation_results=[],
         overall_validation_score=0.0,
         critical_issues=[],
-
         # Ensemble Phase
         ensemble_strategy=None,
         ensemble_weights={},
-
         # Submission Phase
         submissions=[],
         best_score=0.0,
@@ -230,18 +223,15 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         baseline_cv_score=None,
         submission_validation_error=None,
         retry_submission_count=0,
-
         # Iteration Control
         current_iteration=0,
         max_iterations=10,
         should_continue=True,
         needs_refinement=False,
         termination_reason=None,
-
         # Memory & Learning
         iteration_memory=[],
         learned_patterns={},
-
         # Structured Memory
         data_insights=None,
         model_performance_history=[],
@@ -254,37 +244,29 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         successful_strategies=[],
         failed_strategies=[],
         strategy_effectiveness={},
-
         # Prompt Optimization
         optimized_prompts={},
         prompt_performance={},
-
         # Meta-Evaluator & RL
         failure_analysis={},
         refinement_guidance={},
         reward_signals={},
-
         # WEBRL: Curriculum Learning
         curriculum_subtasks=[],
         needs_subtask_resolution=False,
-
         # Eureka: Multi-candidate Evolutionary Plans
         candidate_plans=[],
         current_plan_index=0,
         evolutionary_generation=0,
         crossover_guidance={},
-
         # GRPO: Reasoning Traces
         reasoning_traces=[],
         current_reasoning=None,
-
         # DPO: Preference Learning
         preference_pairs=[],
-
         # Quiet-STaR: Self-Evaluation
         self_evaluations=[],
         last_self_evaluation=None,
-
         # Metadata
         workflow_start_time=now,
         last_updated=now,

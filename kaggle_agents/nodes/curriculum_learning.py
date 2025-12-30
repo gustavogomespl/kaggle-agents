@@ -10,11 +10,11 @@ Based on: WEBRL - Training LLM Web Agents via Self-Evolving Curriculum
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
-from ..core.config import get_config, get_llm_for_role
+from ..core.config import get_llm_for_role
 from ..core.state import KaggleState
 from ..utils.llm_utils import get_text_content
 
@@ -28,8 +28,8 @@ class SubTask:
     task_description: str
     priority: int  # 1 (highest) to 5 (lowest)
     status: Literal["pending", "in_progress", "resolved", "skipped"] = "pending"
-    resolution_code: Optional[str] = None
-    resolution_guidance: Optional[str] = None
+    resolution_code: str | None = None
+    resolution_guidance: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
 
     def to_dict(self) -> dict[str, Any]:
@@ -199,7 +199,7 @@ def generate_subtask_from_error(
     error_type: str,
     parent_component: str,
     error_message: str = "",
-    state: Optional[KaggleState] = None,
+    state: KaggleState | None = None,
 ) -> SubTask:
     """
     Generate a SubTask from an error type with context-aware guidance.
@@ -265,9 +265,9 @@ def generate_subtask_with_llm(
     recent_code = ""
     if dev_results:
         last_result = dev_results[-1]
-        code_lines = (last_result.code or "").split('\n')
+        code_lines = (last_result.code or "").split("\n")
         if len(code_lines) > 40:
-            recent_code = '\n'.join(code_lines[:20]) + '\n...\n' + '\n'.join(code_lines[-10:])
+            recent_code = "\n".join(code_lines[:20]) + "\n...\n" + "\n".join(code_lines[-10:])
         else:
             recent_code = last_result.code or ""
         recent_code = recent_code[:2000]
@@ -330,6 +330,7 @@ Be specific and actionable. Include parameter values, function names, and code p
                     break
 
         import json
+
         result = json.loads(content)
 
         # Build guidance from steps and rationale
@@ -360,6 +361,7 @@ Be specific and actionable. Include parameter values, function names, and code p
 
 
 # ==================== Curriculum Learning Node ====================
+
 
 def curriculum_learning_node(state: KaggleState) -> dict[str, Any]:
     """
@@ -410,9 +412,7 @@ def curriculum_learning_node(state: KaggleState) -> dict[str, Any]:
         use_llm = state.get("fast_mode", False) is False  # Only use LLM in non-fast mode
 
         if use_llm and error_message:
-            subtask = generate_subtask_with_llm(
-                error_type, parent_component, error_message, state
-            )
+            subtask = generate_subtask_with_llm(error_type, parent_component, error_message, state)
         else:
             subtask = generate_subtask_from_error(
                 error_type, parent_component, error_message, state
@@ -491,12 +491,12 @@ def inject_subtask_guidance(state: KaggleState) -> dict[str, Any]:
                 code_section = f"**Example Code**:\n```python\n{subtask['resolution_code']}\n```"
 
             guidance_parts.append(f"""
-### CRITICAL FIX REQUIRED: {subtask['failure_type'].upper()}
+### CRITICAL FIX REQUIRED: {subtask["failure_type"].upper()}
 
-**Problem**: {subtask['task_description']}
+**Problem**: {subtask["task_description"]}
 
 **Resolution Steps**:
-{subtask.get('resolution_guidance', 'Apply standard debugging techniques.')}
+{subtask.get("resolution_guidance", "Apply standard debugging techniques.")}
 
 {code_section}
 """)
@@ -518,9 +518,9 @@ def inject_subtask_guidance(state: KaggleState) -> dict[str, Any]:
     # Update developer guidance with curriculum context
     if "developer_guidance" in updated_guidance:
         updated_guidance["developer_guidance"] = (
-            updated_guidance["developer_guidance"] +
-            "\n\n## CURRICULUM FIXES (from previous failures):\n" +
-            curriculum_guidance
+            updated_guidance["developer_guidance"]
+            + "\n\n## CURRICULUM FIXES (from previous failures):\n"
+            + curriculum_guidance
         )
     else:
         updated_guidance["developer_guidance"] = curriculum_guidance
@@ -535,7 +535,7 @@ def inject_subtask_guidance(state: KaggleState) -> dict[str, Any]:
 def mark_subtask_resolved(
     state: KaggleState,
     error_type: str,
-    resolution_code: Optional[str] = None,
+    resolution_code: str | None = None,
 ) -> dict[str, Any]:
     """
     Mark a subtask as resolved after successful execution.

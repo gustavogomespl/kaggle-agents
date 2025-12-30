@@ -4,15 +4,14 @@ Tests for Quiet-STaR Self-Evaluation functionality.
 Tests the self-evaluation methods in DeveloperAgent.
 """
 
+from unittest.mock import MagicMock
+
 import pytest
-from unittest.mock import MagicMock, patch
-from datetime import datetime
 
 from kaggle_agents.core.state import (
-    SelfEvaluation,
     AblationComponent,
     CompetitionInfo,
-    KaggleState,
+    SelfEvaluation,
     create_initial_state,
 )
 
@@ -266,4 +265,3 @@ class TestKaggleStateIntegration:
 
         assert len(state["self_evaluations"]) == 2
         assert state["last_self_evaluation"].confidence == 0.6
-

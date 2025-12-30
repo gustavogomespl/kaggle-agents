@@ -9,11 +9,7 @@ from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit
 
 
 def generate_folds(
-    train_path: str,
-    target_col: str,
-    output_path: str,
-    n_folds: int = 5,
-    seed: int = 42
+    train_path: str, target_col: str, output_path: str, n_folds: int = 5, seed: int = 42
 ) -> str:
     """
     Generate fixed cross-validation folds and save to CSV.
@@ -33,7 +29,7 @@ def generate_folds(
     df = pd.read_csv(train_path)
 
     # Create 'fold' column
-    df['fold'] = -1
+    df["fold"] = -1
 
     # Determine problem type for splitting strategy
     # Simple heuristic: if target has few unique values -> classification
@@ -41,16 +37,18 @@ def generate_folds(
     is_classification = n_unique < 20
 
     if is_classification:
-        print(f"      Detected classification (unique targets: {n_unique}) -> Using StratifiedKFold")
+        print(
+            f"      Detected classification (unique targets: {n_unique}) -> Using StratifiedKFold"
+        )
         kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=seed)
         y = df[target_col]
         for fold, (_train_idx, val_idx) in enumerate(kf.split(df, y)):
-            df.loc[val_idx, 'fold'] = fold
+            df.loc[val_idx, "fold"] = fold
     else:
         print("      Detected regression -> Using KFold")
         kf = KFold(n_splits=n_folds, shuffle=True, random_state=seed)
         for fold, (_train_idx, val_idx) in enumerate(kf.split(df)):
-            df.loc[val_idx, 'fold'] = fold
+            df.loc[val_idx, "fold"] = fold
 
     # Save only index (if needed) or full dataframe?
     # Saving full dataframe with 'fold' column is safest for alignment

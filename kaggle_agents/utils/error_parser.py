@@ -12,6 +12,7 @@ from dataclasses import dataclass
 @dataclass
 class ParsedError:
     """Structured error information."""
+
     error_type: str
     error_category: str
     line_number: int | None
@@ -97,7 +98,7 @@ class ErrorParser:
     def _extract_error_type(self, error_msg: str) -> str:
         """Extract error type from message."""
         # Common pattern: "ErrorType: message"
-        match = re.search(r'(\w+Error|Timeout|validation failed):', error_msg, re.IGNORECASE)
+        match = re.search(r"(\w+Error|Timeout|validation failed):", error_msg, re.IGNORECASE)
         if match:
             return match.group(1)
 
@@ -124,7 +125,7 @@ class ErrorParser:
     def _extract_line_number(self, text: str) -> int | None:
         """Extract line number from traceback."""
         # Pattern: "line 42"
-        match = re.search(r'line (\d+)', text, re.IGNORECASE)
+        match = re.search(r"line (\d+)", text, re.IGNORECASE)
         if match:
             return int(match.group(1))
         return None
@@ -132,7 +133,7 @@ class ErrorParser:
     def _extract_function_name(self, text: str) -> str | None:
         """Extract function name from traceback."""
         # Pattern: "in function_name"
-        match = re.search(r'in (\w+)', text)
+        match = re.search(r"in (\w+)", text)
         if match:
             return match.group(1)
         return None
@@ -184,27 +185,33 @@ class ErrorParser:
         }
 
         # Extract warnings
-        warning_pattern = r'(Warning:|WARNING:)(.+?)(?:\n|$)'
+        warning_pattern = r"(Warning:|WARNING:)(.+?)(?:\n|$)"
         warnings = re.findall(warning_pattern, stdout + stderr, re.IGNORECASE)
         trace["warnings"] = [w[1].strip() for w in warnings]
 
         # Extract print statements (execution steps)
         print_lines = [
-            line.strip() for line in stdout.split('\n')
-            if line.strip() and not line.startswith('Traceback')
+            line.strip()
+            for line in stdout.split("\n")
+            if line.strip() and not line.startswith("Traceback")
         ]
         trace["print_statements"] = print_lines[:20]  # Keep first 20
 
         # Extract performance metric
-        perf_pattern = r'Final Validation Performance:\s*([\d.]+)'
+        perf_pattern = r"Final Validation Performance:\s*([\d.]+)"
         match = re.search(perf_pattern, stdout, re.IGNORECASE)
         if match:
             trace["performance_metric"] = float(match.group(1))
 
         # Identify execution steps from prints
         step_keywords = [
-            "loading", "preprocessing", "training", "validating",
-            "predicting", "saving", "evaluating"
+            "loading",
+            "preprocessing",
+            "training",
+            "validating",
+            "predicting",
+            "saving",
+            "evaluating",
         ]
         for line in print_lines:
             line_lower = line.lower()

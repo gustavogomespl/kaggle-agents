@@ -13,4 +13,5 @@ Usage:
 
 from .loader import get_constraints_for_domain
 
+
 __all__ = ["get_constraints_for_domain"]

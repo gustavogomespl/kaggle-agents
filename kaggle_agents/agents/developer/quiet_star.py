@@ -14,6 +14,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ...core.state import AblationComponent, KaggleState, SelfEvaluation
 from ...utils.llm_utils import get_text_content
 
+
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
@@ -75,7 +76,9 @@ Analyze and return JSON:
 Be specific about potential failure points (imports, data types, output format, etc.)."""
 
         messages = [
-            SystemMessage(content="You are a critical code reviewer evaluating ML code before execution."),
+            SystemMessage(
+                content="You are a critical code reviewer evaluating ML code before execution."
+            ),
             HumanMessage(content=prompt),
         ]
 
@@ -83,7 +86,7 @@ Be specific about potential failure points (imports, data types, output format, 
             response = self.llm.invoke(messages)
             content = get_text_content(response.content).strip()
 
-            json_match = re.search(r'\{[\s\S]*\}', content)
+            json_match = re.search(r"\{[\s\S]*\}", content)
             if json_match:
                 result = json.loads(json_match.group())
 
@@ -146,7 +149,9 @@ ORIGINAL CODE:
 Return the COMPLETE fixed code with all fixes applied. Include ALL imports and functionality."""
 
         messages = [
-            SystemMessage(content="You are fixing code based on self-evaluation feedback. Apply all suggested fixes."),
+            SystemMessage(
+                content="You are fixing code based on self-evaluation feedback. Apply all suggested fixes."
+            ),
             HumanMessage(content=prompt),
         ]
 

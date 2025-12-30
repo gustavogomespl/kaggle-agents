@@ -7,7 +7,7 @@ identifying high-impact components for systematic improvement.
 
 import json
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 import dspy
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -22,11 +22,11 @@ from ..core.state import (
 )
 from ..optimization import create_optimizer
 from ..prompts.templates.planner_prompts import (
+    ANALYZE_GAPS_PROMPT,
     ANALYZE_SOTA_PROMPT,
     CREATE_ABLATION_PLAN_PROMPT,
     PLANNER_SYSTEM_PROMPT,
     REFINE_ABLATION_PLAN_PROMPT,
-    ANALYZE_GAPS_PROMPT,
     get_domain_guidance,
 )
 from ..utils.llm_utils import get_text_content
@@ -34,17 +34,26 @@ from ..utils.llm_utils import get_text_content
 
 # ==================== DSPy Signatures ====================
 
+
 class AblationPlannerSignature(dspy.Signature):
     """Signature for ablation plan generation."""
 
     competition_info: str = dspy.InputField(desc="Competition metadata and description")
     domain: str = dspy.InputField(desc="Competition domain (tabular, CV, NLP, etc.)")
-    sota_details: str = dspy.InputField(desc="Detailed SOTA solutions with code snippets, votes, and complexity")
-    sota_summary: str = dspy.InputField(desc="Summary of SOTA patterns (models, features, ensembles)")
+    sota_details: str = dspy.InputField(
+        desc="Detailed SOTA solutions with code snippets, votes, and complexity"
+    )
+    sota_summary: str = dspy.InputField(
+        desc="Summary of SOTA patterns (models, features, ensembles)"
+    )
     domain_guidance: str = dspy.InputField(desc="Domain-specific guidance and priorities")
-    memory_summary: str = dspy.InputField(desc="Memory summary of past results, errors, and best hyperparameters")
+    memory_summary: str = dspy.InputField(
+        desc="Memory summary of past results, errors, and best hyperparameters"
+    )
 
-    ablation_plan: str = dspy.OutputField(desc="JSON list of ablation components using Adopt & Improve strategy")
+    ablation_plan: str = dspy.OutputField(
+        desc="JSON list of ablation components using Adopt & Improve strategy"
+    )
     analysis: str = dspy.OutputField(desc="Analysis of which SOTA solution was adopted and why")
 
 
@@ -62,6 +71,7 @@ class SOTAAnalysisSignature(dspy.Signature):
 
 # ==================== DSPy Modules ====================
 
+
 class AblationPlannerModule(dspy.Module):
     """DSPy module for ablation planning."""
 
@@ -69,7 +79,9 @@ class AblationPlannerModule(dspy.Module):
         super().__init__()
         self.generate_plan = dspy.ChainOfThought(AblationPlannerSignature)
 
-    def forward(self, competition_info, domain, sota_details, sota_summary, domain_guidance, memory_summary):
+    def forward(
+        self, competition_info, domain, sota_details, sota_summary, domain_guidance, memory_summary
+    ):
         """Generate ablation plan using Adopt & Improve strategy."""
         return self.generate_plan(
             competition_info=competition_info,
@@ -94,6 +106,7 @@ class SOTAAnalyzerModule(dspy.Module):
 
 
 # ==================== Planner Agent ====================
+
 
 class PlannerAgent:
     """
@@ -159,17 +172,17 @@ class PlannerAgent:
         use_eureka = bool(crossover_guidance) or evolutionary_generation > 0 or is_refinement
 
         if use_eureka:
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("= PLANNER AGENT: Eureka Multi-Candidate Planning")
-            print("="*60)
+            print("=" * 60)
         elif is_refinement:
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("= PLANNER AGENT: Refining Ablation Plan (RL-based)")
-            print("="*60)
+            print("=" * 60)
         else:
-            print("\n" + "="*60)
+            print("\n" + "=" * 60)
             print("= PLANNER AGENT: Creating Ablation Plan")
-            print("="*60)
+            print("=" * 60)
 
         # 1. Analyze SOTA solutions
         print("\nAnalyzing SOTA patterns...")
@@ -197,7 +210,7 @@ class PlannerAgent:
                 "last_updated": datetime.now(),
             }
 
-        elif is_refinement:
+        if is_refinement:
             print("\n🔄 Refining plan based on previous results...")
             ablation_plan = self._refine_ablation_plan(state, sota_analysis)
         else:
@@ -241,16 +254,22 @@ class PlannerAgent:
         # Format SOTA solutions for analysis
         sota_summary = self._format_sota_solutions(sota_solutions)
 
-        if self.use_dspy and hasattr(self, 'sota_analyzer'):
+        if self.use_dspy and hasattr(self, "sota_analyzer"):
             # Use DSPy module
             result = self.sota_analyzer(sota_solutions=sota_summary)
 
             analysis = {
                 "common_models": result.common_models.split(", ") if result.common_models else [],
-                "feature_patterns": result.feature_patterns.split(", ") if result.feature_patterns else [],
-                "ensemble_strategies": result.ensemble_strategies if result.ensemble_strategies else "",
+                "feature_patterns": result.feature_patterns.split(", ")
+                if result.feature_patterns
+                else [],
+                "ensemble_strategies": result.ensemble_strategies
+                if result.ensemble_strategies
+                else "",
                 "unique_tricks": result.unique_tricks.split(", ") if result.unique_tricks else [],
-                "success_factors": result.success_factors.split(", ") if result.success_factors else [],
+                "success_factors": result.success_factors.split(", ")
+                if result.success_factors
+                else [],
             }
         else:
             # Use direct LLM call
@@ -340,9 +359,7 @@ class PlannerAgent:
                     insights.append("\n⚠️  Common Errors to Avoid:")
                     # Get top 3 most common errors
                     common_errors = sorted(
-                        analysis["common_errors"].items(),
-                        key=lambda x: x[1],
-                        reverse=True
+                        analysis["common_errors"].items(), key=lambda x: x[1], reverse=True
                     )[:3]
                     for error_type, count in common_errors:
                         insights.append(f"   - {error_type}: {count} occurrences")
@@ -350,7 +367,9 @@ class PlannerAgent:
                 # Add component-specific success patterns
                 if analysis.get("success_by_component"):
                     insights.append("\n📊 Component Success Rates:")
-                    for comp_type, success_info in list(analysis["success_by_component"].items())[:3]:
+                    for comp_type, success_info in list(analysis["success_by_component"].items())[
+                        :3
+                    ]:
                         rate = success_info.get("success_rate", 0.0)
                         insights.append(f"   - {comp_type}: {rate:.0%} success rate")
 
@@ -431,10 +450,14 @@ Domain: {domain}
                 plan_data = self._parse_llm_plan_response(result.ablation_plan, sota_analysis)
                 if len(plan_data) < 3:
                     print(f"  ⚠️ DSPy generated only {len(plan_data)} components, using fallback")
-                    plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
+                    plan_data = self._create_fallback_plan(
+                        domain, sota_analysis, curriculum_insights, state=state
+                    )
             except Exception as e:
                 print(f"  ⚠️ DSPy plan generation failed: {e}, using fallback")
-                plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
+                plan_data = self._create_fallback_plan(
+                    domain, sota_analysis, curriculum_insights, state=state
+                )
 
         else:
             # Use direct LLM call with Adopt & Improve strategy
@@ -490,6 +513,7 @@ Return a JSON array with 3-5 components. Each component must have:
                 # Normalize response content to text (handles list/dict responses from some LLM backends)
                 try:
                     from ..utils.llm_utils import get_text_content
+
                     plan_text = get_text_content(response.content)
                 except Exception:
                     plan_text = response.content if hasattr(response, "content") else response
@@ -502,10 +526,14 @@ Return a JSON array with 3-5 components. Each component must have:
                 plan_data = self._parse_llm_plan_response(plan_text, sota_analysis)
                 if len(plan_data) < 3:
                     print(f"  ⚠️ LLM generated only {len(plan_data)} components, using fallback")
-                    plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
+                    plan_data = self._create_fallback_plan(
+                        domain, sota_analysis, curriculum_insights, state=state
+                    )
             except Exception as e:
                 print(f"  ⚠️ LLM plan generation failed: {e}, using fallback")
-                plan_data = self._create_fallback_plan(domain, sota_analysis, curriculum_insights, state=state)
+                plan_data = self._create_fallback_plan(
+                    domain, sota_analysis, curriculum_insights, state=state
+                )
 
         components = self._coerce_components(plan_data)
 
@@ -530,7 +558,7 @@ Return a JSON array with 3-5 components. Each component must have:
             name = item.get("name")
             if not name or name == "unnamed":
                 comp_type = item.get("component_type", "component")
-                name = f"{comp_type}_{i+1}"
+                name = f"{comp_type}_{i + 1}"
                 if item.get("description"):
                     desc = str(item["description"]).lower()
                     for word in desc.split():
@@ -580,35 +608,37 @@ Return a JSON array with 3-5 components. Each component must have:
         for i, component in enumerate(previous_plan):
             if i < len(dev_results):
                 result = dev_results[i]
-                test_results_summary.append({
-                    "component": component.name,
-                    "type": component.component_type,
-                    "success": result.success,
-                    "execution_time": result.execution_time,
-                    "impact": "positive" if result.success else "failed"
-                })
+                test_results_summary.append(
+                    {
+                        "component": component.name,
+                        "type": component.component_type,
+                        "success": result.success,
+                        "execution_time": result.execution_time,
+                        "impact": "positive" if result.success else "failed",
+                    }
+                )
 
         # Format previous plan for prompt
-        previous_plan_str = json.dumps([
-            {
-                "name": c.name,
-                "type": c.component_type,
-                "description": c.code[:100] + "...",
-                "estimated_impact": c.estimated_impact
-            }
-            for c in previous_plan
-        ], indent=2)
+        previous_plan_str = json.dumps(
+            [
+                {
+                    "name": c.name,
+                    "type": c.component_type,
+                    "description": c.code[:100] + "...",
+                    "estimated_impact": c.estimated_impact,
+                }
+                for c in previous_plan
+            ],
+            indent=2,
+        )
 
         # Format test results
         test_results_str = json.dumps(test_results_summary, indent=2)
 
-
         # Perform Gap Analysis (NEW STEP)
         print("  🔍 Performing Gap Analysis...")
         gap_analysis = self._analyze_gaps(
-            state=state,
-            previous_plan_str=previous_plan_str,
-            test_results_str=test_results_str
+            state=state, previous_plan_str=previous_plan_str, test_results_str=test_results_str
         )
         gap_analysis_str = json.dumps(gap_analysis, indent=2)
         print(f"  🔍 Gap Analysis: {gap_analysis.get('improvement_strategy', 'No strategy found')}")
@@ -629,8 +659,12 @@ Return a JSON array with 3-5 components. Each component must have:
             failed_components = failure_analysis.get("failed_components", [])
 
             if error_patterns or failed_components:
-                failure_text = "\n\n## ⚠️ ERROR PATTERNS TO PREVENT (from MetaEvaluator analysis)\n\n"
-                failure_text += "These errors occurred in previous components - plan to AVOID them:\n\n"
+                failure_text = (
+                    "\n\n## ⚠️ ERROR PATTERNS TO PREVENT (from MetaEvaluator analysis)\n\n"
+                )
+                failure_text += (
+                    "These errors occurred in previous components - plan to AVOID them:\n\n"
+                )
 
                 if error_patterns:
                     failure_text += "**Recurring Error Types:**\n"
@@ -658,7 +692,9 @@ Return a JSON array with 3-5 components. Each component must have:
             guidance_text = "\n\n## 🎯 META-EVALUATOR GUIDANCE (from RL analysis)\n\n"
 
             if "planner_guidance" in refinement_guidance:
-                guidance_text += f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
+                guidance_text += (
+                    f"**Strategic Guidance:**\n{refinement_guidance['planner_guidance']}\n\n"
+                )
 
             if refinement_guidance.get("priority_fixes"):
                 guidance_text += "**Priority Error Fixes:**\n"
@@ -697,7 +733,9 @@ Return a JSON array with 3-5 components. Each component must have:
                 from langchain.schema import HumanMessage, SystemMessage
 
                 messages = [
-                    SystemMessage(content="You are a Kaggle Grandmaster expert at refining ML solutions based on test results."),
+                    SystemMessage(
+                        content="You are a Kaggle Grandmaster expert at refining ML solutions based on test results."
+                    ),
                     HumanMessage(content=prompt),
                 ]
 
@@ -731,10 +769,10 @@ Return a JSON array with 3-5 components. Each component must have:
             code = item.get("code_outline", item.get("description", ""))
 
             component = AblationComponent(
-                name=item.get("name", f"refined_component_{i+1}"),
+                name=item.get("name", f"refined_component_{i + 1}"),
                 component_type=item.get("component_type", "model"),
                 code=code,
-                estimated_impact=item.get("estimated_impact", 0.15)
+                estimated_impact=item.get("estimated_impact", 0.15),
             )
             components.append(component)
 
@@ -770,11 +808,13 @@ Return a JSON array with 3-5 components. Each component must have:
                 score = self._extract_validation_score(dev_results[idx].stdout)
             reward = score if score is not None else comp.estimated_impact
             success = idx < len(dev_results) and dev_results[idx].success
-            arms.append({
-                "component": comp,
-                "reward": reward if reward is not None else 0.0,
-                "success": success,
-            })
+            arms.append(
+                {
+                    "component": comp,
+                    "reward": reward if reward is not None else 0.0,
+                    "success": success,
+                }
+            )
 
         # Exploit: keep top-2 successful arms
         successful_arms = [a for a in arms if a["success"]]
@@ -786,64 +826,76 @@ Return a JSON array with 3-5 components. Each component must have:
         # Ensure a strong feature engineering arm is present
         fe_in_keep = any(a["component"].component_type == "feature_engineering" for a in keep)
         if not fe_in_keep:
-            plan.append({
-                "name": "advanced_feature_engineering",
-                "component_type": "feature_engineering",
-                "description": "Polynomial + interaction features with leak-safe pipelines (imputer/encoder in CV)",
-                "estimated_impact": 0.15,
-                "rationale": "Consistently strong FE baseline",
-                "code_outline": "Pipeline with ColumnTransformer, SimpleImputer, OneHot/TargetEncoder, interactions",
-            })
+            plan.append(
+                {
+                    "name": "advanced_feature_engineering",
+                    "component_type": "feature_engineering",
+                    "description": "Polynomial + interaction features with leak-safe pipelines (imputer/encoder in CV)",
+                    "estimated_impact": 0.15,
+                    "rationale": "Consistently strong FE baseline",
+                    "code_outline": "Pipeline with ColumnTransformer, SimpleImputer, OneHot/TargetEncoder, interactions",
+                }
+            )
 
         # Add kept winners
         for arm in keep:
             comp = arm["component"]
-            plan.append({
-                "name": comp.name,
-                "component_type": comp.component_type,
-                "description": comp.code or comp.component_type,
-                "estimated_impact": float(comp.estimated_impact) if comp.estimated_impact else max(0.12, arm["reward"]),
-                "rationale": "Kept from previous iteration (top reward)",
-                "code_outline": comp.code or comp.component_type,
-            })
+            plan.append(
+                {
+                    "name": comp.name,
+                    "component_type": comp.component_type,
+                    "description": comp.code or comp.component_type,
+                    "estimated_impact": float(comp.estimated_impact)
+                    if comp.estimated_impact
+                    else max(0.12, arm["reward"]),
+                    "rationale": "Kept from previous iteration (top reward)",
+                    "code_outline": comp.code or comp.component_type,
+                }
+            )
 
         # Ensure at least two model components
         model_count = sum(1 for p in plan if p["component_type"] == "model")
         if model_count < 2:
-            plan.append({
-                "name": "lightgbm_fast_cv",
-                "component_type": "model",
-                "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
-                "estimated_impact": 0.20,
-                "rationale": "High-ROI baseline model",
-                "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
-            })
+            plan.append(
+                {
+                    "name": "lightgbm_fast_cv",
+                    "component_type": "model",
+                    "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
+                    "estimated_impact": 0.20,
+                    "rationale": "High-ROI baseline model",
+                    "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
+                }
+            )
             model_count += 1
 
         if model_count < 2:
-            plan.append({
-                "name": "xgboost_fast_cv",
-                "component_type": "model",
-                "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
-                "estimated_impact": 0.18,
-                "rationale": "Adds diversity for ensemble",
-                "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
-            })
+            plan.append(
+                {
+                    "name": "xgboost_fast_cv",
+                    "component_type": "model",
+                    "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
+                    "estimated_impact": 0.18,
+                    "rationale": "Adds diversity for ensemble",
+                    "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
+                }
+            )
 
         # Exploration arm if capacity allows
         if len(plan) < 4:
-            plan.append({
-                "name": "stacking_light",
-                "component_type": "ensemble",
-                "description": "Weighted average of top models using CV rewards as weights; validate submission vs sample",
-                "estimated_impact": 0.12,
-                "rationale": "Cheap ensemble leveraging existing predictions",
-                "code_outline": "Load saved preds, weight by CV reward, validate sample_submission shape/ids",
-            })
+            plan.append(
+                {
+                    "name": "stacking_light",
+                    "component_type": "ensemble",
+                    "description": "Weighted average of top models using CV rewards as weights; validate submission vs sample",
+                    "estimated_impact": 0.12,
+                    "rationale": "Cheap ensemble leveraging existing predictions",
+                    "code_outline": "Load saved preds, weight by CV reward, validate sample_submission shape/ids",
+                }
+            )
 
         return plan[:4]
 
-    def _extract_validation_score(self, stdout: str) -> Optional[float]:
+    def _extract_validation_score(self, stdout: str) -> float | None:
         """Parse validation score from stdout if present."""
         import re
 
@@ -862,7 +914,7 @@ Return a JSON array with 3-5 components. Each component must have:
         self,
         plan: list[AblationComponent],
         *,
-        state: Optional[KaggleState] = None,
+        state: KaggleState | None = None,
     ) -> list[AblationComponent]:
         """
         Validate and enhance the ablation plan.
@@ -888,7 +940,9 @@ Return a JSON array with 3-5 components. Each component must have:
             except ValueError:
                 timeout_cap = None
 
-        fast_mode = bool((state or {}).get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
+        fast_mode = (
+            bool((state or {}).get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
+        )
         if isinstance(timeout_cap, int) and timeout_cap <= 1200:
             fast_mode = True
 
@@ -901,8 +955,17 @@ Return a JSON array with 3-5 components. Each component must have:
         # Guardrail: block tabular models for image competitions without features.
         if self._is_image_competition_without_features(state):
             tabular_signals = [
-                "lightgbm", "lgbm", "xgboost", "catboost", "randomforest",
-                "logistic", "svm", "naive", "optuna", "stacking", "ridge",
+                "lightgbm",
+                "lgbm",
+                "xgboost",
+                "catboost",
+                "randomforest",
+                "logistic",
+                "svm",
+                "naive",
+                "optuna",
+                "stacking",
+                "ridge",
             ]
             filtered_plan = []
             removed = []
@@ -913,7 +976,9 @@ Return a JSON array with 3-5 components. Each component must have:
                     continue
                 filtered_plan.append(comp)
             if removed:
-                print(f"  ⚠️  Removed tabular components for image competition without features: {', '.join(removed)}")
+                print(
+                    f"  ⚠️  Removed tabular components for image competition without features: {', '.join(removed)}"
+                )
                 valid_plan = filtered_plan
 
         # Limit components (quality over quantity)
@@ -922,11 +987,17 @@ Return a JSON array with 3-5 components. Each component must have:
             print(
                 f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top {max_components} by impact"
             )
-            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[:max_components]
+            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[
+                :max_components
+            ]
 
         # Ensure we have enough model components to produce predictions.
         model_count = sum(1 for c in valid_plan if c.component_type == "model")
-        tabular_domain = domain.startswith("tabular") or domain in {"tabular", "tabular_classification", "tabular_regression"}
+        tabular_domain = domain.startswith("tabular") or domain in {
+            "tabular",
+            "tabular_classification",
+            "tabular_regression",
+        }
         require_two_models = tabular_domain and not fast_mode
 
         if model_count == 0:
@@ -983,38 +1054,43 @@ Return a JSON array with 3-5 components. Each component must have:
 
         # Sort by type: preprocessing first, then models, then ensembles
         # This ensures data is prepared before models are trained
-        preprocessing_components = [c for c in valid_plan if c.component_type in ["preprocessing", "feature_engineering"]]
+        preprocessing_components = [
+            c for c in valid_plan if c.component_type in ["preprocessing", "feature_engineering"]
+        ]
         model_components = [c for c in valid_plan if c.component_type == "model"]
-        other_components = [c for c in valid_plan if c.component_type not in ["preprocessing", "feature_engineering", "model"]]
+        other_components = [
+            c
+            for c in valid_plan
+            if c.component_type not in ["preprocessing", "feature_engineering", "model"]
+        ]
 
         # Reorder: preprocessing first, then models, then ensembles
         valid_plan = preprocessing_components + model_components + other_components
 
         # Debug log: Show final plan composition
-        print(f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total")
+        print(
+            f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total"
+        )
 
         return valid_plan
 
     def _analyze_gaps(
-        self, 
-        state: KaggleState, 
-        previous_plan_str: str, 
-        test_results_str: str
+        self, state: KaggleState, previous_plan_str: str, test_results_str: str
     ) -> dict[str, Any]:
         """
         Analyze gaps between results and goal.
-        
+
         Args:
             state: Current state
             previous_plan_str: JSON string of previous plan
             test_results_str: JSON string of test results
-            
+
         Returns:
             Dictionary with gap analysis
         """
         competition_info = state["competition_info"]
         current_score = state.get("current_performance_score", 0.0)
-        
+
         prompt = ANALYZE_GAPS_PROMPT.format(
             previous_plan=previous_plan_str,
             test_results=test_results_str,
@@ -1023,12 +1099,12 @@ Return a JSON array with 3-5 components. Each component must have:
             target_score="SOTA (typically Top 10%)",
             memory_summary=get_memory_summary_for_planning(state),
         )
-        
+
         messages = [
             SystemMessage(content=PLANNER_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
-        
+
         try:
             if not getattr(self, "llm", None):
                 self.llm = get_llm_for_role(
@@ -1038,19 +1114,19 @@ Return a JSON array with 3-5 components. Each component must have:
                 )
             response = self.llm.invoke(messages)
             content = get_text_content(response.content).strip()
-            
+
             if "```json" in content:
                 content = content.split("```json", 1)[1].split("```", 1)[0].strip()
             elif content.startswith("```") and content.endswith("```"):
                 content = content.strip("` \n")
-                
+
             return json.loads(content)
         except Exception as e:
             print(f"  ⚠️ Gap analysis failed: {e}")
             return {
                 "root_causes": ["Unknown (analysis failed)"],
                 "missed_opportunities": ["Standard baselines"],
-                "improvement_strategy": "Focus on fixing any errors shown in logs."
+                "improvement_strategy": "Focus on fixing any errors shown in logs.",
             }
 
     def _parse_llm_plan_response(
@@ -1110,7 +1186,9 @@ Return a JSON array with 3-5 components. Each component must have:
                                 "component_type": item.get("component_type", "model"),
                                 "description": item.get("description", ""),
                                 "estimated_impact": float(item.get("estimated_impact", 0.1)),
-                                "code_outline": item.get("code_outline", item.get("description", "")),
+                                "code_outline": item.get(
+                                    "code_outline", item.get("description", "")
+                                ),
                                 "rationale": item.get("rationale", ""),
                             }
                             valid_components.append(component)
@@ -1121,7 +1199,7 @@ Return a JSON array with 3-5 components. Each component must have:
         # If JSON parsing fails, return empty (caller will use fallback)
         return []
 
-    def _is_image_competition_without_features(self, state: Optional[KaggleState]) -> bool:
+    def _is_image_competition_without_features(self, state: KaggleState | None) -> bool:
         """
         Detect if competition is image-based but has no tabular features.
 
@@ -1142,6 +1220,7 @@ Return a JSON array with 3-5 components. Each component must have:
         has_images = False
         if data_dir:
             from pathlib import Path
+
             data_path = Path(data_dir)
             if data_path.exists():
                 # Check for common image directories (train/, test/, images/)
@@ -1149,7 +1228,15 @@ Return a JSON array with 3-5 components. Each component must have:
                     subdir_path = data_path / subdir
                     if subdir_path.exists() and subdir_path.is_dir():
                         # Check if directory contains image files
-                        image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+                        image_extensions = {
+                            ".jpg",
+                            ".jpeg",
+                            ".png",
+                            ".gif",
+                            ".bmp",
+                            ".tiff",
+                            ".webp",
+                        }
                         for f in subdir_path.iterdir():
                             if f.suffix.lower() in image_extensions:
                                 has_images = True
@@ -1162,7 +1249,9 @@ Return a JSON array with 3-5 components. Each component must have:
         train_csv_path = state.get("train_csv_path", "")
         if train_csv_path:
             from pathlib import Path
+
             import pandas as pd
+
             train_path = Path(train_csv_path)
             if train_path.exists():
                 try:
@@ -1173,7 +1262,7 @@ Return a JSON array with 3-5 components. Each component must have:
                     pass
 
         if has_images and train_csv_minimal:
-            print(f"  [WARNING] Detected IMAGE competition without tabular features!")
+            print("  [WARNING] Detected IMAGE competition without tabular features!")
             print(f"            - Has image files: {has_images}")
             print(f"            - train.csv minimal (<=2 cols): {train_csv_minimal}")
             return True
@@ -1186,7 +1275,7 @@ Return a JSON array with 3-5 components. Each component must have:
         sota_analysis: dict[str, Any],
         curriculum_insights: str = "",
         *,
-        state: Optional[KaggleState] = None,
+        state: KaggleState | None = None,
     ) -> list[dict[str, Any]]:
         """
         Create domain-specific fallback plan when LLM parsing fails.
@@ -1207,10 +1296,14 @@ Return a JSON array with 3-5 components. Each component must have:
         # This catches cases where domain detection fails but we can clearly see
         # image files exist and train.csv has minimal columns (just id + label)
         if self._is_image_competition_without_features(state):
-            print("  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)")
+            print(
+                "  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)"
+            )
             print("            Tree models (LightGBM/XGBoost) require tabular features!")
             # Force image classification fallback
-            return self._create_image_fallback_plan("image_classification", sota_analysis, fast_mode=False)
+            return self._create_image_fallback_plan(
+                "image_classification", sota_analysis, fast_mode=False
+            )
 
         run_mode = str((state or {}).get("run_mode", "")).lower()
         objective = str((state or {}).get("objective", "")).lower()
@@ -1230,8 +1323,11 @@ Return a JSON array with 3-5 components. Each component must have:
 
         # Define domain sets for routing
         IMAGE_DOMAINS = {
-            "image_classification", "image_regression", "object_detection",
-            "image_to_image", "image_segmentation"
+            "image_classification",
+            "image_regression",
+            "object_detection",
+            "image_to_image",
+            "image_segmentation",
         }
         TEXT_DOMAINS = {"text_classification", "text_regression", "seq_to_seq"}
         AUDIO_DOMAINS = {"audio_classification", "audio_regression"}
@@ -1240,22 +1336,23 @@ Return a JSON array with 3-5 components. Each component must have:
         if domain in ("image_to_image", "image_segmentation"):
             # CRITICAL: Image-to-image tasks require pixel-level predictions
             # Use specialized fallback plan with encoder-decoder architectures
-            return self._create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
-        elif domain in IMAGE_DOMAINS or domain.startswith("image_"):
+            return self._create_image_to_image_fallback_plan(
+                domain, sota_analysis, fast_mode=fast_mode
+            )
+        if domain in IMAGE_DOMAINS or domain.startswith("image_"):
             # Includes object_detection which uses CNN-based approaches
             return self._create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
-        elif domain in TEXT_DOMAINS or domain.startswith("text_"):
+        if domain in TEXT_DOMAINS or domain.startswith("text_"):
             return self._create_text_fallback_plan(domain, sota_analysis)
-        elif domain in AUDIO_DOMAINS or domain.startswith("audio_"):
+        if domain in AUDIO_DOMAINS or domain.startswith("audio_"):
             return self._create_audio_fallback_plan(domain, sota_analysis)
-        else:
-            # Tabular (existing logic)
-            return self._create_tabular_fallback_plan(
-                domain,
-                sota_analysis,
-                curriculum_insights,
-                fast_mode=fast_mode,
-            )
+        # Tabular (existing logic)
+        return self._create_tabular_fallback_plan(
+            domain,
+            sota_analysis,
+            curriculum_insights,
+            fast_mode=fast_mode,
+        )
 
     def _create_tabular_fallback_plan(
         self,
@@ -1311,60 +1408,66 @@ Return a JSON array with 3-5 components. Each component must have:
         plan = []
 
         # ALWAYS add feature engineering first (high impact)
-        plan.append({
-            "name": "advanced_feature_engineering",
-            "component_type": "feature_engineering",
-            "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
-            "estimated_impact": 0.15,
-            "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
-            "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder"
-        })
+        plan.append(
+            {
+                "name": "advanced_feature_engineering",
+                "component_type": "feature_engineering",
+                "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
+                "estimated_impact": 0.15,
+                "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
+                "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder",
+            }
+        )
 
         # ALWAYS add 3 diverse models for ensemble diversity
-        plan.extend([
-            {
-                "name": "lightgbm_optuna_tuned",
-                "component_type": "model",
-                "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
-                "estimated_impact": 0.22,
-                "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
-                "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100"
-            },
-            {
-                "name": "xgboost_optuna_tuned",
-                "component_type": "model",
-                "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
-                "estimated_impact": 0.20,
-                "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
-                "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50"
-            },
-            {
-                "name": "catboost_optuna_tuned",
-                "component_type": "model",
-                "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
-                "estimated_impact": 0.19,
-                "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
-                "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV"
-            },
-            {
-                "name": "neural_network_mlp",
-                "component_type": "model",
-                "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
-                "estimated_impact": 0.15,
-                "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
-                "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping."
-            }
-        ])
+        plan.extend(
+            [
+                {
+                    "name": "lightgbm_optuna_tuned",
+                    "component_type": "model",
+                    "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
+                    "estimated_impact": 0.22,
+                    "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
+                    "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100",
+                },
+                {
+                    "name": "xgboost_optuna_tuned",
+                    "component_type": "model",
+                    "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
+                    "estimated_impact": 0.20,
+                    "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
+                    "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50",
+                },
+                {
+                    "name": "catboost_optuna_tuned",
+                    "component_type": "model",
+                    "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
+                    "estimated_impact": 0.19,
+                    "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
+                    "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV",
+                },
+                {
+                    "name": "neural_network_mlp",
+                    "component_type": "model",
+                    "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
+                    "estimated_impact": 0.15,
+                    "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
+                    "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping.",
+                },
+            ]
+        )
 
         # ALWAYS add stacking ensemble (combines the 4 models above)
-        plan.append({
-            "name": "stacking_ensemble",
-            "component_type": "ensemble",
-            "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
-            "estimated_impact": 0.25,
-            "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
-            "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5"
-        })
+        plan.append(
+            {
+                "name": "stacking_ensemble",
+                "component_type": "ensemble",
+                "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
+                "estimated_impact": 0.25,
+                "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
+                "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5",
+            }
+        )
 
         return plan
 
@@ -1397,10 +1500,10 @@ Return a JSON array with 3-5 components. Each component must have:
                 {
                     "name": f"efficientnet_b0_fast_{task}",
                     "component_type": "model",
-                    "description": f"EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern.",
+                    "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern.",
                     "estimated_impact": 0.30,
                     "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
-                    "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save best checkpoint, implement _check_deadline() pattern"
+                    "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save best checkpoint, implement _check_deadline() pattern",
                 },
                 {
                     "name": "tta_inference_only",
@@ -1408,8 +1511,8 @@ Return a JSON array with 3-5 components. Each component must have:
                     "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained model and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
                     "estimated_impact": 0.05,
                     "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
-                    "code_outline": "Load models/best_model.pth, for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv"
-                }
+                    "code_outline": "Load models/best_model.pth, for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
+                },
             ]
 
         # NORMAL MODE: 3 components (2 models + TTA ensemble)
@@ -1420,7 +1523,7 @@ Return a JSON array with 3-5 components. Each component must have:
                 "description": f"EfficientNet-B0 pre-trained fine-tuned for {task}. PyTorch DataLoader with ImageFolder or custom Dataset. Data augmentation (rotation, flip, color jitter). Use transfer learning from ImageNet weights.",
                 "estimated_impact": 0.28,
                 "rationale": "EfficientNet achieves SOTA on ImageNet with excellent efficiency. Transfer learning transfers learned features. Data augmentation prevents overfitting on small datasets.",
-                "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, CV folds via KAGGLE_AGENTS_CV_FOLDS, save OOF predictions for ensemble"
+                "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, CV folds via KAGGLE_AGENTS_CV_FOLDS, save OOF predictions for ensemble",
             },
             {
                 "name": f"resnet50_{task}",
@@ -1428,7 +1531,7 @@ Return a JSON array with 3-5 components. Each component must have:
                 "description": "ResNet50 fine-tuned with different augmentation strategy (Cutout, Mixup) for architectural diversity in ensemble.",
                 "estimated_impact": 0.24,
                 "rationale": "ResNet provides complementary features vs EfficientNet. Ensemble benefits from architectural diversity.",
-                "code_outline": "torchvision.models.resnet50(pretrained=True), replace head, Cutout + Mixup augmentations, AdamW, CV folds via KAGGLE_AGENTS_CV_FOLDS"
+                "code_outline": "torchvision.models.resnet50(pretrained=True), replace head, Cutout + Mixup augmentations, AdamW, CV folds via KAGGLE_AGENTS_CV_FOLDS",
             },
             {
                 "name": "tta_ensemble",
@@ -1436,8 +1539,8 @@ Return a JSON array with 3-5 components. Each component must have:
                 "description": "Test-time augmentation (TTA) + weighted ensemble of EfficientNet and ResNet predictions. Apply multiple transforms to test images and average predictions.",
                 "estimated_impact": 0.15,
                 "rationale": "TTA averages predictions over multiple augmented views of each test image, reducing variance. Weighted ensemble (by CV score) combines different architectures. Typical +2-5% improvement.",
-                "code_outline": "For each test image: apply 5 transforms (original, hflip, vflip, rotate90, rotate270), get predictions from each model, average TTA predictions per model, then weighted average models by CV score"
-            }
+                "code_outline": "For each test image: apply 5 transforms (original, hflip, vflip, rotate90, rotate270), get predictions from each model, average TTA predictions per model, then weighted average models by CV score",
+            },
         ]
 
     def _create_image_to_image_fallback_plan(
@@ -1503,7 +1606,7 @@ pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
 ```""",
                     "estimated_impact": 0.35,
                     "rationale": "Simple autoencoder is fast to train and provides baseline for denoising. Pixel-level output is critical for correct submission format.",
-                    "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, flatten to pixel-level CSV"
+                    "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, flatten to pixel-level CSV",
                 },
                 {
                     "name": "submission_format_validator",
@@ -1511,8 +1614,8 @@ pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
                     "description": "Validate pixel-level submission format matches sample_submission.csv exactly.",
                     "estimated_impact": 0.05,
                     "rationale": "Critical validation to catch format errors before submission.",
-                    "code_outline": "Load sample_sub, verify row count matches, verify ID format matches exactly"
-                }
+                    "code_outline": "Load sample_sub, verify row count matches, verify ID format matches exactly",
+                },
             ]
 
         # Full mode: U-Net and ensemble
@@ -1538,7 +1641,7 @@ Read sample_submission.csv to get expected row count (millions of rows).
 Flatten each output image to pixel format: {img_id}_{row}_{col} -> value""",
                 "estimated_impact": 0.40,
                 "rationale": "U-Net is SOTA for image-to-image tasks. Skip connections preserve fine details crucial for denoising/super-resolution.",
-                "code_outline": "PyTorch U-Net with skip connections, MSE loss, 3-5 epochs, output full image, flatten to pixel CSV"
+                "code_outline": "PyTorch U-Net with skip connections, MSE loss, 3-5 epochs, output full image, flatten to pixel CSV",
             },
             {
                 "name": "residual_autoencoder",
@@ -1553,7 +1656,7 @@ Architecture:
 This provides model diversity for ensemble.""",
                 "estimated_impact": 0.35,
                 "rationale": "Residual learning (predicting noise) often works better than direct denoising. Provides ensemble diversity.",
-                "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, same pixel-level submission format"
+                "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, same pixel-level submission format",
             },
             {
                 "name": "pixel_ensemble_average",
@@ -1566,8 +1669,8 @@ This provides model diversity for ensemble.""",
 4. Validate row count matches sample_submission.csv""",
                 "estimated_impact": 0.10,
                 "rationale": "Ensembling reduces prediction variance. Simple average works well for image tasks.",
-                "code_outline": "Load both model outputs, pixel-wise average, flatten to CSV, validate format"
-            }
+                "code_outline": "Load both model outputs, pixel-wise average, flatten to CSV, validate format",
+            },
         ]
 
     def _create_text_fallback_plan(
@@ -1589,42 +1692,43 @@ This provides model diversity for ensemble.""",
         """
         if domain == "seq_to_seq":
             # Sequence-to-sequence tasks (translation, text normalization, summarization)
-            return [{
-                "name": "t5_base_seq2seq",
-                "component_type": "model",
-                "description": "T5-base fine-tuned for seq2seq task using HuggingFace Trainer API. T5 is designed for text-to-text tasks.",
-                "estimated_impact": 0.30,
-                "rationale": "T5 (Text-to-Text Transfer Transformer) is specifically designed for seq2seq tasks. Achieves SOTA on translation, summarization, and text normalization benchmarks.",
-                "code_outline": "transformers.T5ForConditionalGeneration.from_pretrained('t5-base'), T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, train with learning_rate=1e-4, evaluate with BLEU/ROUGE metrics"
-            }]
-        else:
-            # Classification or regression tasks
             return [
                 {
-                    "name": "roberta_classifier",
+                    "name": "t5_base_seq2seq",
                     "component_type": "model",
-                    "description": "RoBERTa-base fine-tuned for text classification with learning rate warmup and linear decay schedule.",
-                    "estimated_impact": 0.28,
-                    "rationale": "RoBERTa improves on BERT with dynamic masking and larger training corpus. Achieves SOTA on GLUE, SuperGLUE, and many NLP benchmarks. Warmup stabilizes training.",
-                    "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with TrainingArguments, AdamW optimizer with warmup_steps=500, 5-fold StratifiedKFold CV, save OOF predictions"
-                },
-                {
-                    "name": "distilbert_classifier",
-                    "component_type": "model",
-                    "description": "DistilBERT fine-tuned (60% faster than BERT, lighter for ensemble diversity).",
-                    "estimated_impact": 0.22,
-                    "rationale": "DistilBERT is 60% faster and 40% smaller than BERT while retaining 97% of performance through knowledge distillation. Provides architectural diversity for ensemble while being computationally efficient.",
-                    "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'), similar training setup to RoBERTa, 5-fold CV"
-                },
-                {
-                    "name": "transformer_ensemble",
-                    "component_type": "ensemble",
-                    "description": "Weighted average of RoBERTa and DistilBERT predictions using CV scores as weights.",
-                    "estimated_impact": 0.12,
-                    "rationale": "Different architectures (RoBERTa vs DistilBERT) capture different linguistic patterns. Ensemble reduces variance and overfitting to specific model biases.",
-                    "code_outline": "Load OOF predictions from both models, compute optimal weights via Ridge regression on validation fold, apply weighted average to test predictions"
+                    "description": "T5-base fine-tuned for seq2seq task using HuggingFace Trainer API. T5 is designed for text-to-text tasks.",
+                    "estimated_impact": 0.30,
+                    "rationale": "T5 (Text-to-Text Transfer Transformer) is specifically designed for seq2seq tasks. Achieves SOTA on translation, summarization, and text normalization benchmarks.",
+                    "code_outline": "transformers.T5ForConditionalGeneration.from_pretrained('t5-base'), T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, train with learning_rate=1e-4, evaluate with BLEU/ROUGE metrics",
                 }
             ]
+        # Classification or regression tasks
+        return [
+            {
+                "name": "roberta_classifier",
+                "component_type": "model",
+                "description": "RoBERTa-base fine-tuned for text classification with learning rate warmup and linear decay schedule.",
+                "estimated_impact": 0.28,
+                "rationale": "RoBERTa improves on BERT with dynamic masking and larger training corpus. Achieves SOTA on GLUE, SuperGLUE, and many NLP benchmarks. Warmup stabilizes training.",
+                "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with TrainingArguments, AdamW optimizer with warmup_steps=500, 5-fold StratifiedKFold CV, save OOF predictions",
+            },
+            {
+                "name": "distilbert_classifier",
+                "component_type": "model",
+                "description": "DistilBERT fine-tuned (60% faster than BERT, lighter for ensemble diversity).",
+                "estimated_impact": 0.22,
+                "rationale": "DistilBERT is 60% faster and 40% smaller than BERT while retaining 97% of performance through knowledge distillation. Provides architectural diversity for ensemble while being computationally efficient.",
+                "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'), similar training setup to RoBERTa, 5-fold CV",
+            },
+            {
+                "name": "transformer_ensemble",
+                "component_type": "ensemble",
+                "description": "Weighted average of RoBERTa and DistilBERT predictions using CV scores as weights.",
+                "estimated_impact": 0.12,
+                "rationale": "Different architectures (RoBERTa vs DistilBERT) capture different linguistic patterns. Ensemble reduces variance and overfitting to specific model biases.",
+                "code_outline": "Load OOF predictions from both models, compute optimal weights via Ridge regression on validation fold, apply weighted average to test predictions",
+            },
+        ]
 
     def _create_audio_fallback_plan(
         self,
@@ -1650,7 +1754,7 @@ This provides model diversity for ensemble.""",
                 "description": "Convert audio files to mel-spectrograms using librosa. Save as PNG images for CNN input.",
                 "estimated_impact": 0.20,
                 "rationale": "Mel-spectrograms are the standard time-frequency representation for audio. Convert audio problem to computer vision problem, enabling use of powerful pre-trained image models.",
-                "code_outline": "Use librosa.feature.melspectrogram(y=audio, sr=22050, n_mels=128), convert to dB scale with librosa.power_to_db(), normalize to [0, 255], save as 3-channel PNG to spectrograms/ directory"
+                "code_outline": "Use librosa.feature.melspectrogram(y=audio, sr=22050, n_mels=128), convert to dB scale with librosa.power_to_db(), normalize to [0, 255], save as 3-channel PNG to spectrograms/ directory",
             },
             {
                 "name": "efficientnet_audio",
@@ -1658,7 +1762,7 @@ This provides model diversity for ensemble.""",
                 "description": "EfficientNet-B0 trained on mel-spectrogram images. Transfer learning from ImageNet.",
                 "estimated_impact": 0.25,
                 "rationale": "CNNs excel at recognizing patterns in spectrograms (frequency bands, temporal patterns). EfficientNet provides excellent accuracy with computational efficiency.",
-                "code_outline": "Load mel-spectrogram images with PyTorch DataLoader, torchvision.models.efficientnet_b0(pretrained=True), replace classifier, train with data augmentation on spectrograms"
+                "code_outline": "Load mel-spectrogram images with PyTorch DataLoader, torchvision.models.efficientnet_b0(pretrained=True), replace classifier, train with data augmentation on spectrograms",
             },
             {
                 "name": "resnet_audio",
@@ -1666,7 +1770,7 @@ This provides model diversity for ensemble.""",
                 "description": "ResNet50 for architectural diversity in ensemble.",
                 "estimated_impact": 0.20,
                 "rationale": "ResNet learns different features than EfficientNet due to different architecture (residual connections). Ensemble benefits from this diversity.",
-                "code_outline": "Similar pipeline to EfficientNet but with torchvision.models.resnet50(pretrained=True)"
+                "code_outline": "Similar pipeline to EfficientNet but with torchvision.models.resnet50(pretrained=True)",
             },
             {
                 "name": "audio_ensemble",
@@ -1674,8 +1778,8 @@ This provides model diversity for ensemble.""",
                 "description": "Weighted average of EfficientNet and ResNet predictions.",
                 "estimated_impact": 0.12,
                 "rationale": "Ensemble reduces overfitting to specific architecture biases and improves generalization.",
-                "code_outline": "Load OOF predictions, compute weights by CV score, weighted average for test predictions"
-            }
+                "code_outline": "Load OOF predictions, compute weights by CV score, weighted average for test predictions",
+            },
         ]
 
     def _format_sota_solutions(self, solutions: list[SOTASolution]) -> str:
@@ -1685,9 +1789,9 @@ This provides model diversity for ensemble.""",
             formatted.append(f"""
 Title: {sol.title}
 Votes: {sol.votes}
-Models: {', '.join(sol.models_used) if sol.models_used else 'N/A'}
-Features: {', '.join(sol.feature_engineering) if sol.feature_engineering else 'N/A'}
-Ensemble: {sol.ensemble_approach or 'N/A'}
+Models: {", ".join(sol.models_used) if sol.models_used else "N/A"}
+Features: {", ".join(sol.feature_engineering) if sol.feature_engineering else "N/A"}
+Ensemble: {sol.ensemble_approach or "N/A"}
 """)
         return "\n---\n".join(formatted)
 
@@ -1702,17 +1806,38 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
             Complexity level: "Low", "Medium", or "High" with explanation
         """
         high_complexity_signals = [
-            "Ensemble", "Stacking", "stacking", "VotingClassifier",
-            "BaggingClassifier", "StackingClassifier", "StackingRegressor",
-            "neural", "deep", "LSTM", "Transformer", "BERT", "CNN",
-            "optuna", "hyperopt", "GridSearchCV", "RandomizedSearchCV",
-            "n_estimators=5000", "n_estimators=10000", "epochs=100",
+            "Ensemble",
+            "Stacking",
+            "stacking",
+            "VotingClassifier",
+            "BaggingClassifier",
+            "StackingClassifier",
+            "StackingRegressor",
+            "neural",
+            "deep",
+            "LSTM",
+            "Transformer",
+            "BERT",
+            "CNN",
+            "optuna",
+            "hyperopt",
+            "GridSearchCV",
+            "RandomizedSearchCV",
+            "n_estimators=5000",
+            "n_estimators=10000",
+            "epochs=100",
         ]
 
         medium_complexity_signals = [
-            "XGBoost", "LightGBM", "CatBoost", "RandomForest",
-            "n_estimators=1000", "n_estimators=2000",
-            "cross_val", "KFold", "StratifiedKFold",
+            "XGBoost",
+            "LightGBM",
+            "CatBoost",
+            "RandomForest",
+            "n_estimators=1000",
+            "n_estimators=2000",
+            "cross_val",
+            "KFold",
+            "StratifiedKFold",
         ]
 
         # Build text to check from all solution fields
@@ -1726,14 +1851,15 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
 
         # Count signals
         high_count = sum(1 for signal in high_complexity_signals if signal.lower() in text_lower)
-        medium_count = sum(1 for signal in medium_complexity_signals if signal.lower() in text_lower)
+        medium_count = sum(
+            1 for signal in medium_complexity_signals if signal.lower() in text_lower
+        )
 
         if high_count >= 3:
             return "High (likely slow - heavy ensembles/optimization/deep learning)"
-        elif high_count >= 1 or medium_count >= 2:
+        if high_count >= 1 or medium_count >= 2:
             return "Medium (moderate training time - standard ML pipeline)"
-        else:
-            return "Low (fast - simple models, quick iteration)"
+        return "Low (fast - simple models, quick iteration)"
 
     def _format_sota_details(self, solutions: list[SOTASolution]) -> str:
         """
@@ -1767,10 +1893,10 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
 ### Candidate {i}: {sol.title}
 - **Votes**: {sol.votes} (Quality Signal - higher is better)
 - **Estimated Complexity**: {complexity}
-- **Models Used**: {', '.join(sol.models_used) if sol.models_used else 'N/A'}
-- **Feature Engineering**: {', '.join(sol.feature_engineering) if sol.feature_engineering else 'N/A'}
-- **Ensemble Approach**: {sol.ensemble_approach or 'N/A'}
-- **Key Strategies**: {', '.join(sol.strategies[:3]) if sol.strategies else 'N/A'}
+- **Models Used**: {", ".join(sol.models_used) if sol.models_used else "N/A"}
+- **Feature Engineering**: {", ".join(sol.feature_engineering) if sol.feature_engineering else "N/A"}
+- **Ensemble Approach**: {sol.ensemble_approach or "N/A"}
+- **Key Strategies**: {", ".join(sol.strategies[:3]) if sol.strategies else "N/A"}
 
 **Code Snippet** (use this as reference for your implementation):
 ```python
@@ -1791,7 +1917,7 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
             if comp.code:
                 print(f"   Code: {comp.code[:80]}...")
 
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
 
     # ==================== Eureka: Multi-Candidate Evolutionary Planning ====================
 
@@ -1873,10 +1999,10 @@ Ensemble: {sol.ensemble_approach or 'N/A'}
 
         # Create strategy-modified prompt
         strategy_prompt = f"""
-Strategy: {strategy['name'].upper()}
-{strategy['prompt_modifier']}
+Strategy: {strategy["name"].upper()}
+{strategy["prompt_modifier"]}
 
-Preferred approaches: {', '.join(strategy['model_preference'])}
+Preferred approaches: {", ".join(strategy["model_preference"])}
 """
 
         # Use fallback plan generation with strategy bias
@@ -1886,10 +2012,14 @@ Preferred approaches: {', '.join(strategy['model_preference'])}
         # Modify plan based on strategy
         if strategy["name"] == "conservative":
             # Filter to keep only well-established models
-            plan = [c for c in plan if any(
-                m in c.name.lower()
-                for m in ["xgboost", "lightgbm", "random", "logistic", "baseline"]
-            )] or plan[:2]
+            plan = [
+                c
+                for c in plan
+                if any(
+                    m in c.name.lower()
+                    for m in ["xgboost", "lightgbm", "random", "logistic", "baseline"]
+                )
+            ] or plan[:2]
 
         elif strategy["name"] == "aggressive":
             # Boost feature engineering and ensemble components
@@ -2034,6 +2164,7 @@ Preferred approaches: {', '.join(strategy['model_preference'])}
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def planner_agent_node(state: KaggleState) -> dict[str, Any]:
     """

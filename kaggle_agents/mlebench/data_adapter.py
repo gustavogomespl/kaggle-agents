@@ -9,7 +9,7 @@ import os
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -20,14 +20,14 @@ class MLEBenchDataInfo:
 
     competition_id: str
     workspace: Path
-    train_path: Optional[Path] = None
-    test_path: Optional[Path] = None
-    clean_train_path: Optional[Path] = None
-    sample_submission_path: Optional[Path] = None
-    train_csv_path: Optional[Path] = None  # For image competitions with labels CSV
-    test_csv_path: Optional[Path] = None
-    ground_truth_path: Optional[Path] = None  # Private test labels
-    description_path: Optional[Path] = None
+    train_path: Path | None = None
+    test_path: Path | None = None
+    clean_train_path: Path | None = None
+    sample_submission_path: Path | None = None
+    train_csv_path: Path | None = None  # For image competitions with labels CSV
+    test_csv_path: Path | None = None
+    ground_truth_path: Path | None = None  # Private test labels
+    description_path: Path | None = None
     data_type: str = "tabular"  # tabular, image, audio, text
     target_column: str = "target"
     id_column: str = "id"
@@ -59,14 +59,17 @@ class MLEBenchDataAdapter:
     @staticmethod
     def _detect_mle_cache() -> Path:
         """Detect MLE-bench cache path based on environment."""
-        print(f"[MLEBenchDataAdapter] Detecting cache path...", flush=True)
+        print("[MLEBenchDataAdapter] Detecting cache path...", flush=True)
         print(f"[MLEBenchDataAdapter]   Path.home() = {Path.home()}", flush=True)
 
         # 1. Check environment variable first
         env_path = os.environ.get("MLEBENCH_DATA_DIR")
         if env_path:
             env_path_obj = Path(env_path)
-            print(f"[MLEBenchDataAdapter]   MLEBENCH_DATA_DIR = {env_path}, exists = {env_path_obj.exists()}", flush=True)
+            print(
+                f"[MLEBenchDataAdapter]   MLEBENCH_DATA_DIR = {env_path}, exists = {env_path_obj.exists()}",
+                flush=True,
+            )
             if env_path_obj.exists():
                 return env_path_obj
 
@@ -88,10 +91,12 @@ class MLEBenchDataAdapter:
 
         # Default fallback (will be created if needed)
         default = Path.home() / ".cache" / "mle-bench" / "data"
-        print(f"[MLEBenchDataAdapter] Warning: No cache found, using default: {default}", flush=True)
+        print(
+            f"[MLEBenchDataAdapter] Warning: No cache found, using default: {default}", flush=True
+        )
         return default
 
-    def __init__(self, mle_cache_path: Optional[Path] = None):
+    def __init__(self, mle_cache_path: Path | None = None):
         """
         Initialize the adapter.
 
@@ -115,7 +120,7 @@ class MLEBenchDataAdapter:
         public_dir = comp_path / "public"
 
         # Debug: show what we're looking for
-        print(f"[MLEBenchDataAdapter] Checking if prepared:", flush=True)
+        print("[MLEBenchDataAdapter] Checking if prepared:", flush=True)
         print(f"[MLEBenchDataAdapter]   Competition path: {comp_path}", flush=True)
         print(f"[MLEBenchDataAdapter]   Competition path exists: {comp_path.exists()}", flush=True)
         print(f"[MLEBenchDataAdapter]   Public dir: {public_dir}", flush=True)
@@ -126,7 +131,10 @@ class MLEBenchDataAdapter:
         if base_comp_dir.exists():
             try:
                 contents = list(base_comp_dir.iterdir())
-                print(f"[MLEBenchDataAdapter]   Base dir contents: {[p.name for p in contents]}", flush=True)
+                print(
+                    f"[MLEBenchDataAdapter]   Base dir contents: {[p.name for p in contents]}",
+                    flush=True,
+                )
             except Exception as e:
                 print(f"[MLEBenchDataAdapter]   Error listing base dir: {e}", flush=True)
 
@@ -189,20 +197,20 @@ class MLEBenchDataAdapter:
                 continue
 
         # Check for text-heavy CSVs
-        for csv_file in public_dir.glob('*.csv'):
-            if 'train' in csv_file.name.lower():
+        for csv_file in public_dir.glob("*.csv"):
+            if "train" in csv_file.name.lower():
                 try:
                     df = pd.read_csv(csv_file, nrows=5)
                     # Check for text columns (long strings)
                     for col in df.columns:
-                        if df[col].dtype == 'object':
+                        if df[col].dtype == "object":
                             avg_len = df[col].astype(str).str.len().mean()
                             if avg_len > 100:  # Long text
-                                return 'text'
+                                return "text"
                 except Exception:
                     pass
 
-        return 'tabular'
+        return "tabular"
 
     def _extract_zips(self, directory: Path) -> None:
         """Extract all ZIP files in directory.
@@ -213,9 +221,7 @@ class MLEBenchDataAdapter:
             to create stable `train/` / `test/` folders when the zip is named similarly.
         """
 
-        def _should_extract_to_subdir(
-            z: zipfile.ZipFile, sample_limit: int = 2000
-        ) -> bool:
+        def _should_extract_to_subdir(z: zipfile.ZipFile, sample_limit: int = 2000) -> bool:
             """Heuristic: extract to subdir if there are files at zip root."""
             seen = 0
             for name in z.namelist():
@@ -263,7 +269,7 @@ class MLEBenchDataAdapter:
             except zipfile.BadZipFile:
                 print(f"   Warning: {zip_file.name} is not a valid zip")
 
-    def _find_csv_file(self, directory: Path, patterns: list[str]) -> Optional[Path]:
+    def _find_csv_file(self, directory: Path, patterns: list[str]) -> Path | None:
         """Find a CSV file matching any of the patterns."""
         for pattern in patterns:
             matches = list(directory.glob(pattern))
@@ -271,7 +277,7 @@ class MLEBenchDataAdapter:
                 return matches[0]
         return None
 
-    def _find_first_zip(self, directory: Path, kind: str) -> Optional[Path]:
+    def _find_first_zip(self, directory: Path, kind: str) -> Path | None:
         """Find a likely train/test ZIP in a directory."""
         kind_norm = kind.strip().lower()
         if kind_norm not in {"train", "test"}:
@@ -298,7 +304,7 @@ class MLEBenchDataAdapter:
                 return df.columns[1]
         except Exception:
             pass
-        return 'target'
+        return "target"
 
     def _detect_id_column(self, sample_sub_path: Path) -> str:
         """Detect ID column from sample submission."""
@@ -308,12 +314,12 @@ class MLEBenchDataAdapter:
                 return df.columns[0]
         except Exception:
             pass
-        return 'id'
+        return "id"
 
     def prepare_workspace(
         self,
         competition_id: str,
-        workspace_path: Optional[Path] = None,
+        workspace_path: Path | None = None,
     ) -> MLEBenchDataInfo:
         """
         Prepare workspace with MLE-bench data for kaggle-agents.
@@ -365,11 +371,14 @@ class MLEBenchDataAdapter:
         )
 
         # Find sample submission (critical for format)
-        sample_sub = self._find_csv_file(public_dir, [
-            'sample_submission*.csv',
-            'sampleSubmission*.csv',
-            '*sample*.csv',
-        ])
+        sample_sub = self._find_csv_file(
+            public_dir,
+            [
+                "sample_submission*.csv",
+                "sampleSubmission*.csv",
+                "*sample*.csv",
+            ],
+        )
         if sample_sub:
             info.sample_submission_path = sample_sub
             info.target_column = self._detect_target_column(sample_sub)
@@ -393,9 +402,9 @@ class MLEBenchDataAdapter:
                 break
 
         # Train CSV (labels for image competitions, or data for tabular)
-        train_csv = self._find_csv_file(public_dir, [
-            'train.csv', 'train_labels.csv', 'labels.csv', 'train*.csv'
-        ])
+        train_csv = self._find_csv_file(
+            public_dir, ["train.csv", "train_labels.csv", "labels.csv", "train*.csv"]
+        )
         if train_csv:
             info.train_csv_path = train_csv
             if data_type == "tabular":
@@ -445,7 +454,7 @@ class MLEBenchDataAdapter:
                 break
 
         # Test CSV
-        test_csv = self._find_csv_file(public_dir, ['test.csv', 'test*.csv'])
+        test_csv = self._find_csv_file(public_dir, ["test.csv", "test*.csv"])
         if test_csv:
             info.test_csv_path = test_csv
             if data_type == "tabular":
@@ -477,9 +486,9 @@ class MLEBenchDataAdapter:
 
         # Find ground truth (for validation after submission)
         if private_dir.exists():
-            gt_file = self._find_csv_file(private_dir, [
-                'test.csv', 'answers.csv', 'solution.csv', 'test_labels.csv'
-            ])
+            gt_file = self._find_csv_file(
+                private_dir, ["test.csv", "answers.csv", "solution.csv", "test_labels.csv"]
+            )
             if gt_file:
                 info.ground_truth_path = gt_file
 
@@ -510,7 +519,7 @@ class MLEBenchDataAdapter:
         """
         import shutil
 
-        print(f"   Creating workspace links...", flush=True)
+        print("   Creating workspace links...", flush=True)
 
         # Files/dirs to link
         items_to_link = []
@@ -601,7 +610,7 @@ class MLEBenchDataAdapter:
         if (workspace / "sample_submission.csv").exists():
             info.sample_submission_path = workspace / "sample_submission.csv"
 
-        print(f"   Workspace setup complete!", flush=True)
+        print("   Workspace setup complete!", flush=True)
 
     def get_state_paths(self, info: MLEBenchDataInfo) -> dict[str, Any]:
         """
@@ -629,7 +638,9 @@ class MLEBenchDataAdapter:
                 "clean_train": str(info.clean_train_path) if info.clean_train_path else "",
                 "train_csv": str(info.train_csv_path) if info.train_csv_path else "",
                 "test_csv": str(info.test_csv_path) if info.test_csv_path else "",
-                "sample_submission": str(info.sample_submission_path) if info.sample_submission_path else "",
+                "sample_submission": str(info.sample_submission_path)
+                if info.sample_submission_path
+                else "",
                 "data_type": info.data_type,
             },
         }

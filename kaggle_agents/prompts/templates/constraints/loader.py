@@ -5,17 +5,20 @@ Reduces token usage by loading only relevant constraints for each domain.
 """
 
 from functools import lru_cache
-from typing import Optional
+
 
 # Domain categories for constraint loading
 DOMAIN_CATEGORIES = {
     # Image domains
     "image": ["cv", "computer_vision", "image_classification"],
-    "image_to_image": ["image_to_image", "image_denoising", "super_resolution", "image_segmentation"],
-
+    "image_to_image": [
+        "image_to_image",
+        "image_denoising",
+        "super_resolution",
+        "image_segmentation",
+    ],
     # Text domains
     "nlp": ["nlp", "text", "text_classification", "sentiment", "translation"],
-
     # Tabular domains
     "tabular": ["tabular", "structured", "time_series"],
 }
@@ -57,19 +60,23 @@ def get_constraints_for_domain(domain: str) -> str:
     if category == "image_to_image":
         from .image import IMAGE_CONSTRAINTS
         from .image_to_image import IMAGE_TO_IMAGE_CONSTRAINTS
+
         parts.append(IMAGE_CONSTRAINTS)
         parts.append(IMAGE_TO_IMAGE_CONSTRAINTS)
 
     elif category == "image":
         from .image import IMAGE_CONSTRAINTS
+
         parts.append(IMAGE_CONSTRAINTS)
 
     elif category == "nlp":
         from .nlp import NLP_CONSTRAINTS
+
         parts.append(NLP_CONSTRAINTS)
 
     elif category == "tabular":
         from .tabular import TABULAR_CONSTRAINTS
+
         parts.append(TABULAR_CONSTRAINTS)
 
     return "\n\n".join(parts)

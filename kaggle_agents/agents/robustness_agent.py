@@ -111,9 +111,9 @@ class RobustnessAgent:
         Returns:
             State updates with validation results
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("=  ROBUSTNESS AGENT: Validating Code")
-        print("="*60)
+        print("=" * 60)
 
         # Get development results
         dev_results = state.get("development_results", [])
@@ -124,6 +124,7 @@ class RobustnessAgent:
 
         # Initialize LLM (supports OpenAI and Anthropic)
         from ..core.config import get_llm
+
         self.llm = get_llm()
 
         # Get latest result
@@ -224,7 +225,9 @@ class RobustnessAgent:
             suggestions=suggestions,
         )
 
-    def _validate_leakage(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:
+    def _validate_leakage(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
         """
         Module 2: Data leakage detection.
 
@@ -308,7 +311,7 @@ IMPORTANT:
                     print("      ```python")
                     # Show first 300 chars of code block
                     code_preview = code_block[:300] + "..." if len(code_block) > 300 else code_block
-                    for line in code_preview.split('\n'):
+                    for line in code_preview.split("\n"):
                         print(f"      {line}")
                     print("      ```")
 
@@ -354,7 +357,9 @@ IMPORTANT:
             details=leakage_details,  # Structured information for auto-correction
         )
 
-    def _validate_data_usage(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:
+    def _validate_data_usage(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
         """
         Module 3: Data usage validation.
 
@@ -384,7 +389,7 @@ IMPORTANT:
         # Check for head/tail (might be debugging code left in)
         if ".head(" in code or ".tail(" in code:
             # Check if it's just for printing
-            if "print" not in code[max(0, code.find(".head(") - 50):code.find(".head(") + 50]:
+            if "print" not in code[max(0, code.find(".head(") - 50) : code.find(".head(") + 50]:
                 issues.append("Using head/tail - might not be using full data")
                 score *= 0.95
 
@@ -398,7 +403,9 @@ IMPORTANT:
             suggestions=suggestions,
         )
 
-    def _validate_format(self, dev_result, working_dir: Path, state: KaggleState) -> ValidationResult:
+    def _validate_format(
+        self, dev_result, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
         """
         Module 4: Format compliance validation.
 
@@ -497,9 +504,9 @@ IMPORTANT:
         stderr = (dev_result.stderr or "")[-1000:]  # Last 1000 chars
 
         # Prepare code summary (first 50 lines + last 20 lines if long)
-        code_lines = code.split('\n')
+        code_lines = code.split("\n")
         if len(code_lines) > 80:
-            code_summary = '\n'.join(code_lines[:50]) + '\n...\n' + '\n'.join(code_lines[-20:])
+            code_summary = "\n".join(code_lines[:50]) + "\n...\n" + "\n".join(code_lines[-20:])
         else:
             code_summary = code
         code_summary = code_summary[:4000]  # Limit token usage
@@ -576,6 +583,7 @@ IMPORTANT:
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def robustness_agent_node(state: KaggleState) -> dict[str, Any]:
     """

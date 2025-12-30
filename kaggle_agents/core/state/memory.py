@@ -45,14 +45,14 @@ class ModelPerformanceRecord:
     model_name: str
     model_type: str  # lightgbm, xgboost, catboost, neural_net, sklearn, etc.
     cv_score: float
-    public_lb_score: Optional[float] = None
+    public_lb_score: float | None = None
 
     # Hyperparameters that achieved this score
     hyperparameters: dict[str, Any] = field(default_factory=dict)
 
     # Training characteristics
     training_time_seconds: float = 0.0
-    memory_usage_mb: Optional[float] = None
+    memory_usage_mb: float | None = None
 
     # Feature information
     features_used: list[str] = field(default_factory=list)
@@ -71,12 +71,12 @@ class DataInsights:
     n_train_samples: int = 0
     n_test_samples: int = 0
     n_features: int = 0
-    n_classes: Optional[int] = None
+    n_classes: int | None = None
 
     # Target distribution
     target_distribution: dict[str, float] = field(default_factory=dict)
     is_imbalanced: bool = False
-    imbalance_ratio: Optional[float] = None
+    imbalance_ratio: float | None = None
 
     # Feature types
     numeric_features: list[str] = field(default_factory=list)
@@ -138,7 +138,7 @@ class HyperparameterHistory:
 
     # Context
     data_size: int = 0
-    n_classes: Optional[int] = None
+    n_classes: int | None = None
     iteration: int = 0
     timestamp: datetime = field(default_factory=datetime.now)
 
@@ -148,6 +148,7 @@ def merge_error_pattern_memory(
     new: list["ErrorPatternMemory"],
 ) -> list["ErrorPatternMemory"]:
     """Merge error pattern memory entries by (error_type, error_pattern)."""
+
     def _normalize(entry: Any) -> Optional["ErrorPatternMemory"]:
         if isinstance(entry, ErrorPatternMemory):
             return entry

@@ -8,21 +8,19 @@ on MLE-bench competitions with proper data handling and grading.
 import json
 import os
 import subprocess
-import sys
 import time
 import traceback as tb
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from ..core.config import get_config
-from ..core.state import CompetitionInfo, KaggleState, create_initial_state
-from .data_adapter import MLEBenchDataAdapter, MLEBenchDataInfo
+from ..core.state import CompetitionInfo, create_initial_state
+from .data_adapter import MLEBenchDataAdapter
 
 
 # Force flush for Colab/Jupyter compatibility
@@ -47,11 +45,11 @@ class MLEBenchResult:
 
     competition_id: str
     success: bool
-    submission_path: Optional[str] = None
+    submission_path: str | None = None
 
     # MLE-bench grading results
     valid_submission: bool = False
-    score: Optional[float] = None
+    score: float | None = None
     gold_medal: bool = False
     silver_medal: bool = False
     bronze_medal: bool = False
@@ -63,11 +61,11 @@ class MLEBenchResult:
     execution_time: float = 0.0
 
     # Error info
-    error: Optional[str] = None
-    traceback: Optional[str] = None
+    error: str | None = None
+    traceback: str | None = None
 
     # Raw grading output
-    grading_output: Optional[dict] = None
+    grading_output: dict | None = None
 
 
 class MLEBenchRunner:
@@ -83,8 +81,8 @@ class MLEBenchRunner:
 
     def __init__(
         self,
-        mle_cache_path: Optional[Path] = None,
-        workspace_base: Optional[Path] = None,
+        mle_cache_path: Path | None = None,
+        workspace_base: Path | None = None,
     ):
         """
         Initialize MLE-bench runner.
@@ -135,7 +133,7 @@ class MLEBenchRunner:
         try:
             result = subprocess.run(
                 ["mlebench", "grade-sample", str(submission_path), competition_id],
-                capture_output=True,
+                check=False, capture_output=True,
                 text=True,
                 timeout=60,
             )
@@ -173,7 +171,7 @@ class MLEBenchRunner:
                 "error": str(e),
             }
 
-    def _find_submission(self, workspace: Path) -> Optional[Path]:
+    def _find_submission(self, workspace: Path) -> Path | None:
         """Find submission file in workspace."""
         candidates = [
             workspace / "submission.csv",
@@ -242,7 +240,7 @@ class MLEBenchRunner:
                     f"Run: mlebench prepare -c {competition_id}"
                 )
 
-            _log(f"  Data is prepared!")
+            _log("  Data is prepared!")
 
             workspace = self.workspace_base / "competitions" / competition_id
             _log(f"  Workspace: {workspace}")
@@ -286,8 +284,12 @@ class MLEBenchRunner:
             # MLE-bench training configuration - start aggressive like SOTA (600 epochs, patience=30)
             state["cv_folds"] = int(os.getenv("KAGGLE_AGENTS_CV_FOLDS", "5"))
             state["fast_mode"] = False  # Disabled - use adaptive epoch budget instead
-            state["epoch_budget"] = int(os.getenv("KAGGLE_AGENTS_MAX_EPOCHS", "600"))  # SOTA uses 600
-            state["early_stopping_patience"] = int(os.getenv("KAGGLE_AGENTS_PATIENCE", "60"))  # SOTA uses 30
+            state["epoch_budget"] = int(
+                os.getenv("KAGGLE_AGENTS_MAX_EPOCHS", "600")
+            )  # SOTA uses 600
+            state["early_stopping_patience"] = int(
+                os.getenv("KAGGLE_AGENTS_PATIENCE", "60")
+            )  # SOTA uses 30
             state["timeout_history"] = []  # Track timeouts for adaptive reduction
             # Use explicit target score only if provided via environment.
             target_score_env = os.getenv("KAGGLE_AGENTS_TARGET_SCORE") or os.getenv("TARGET_SCORE")
@@ -315,7 +317,7 @@ class MLEBenchRunner:
                     "mode": "mlebench",
                     "timeout_per_component": timeout_per_component,
                     "enable_checkpoint_recovery": enable_checkpoint_recovery,
-                }
+                },
             }
 
             _log("  Invoking workflow... (this may take a while)")
@@ -404,13 +406,13 @@ class MLEBenchRunner:
 
 def solve_mlebench(
     competition_id: str,
-    mle_cache_path: Optional[str] = None,
+    mle_cache_path: str | None = None,
     problem_type: str = "unknown",
     evaluation_metric: str = "unknown",
     max_iterations: int = 3,
     timeout_per_component: int = 3000,
     enable_checkpoint_recovery: bool = True,
-    workspace_base: Optional[str] = None,
+    workspace_base: str | None = None,
 ) -> MLEBenchResult:
     """
     Solve an MLE-bench competition.

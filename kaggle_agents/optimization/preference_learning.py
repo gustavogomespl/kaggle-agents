@@ -12,14 +12,13 @@ Key concepts:
 - PreferenceRewardModel: Scores code based on learned preferences
 """
 
-from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
 from ..core.config import get_config, get_llm_for_role
-from ..core.state import KaggleState, PreferencePair
+from ..core.state import PreferencePair
 from ..utils.llm_utils import get_text_content
 
 
@@ -41,7 +40,9 @@ class PreferenceCollector:
         """Initialize the preference collector."""
         self.config = get_config()
         self.pairs: list[PreferencePair] = []
-        self._pending_rejected: dict[str, tuple[str, str, str]] = {}  # component -> (code, context, type)
+        self._pending_rejected: dict[
+            str, tuple[str, str, str]
+        ] = {}  # component -> (code, context, type)
 
     def mark_as_rejected(
         self,
@@ -49,7 +50,7 @@ class PreferenceCollector:
         component_type: str,
         code: str,
         context: str,
-        error: Optional[str] = None,
+        error: str | None = None,
     ) -> None:
         """
         Mark a code attempt as rejected (failed).
@@ -71,8 +72,8 @@ class PreferenceCollector:
         component_name: str,
         component_type: str,
         code: str,
-        score: Optional[float] = None,
-    ) -> Optional[PreferencePair]:
+        score: float | None = None,
+    ) -> PreferencePair | None:
         """
         Mark a code attempt as chosen (successful).
 
@@ -119,8 +120,8 @@ class PreferenceCollector:
         self,
         chosen_code: str,
         rejected_code: str,
-        chosen_score: Optional[float] = None,
-        error: Optional[str] = None,
+        chosen_score: float | None = None,
+        error: str | None = None,
     ) -> float:
         """
         Calculate preference margin between chosen and rejected code.
@@ -173,7 +174,7 @@ class PreferenceCollector:
         fixed_code: str,
         context: str,
         error: str,
-        cv_score: Optional[float] = None,
+        cv_score: float | None = None,
     ) -> PreferencePair:
         """
         Collect a preference pair from a fix cycle in one step.
@@ -355,7 +356,7 @@ class PreferenceRewardModel:
         self,
         code: str,
         component_type: str,
-        context: Optional[str] = None,
+        context: str | None = None,
     ) -> dict[str, float]:
         """
         Score code based on learned preferences.
@@ -509,7 +510,10 @@ Return ONLY a number between 0.0 and 1.0."""
         Returns:
             Guidance string based on learned patterns
         """
-        if not self._learned_patterns["good_patterns"] and not self._learned_patterns["bad_patterns"]:
+        if (
+            not self._learned_patterns["good_patterns"]
+            and not self._learned_patterns["bad_patterns"]
+        ):
             return ""
 
         guidance_parts = []
@@ -547,4 +551,3 @@ def create_preference_reward_model(use_llm: bool = True) -> PreferenceRewardMode
         PreferenceRewardModel instance
     """
     return PreferenceRewardModel(use_llm=use_llm)
-

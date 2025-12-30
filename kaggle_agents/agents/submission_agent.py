@@ -56,14 +56,16 @@ class SubmissionAgent:
         Returns:
             State updates with submission results
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("📤 SUBMISSION AGENT: Uploading to Kaggle")
-        print("="*60)
+        print("=" * 60)
 
         working_dir = Path(state["working_directory"])
         competition_name = state["competition_info"].name
         metric_name = state["competition_info"].evaluation_metric
-        sample_submission_path = state.get("sample_submission_path") or working_dir / "sample_submission.csv"
+        sample_submission_path = (
+            state.get("sample_submission_path") or working_dir / "sample_submission.csv"
+        )
 
         # Find submission file
         submission_path = self._find_submission_file(working_dir)
@@ -119,10 +121,9 @@ class SubmissionAgent:
 
         # In MLE-bench mode (or when explicitly enabled), grade locally so downstream
         # feedback/rewards can optimize for medals without needing Kaggle API.
-        mlebench_mode = (
-            str(state.get("run_mode", "")).lower() == "mlebench"
-            or os.getenv("MLEBENCH_MODE", "").lower() in {"1", "true", "yes"}
-        )
+        mlebench_mode = str(state.get("run_mode", "")).lower() == "mlebench" or os.getenv(
+            "MLEBENCH_MODE", ""
+        ).lower() in {"1", "true", "yes"}
         if mlebench_mode:
             grading = self._grade_with_mlebench(
                 competition_name=competition_name,
@@ -140,9 +141,13 @@ class SubmissionAgent:
                     f"medal={'gold' if grading.get('gold_medal') else 'silver' if grading.get('silver_medal') else 'bronze' if grading.get('bronze_medal') else 'none'}"
                 )
                 # Save temporal version (Success Memory)
-                versioned_path = working_dir / f"submission_iter_{state.get('current_iteration', 0)}_score_{float(score):.4f}.csv"
+                versioned_path = (
+                    working_dir
+                    / f"submission_iter_{state.get('current_iteration', 0)}_score_{float(score):.4f}.csv"
+                )
                 try:
                     import shutil
+
                     shutil.copy2(submission_path, versioned_path)
                     print(f"✅ Saved temporal backup: {versioned_path.name}")
                 except Exception as e:
@@ -236,7 +241,7 @@ class SubmissionAgent:
         try:
             result = subprocess.run(
                 ["mlebench", "grade-sample", str(submission_path), competition_name],
-                capture_output=True,
+                check=False, capture_output=True,
                 text=True,
                 timeout=60,
             )
@@ -330,7 +335,9 @@ class SubmissionAgent:
 
                         # Detect pixel-level format mismatch (expected >> actual)
                         if ratio > 100:
-                            return False, f"""
+                            return (
+                                False,
+                                f"""
 PIXEL-LEVEL FORMAT MISMATCH DETECTED!
 
 Expected: {expected_rows:,} rows (one per pixel)
@@ -370,18 +377,26 @@ DO NOT USE:
 - Image classifiers (EfficientNet, ResNet, VGG with FC head)
 - Models that output a single value per image
 - Global average pooling followed by dense layers
-"""
-                        else:
-                            return False, f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})"
+""",
+                            )
+                        return (
+                            False,
+                            f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})",
+                        )
 
                     if df.columns.tolist() != sample_sub.columns.tolist():
                         if set(df.columns) == set(sample_sub.columns):
                             # Auto-fix column order to match sample_submission
                             df = df[sample_sub.columns]
                             df.to_csv(submission_path, index=False)
-                            print("⚠️ Column order mismatch fixed: reordered columns to match sample_submission")
+                            print(
+                                "⚠️ Column order mismatch fixed: reordered columns to match sample_submission"
+                            )
                         else:
-                            return False, f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}"
+                            return (
+                                False,
+                                f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}",
+                            )
 
                     # Check ID column match if sample_submission includes an ID column
                     id_col = None
@@ -389,7 +404,11 @@ DO NOT USE:
                         # Prefer explicit ID-like column names
                         for col in sample_sub.columns:
                             col_lower = col.lower()
-                            if col_lower == "id" or col_lower.endswith("_id") or col_lower.endswith("id"):
+                            if (
+                                col_lower == "id"
+                                or col_lower.endswith("_id")
+                                or col_lower.endswith("id")
+                            ):
                                 id_col = col
                                 break
                         # Fallback to first column only when multi-column sample looks like it has IDs
@@ -408,19 +427,23 @@ DO NOT USE:
                         if sub_ids != sample_ids:
                             missing = sample_ids - sub_ids
                             extra = sub_ids - sample_ids
-                            return False, f"ID values don't match sample_submission. Missing {len(missing)} IDs, {len(extra)} unexpected IDs."
-                        else:
-                            # Auto-fix ID order to match sample_submission
-                            sample_ids_order = sample_sub[id_col].astype(str).to_list()
-                            df_indexed = df.set_index(df[id_col].astype(str))
-                            try:
-                                df = df_indexed.loc[sample_ids_order].reset_index()
-                            except KeyError as exc:
-                                return False, f"Failed to reorder submission IDs: {exc!s}"
-                            # Ensure column order matches sample_submission (ID first)
-                            df = df[sample_sub.columns]
-                            df.to_csv(submission_path, index=False)
-                            print("⚠️ ID order mismatch fixed: reordered rows to match sample_submission")
+                            return (
+                                False,
+                                f"ID values don't match sample_submission. Missing {len(missing)} IDs, {len(extra)} unexpected IDs.",
+                            )
+                        # Auto-fix ID order to match sample_submission
+                        sample_ids_order = sample_sub[id_col].astype(str).to_list()
+                        df_indexed = df.set_index(df[id_col].astype(str))
+                        try:
+                            df = df_indexed.loc[sample_ids_order].reset_index()
+                        except KeyError as exc:
+                            return False, f"Failed to reorder submission IDs: {exc!s}"
+                        # Ensure column order matches sample_submission (ID first)
+                        df = df[sample_sub.columns]
+                        df.to_csv(submission_path, index=False)
+                        print(
+                            "⚠️ ID order mismatch fixed: reordered rows to match sample_submission"
+                        )
 
                     # Warn if multi-class probabilities do not sum to 1
                     if problem_type and "class" in problem_type.lower() and sample_sub.shape[1] > 2:
@@ -430,7 +453,9 @@ DO NOT USE:
                             if (vals >= 0).all() and (vals <= 1).all():
                                 row_sums = vals.sum(axis=1)
                                 if not np.allclose(row_sums, 1.0, atol=1e-2):
-                                    print("⚠️ Warning: row probabilities do not sum to 1.0. If multi-class, apply softmax; if multi-label, this is expected.")
+                                    print(
+                                        "⚠️ Warning: row probabilities do not sum to 1.0. If multi-class, apply softmax; if multi-label, this is expected."
+                                    )
                         except Exception:
                             pass
 
@@ -439,7 +464,9 @@ DO NOT USE:
 
             # Prediction sanity checks
             problem_lower = (problem_type or "").lower()
-            is_classification = "class" in problem_lower  # covers binary_classification, classification, multiclass
+            is_classification = (
+                "class" in problem_lower
+            )  # covers binary_classification, classification, multiclass
 
             pred_col = df.columns[1]
             preds = df[pred_col]
@@ -499,7 +526,10 @@ DO NOT USE:
                 # Final decision: prefer metric signal; fall back to sample hints.
                 if expects_prob or (not expects_label and sample_suggests_prob):
                     if (vals > 1).any():
-                        return False, f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})"
+                        return (
+                            False,
+                            f"Predictions outside [0,1] range (min={preds.min():.4f}, max={preds.max():.4f})",
+                        )
                 elif expects_label or sample_suggests_label:
                     # Accept label-style outputs without coercion.
                     pass
@@ -576,13 +606,21 @@ DO NOT USE:
             # Try using Kaggle CLI first (more reliable in some environments)
             try:
                 import subprocess
+
                 cmd = [
-                    "kaggle", "competitions", "submit",
-                    "-c", competition_name,
-                    "-f", str(submission_path),
-                    "-m", message
+                    "kaggle",
+                    "competitions",
+                    "submit",
+                    "-c",
+                    competition_name,
+                    "-f",
+                    str(submission_path),
+                    "-m",
+                    message,
                 ]
-                result_cli = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=30)
+                result_cli = subprocess.run(
+                    cmd, check=False, capture_output=True, text=True, timeout=30
+                )
 
                 if result_cli.returncode == 0:
                     print("✅ Uploaded successfully via CLI!")
@@ -617,9 +655,13 @@ DO NOT USE:
                 print("\n⏳ Score not yet available (check leaderboard later)")
 
             # Save temporal version (Success Memory)
-            versioned_path = working_dir / f"submission_iter_{state.get('current_iteration', 0)}_score_{public_score if public_score is not None else 0.0:.4f}.csv"
+            versioned_path = (
+                working_dir
+                / f"submission_iter_{state.get('current_iteration', 0)}_score_{public_score if public_score is not None else 0.0:.4f}.csv"
+            )
             try:
                 import shutil
+
                 shutil.copy2(submission_path, versioned_path)
                 print(f"✅ Saved temporal backup: {versioned_path.name}")
             except Exception as e:
@@ -701,7 +743,6 @@ DO NOT USE:
 
             return (better_count / total_count) * 100
 
-
         except Exception:
             # Fallback: estimate based on submissions
             # Assume we're in the middle if we can't get leaderboard
@@ -723,12 +764,15 @@ DO NOT USE:
             state["should_continue"] = False
             state["termination_reason"] = "goal_achieved"
         else:
-            print(f"\n📈 Progress: {submission_result.percentile:.1f}% (target: {target_percentile}%)")
+            print(
+                f"\n📈 Progress: {submission_result.percentile:.1f}% (target: {target_percentile}%)"
+            )
             remaining = submission_result.percentile - target_percentile
             print(f"   Need to improve by {remaining:.1f} percentile points")
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def submission_agent_node(state: KaggleState) -> dict[str, Any]:
     """

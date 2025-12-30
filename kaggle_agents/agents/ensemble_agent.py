@@ -121,7 +121,7 @@ class EnsembleAgent:
         valid_names = []
 
         for i, (model, name) in enumerate(zip(models, model_names, strict=False)):
-            print(f"    Processing model {i+1}/{len(models)}: {name}")
+            print(f"    Processing model {i + 1}/{len(models)}: {name}")
 
             # Try to load OOF predictions
             oof_path = working_dir / "models" / f"oof_{name}.npy"
@@ -170,7 +170,7 @@ class EnsembleAgent:
         return {
             "meta_model": meta_model,
             "base_models": valid_models,
-            "base_model_names": valid_names
+            "base_model_names": valid_names,
         }
 
     def create_blending_ensemble(
@@ -245,15 +245,11 @@ class EnsembleAgent:
         init_weights = [1.0 / len(models)] * len(models)
 
         # Constraints: weights sum to 1, 0 <= weight <= 1
-        constraints = ({'type': 'eq', 'fun': lambda w: 1 - sum(w)})
+        constraints = {"type": "eq", "fun": lambda w: 1 - sum(w)}
         bounds = [(0, 1)] * len(models)
 
         result = minimize(
-            loss_func,
-            init_weights,
-            method='SLSQP',
-            bounds=bounds,
-            constraints=constraints
+            loss_func, init_weights, method="SLSQP", bounds=bounds, constraints=constraints
         )
 
         opt_weights = result.x / result.x.sum()
@@ -270,7 +266,7 @@ class EnsembleAgent:
         X: pd.DataFrame,
         y: pd.Series,
         problem_type: str,
-        n_iterations: int = 100
+        n_iterations: int = 100,
     ) -> dict[str, Any]:
         """
         Create ensemble using Caruana's Hill Climbing (Forward Selection).
@@ -309,13 +305,13 @@ class EnsembleAgent:
                 # Assuming AUC for classification if not specified, or LogLoss
                 # Let's use LogLoss for optimization as it's differentiable/smooth
                 y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
-                return -log_loss(y_true, y_pred) # Maximize negative log loss
-            return -np.sqrt(mean_squared_error(y_true, y_pred)) # Maximize negative RMSE
+                return -log_loss(y_true, y_pred)  # Maximize negative log loss
+            return -np.sqrt(mean_squared_error(y_true, y_pred))  # Maximize negative RMSE
 
         # Hill Climbing
         current_ensemble_preds = np.zeros_like(oof_preds[:, 0])
         ensemble_counts = np.zeros(n_models, dtype=int)
-        best_score = -float('inf')
+        best_score = -float("inf")
 
         # Initial step: pick best single model
         for i in range(n_models):
@@ -331,11 +327,11 @@ class EnsembleAgent:
 
         # Iterations
         for it in range(n_iterations):
-            best_iter_score = -float('inf')
+            best_iter_score = -float("inf")
             best_iter_idx = -1
 
             # Try adding each model
-            current_size = it + 2 # +1 for init, +1 for current iter (1-based)
+            current_size = it + 2  # +1 for init, +1 for current iter (1-based)
 
             for i in range(n_models):
                 # Candidate: current sum + new model prediction
@@ -357,13 +353,17 @@ class EnsembleAgent:
             if best_iter_score > best_score:
                 best_score = best_iter_score
                 ensemble_counts[best_iter_idx] += 1
-                current_ensemble_preds = (current_ensemble_preds * (current_size - 1) + oof_preds[:, best_iter_idx]) / current_size
+                current_ensemble_preds = (
+                    current_ensemble_preds * (current_size - 1) + oof_preds[:, best_iter_idx]
+                ) / current_size
                 # print(f"    Iter {it+1}: Added {valid_names[best_iter_idx]} -> Score: {best_score:.4f}")
             else:
                 # If no improvement, should we stop? Caruana usually continues to smooth out
                 # But for simplicity, we can continue or stop. Let's continue.
                 ensemble_counts[best_iter_idx] += 1
-                current_ensemble_preds = (current_ensemble_preds * (current_size - 1) + oof_preds[:, best_iter_idx]) / current_size
+                current_ensemble_preds = (
+                    current_ensemble_preds * (current_size - 1) + oof_preds[:, best_iter_idx]
+                ) / current_size
 
         # Calculate final weights
         weights = ensemble_counts / ensemble_counts.sum()
@@ -372,7 +372,7 @@ class EnsembleAgent:
         return {
             "base_models": valid_models,
             "base_model_names": valid_names,
-            "weights": weights.tolist()
+            "weights": weights.tolist(),
         }
 
     def create_temporal_ensemble(
@@ -398,7 +398,7 @@ class EnsembleAgent:
             True if ensemble created and saved as submission.csv
         """
         print(f"\n  ⏳ Temporal Ensemble (Iteration {current_iteration})")
-        
+
         # Determine strict direction
         minimize = is_metric_minimization(metric_name)
         print(f"      Metric: {metric_name} (Minimize: {minimize})")
@@ -407,7 +407,11 @@ class EnsembleAgent:
         candidates = []
 
         # From state history
-        valid_history = [s for s in submissions if s.file_path and Path(s.file_path).exists() and s.public_score is not None]
+        valid_history = [
+            s
+            for s in submissions
+            if s.file_path and Path(s.file_path).exists() and s.public_score is not None
+        ]
 
         # Also scan directory for manual matches (recovered state)
         for f in working_dir.glob("submission_iter_*_score_*.csv"):
@@ -431,7 +435,9 @@ class EnsembleAgent:
         candidates = list(unique_candidates)
 
         if len(candidates) < 2:
-            print(f"      Running single model (History: {len(candidates)}), needs 2+ for ensemble.")
+            print(
+                f"      Running single model (History: {len(candidates)}), needs 2+ for ensemble."
+            )
             return False
 
         # Sort by score (Assume HIGHER is better for selection logic, we will check metric later)
@@ -448,11 +454,11 @@ class EnsembleAgent:
         # Sort logic based on metric direction
         # If minimize (RMSE, LogLoss): asc=True (lower score is better)
         # If maximize (AUC, Accuracy): asc=False (higher score is better)
-        # We want the BEST files first. 
+        # We want the BEST files first.
         # So for minimize: sort by score ASC.
         # For maximize: sort by score DESC (reverse=True).
         reverse_sort = not minimize
-        
+
         sorted_candidates = sorted(candidates, key=lambda x: x["score"], reverse=reverse_sort)
         top_k = sorted_candidates[:3]
 
@@ -490,7 +496,7 @@ class EnsembleAgent:
 
             # Weighted Average
             # Weights: 1st=3, 2nd=2, 3rd=1 (normalized)
-            weights = np.array([3.0, 2.0, 1.0])[:len(dfs)]
+            weights = np.array([3.0, 2.0, 1.0])[: len(dfs)]
             weights /= weights.sum()
 
             print(f"      Weights: {weights}")
@@ -588,10 +594,7 @@ class EnsembleAgent:
         return np.average(predictions, axis=0, weights=weights)
 
     def plan_ensemble_strategy(
-        self,
-        models: list[Any],
-        problem_type: str,
-        eda_summary: dict[str, Any]
+        self, models: list[Any], problem_type: str, eda_summary: dict[str, Any]
     ) -> dict[str, Any]:
         """Plan ensemble strategy using LLM."""
         import json
@@ -604,11 +607,11 @@ class EnsembleAgent:
 
         model_descriptions = []
         for i, m in enumerate(models):
-            model_descriptions.append(f"Model {i+1}: {type(m).__name__}")
+            model_descriptions.append(f"Model {i + 1}: {type(m).__name__}")
 
         prompt = f"""# Introduction
 - You are a Kaggle grandmaster attending a competition.
-- We have {len(models)} trained models: {', '.join(model_descriptions)}.
+- We have {len(models)} trained models: {", ".join(model_descriptions)}.
 - Problem Type: {problem_type}
 - EDA Insights: {str(eda_summary)[:500]}...
 
@@ -637,7 +640,10 @@ Return a JSON object:
                 content = content.split("```")[1].split("```")[0].strip()
             return json.loads(content)
         except:
-            return {"strategy_name": "weighted_blending", "description": "Fallback to weighted blending"}
+            return {
+                "strategy_name": "weighted_blending",
+                "description": "Fallback to weighted blending",
+            }
 
     def __call__(self, state: KaggleState) -> KaggleState:
         """Create ensemble from trained models.
@@ -648,14 +654,18 @@ Return a JSON object:
         Returns:
             Updated state with ensemble model
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("ENSEMBLE AGENT: Creating Model Ensemble")
-        print("="*60)
+        print("=" * 60)
 
         # check for temporal ensemble opportunity first if in later iterations
         current_iteration = state.get("current_iteration", 0)
         submissions = state.get("submissions", []) if isinstance(state, dict) else state.submissions
-        working_dir_value = state.get("working_directory", "") if isinstance(state, dict) else state.working_directory
+        working_dir_value = (
+            state.get("working_directory", "")
+            if isinstance(state, dict)
+            else state.working_directory
+        )
         working_dir = Path(working_dir_value) if working_dir_value else Path()
 
         # If we have history, try temporal ensemble first (it's cheap and robust)
@@ -669,22 +679,58 @@ Return a JSON object:
 
         try:
             # Handle both dict and dataclass state access
-            models_trained = state.get("models_trained", []) if isinstance(state, dict) else state.models_trained
-            train_data_path = state.get("train_data_path", "") if isinstance(state, dict) else state.train_data_path
-            current_train_path = state.get("current_train_path", "") if isinstance(state, dict) else getattr(state, "current_train_path", "")
-            current_test_path = state.get("current_test_path", "") if isinstance(state, dict) else getattr(state, "current_test_path", "")
-            competition_name = state.get("competition_name", "") if isinstance(state, dict) else state.competition_name
-            eda_summary = state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
-            best_model = state.get("best_model", {}) if isinstance(state, dict) else state.best_model
-            working_dir_value = state.get("working_directory", "") if isinstance(state, dict) else state.working_directory
+            models_trained = (
+                state.get("models_trained", []) if isinstance(state, dict) else state.models_trained
+            )
+            train_data_path = (
+                state.get("train_data_path", "")
+                if isinstance(state, dict)
+                else state.train_data_path
+            )
+            current_train_path = (
+                state.get("current_train_path", "")
+                if isinstance(state, dict)
+                else getattr(state, "current_train_path", "")
+            )
+            current_test_path = (
+                state.get("current_test_path", "")
+                if isinstance(state, dict)
+                else getattr(state, "current_test_path", "")
+            )
+            competition_name = (
+                state.get("competition_name", "")
+                if isinstance(state, dict)
+                else state.competition_name
+            )
+            eda_summary = (
+                state.get("eda_summary", {}) if isinstance(state, dict) else state.eda_summary
+            )
+            best_model = (
+                state.get("best_model", {}) if isinstance(state, dict) else state.best_model
+            )
+            working_dir_value = (
+                state.get("working_directory", "")
+                if isinstance(state, dict)
+                else state.working_directory
+            )
             working_dir = Path(working_dir_value) if working_dir_value else Path()
             working_dir = Path(working_dir_value) if working_dir_value else Path()
-            test_data_path = state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
-            sample_submission_path = state.get("sample_submission_path", "") if isinstance(state, dict) else state.sample_submission_path
+            test_data_path = (
+                state.get("test_data_path", "") if isinstance(state, dict) else state.test_data_path
+            )
+            sample_submission_path = (
+                state.get("sample_submission_path", "")
+                if isinstance(state, dict)
+                else state.sample_submission_path
+            )
             models_dir = working_dir / "models"
-            
+
             # Access metric name safely from competition_info
-            comp_info = state.get("competition_info") if isinstance(state, dict) else getattr(state, "competition_info", None)
+            comp_info = (
+                state.get("competition_info")
+                if isinstance(state, dict)
+                else getattr(state, "competition_info", None)
+            )
             metric_name = getattr(comp_info, "evaluation_metric", "") if comp_info else ""
 
             # DEBUG: Detailed information about available models
@@ -699,7 +745,11 @@ Return a JSON object:
             if successful_results:
                 print("\n   ✅ Successful components:")
                 for i, result in enumerate(successful_results[-5:], 1):  # Last 5
-                    artifacts_str = ', '.join(result.artifacts_created[:3]) if result.artifacts_created else 'none'
+                    artifacts_str = (
+                        ", ".join(result.artifacts_created[:3])
+                        if result.artifacts_created
+                        else "none"
+                    )
                     print(f"      {i}. {artifacts_str}")
 
             # Check if we have multiple models
@@ -716,24 +766,46 @@ Return a JSON object:
                     if len(prediction_pairs) >= 2:
                         print("\n   ✅ Using prediction-only ensemble from OOF/Test pairs")
                         output_path = working_dir / "submission.csv"
-                        sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
-                        if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path):
+                        sample_path = (
+                            Path(sample_submission_path)
+                            if sample_submission_path
+                            else working_dir / "sample_submission.csv"
+                        )
+                        if self._ensemble_from_predictions(
+                            prediction_pairs, sample_path, output_path
+                        ):
                             return {
                                 "ensemble_created": True,
                                 "ensemble_method": "prediction_average",
                             }
 
-                print(f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})")
-                print("      Reason: Ensemble requires at least 2 trained models or 2 OOF/Test pairs")
+                print(
+                    f"\n   ⚠️  Not enough models for ensemble (need 2+, have {len(models_trained)})"
+                )
+                print(
+                    "      Reason: Ensemble requires at least 2 trained models or 2 OOF/Test pairs"
+                )
                 print("      Skipping ensemble step")
                 return {
                     "ensemble_skipped": True,
-                    "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)"
+                    "skip_reason": f"insufficient_models (have {len(models_trained)}, need 2+)",
                 }
 
             # Resolve train/test paths (prefer engineered data if available)
-            resolved_train_path = Path(current_train_path) if current_train_path else Path(train_data_path) if train_data_path else working_dir / "train.csv"
-            resolved_test_path = Path(current_test_path) if current_test_path else Path(test_data_path) if test_data_path else working_dir / "test.csv"
+            resolved_train_path = (
+                Path(current_train_path)
+                if current_train_path
+                else Path(train_data_path)
+                if train_data_path
+                else working_dir / "train.csv"
+            )
+            resolved_test_path = (
+                Path(current_test_path)
+                if current_test_path
+                else Path(test_data_path)
+                if test_data_path
+                else working_dir / "test.csv"
+            )
 
             print("\n   📂 Data Paths:")
             print(f"      Train: {resolved_train_path.name}")
@@ -786,22 +858,30 @@ Return a JSON object:
             else:
                 print(f"   ⚠️ Test data not found at {test_path}, skipping submission generation")
 
-            sample_sub_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
+            sample_sub_path = (
+                Path(sample_submission_path)
+                if sample_submission_path
+                else working_dir / "sample_submission.csv"
+            )
 
             # Load top models (top 3 by CV score)
             print("\n   🔍 Loading top models for ensemble...")
-            sorted_models = sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[:3]
+            sorted_models = sorted(models_trained, key=lambda x: x["mean_cv_score"], reverse=True)[
+                :3
+            ]
 
             top_models = []
             top_model_names = []
             for i, model_info in enumerate(sorted_models, 1):
                 model_path = f"{get_config().paths.models_dir}/{model_info['name']}_{competition_name}.joblib"
-                print(f"      Model {i}: {model_info['name']} (CV: {model_info['mean_cv_score']:.4f})")
+                print(
+                    f"      Model {i}: {model_info['name']} (CV: {model_info['mean_cv_score']:.4f})"
+                )
 
                 if Path(model_path).exists():
                     model = joblib.load(model_path)
                     top_models.append(model)
-                    top_model_names.append(model_info['name'])
+                    top_model_names.append(model_info["name"])
                     print(f"         ✅ Loaded from {model_path}")
                 else:
                     print(f"         ❌ Model file not found: {model_path}")
@@ -811,7 +891,7 @@ Return a JSON object:
                 print(f"      Required: 2+, Found: {len(top_models)}")
                 return {
                     "ensemble_skipped": True,
-                    "skip_reason": f"models_not_found (loaded {len(top_models)}, need 2+)"
+                    "skip_reason": f"models_not_found (loaded {len(top_models)}, need 2+)",
                 }
 
             # PLAN ENSEMBLE STRATEGY
@@ -825,12 +905,7 @@ Return a JSON object:
             # Create ensemble
             if "stack" in ensemble_strategy.lower():
                 ensemble = self.create_stacking_ensemble(
-                    top_models,
-                    top_model_names,
-                    working_dir,
-                    X,
-                    y,
-                    problem_type
+                    top_models, top_model_names, working_dir, X, y, problem_type
                 )
                 if test_features is None:
                     print("  ⚠️ Skipping stacking submission because test features are unavailable")
@@ -843,16 +918,13 @@ Return a JSON object:
                         sub_df.to_csv(submission_path, index=False)
                         print(f"  ✅ Saved ensemble submission to {submission_path}")
                     else:
-                        print(f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save")
+                        print(
+                            f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"
+                        )
 
             elif "caruana" in ensemble_strategy.lower():
                 ensemble = self.create_caruana_ensemble(
-                    top_models,
-                    top_model_names,
-                    working_dir,
-                    X,
-                    y,
-                    problem_type
+                    top_models, top_model_names, working_dir, X, y, problem_type
                 )
 
                 # Generate Final Submission using Test Preds (Weighted Average)
@@ -873,9 +945,13 @@ Return a JSON object:
                         model = base_models[idx] if idx < len(base_models) else None
                         if model is not None:
                             try:
-                                if problem_type == "classification" and hasattr(model, "predict_proba"):
+                                if problem_type == "classification" and hasattr(
+                                    model, "predict_proba"
+                                ):
                                     model_preds = model.predict_proba(test_features)
-                                    preds = model_preds[:, 1] if model_preds.ndim > 1 else model_preds
+                                    preds = (
+                                        model_preds[:, 1] if model_preds.ndim > 1 else model_preds
+                                    )
                                 else:
                                     preds = model.predict(test_features)
                             except Exception as e:
@@ -906,9 +982,13 @@ Return a JSON object:
                         sub_df.to_csv(submission_path, index=False)
                         print(f"  ✅ Saved ensemble submission to {submission_path}")
                     else:
-                        print(f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save")
+                        print(
+                            f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"
+                        )
                 else:
-                    print("  ❌ No test predictions available for Caruana ensemble, skipping submission.")
+                    print(
+                        "  ❌ No test predictions available for Caruana ensemble, skipping submission."
+                    )
 
             else:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
@@ -924,21 +1004,26 @@ Return a JSON object:
 
             # Save ensemble
             ensemble_path = f"{get_config().paths.models_dir}/ensemble_{competition_name}.joblib"
-            joblib.dump({
-                "ensemble": ensemble,
-                "problem_type": problem_type,
-                "strategy": ensemble_strategy,
-                "plan": plan
-            }, ensemble_path)
+            joblib.dump(
+                {
+                    "ensemble": ensemble,
+                    "problem_type": problem_type,
+                    "strategy": ensemble_strategy,
+                    "plan": plan,
+                },
+                ensemble_path,
+            )
 
-            print(f"Ensemble Agent: Created {ensemble_strategy} ensemble with {len(top_models)} models")
+            print(
+                f"Ensemble Agent: Created {ensemble_strategy} ensemble with {len(top_models)} models"
+            )
 
             return {
                 "best_model": {
                     "name": f"ensemble_{ensemble_strategy}",
                     "path": ensemble_path,
                     "mean_cv_score": best_model.get("mean_cv_score", 0.0),
-                    "is_ensemble": True
+                    "is_ensemble": True,
                 }
             }
 
@@ -950,36 +1035,41 @@ Return a JSON object:
             # After generating the current iteration's "submission.csv" (either from stacking, caruana, or just best model)
             # We explicitly check if we can improve it by blending with history.
             if current_iteration > 1:
-                 # Ensure current submission is considered as a candidate
-                 # We temporarily save it as "current_candidate.csv" to be picked up?
-                 # Or we just pass the path.
-                 # Actually, create_temporal_ensemble scans for submission_iter_*.
-                 # The current one is just "submission.csv".
-                 # Let's simple copy current submission.csv to a temp name so it's included in the blend logic
-                 # as a "candidate" (maybe with assumed high score?).
-                 # Actually, simpler: Just run temporal ensemble. If it finds enough history, it overwrites submission.csv.
-                 # The newly generated submission.csv effectively becomes valid for this iteration.
-                 current_sub = working_dir / "submission.csv"
-                 if current_sub.exists():
-                     # Give it a temp name to be picked up by the scanner?
-                     # Scanner looks for "submission_iter_*.csv".
-                     # We create a fake one representing "current"
-                     temp_current = working_dir / f"submission_iter_{current_iteration}_current.csv"
-                     import shutil
-                     shutil.copy2(current_sub, temp_current)
+                # Ensure current submission is considered as a candidate
+                # We temporarily save it as "current_candidate.csv" to be picked up?
+                # Or we just pass the path.
+                # Actually, create_temporal_ensemble scans for submission_iter_*.
+                # The current one is just "submission.csv".
+                # Let's simple copy current submission.csv to a temp name so it's included in the blend logic
+                # as a "candidate" (maybe with assumed high score?).
+                # Actually, simpler: Just run temporal ensemble. If it finds enough history, it overwrites submission.csv.
+                # The newly generated submission.csv effectively becomes valid for this iteration.
+                current_sub = working_dir / "submission.csv"
+                if current_sub.exists():
+                    # Give it a temp name to be picked up by the scanner?
+                    # Scanner looks for "submission_iter_*.csv".
+                    # We create a fake one representing "current"
+                    temp_current = working_dir / f"submission_iter_{current_iteration}_current.csv"
+                    import shutil
 
-                 self.create_temporal_ensemble(working_dir, submissions, current_iteration, metric_name)
+                    shutil.copy2(current_sub, temp_current)
 
-            return {
-                "errors": [*errors, error_msg]
-            } if errors else {
-                 "best_model": {
-                    "name": f"ensemble_{ensemble_strategy}",
-                    "path": ensemble_path,
-                    "mean_cv_score": best_model.get("mean_cv_score", 0.0),
-                    "is_ensemble": True
+                self.create_temporal_ensemble(
+                    working_dir, submissions, current_iteration, metric_name
+                )
+
+            return (
+                {"errors": [*errors, error_msg]}
+                if errors
+                else {
+                    "best_model": {
+                        "name": f"ensemble_{ensemble_strategy}",
+                        "path": ensemble_path,
+                        "mean_cv_score": best_model.get("mean_cv_score", 0.0),
+                        "is_ensemble": True,
+                    }
                 }
-            }
+            )
 
 
 def ensemble_agent_node(state: KaggleState) -> dict[str, Any]:

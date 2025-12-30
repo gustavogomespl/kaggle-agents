@@ -13,7 +13,7 @@ from __future__ import annotations
 import os
 import random
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -27,11 +27,11 @@ class DynamicContext:
     iteration_num: int = 0
     what_worked: list[str] = field(default_factory=list)
     what_failed: list[str] = field(default_factory=list)
-    best_score: Optional[float] = None
-    target_score: Optional[float] = None
+    best_score: float | None = None
+    target_score: float | None = None
     run_mode: str = ""
     objective: str = ""
-    timeout_per_component: Optional[int] = None
+    timeout_per_component: int | None = None
     fast_mode: bool = False
     # Adaptive training fields
     epoch_budget: int = 300  # Maximum epochs for current iteration (SOTA uses 600)
@@ -39,14 +39,14 @@ class DynamicContext:
     suggested_epochs: int = 300  # Suggested epochs based on timeout history
     early_stopping_patience: int = 30  # SOTA uses patience=30
     # Submission validation retry
-    submission_validation_error: Optional[str] = None  # Error from last invalid submission
+    submission_validation_error: str | None = None  # Error from last invalid submission
     # Memory summary (best models/HPs/errors/strategies)
-    memory_summary: Optional[str] = None
+    memory_summary: str | None = None
     # DPO: Preference pairs for contrastive learning
     dpo_examples: str = ""  # Formatted DPO pairs (good vs bad code examples)
 
 
-def build_context(state: dict[str, Any], component: Optional[Any] = None) -> DynamicContext:
+def build_context(state: dict[str, Any], component: Any | None = None) -> DynamicContext:
     """
     Build dynamic context from KaggleState for prompt injection.
 
@@ -63,8 +63,8 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
     Returns:
         DynamicContext with extracted information
     """
-    from ....utils.log_parser import parse_training_logs, format_feedback_for_llm
     from ....core.state import get_memory_summary_for_planning
+    from ....utils.log_parser import format_feedback_for_llm, parse_training_logs
 
     context = DynamicContext()
     context.iteration_num = state.get("current_iteration", 0)
@@ -231,7 +231,7 @@ def build_context(state: dict[str, Any], component: Optional[Any] = None) -> Dyn
     return context
 
 
-def _format_dpo_for_prompt(pairs: list, component: Optional[Any] = None) -> str:
+def _format_dpo_for_prompt(pairs: list, component: Any | None = None) -> str:
     """
     Format DPO preference pairs as contrastive examples for prompts.
 
@@ -267,7 +267,9 @@ def _format_dpo_for_prompt(pairs: list, component: Optional[Any] = None) -> str:
     selected = sorted_pairs[:3]
 
     lines = ["## DPO: Learned Code Preferences (from past fixes)\n"]
-    lines.append("Learn from these successful fixes - avoid the rejected patterns, follow the chosen patterns:\n")
+    lines.append(
+        "Learn from these successful fixes - avoid the rejected patterns, follow the chosen patterns:\n"
+    )
 
     for i, pair in enumerate(selected, 1):
         context_desc = getattr(pair, "context", "Code fix")[:50]
@@ -297,7 +299,9 @@ def _format_dpo_for_prompt(pairs: list, component: Optional[Any] = None) -> str:
             lines.append("")
 
     if len(lines) > 2:  # More than just header
-        lines.append("**INSTRUCTION**: When implementing similar code, follow the preferred patterns above.")
+        lines.append(
+            "**INSTRUCTION**: When implementing similar code, follow the preferred patterns above."
+        )
         return "\n".join(lines)
 
     return ""

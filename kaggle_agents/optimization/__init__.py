@@ -9,6 +9,14 @@ Enhanced with:
 - PreferenceRewardModel: Scores code based on learned preferences
 """
 
+from .preference_learning import (
+    # DPO-style Preference Learning
+    PreferenceCollector,
+    PreferenceRewardModel,
+    # Factory Functions
+    create_preference_collector,
+    create_preference_reward_model,
+)
 from .prompt_optimizer import (
     PromptOptimizer,
     TrainingDataCollector,
@@ -16,16 +24,16 @@ from .prompt_optimizer import (
     create_training_collector,
 )
 from .reward_model import (
+    # Enhanced Reward Models (NEW)
+    AblationRewardModel,
     # Standard Reward Models
     CombinedRewardModel,
     DeveloperRewardModel,
+    ExecutionFeedbackRewardModel,
+    ImprovementTrackingRewardModel,
     KaggleScoreRewardModel,
     PlannerRewardModel,
     ValidationRewardModel,
-    # Enhanced Reward Models (NEW)
-    AblationRewardModel,
-    ExecutionFeedbackRewardModel,
-    ImprovementTrackingRewardModel,
     # Factory Functions
     create_ablation_metric,
     create_combined_metric,
@@ -35,14 +43,6 @@ from .reward_model import (
     create_kaggle_metric,
     create_planner_metric,
     create_validation_metric,
-)
-from .preference_learning import (
-    # DPO-style Preference Learning
-    PreferenceCollector,
-    PreferenceRewardModel,
-    # Factory Functions
-    create_preference_collector,
-    create_preference_reward_model,
 )
 
 

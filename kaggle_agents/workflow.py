@@ -25,16 +25,16 @@ from .agents.reporting_agent import reporting_agent_node
 from .agents.submission_agent import submission_agent_node
 from .core.state import KaggleState, create_initial_state
 from .domain import detect_competition_domain
-from .nodes.prompt_refinement import prompt_refinement_node
 from .nodes.curriculum_learning import (
     curriculum_learning_node,
     inject_subtask_guidance,
-    route_after_curriculum,
 )
+from .nodes.prompt_refinement import prompt_refinement_node
 from .tools.kaggle_api import KaggleAPIClient
 
 
 # ==================== Agent Nodes ====================
+
 
 def data_download_node(state: KaggleState) -> dict[str, Any]:
     """
@@ -46,9 +46,9 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates with data file paths
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("= DATA DOWNLOAD")
-    print("="*60)
+    print("=" * 60)
 
     competition_info = state["competition_info"]
     working_dir = Path(state["working_directory"])
@@ -62,20 +62,18 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
 
         # Download competition data
         data_files = kaggle_client.download_competition_data(
-            competition=competition_info.name,
-            path=str(working_dir),
-            quiet=False
+            competition=competition_info.name, path=str(working_dir), quiet=False
         )
 
         print("\n✓ Download complete!")
         print(f"   Train: {data_files.get('train', 'N/A')}")
         print(f"   Test: {data_files.get('test', 'N/A')}")
-        target_col = "target" # Default
-        if data_files.get('sample_submission'):
+        target_col = "target"  # Default
+        if data_files.get("sample_submission"):
             print(f"   Sample Submission: {data_files['sample_submission']}")
             try:
                 # Infer target column from sample submission (usually 2nd column)
-                sample_sub = pd.read_csv(data_files['sample_submission'])
+                sample_sub = pd.read_csv(data_files["sample_submission"])
                 if len(sample_sub.columns) >= 2:
                     target_col = sample_sub.columns[1]
                     print(f"   🎯 Target Column Detected: {target_col}")
@@ -83,21 +81,22 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
                 print(f"   ⚠️ Could not read sample submission to infer target: {e}")
 
         # GENERATE FIXED FOLDS (Consistent CV)
-        if data_files.get('train'):
+        if data_files.get("train"):
             try:
                 from .utils.cross_validation import generate_folds
+
                 folds_path = str(working_dir / "folds.csv")
                 # Use train_csv if available (for image competitions where 'train' is a dir/zip)
-                train_path_for_folds = data_files.get('train_csv', data_files['train'])
-                
+                train_path_for_folds = data_files.get("train_csv", data_files["train"])
+
                 generate_folds(
                     train_path=train_path_for_folds,
                     target_col=target_col,
                     output_path=folds_path,
                     n_folds=5,
-                    seed=42
+                    seed=42,
                 )
-                data_files['folds'] = folds_path
+                data_files["folds"] = folds_path
             except Exception as e:
                 print(f"   ⚠️ Failed to generate fixed folds: {e}")
 
@@ -151,9 +150,9 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates with domain detection
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("= DOMAIN DETECTION")
-    print("="*60)
+    print("=" * 60)
 
     competition_info = state["competition_info"]
     working_dir = state["working_directory"]
@@ -163,6 +162,7 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
 
     # Get LLM for domain detection (use planner's LLM with low temperature)
     from .core.config import get_llm_for_role
+
     try:
         llm = get_llm_for_role(role="planner", temperature=0.0)
     except Exception as e:
@@ -185,21 +185,22 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
             print("   Override: Detected clean/target directory -> image_to_image")
 
         # Check for pixel-level submission format (many rows per image)
-        sample_sub_path = data_files.get("sample_submission", "") or state.get("sample_submission_path", "")
+        sample_sub_path = data_files.get("sample_submission", "") or state.get(
+            "sample_submission_path", ""
+        )
         test_path = data_files.get("test", "") or state.get("test_data_path", "")
         if sample_sub_path and Path(sample_sub_path).exists():
             from .domain import detect_submission_format
+
             sub_format, sub_meta = detect_submission_format(
-                sample_sub_path,
-                test_path if test_path else None,
-                competition_info
+                sample_sub_path, test_path if test_path else None, competition_info
             )
             submission_format_type = sub_format
             submission_format_metadata = sub_meta
             if sub_format == "pixel_level":
                 domain = "image_to_image"
                 confidence = 0.95
-                print(f"   Override: Detected pixel-level submission format -> image_to_image")
+                print("   Override: Detected pixel-level submission format -> image_to_image")
                 print(f"      Expected rows: {sub_meta.get('expected_rows', 'unknown')}")
                 print(f"      ID pattern: {sub_meta.get('id_pattern', 'unknown')}")
 
@@ -228,9 +229,9 @@ def iteration_control_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates with iteration control
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("= ITERATION CONTROL")
-    print("="*60)
+    print("=" * 60)
 
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
@@ -282,9 +283,9 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates with refinement decision
     """
-    print("\n" + "="*60)
+    print("\n" + "=" * 60)
     print("= PERFORMANCE EVALUATION")
-    print("="*60)
+    print("=" * 60)
 
     current_score = state.get("best_score", 0.0)
     # Dynamic target_score from state (set by MLE-bench or config), fallback to top 20% threshold
@@ -309,6 +310,7 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
             print(f"\n📊 Public Score: {public_score:.4f}")
             # Use metric direction for score selection
             from .core.config import compare_scores
+
             if current_score == 0.0:
                 current_score = public_score
             else:
@@ -337,7 +339,11 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     dev_results = state.get("development_results", [])
     successful_components = [r for r in dev_results if r.success]
 
-    print(f"\n📈 Component Success Rate: {len(successful_components)}/{len(dev_results)} ({len(successful_components)/len(dev_results)*100:.0f}%)" if dev_results else "\n📈 No components tested yet")
+    print(
+        f"\n📈 Component Success Rate: {len(successful_components)}/{len(dev_results)} ({len(successful_components) / len(dev_results) * 100:.0f}%)"
+        if dev_results
+        else "\n📈 No components tested yet"
+    )
 
     # Decision: should we refine?
     needs_refinement = False
@@ -376,6 +382,7 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
 
 
 # ==================== Conditional Functions ====================
+
 
 def should_continue_workflow(state: KaggleState) -> Literal["continue", "end"]:
     """
@@ -495,7 +502,9 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
             recent_failures = [r for r in dev_results[-3:] if not r.success]
             if len(recent_failures) == 3:
                 # Check if all have same error about data files
-                data_errors = [r for r in recent_failures if "Data files not found" in (r.stderr or "")]
+                data_errors = [
+                    r for r in recent_failures if "Data files not found" in (r.stderr or "")
+                ]
                 if len(data_errors) == 3:
                     print("\n⚠️ Repeated data file errors, stopping workflow")
                     return "end"
@@ -558,8 +567,7 @@ def route_after_submission(state: KaggleState) -> Literal["retry_developer", "co
             print(f"⚠️ Invalid submission: {error_msg[:100]}...")
             print(f"   Retrying with error context... ({retry_count + 1}/3)")
             return "retry_developer"
-        else:
-            print("⚠️ Max submission retries reached, continuing...")
+        print("⚠️ Max submission retries reached, continuing...")
 
     return "continue"
 
@@ -657,10 +665,9 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
             if float(current_score) <= float(target_score):
                 print(f"   ✅ Goal achieved: {current_score:.4f} <= {target_score:.4f}")
                 return "end"
-        else:
-            if float(current_score) >= float(target_score):
-                print(f"   ✅ Goal achieved: {current_score:.4f} >= {target_score:.4f}")
-                return "end"
+        elif float(current_score) >= float(target_score):
+            print(f"   ✅ Goal achieved: {current_score:.4f} >= {target_score:.4f}")
+            return "end"
 
     # Decide based on refinement flag
     if needs_refinement:
@@ -672,6 +679,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
 
 
 # ==================== Workflow Construction ====================
+
 
 def create_workflow() -> StateGraph:
     """
@@ -719,9 +727,9 @@ def create_workflow() -> StateGraph:
         "developer",
         route_after_developer,
         {
-            "iterate": "developer",      # More components to implement
-            "end": "robustness",          # All components done → validate
-        }
+            "iterate": "developer",  # More components to implement
+            "end": "robustness",  # All components done → validate
+        },
     )
 
     # Robustness → Ensemble
@@ -737,7 +745,7 @@ def create_workflow() -> StateGraph:
         {
             "retry_developer": "developer",  # Invalid submission → regenerate
             "continue": "performance_evaluation",  # Valid → continue
-        }
+        },
     )
 
     # Performance Evaluation → Meta-Evaluator (RL analysis)
@@ -753,8 +761,8 @@ def create_workflow() -> StateGraph:
         route_after_iteration_control,
         {
             "refine": "planner",  # Start refinement cycle
-            "end": "reporting", # Goal achieved or max iterations -> Explain
-        }
+            "end": "reporting",  # Goal achieved or max iterations -> Explain
+        },
     )
 
     # Reporting → END
@@ -778,8 +786,8 @@ def compile_workflow(checkpointer=None):
     return workflow.compile(checkpointer=checkpointer) if checkpointer else workflow.compile()
 
 
-
 # ==================== Workflow Execution ====================
+
 
 def run_workflow(
     competition_name: str,
@@ -801,15 +809,16 @@ def run_workflow(
     Returns:
         Final state
     """
-    print("="*70)
+    print("=" * 70)
     print(f"KAGGLE AGENTS WORKFLOW: {competition_name}")
-    print("="*70)
+    print("=" * 70)
 
     # Create initial state
     state = create_initial_state(competition_name, working_dir)
 
     # Set competition info
     from .core.state import CompetitionInfo
+
     state["competition_info"] = CompetitionInfo(**competition_info)
 
     # Set iteration config
@@ -827,8 +836,8 @@ def run_workflow(
             "metadata": {
                 "competition": competition_name,
                 "project": "default",
-                "type": "autonomous-run"
-            }
+                "type": "autonomous-run",
+            },
         }
         final_state = workflow.invoke(state, config)
     else:
@@ -838,14 +847,14 @@ def run_workflow(
             "metadata": {
                 "competition": competition_name,
                 "project": "default",
-                "type": "autonomous-run"
-            }
+                "type": "autonomous-run",
+            },
         }
         final_state = workflow.invoke(state, config)
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("WORKFLOW COMPLETE")
-    print("="*70)
+    print("=" * 70)
 
     # Print summary
     print("\n📊 Summary:")
@@ -858,7 +867,9 @@ def run_workflow(
     dev_results = final_state.get("development_results", [])
     successful = sum(1 for r in dev_results if r.success)
     if dev_results:
-        print(f"   Success Rate: {successful}/{len(dev_results)} ({successful/len(dev_results)*100:.0f}%)")
+        print(
+            f"   Success Rate: {successful}/{len(dev_results)} ({successful / len(dev_results) * 100:.0f}%)"
+        )
 
     # Validation summary
     validation_score = final_state.get("overall_validation_score")
@@ -880,6 +891,7 @@ def run_workflow(
 
 
 # ==================== MLE-bench Workflow ====================
+
 
 def route_after_meta_evaluator(state: KaggleState) -> Literal["curriculum", "continue"]:
     """
@@ -966,9 +978,9 @@ def create_mlebench_workflow() -> StateGraph:
         "developer",
         route_after_developer,
         {
-            "iterate": "developer",      # More components to implement
-            "end": "robustness",          # All components done → validate
-        }
+            "iterate": "developer",  # More components to implement
+            "end": "robustness",  # All components done → validate
+        },
     )
 
     # Robustness → Ensemble
@@ -987,8 +999,8 @@ def create_mlebench_workflow() -> StateGraph:
         route_after_meta_evaluator,
         {
             "curriculum": "curriculum_learning",  # WEBRL: Generate sub-tasks
-            "continue": "prompt_refinement",      # Standard path
-        }
+            "continue": "prompt_refinement",  # Standard path
+        },
     )
 
     # Curriculum Learning → Inject Guidance → Prompt Refinement
@@ -1003,9 +1015,9 @@ def create_mlebench_workflow() -> StateGraph:
         "iteration_control",
         route_after_iteration_control,
         {
-            "refine": "planner",   # Start refinement cycle (back to planner with guidance)
-            "end": "reporting",    # Goal achieved or max iterations → Report
-        }
+            "refine": "planner",  # Start refinement cycle (back to planner with guidance)
+            "end": "reporting",  # Goal achieved or max iterations → Report
+        },
     )
 
     # Reporting → END
@@ -1015,6 +1027,7 @@ def create_mlebench_workflow() -> StateGraph:
 
 
 # ==================== Simplified Workflow (for testing) ====================
+
 
 def create_simple_workflow() -> StateGraph:
     """
@@ -1059,22 +1072,23 @@ def run_simple_workflow(
     Returns:
         Final state
     """
-    print("="*70)
+    print("=" * 70)
     print(f"SIMPLE WORKFLOW: {competition_name}")
-    print("="*70)
+    print("=" * 70)
 
     # Create initial state
     state = create_initial_state(competition_name, working_dir)
 
     from .core.state import CompetitionInfo
+
     state["competition_info"] = CompetitionInfo(**competition_info)
 
     # Run workflow
     workflow = create_simple_workflow()
     final_state = workflow.invoke(state)
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print(" WORKFLOW COMPLETE")
-    print("="*70)
+    print("=" * 70)
 
     return final_state

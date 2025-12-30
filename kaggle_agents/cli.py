@@ -21,8 +21,7 @@ def print_header():
     """Print application header."""
     console.print(
         Panel.fit(
-            "[bold]Kaggle Agents[/bold]\n"
-            "Autonomous Competition Solving",
+            "[bold]Kaggle Agents[/bold]\nAutonomous Competition Solving",
             border_style="blue",
         )
     )
@@ -167,9 +166,7 @@ def main():
     # Start command
     start_parser = subparsers.add_parser("start", help="Start solving a competition")
     start_parser.add_argument("competition", help="Competition name")
-    start_parser.add_argument(
-        "--description", "-d", help="Competition description", default=None
-    )
+    start_parser.add_argument("--description", "-d", help="Competition description", default=None)
     start_parser.add_argument(
         "--problem-type",
         "-p",
@@ -181,9 +178,7 @@ def main():
             "regression",
         ],
     )
-    start_parser.add_argument(
-        "--metric", "-m", help="Evaluation metric", default="accuracy"
-    )
+    start_parser.add_argument("--metric", "-m", help="Evaluation metric", default="accuracy")
     start_parser.add_argument(
         "--max-iterations",
         "-i",

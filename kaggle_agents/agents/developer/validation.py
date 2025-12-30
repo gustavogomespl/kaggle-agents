@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from ...core.config import calculate_score_improvement, is_metric_minimization
 from ...core.state import AblationComponent, KaggleState
 
+
 if TYPE_CHECKING:
     from ...tools.code_executor import ExecutionResult
 
@@ -84,9 +85,7 @@ class ValidationMixin:
             print(
                 f"      Metric:         {metric_name} ({'↓' if is_minimize else '↑'} {'minimize' if is_minimize else 'maximize'})"
             )
-            print(
-                "      ⚠️  No CV score found in stdout; skipping rollback and keeping component."
-            )
+            print("      ⚠️  No CV score found in stdout; skipping rollback and keeping component.")
             return True, None
 
         baseline_score = state.get("baseline_cv_score")
@@ -97,9 +96,7 @@ class ValidationMixin:
         direction_text = "minimize" if is_minimize else "maximize"
 
         print("\n   📊 Ablation Study (Hill Climbing):")
-        print(
-            f"      Metric:         {metric_name} ({direction_symbol} {direction_text})"
-        )
+        print(f"      Metric:         {metric_name} ({direction_symbol} {direction_text})")
         print(f"      Baseline CV:    {baseline_score:.4f}")
         print(f"      Component CV:   {cv_score:.4f}")
         print(f"      Improvement:    {improvement:+.4f}")
@@ -109,9 +106,7 @@ class ValidationMixin:
 
         if not should_keep:
             print("      ❌ Component REJECTED (no improvement or negative impact)")
-            print(
-                f"      Reason: Delta ({improvement:+.4f}) < threshold ({min_improvement})"
-            )
+            print(f"      Reason: Delta ({improvement:+.4f}) < threshold ({min_improvement})")
         else:
             print("      ✅ Component ACCEPTED (positive improvement)")
             if baseline_score not in [float("inf"), float("-inf"), 0]:

@@ -9,11 +9,13 @@ from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 
+
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
 from ..core.state import CompetitionInfo, DomainType, SubmissionFormatType
 from ..utils.llm_utils import get_text_content
+
 
 # Image extensions for format detection
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"}
@@ -153,11 +155,15 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             return counts, total
 
         # Prefer train/test folders if present
-        candidate_dirs = [
-            p
-            for p in data_dir.iterdir()
-            if p.is_dir() and p.name.lower().startswith(("train", "test"))
-        ] if data_dir.exists() else []
+        candidate_dirs = (
+            [
+                p
+                for p in data_dir.iterdir()
+                if p.is_dir() and p.name.lower().startswith(("train", "test"))
+            ]
+            if data_dir.exists()
+            else []
+        )
 
         # Image-to-image heuristic: look for paired train + clean/target directories
         if data_dir.exists():
@@ -191,7 +197,9 @@ Respond with ONLY the category name, nothing else. Example: image_classification
                 train_result = classify(train_counts, train_total)
                 clean_result = classify(clean_counts, clean_total)
                 if train_result and clean_result:
-                    if train_result[0].startswith("image_") and clean_result[0].startswith("image_"):
+                    if train_result[0].startswith("image_") and clean_result[0].startswith(
+                        "image_"
+                    ):
                         return ("image_to_image", 0.92)
 
         for dir_path in candidate_dirs:
@@ -256,9 +264,9 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         # Return dominant type
         if counts["image"] > max(counts["audio"], counts["text"], counts["tabular"]):
             return "image"
-        elif counts["audio"] > max(counts["text"], counts["tabular"]):
+        if counts["audio"] > max(counts["text"], counts["tabular"]):
             return "audio"
-        elif counts["text"] > counts["tabular"]:
+        if counts["text"] > counts["tabular"]:
             return "text"
         return "tabular"
 
@@ -309,7 +317,9 @@ Respond with ONLY the category name, nothing else. Example: image_classification
                             extensions[ext] = extensions.get(ext, 0) + 1
                         if extensions:
                             dominant = max(extensions.items(), key=lambda x: x[1])
-                            files.append(f"{path.name}/ ({len(contents)} files, mostly {dominant[0]})")
+                            files.append(
+                                f"{path.name}/ ({len(contents)} files, mostly {dominant[0]})"
+                            )
             files = files[:20]  # Limit to 20 entries
 
         # Enhanced prompt with data type hint
@@ -346,14 +356,17 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 
         try:
             response = self.llm.invoke(prompt)
-            content = get_text_content(response.content) if hasattr(response, "content") else str(response)
+            content = (
+                get_text_content(response.content)
+                if hasattr(response, "content")
+                else str(response)
+            )
             domain = content.strip().lower().replace(" ", "_")
 
             if domain in self.DOMAINS:
                 return domain, 0.95  # type: ignore
-            else:
-                # LLM returned invalid domain, use structural heuristics
-                return self._detect_from_structure(competition_info, data_dir)
+            # LLM returned invalid domain, use structural heuristics
+            return self._detect_from_structure(competition_info, data_dir)
 
         except Exception:
             # LLM failed, use structural heuristics
@@ -421,10 +434,9 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             if test_path.is_dir():
                 # Count test images
                 test_files = list(test_path.glob("*"))
-                n_test_samples = len([
-                    f for f in test_files
-                    if f.is_file() and f.suffix.lower() in IMAGE_EXTS
-                ])
+                n_test_samples = len(
+                    [f for f in test_files if f.is_file() and f.suffix.lower() in IMAGE_EXTS]
+                )
                 # If no images found, count all files
                 if n_test_samples == 0:
                     n_test_samples = len([f for f in test_files if f.is_file()])
@@ -444,7 +456,7 @@ Respond with ONLY the category name, nothing else. Example: image_classification
                     metadata["pixel_format_detected"] = True
                     metadata["estimated_pixels_per_image"] = n_rows // n_test_samples
                     return "pixel_level", metadata
-                elif len(parts) == 2:
+                if len(parts) == 2:
                     # Could be image_pixel_index format
                     metadata["id_pattern"] = "image_pixel"
                     metadata["pixel_format_detected"] = True

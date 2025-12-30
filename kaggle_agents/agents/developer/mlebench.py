@@ -34,7 +34,7 @@ class MLEBenchMixin:
         try:
             result = subprocess.run(
                 ["mlebench", "grade-sample", str(submission_path), competition_name],
-                capture_output=True,
+                check=False, capture_output=True,
                 text=True,
                 timeout=60,
             )
@@ -101,8 +101,7 @@ class MLEBenchMixin:
             if is_metric_minimization(metric_name):
                 if float(score) <= float(target_score):
                     return True
-            else:
-                if float(score) >= float(target_score):
-                    return True
+            elif float(score) >= float(target_score):
+                return True
 
         return False

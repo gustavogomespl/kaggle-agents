@@ -4,7 +4,7 @@ Advanced RL types for learning (WEBRL, Eureka, GRPO, DPO, Quiet-STaR).
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Literal
 
 from .competition import AblationComponent
 
@@ -23,8 +23,8 @@ class SubTask:
     task_description: str
     priority: int  # 1 (highest) to 5 (lowest)
     status: Literal["pending", "in_progress", "resolved", "skipped"] = "pending"
-    resolution_code: Optional[str] = None
-    resolution_guidance: Optional[str] = None
+    resolution_code: str | None = None
+    resolution_guidance: str | None = None
     created_at: datetime = field(default_factory=datetime.now)
 
 

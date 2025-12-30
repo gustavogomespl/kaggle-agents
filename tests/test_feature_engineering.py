@@ -1,8 +1,9 @@
 """Tests for feature engineering utilities."""
 
-import pytest
-import pandas as pd
 import numpy as np
+import pandas as pd
+import pytest
+
 from kaggle_agents.utils.feature_engineering import AdvancedFeatureEngineer
 
 
@@ -20,20 +21,24 @@ class TestAdvancedFeatureEngineer:
         np.random.seed(42)
         n = 100
 
-        train = pd.DataFrame({
-            "num1": np.random.randn(n),
-            "num2": np.random.randn(n),
-            "cat_low": np.random.choice(["A", "B", "C"], n),
-            "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
-            "target": np.random.choice([0, 1], n),
-        })
+        train = pd.DataFrame(
+            {
+                "num1": np.random.randn(n),
+                "num2": np.random.randn(n),
+                "cat_low": np.random.choice(["A", "B", "C"], n),
+                "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
+                "target": np.random.choice([0, 1], n),
+            }
+        )
 
-        test = pd.DataFrame({
-            "num1": np.random.randn(n),
-            "num2": np.random.randn(n),
-            "cat_low": np.random.choice(["A", "B", "C"], n),
-            "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
-        })
+        test = pd.DataFrame(
+            {
+                "num1": np.random.randn(n),
+                "num2": np.random.randn(n),
+                "cat_low": np.random.choice(["A", "B", "C"], n),
+                "cat_high": np.random.choice([f"cat_{i}" for i in range(50)], n),
+            }
+        )
 
         # Add some missing values
         train.loc[0:10, "num1"] = np.nan

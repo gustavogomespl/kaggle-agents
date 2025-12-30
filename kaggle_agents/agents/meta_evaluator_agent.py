@@ -81,6 +81,7 @@ IMPORTANT: Be specific. Quote the exact error messages. Provide actionable solut
 
 # ==================== Meta-Evaluator Agent ====================
 
+
 class MetaEvaluatorAgent:
     """
     Meta-agent that evaluates other agents and optimizes their prompts using RL.
@@ -118,9 +119,9 @@ class MetaEvaluatorAgent:
         Returns:
             State updates with failure analysis and refinement guidance
         """
-        print("\n" + "="*60)
+        print("\n" + "=" * 60)
         print("= META-EVALUATOR: Analyzing Performance & Optimizing Prompts")
-        print("="*60)
+        print("=" * 60)
 
         current_iteration = state.get("current_iteration", 0)
         print(f"\n📊 Iteration: {current_iteration}")
@@ -137,9 +138,7 @@ class MetaEvaluatorAgent:
         )
 
         # Create iteration memory for learning
-        iteration_memory = self._create_iteration_memory(
-            state, failure_analysis, reward_signals
-        )
+        iteration_memory = self._create_iteration_memory(state, failure_analysis, reward_signals)
 
         # Collect training data for DSPy optimization
         self._collect_training_data(state, failure_analysis, reward_signals)
@@ -200,13 +199,15 @@ class MetaEvaluatorAgent:
                 error_msg = result.errors[0] if result.errors else result.stderr[:200]
                 error_type = self._classify_error(error_msg)
 
-                analysis["failed_components"].append({
-                    "name": component_name,
-                    "type": component_type,
-                    "error": error_msg,
-                    "error_type": error_type,
-                    "execution_time": result.execution_time,
-                })
+                analysis["failed_components"].append(
+                    {
+                        "name": component_name,
+                        "type": component_type,
+                        "error": error_msg,
+                        "error_type": error_type,
+                        "execution_time": result.execution_time,
+                    }
+                )
 
                 # Track error pattern
                 analysis["error_patterns"].add(error_type)
@@ -224,11 +225,13 @@ class MetaEvaluatorAgent:
 
             else:
                 # Track success
-                analysis["success_components"].append({
-                    "name": component_name,
-                    "type": component_type,
-                    "execution_time": result.execution_time,
-                })
+                analysis["success_components"].append(
+                    {
+                        "name": component_name,
+                        "type": component_type,
+                        "execution_time": result.execution_time,
+                    }
+                )
 
                 # Track success pattern
                 success_pattern = f"{component_type}_success"
@@ -364,19 +367,19 @@ class MetaEvaluatorAgent:
         for i, result in enumerate(dev_results[-3:]):  # Last 3 components
             stdout = (result.stdout or "")[-2000:]  # Last 2000 chars
             stderr = (result.stderr or "")[-1000:]  # Last 1000 chars
-            logs = f"=== Component {i+1} ===\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
+            logs = f"=== Component {i + 1} ===\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}"
             all_logs.append(logs)
 
             # Code summary (first 30 lines + last 10 lines)
-            code_lines = (result.code or "").split('\n')
+            code_lines = (result.code or "").split("\n")
             if len(code_lines) > 50:
-                code_summary = '\n'.join(code_lines[:30]) + '\n...\n' + '\n'.join(code_lines[-10:])
+                code_summary = "\n".join(code_lines[:30]) + "\n...\n" + "\n".join(code_lines[-10:])
             else:
                 code_summary = result.code or ""
             code_summaries.append(code_summary[:1500])
 
-        combined_logs = '\n\n'.join(all_logs)[-6000:]  # Limit total logs
-        combined_code = '\n---\n'.join(code_summaries)[-3000:]
+        combined_logs = "\n\n".join(all_logs)[-6000:]  # Limit total logs
+        combined_code = "\n---\n".join(code_summaries)[-3000:]
 
         # Use LLM to analyze logs
         prompt = SEMANTIC_LOG_ANALYSIS_PROMPT.format(
@@ -408,7 +411,9 @@ class MetaEvaluatorAgent:
             if analysis["has_semantic_errors"]:
                 print(f"   ⚠️  Semantic Analysis: {analysis['summary']}")
                 for issue in analysis["detected_issues"][:3]:
-                    print(f"      - {issue.get('pattern', 'Unknown')}: {issue.get('root_cause', '')}")
+                    print(
+                        f"      - {issue.get('pattern', 'Unknown')}: {issue.get('root_cause', '')}"
+                    )
 
             return analysis
 
@@ -496,9 +501,7 @@ class MetaEvaluatorAgent:
                 current_score = 0.0
 
         score_component = (
-            min(float(current_score) / float(target_score), 1.0)
-            if float(target_score) > 0
-            else 0.0
+            min(float(current_score) / float(target_score), 1.0) if float(target_score) > 0 else 0.0
         )
         if run_mode == "mlebench" or "medal" in objective:
             # Blend medal attainment with raw score; medal dominates to keep the objective explicit.
@@ -516,12 +519,18 @@ class MetaEvaluatorAgent:
         r_improvement = max(0.0, min(score_improvement * 10, 1.0))  # Scale to 0-1
 
         # Reward 4: Execution Semantics (no errors, fast execution)
-        avg_execution_time = sum(r.execution_time for r in dev_results) / total_components if total_components > 0 else 0.0
+        avg_execution_time = (
+            sum(r.execution_time for r in dev_results) / total_components
+            if total_components > 0
+            else 0.0
+        )
         r_semantics = 1.0 - min(avg_execution_time / 300.0, 1.0)  # Normalize by 5min timeout
 
         # Reward 5: Diversity
         # Encourages trying different types of components (e.g. not just 5 XGBoosts)
-        unique_types = len({c.get("type", "unknown") for c in failure_analysis["success_components"]})
+        unique_types = len(
+            {c.get("type", "unknown") for c in failure_analysis["success_components"]}
+        )
         r_diversity = min(unique_types / 3.0, 1.0)  # Target: at least 3 different types working
 
         # Reward 6: Robustness/Overfitting Penalty
@@ -533,7 +542,9 @@ class MetaEvaluatorAgent:
 
         # If we have both scores, check gap. If gap > 0.1, heavy penalty.
         gap = abs(validation_score - public_score)
-        r_robustness = 1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
+        r_robustness = (
+            1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
+        )
 
         # Combined reward (weighted)
         # In MLE-bench, speed and medal attainment matter more than exploring many components.
@@ -557,12 +568,12 @@ class MetaEvaluatorAgent:
             }
 
         r_combined = (
-            weights["functional"] * r_functional +
-            weights["performance"] * r_performance +
-            weights["improvement"] * r_improvement +
-            weights["semantics"] * r_semantics +
-            weights["diversity"] * r_diversity +
-            weights["robustness"] * r_robustness
+            weights["functional"] * r_functional
+            + weights["performance"] * r_performance
+            + weights["improvement"] * r_improvement
+            + weights["semantics"] * r_semantics
+            + weights["diversity"] * r_diversity
+            + weights["robustness"] * r_robustness
         )
 
         rewards = {
@@ -576,8 +587,10 @@ class MetaEvaluatorAgent:
             "r_combined": r_combined,
         }
 
-        print(f"   📊 Rewards: functional={r_functional:.2f}, performance={r_performance:.2f}, "
-              f"diversity={r_diversity:.2f}, robustness={r_robustness:.2f}, combined={r_combined:.3f}")
+        print(
+            f"   📊 Rewards: functional={r_functional:.2f}, performance={r_performance:.2f}, "
+            f"diversity={r_diversity:.2f}, robustness={r_robustness:.2f}, combined={r_combined:.3f}"
+        )
 
         return rewards
 
@@ -706,8 +719,8 @@ class MetaEvaluatorAgent:
         context = f"""# Iteration {current_iteration} Evaluation
 
 ## Objective
-- run_mode: {run_mode or 'kaggle'}
-- objective: {objective or 'top20'}
+- run_mode: {run_mode or "kaggle"}
+- objective: {objective or "top20"}
 
 ## Current Performance
 - Score: {current_score:.4f}
@@ -715,15 +728,15 @@ class MetaEvaluatorAgent:
 - Gap: {target_score - current_score:.4f}
 
 ## Component Results
-- Total: {len(state.get('development_results', []))}
-- Successful: {len(failure_analysis['success_components'])}
-- Failed: {len(failure_analysis['failed_components'])}
+- Total: {len(state.get("development_results", []))}
+- Successful: {len(failure_analysis["success_components"])}
+- Failed: {len(failure_analysis["failed_components"])}
 
 ## Success Patterns
-{chr(10).join('- ' + p for p in failure_analysis['success_patterns'])}
+{chr(10).join("- " + p for p in failure_analysis["success_patterns"])}
 
 ## Error Patterns
-{chr(10).join('- ' + p for p in failure_analysis['error_patterns'])}
+{chr(10).join("- " + p for p in failure_analysis["error_patterns"])}
 """
 
         if isinstance(mlebench_grade, dict):
@@ -736,10 +749,10 @@ class MetaEvaluatorAgent:
                 medals.append("Bronze")
             context += f"""
 ## MLE-bench Grading
-- valid_submission: {bool(mlebench_grade.get('valid_submission', False))}
-- score: {mlebench_grade.get('score')}
-- above_median: {bool(mlebench_grade.get('above_median', False))}
-- medals: {', '.join(medals) if medals else 'None'}
+- valid_submission: {bool(mlebench_grade.get("valid_submission", False))}
+- score: {mlebench_grade.get("score")}
+- above_median: {bool(mlebench_grade.get("above_median", False))}
+- medals: {", ".join(medals) if medals else "None"}
 """
 
         # FULL CODE AND PERFORMANCE ANALYSIS
@@ -759,7 +772,7 @@ class MetaEvaluatorAgent:
             score = float(score_match.group(1)) if score_match else "N/A"
 
             # Determine component name (heuristic)
-            comp_name = f"Component_{i+1}"
+            comp_name = f"Component_{i + 1}"
             if "class " in res.code:
                 # Try to find class name
                 class_match = re.search(r"class (\w+)", res.code)
@@ -777,12 +790,12 @@ class MetaEvaluatorAgent:
                 context += f"**Error**: {res.stderr[-200:] if res.stderr else 'Unknown Error'}\n"
 
             # Send code summary instead of full code to reduce tokens
-            code_lines = res.code.split('\n')
+            code_lines = res.code.split("\n")
             context += "**Code Summary**:\n```python\n"
-            context += '\n'.join(code_lines[:20])  # First 20 lines
+            context += "\n".join(code_lines[:20])  # First 20 lines
             if len(code_lines) > 30:
                 context += "\n# ... (middle section omitted) ...\n"
-                context += '\n'.join(code_lines[-10:])  # Last 10 lines
+                context += "\n".join(code_lines[-10:])  # Last 10 lines
             context += "\n```\n"
             context += f"**Total Lines**: {len(code_lines)}\n"
             stdout_tail = res.stdout[-3000:] if res.stdout else ""
@@ -895,21 +908,21 @@ Focus on actionable, specific improvements based on error patterns and performan
         # Find top-performing iterations by score improvement
         sorted_memories = sorted(
             iteration_memory,
-            key=lambda m: m.score_improvement if hasattr(m, 'score_improvement') else 0.0,
-            reverse=True
+            key=lambda m: m.score_improvement if hasattr(m, "score_improvement") else 0.0,
+            reverse=True,
         )
         top_memories = sorted_memories[:2]  # Top 2 iterations
 
         # Extract success patterns from top iterations
         success_patterns = set()
         for memory in top_memories:
-            what_worked = memory.what_worked if hasattr(memory, 'what_worked') else []
+            what_worked = memory.what_worked if hasattr(memory, "what_worked") else []
             success_patterns.update(what_worked)
 
         # Extract failure patterns to avoid
         avoid_patterns = set()
         for memory in iteration_memory:
-            what_failed = memory.what_failed if hasattr(memory, 'what_failed') else []
+            what_failed = memory.what_failed if hasattr(memory, "what_failed") else []
             avoid_patterns.update(what_failed)
 
         # Analyze candidate plans if available
@@ -918,24 +931,28 @@ Focus on actionable, specific improvements based on error patterns and performan
             # Get strategies from plans with highest fitness
             sorted_candidates = sorted(
                 candidate_plans,
-                key=lambda p: p.fitness_score if hasattr(p, 'fitness_score') else 0.0,
-                reverse=True
+                key=lambda p: p.fitness_score if hasattr(p, "fitness_score") else 0.0,
+                reverse=True,
             )
             for candidate in sorted_candidates[:2]:
-                if hasattr(candidate, 'strategy'):
+                if hasattr(candidate, "strategy"):
                     successful_strategies.append(candidate.strategy)
 
         # Generate crossover guidance
         crossover_guidance = {
             "preserve_components": list(success_patterns),
-            "avoid_components": list(avoid_patterns - success_patterns),  # Don't avoid if also succeeded
+            "avoid_components": list(
+                avoid_patterns - success_patterns
+            ),  # Don't avoid if also succeeded
             "successful_strategies": successful_strategies,
             "suggested_combinations": self._suggest_combinations(success_patterns),
             "evolutionary_pressure": self._calculate_evolutionary_pressure(iteration_memory),
         }
 
-        print(f"   ✓ Crossover: Preserve {len(crossover_guidance['preserve_components'])} patterns, "
-              f"Avoid {len(crossover_guidance['avoid_components'])} patterns")
+        print(
+            f"   ✓ Crossover: Preserve {len(crossover_guidance['preserve_components'])} patterns, "
+            f"Avoid {len(crossover_guidance['avoid_components'])} patterns"
+        )
 
         return crossover_guidance
 
@@ -958,14 +975,25 @@ Focus on actionable, specific improvements based on error patterns and performan
             suggestions.append(f"Combine {pattern_list[0]} with {pattern_list[1]}")
 
         # Standard high-value combinations
-        if "model_success" in success_patterns and "feature_engineering_success" not in success_patterns:
+        if (
+            "model_success" in success_patterns
+            and "feature_engineering_success" not in success_patterns
+        ):
             suggestions.append("Add advanced feature engineering to successful model")
 
-        if "feature_engineering_success" in success_patterns and "ensemble_success" not in success_patterns:
+        if (
+            "feature_engineering_success" in success_patterns
+            and "ensemble_success" not in success_patterns
+        ):
             suggestions.append("Apply ensemble techniques to leverage good features")
 
         # Suggest based on what's missing
-        all_types = {"model_success", "feature_engineering_success", "ensemble_success", "preprocessing_success"}
+        all_types = {
+            "model_success",
+            "feature_engineering_success",
+            "ensemble_success",
+            "preprocessing_success",
+        }
         missing = all_types - success_patterns
         if missing:
             missing_type = list(missing)[0].replace("_success", "")
@@ -991,14 +1019,16 @@ Focus on actionable, specific improvements based on error patterns and performan
 
         # Calculate average score improvement
         improvements = [
-            m.score_improvement if hasattr(m, 'score_improvement') else 0.0
+            m.score_improvement if hasattr(m, "score_improvement") else 0.0
             for m in iteration_memory
         ]
         avg_improvement = sum(improvements) / len(improvements) if improvements else 0.0
 
         # Recent trend
         recent_improvements = improvements[-3:] if len(improvements) >= 3 else improvements
-        recent_avg = sum(recent_improvements) / len(recent_improvements) if recent_improvements else 0.0
+        recent_avg = (
+            sum(recent_improvements) / len(recent_improvements) if recent_improvements else 0.0
+        )
 
         # If recent improvements are positive and growing, exploit
         if recent_avg > 0.01 and len(iteration_memory) > 2:
@@ -1169,6 +1199,7 @@ Return structured JSON with clear guidance for each agent type."""
 
 
 # ==================== LangGraph Node Function ====================
+
 
 def meta_evaluator_node(state: KaggleState) -> dict[str, Any]:
     """

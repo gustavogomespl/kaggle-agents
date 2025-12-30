@@ -24,7 +24,7 @@ class KaggleLogger:
     - Configurable log levels
     """
 
-    _instance: Optional['KaggleLogger'] = None
+    _instance: Optional["KaggleLogger"] = None
     _initialized: bool = False
 
     def __new__(cls):
@@ -98,7 +98,7 @@ class KaggleLogger:
                 log_file,
                 maxBytes=10 * 1024 * 1024,  # 10MB
                 backupCount=5,
-                encoding='utf-8',
+                encoding="utf-8",
             )
             file_handler.setLevel(level)
 
@@ -201,13 +201,11 @@ class LogContext:
 
         if exc_type is None:
             self.logger.info(
-                f"[bold green]✓ {self.stage_name} completed[/bold green] "
-                f"({duration:.2f}s)"
+                f"[bold green]✓ {self.stage_name} completed[/bold green] ({duration:.2f}s)"
             )
         else:
             self.logger.error(
-                f"[bold red]✗ {self.stage_name} failed[/bold red] "
-                f"({duration:.2f}s): {exc_val}"
+                f"[bold red]✗ {self.stage_name} failed[/bold red] ({duration:.2f}s): {exc_val}"
             )
 
         return False  # Re-raise exception
@@ -215,9 +213,9 @@ class LogContext:
 
 def log_agent_start(logger: logging.Logger, agent_name: str):
     """Log agent execution start."""
-    logger.info(f"\n{'='*60}")
+    logger.info(f"\n{'=' * 60}")
     logger.info(f"AGENT: {agent_name}")
-    logger.info(f"{'='*60}")
+    logger.info(f"{'=' * 60}")
 
 
 def log_agent_end(logger: logging.Logger, agent_name: str, success: bool = True):

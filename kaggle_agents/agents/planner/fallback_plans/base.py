@@ -3,25 +3,28 @@ Base utilities and router for fallback plans.
 """
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from ....core.state import KaggleState
-from .tabular import create_tabular_fallback_plan
-from .image import create_image_fallback_plan, create_image_to_image_fallback_plan
-from .text import create_text_fallback_plan
 from .audio import create_audio_fallback_plan
+from .image import create_image_fallback_plan, create_image_to_image_fallback_plan
+from .tabular import create_tabular_fallback_plan
+from .text import create_text_fallback_plan
 
 
 # Domain sets for routing
 IMAGE_DOMAINS = {
-    "image_classification", "image_regression", "object_detection",
-    "image_to_image", "image_segmentation"
+    "image_classification",
+    "image_regression",
+    "object_detection",
+    "image_to_image",
+    "image_segmentation",
 }
 TEXT_DOMAINS = {"text_classification", "text_regression", "seq_to_seq"}
 AUDIO_DOMAINS = {"audio_classification", "audio_regression"}
 
 
-def is_image_competition_without_features(state: Optional[KaggleState]) -> bool:
+def is_image_competition_without_features(state: KaggleState | None) -> bool:
     """
     Detect image competition masquerading as tabular due to detection failure.
 
@@ -60,6 +63,7 @@ def is_image_competition_without_features(state: Optional[KaggleState]) -> bool:
 
     try:
         import pandas as pd
+
         df = pd.read_csv(train_csv, nrows=5)
         # If only id + label columns, this is image competition
         return len(df.columns) <= 2
@@ -72,7 +76,7 @@ def create_fallback_plan(
     sota_analysis: dict[str, Any],
     curriculum_insights: str = "",
     *,
-    state: Optional[KaggleState] = None,
+    state: KaggleState | None = None,
 ) -> list[dict[str, Any]]:
     """
     Create domain-specific fallback plan when LLM parsing fails.
@@ -92,7 +96,9 @@ def create_fallback_plan(
 
     # SAFETY CHECK: Prevent tabular models for image competitions
     if is_image_competition_without_features(state):
-        print("  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)")
+        print(
+            "  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)"
+        )
         print("            Tree models (LightGBM/XGBoost) require tabular features!")
         return create_image_fallback_plan("image_classification", sota_analysis, fast_mode=False)
 
@@ -115,17 +121,16 @@ def create_fallback_plan(
     # Route to domain-specific fallback method
     if domain in ("image_to_image", "image_segmentation"):
         return create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
-    elif domain in IMAGE_DOMAINS or domain.startswith("image_"):
+    if domain in IMAGE_DOMAINS or domain.startswith("image_"):
         return create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
-    elif domain in TEXT_DOMAINS or domain.startswith("text_"):
+    if domain in TEXT_DOMAINS or domain.startswith("text_"):
         return create_text_fallback_plan(domain, sota_analysis)
-    elif domain in AUDIO_DOMAINS or domain.startswith("audio_"):
+    if domain in AUDIO_DOMAINS or domain.startswith("audio_"):
         return create_audio_fallback_plan(domain, sota_analysis)
-    else:
-        # Tabular (default)
-        return create_tabular_fallback_plan(
-            domain,
-            sota_analysis,
-            curriculum_insights,
-            fast_mode=fast_mode,
-        )
+    # Tabular (default)
+    return create_tabular_fallback_plan(
+        domain,
+        sota_analysis,
+        curriculum_insights,
+        fast_mode=fast_mode,
+    )

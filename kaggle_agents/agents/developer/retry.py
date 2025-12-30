@@ -27,10 +27,12 @@ from ...prompts.templates.developer_prompts import (
 from ...utils.llm_utils import get_text_content
 from .agent import get_dynamic_temperature
 
+
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
-    from ...tools.code_executor import CodeExecutor, ExecutionResult
+
     from ...optimization import PreferenceCollector
+    from ...tools.code_executor import CodeExecutor, ExecutionResult
 
 
 class RetryMixin:
@@ -222,9 +224,7 @@ class RetryMixin:
 
         try:
             messages = [
-                SystemMessage(
-                    content="You are an expert code reviewer and meta-evaluator."
-                ),
+                SystemMessage(content="You are an expert code reviewer and meta-evaluator."),
                 HumanMessage(content=prompt),
             ]
 
@@ -341,7 +341,9 @@ class RetryMixin:
         debug_timeout = self.config.ablation.debug_timeout
         if original_timeout is not None:
             self.executor.timeout = min(original_timeout, debug_timeout)
-            print(f"   Debug timeout set to: {self.executor.timeout}s ({self.executor.timeout / 60:.1f} min)")
+            print(
+                f"   Debug timeout set to: {self.executor.timeout}s ({self.executor.timeout / 60:.1f} min)"
+            )
 
         # META-EVAL FEEDBACK LOOP: Inject refinement guidance from MetaEvaluator
         if state:
@@ -423,14 +425,10 @@ class RetryMixin:
                 return debugged_code, test_result, True
 
             error_sig = (
-                "|".join(test_result.errors)
-                if test_result.errors
-                else test_result.stderr.strip()
+                "|".join(test_result.errors) if test_result.errors else test_result.stderr.strip()
             )
             if error_sig and error_sig == last_error_sig:
-                print(
-                    "Debug halted: same error persists; stopping to avoid infinite loop"
-                )
+                print("Debug halted: same error persists; stopping to avoid infinite loop")
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return debugged_code, test_result, False

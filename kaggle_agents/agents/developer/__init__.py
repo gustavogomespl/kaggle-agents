@@ -8,9 +8,10 @@ code generation and execution with automatic retry and debugging capabilities.
 from .agent import DeveloperAgent, developer_agent_node
 from .dspy_modules import CodeFixerModule, CodeGeneratorModule
 
+
 __all__ = [
+    "CodeFixerModule",
+    "CodeGeneratorModule",
     "DeveloperAgent",
     "developer_agent_node",
-    "CodeGeneratorModule",
-    "CodeFixerModule",
 ]

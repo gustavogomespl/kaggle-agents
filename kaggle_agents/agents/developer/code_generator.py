@@ -11,7 +11,7 @@ Handles:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import HumanMessage
 
@@ -24,20 +24,21 @@ from ...prompts.templates.developer_prompts import (
 )
 from ...utils.llm_utils import get_text_content
 
+
 if TYPE_CHECKING:
     from .agent import DeveloperAgent
 
 
 # Dynamic temperature settings for different contexts
 TEMPERATURE_SETTINGS = {
-    "initial_generation": 0.1,      # Conservative for initial code generation
-    "error_fixing_attempt_1": 0.25, # Slightly more creative for first fix
+    "initial_generation": 0.1,  # Conservative for initial code generation
+    "error_fixing_attempt_1": 0.25,  # Slightly more creative for first fix
     "error_fixing_attempt_2": 0.4,  # More creative after first attempt fails
     "error_fixing_attempt_3": 0.5,  # Maximum creativity for persistent errors
-    "debug_mode": 0.45,             # Higher creativity in debug mode
-    "ensemble": 0.3,                # Moderate creativity for ensemble strategies
-    "feature_engineering": 0.2,     # Some creativity for feature ideas
-    "refinement": 0.35,             # Moderate for refinement iterations
+    "debug_mode": 0.45,  # Higher creativity in debug mode
+    "ensemble": 0.3,  # Moderate creativity for ensemble strategies
+    "feature_engineering": 0.2,  # Some creativity for feature ideas
+    "refinement": 0.35,  # Moderate for refinement iterations
 }
 
 
@@ -64,23 +65,22 @@ def get_dynamic_temperature(
         # Use component-specific temperature for generation
         if component_type == "ensemble":
             return TEMPERATURE_SETTINGS["ensemble"]
-        elif component_type == "feature_engineering":
+        if component_type == "feature_engineering":
             return TEMPERATURE_SETTINGS["feature_engineering"]
         return TEMPERATURE_SETTINGS["initial_generation"]
 
-    elif context == "fixing":
+    if context == "fixing":
         # Escalate temperature with each failed attempt
         if attempt <= 0:
             return TEMPERATURE_SETTINGS["error_fixing_attempt_1"]
-        elif attempt == 1:
+        if attempt == 1:
             return TEMPERATURE_SETTINGS["error_fixing_attempt_2"]
-        else:
-            return TEMPERATURE_SETTINGS["error_fixing_attempt_3"]
+        return TEMPERATURE_SETTINGS["error_fixing_attempt_3"]
 
-    elif context == "debug":
+    if context == "debug":
         return TEMPERATURE_SETTINGS["debug_mode"]
 
-    elif context == "refinement":
+    if context == "refinement":
         return TEMPERATURE_SETTINGS["refinement"]
 
     # Default fallback
@@ -91,7 +91,7 @@ class CodeGeneratorMixin:
     """Mixin providing code generation capabilities to DeveloperAgent."""
 
     def _generate_code(
-        self: "DeveloperAgent",
+        self: DeveloperAgent,
         component: AblationComponent,
         competition_info,
         working_dir: Path,

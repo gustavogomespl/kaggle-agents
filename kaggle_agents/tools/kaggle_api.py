@@ -67,14 +67,13 @@ class KaggleAPIClient:
         }
 
         # Classify by dominant extension
-        if dominant_ext in ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff']:
+        if dominant_ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"]:
             return "image", metadata
-        elif dominant_ext in ['.wav', '.mp3', '.flac', '.ogg', '.m4a']:
+        if dominant_ext in [".wav", ".mp3", ".flac", ".ogg", ".m4a"]:
             return "audio", metadata
-        elif dominant_ext in ['.txt', '.json']:
+        if dominant_ext in [".txt", ".json"]:
             return "text", metadata
-        else:
-            return "unknown", metadata
+        return "unknown", metadata
 
     def _identify_data_assets(self, download_path: Path) -> dict[str, Any]:
         assets: dict[str, Any] = {}
@@ -85,7 +84,7 @@ class KaggleAPIClient:
                 suffix = file_path.suffix.lower()
                 name_lower = file_path.name.lower()
                 # CSV/Parquet
-                if suffix in ['.csv', '.parquet']:
+                if suffix in [".csv", ".parquet"]:
                     if "train" in name_lower:
                         assets["train_csv"] = str(file_path)
                     elif "test" in name_lower:
@@ -93,7 +92,7 @@ class KaggleAPIClient:
                     elif "sample_submission" in name_lower or "samplesubmission" in name_lower:
                         assets["sample_submission"] = str(file_path)
                 # ZIP
-                elif suffix == '.zip':
+                elif suffix == ".zip":
                     if "train" in name_lower:
                         assets["train_zip"] = str(file_path)
                     elif "test" in name_lower:
@@ -161,10 +160,7 @@ class KaggleAPIClient:
 
         try:
             self.api.competition_download_files(
-                competition,
-                path=str(download_path),
-                force=False,
-                quiet=quiet
+                competition, path=str(download_path), force=False, quiet=quiet
             )
         except Exception as e:
             raise Exception(
@@ -239,18 +235,20 @@ class KaggleAPIClient:
 
             return {
                 "name": comp.ref,
-                "title": comp.title if hasattr(comp, 'title') else competition,
-                "description": comp.description if hasattr(comp, 'description') else "",
-                "evaluation": comp.evaluationMetric if hasattr(comp, 'evaluationMetric') else "unknown",
-                "deadline": str(comp.deadline) if hasattr(comp, 'deadline') and comp.deadline else "N/A",
-                "category": comp.category if hasattr(comp, 'category') else "unknown",
-                "reward": comp.reward if hasattr(comp, 'reward') else "N/A",
-                "team_count": comp.teamCount if hasattr(comp, 'teamCount') else 0,
+                "title": comp.title if hasattr(comp, "title") else competition,
+                "description": comp.description if hasattr(comp, "description") else "",
+                "evaluation": comp.evaluationMetric
+                if hasattr(comp, "evaluationMetric")
+                else "unknown",
+                "deadline": str(comp.deadline)
+                if hasattr(comp, "deadline") and comp.deadline
+                else "N/A",
+                "category": comp.category if hasattr(comp, "category") else "unknown",
+                "reward": comp.reward if hasattr(comp, "reward") else "N/A",
+                "team_count": comp.teamCount if hasattr(comp, "teamCount") else 0,
             }
         except Exception as e:
-            raise Exception(
-                f"Failed to get info for competition '{competition}': {e!s}"
-            )
+            raise Exception(f"Failed to get info for competition '{competition}': {e!s}")
 
     def submit_prediction(
         self, competition: str, file_path: str, message: str, quiet: bool = False
@@ -280,18 +278,13 @@ class KaggleAPIClient:
         try:
             # API signature: competition_submit(file_name, message, competition, quiet=False)
             # Note: API returns submission result object
-            self.api.competition_submit(
-                file_path,
-                message,
-                competition,
-                quiet=quiet
-            )
+            self.api.competition_submit(file_path, message, competition, quiet=quiet)
 
             return {
                 "message": message,
                 "status": "submitted",
                 "file": file_path,
-                "competition": competition
+                "competition": competition,
             }
         except Exception as e:
             raise Exception(
@@ -299,9 +292,7 @@ class KaggleAPIClient:
                 f"Ensure you have accepted competition rules and file format is correct."
             )
 
-    def get_leaderboard(
-        self, competition: str, top_n: int = 100
-    ) -> list[dict[str, Any]]:
+    def get_leaderboard(self, competition: str, top_n: int = 100) -> list[dict[str, Any]]:
         """Get competition leaderboard.
 
         Uses: api.competition_leaderboard_view(id)
@@ -329,13 +320,17 @@ class KaggleAPIClient:
             entries = []
             # Leaderboard may return fewer than requested
             for i, entry in enumerate(leaderboard[:top_n]):
-                entries.append({
-                    "rank": i + 1,
-                    "teamName": entry.teamName if hasattr(entry, 'teamName') else "Unknown",
-                    "score": float(entry.score) if hasattr(entry, 'score') else 0.0,
-                    "submissionDate": str(entry.submissionDate) if hasattr(entry, 'submissionDate') else "N/A",
-                    "entries": entry.entries if hasattr(entry, 'entries') else 0,
-                })
+                entries.append(
+                    {
+                        "rank": i + 1,
+                        "teamName": entry.teamName if hasattr(entry, "teamName") else "Unknown",
+                        "score": float(entry.score) if hasattr(entry, "score") else 0.0,
+                        "submissionDate": str(entry.submissionDate)
+                        if hasattr(entry, "submissionDate")
+                        else "N/A",
+                        "entries": entry.entries if hasattr(entry, "entries") else 0,
+                    }
+                )
 
             return entries
         except Exception as e:
@@ -371,14 +366,20 @@ class KaggleAPIClient:
 
             result = []
             for sub in submissions:
-                result.append({
-                    "date": str(sub.date) if hasattr(sub, 'date') else "N/A",
-                    "description": sub.description if hasattr(sub, 'description') else "",
-                    "status": sub.status if hasattr(sub, 'status') else "unknown",
-                    "publicScore": float(sub.publicScore) if hasattr(sub, 'publicScore') and sub.publicScore else 0.0,
-                    "privateScore": float(sub.privateScore) if hasattr(sub, 'privateScore') and sub.privateScore else 0.0,
-                    "fileName": sub.fileName if hasattr(sub, 'fileName') else "",
-                })
+                result.append(
+                    {
+                        "date": str(sub.date) if hasattr(sub, "date") else "N/A",
+                        "description": sub.description if hasattr(sub, "description") else "",
+                        "status": sub.status if hasattr(sub, "status") else "unknown",
+                        "publicScore": float(sub.publicScore)
+                        if hasattr(sub, "publicScore") and sub.publicScore
+                        else 0.0,
+                        "privateScore": float(sub.privateScore)
+                        if hasattr(sub, "privateScore") and sub.privateScore
+                        else 0.0,
+                        "fileName": sub.fileName if hasattr(sub, "fileName") else "",
+                    }
+                )
 
             return result
         except Exception as e:
@@ -393,7 +394,7 @@ class KaggleAPIClient:
         category: str = "all",
         sort_by: str = "latestDeadline",
         page: int = 1,
-        search: str | None = None
+        search: str | None = None,
     ) -> list[dict[str, Any]]:
         """List Kaggle competitions.
 
@@ -417,23 +418,23 @@ class KaggleAPIClient:
         try:
             # API signature: competitions_list(group, category, sort_by, page, search)
             competitions = self.api.competitions_list(
-                group=group,
-                category=category,
-                sort_by=sort_by,
-                page=page,
-                search=search
+                group=group, category=category, sort_by=sort_by, page=page, search=search
             )
 
             result = []
             for comp in competitions:
-                result.append({
-                    "ref": comp.ref if hasattr(comp, 'ref') else "",
-                    "title": comp.title if hasattr(comp, 'title') else "",
-                    "deadline": str(comp.deadline) if hasattr(comp, 'deadline') and comp.deadline else "N/A",
-                    "category": comp.category if hasattr(comp, 'category') else "",
-                    "reward": comp.reward if hasattr(comp, 'reward') else "N/A",
-                    "teamCount": comp.teamCount if hasattr(comp, 'teamCount') else 0,
-                })
+                result.append(
+                    {
+                        "ref": comp.ref if hasattr(comp, "ref") else "",
+                        "title": comp.title if hasattr(comp, "title") else "",
+                        "deadline": str(comp.deadline)
+                        if hasattr(comp, "deadline") and comp.deadline
+                        else "N/A",
+                        "category": comp.category if hasattr(comp, "category") else "",
+                        "reward": comp.reward if hasattr(comp, "reward") else "N/A",
+                        "teamCount": comp.teamCount if hasattr(comp, "teamCount") else 0,
+                    }
+                )
 
             return result
         except Exception as e:

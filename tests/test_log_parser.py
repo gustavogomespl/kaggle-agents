@@ -1,10 +1,11 @@
 """Tests for the log parser module."""
 
 import pytest
+
 from kaggle_agents.utils.log_parser import (
     TrainingFeedback,
-    parse_training_logs,
     format_feedback_for_llm,
+    parse_training_logs,
 )
 
 
@@ -21,7 +22,7 @@ class TestLogParser:
 [LOG:FOLD] fold=5 score=0.8738 time=45.01
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert len(feedback.fold_scores) == 5
         assert feedback.fold_scores[0] == pytest.approx(0.8732)
         assert feedback.fold_scores[1] == pytest.approx(0.8756)
@@ -35,7 +36,7 @@ class TestLogParser:
 [LOG:OPTUNA] trial=3 score=0.8680 time=32.1 params={'learning_rate': 0.08, 'max_depth': 5}
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert len(feedback.optuna_trials) == 3
         assert feedback.best_optuna_trial is not None
         assert feedback.best_optuna_trial["trial"] == 2
@@ -49,7 +50,7 @@ class TestLogParser:
 [LOG:TIMING] step=MODEL_TRAINING time=180.50 cumulative=195.30
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert len(feedback.timing_breakdown) == 3
         assert feedback.timing_breakdown["DATA_LOADING"] == pytest.approx(2.50)
         assert feedback.timing_breakdown["MODEL_TRAINING"] == pytest.approx(180.50)
@@ -62,7 +63,7 @@ class TestLogParser:
 [LOG:FEATURES] top=['feature1', 'feature2', 'feature3'] importances=[0.15, 0.12, 0.08]
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert len(feedback.top_features) == 3
         assert feedback.top_features[0] == "feature1"
         assert feedback.feature_importances[0] == pytest.approx(0.15)
@@ -73,7 +74,7 @@ class TestLogParser:
 [LOG:MEMORY] current_mb=1250.5 peak_mb=1800.2
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert feedback.memory_current_mb == pytest.approx(1250.5)
         assert feedback.memory_peak_mb == pytest.approx(1800.2)
 
@@ -83,7 +84,7 @@ class TestLogParser:
 [LOG:HYPERPARAMS] params={'n_estimators': 1000, 'learning_rate': 0.05, 'max_depth': 7}
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert feedback.hyperparams is not None
         assert "n_estimators" in feedback.hyperparams or "learning_rate" in feedback.hyperparams
 
@@ -93,7 +94,7 @@ class TestLogParser:
 [LOG:CV_SUMMARY] mean=0.8732 std=0.0085 scores=[0.871, 0.875, 0.872, 0.874, 0.873]
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert feedback.cv_mean == pytest.approx(0.8732)
         assert feedback.cv_std == pytest.approx(0.0085)
 
@@ -104,7 +105,7 @@ class TestLogParser:
 [LOG:WARNING] message=GPU memory exhausted, falling back to CPU
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert len(feedback.warnings) == 2
         assert "High variance" in feedback.warnings[0]
 
@@ -114,7 +115,7 @@ class TestLogParser:
 [LOG:ERROR] message=Failed to load model checkpoint
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert len(feedback.errors) == 1
         assert "Failed to load" in feedback.errors[0]
 
@@ -145,7 +146,7 @@ Training with 5-fold CV...
 Final Validation Performance: 0.873800
 """
         feedback = parse_training_logs(stdout)
-        
+
         assert feedback.has_data()
         assert len(feedback.fold_scores) == 5
         assert len(feedback.optuna_trials) == 2
@@ -173,9 +174,9 @@ class TestImprovementSuggestions:
             cv_mean=0.856,
             cv_std=0.045,
         )
-        
+
         suggestions = feedback.get_improvement_suggestions()
-        
+
         assert any("variance" in s.lower() for s in suggestions)
 
     def test_low_score_suggestion(self):
@@ -185,9 +186,9 @@ class TestImprovementSuggestions:
             cv_mean=0.46,
             cv_std=0.015,
         )
-        
+
         suggestions = feedback.get_improvement_suggestions()
-        
+
         assert any("low" in s.lower() and "score" in s.lower() for s in suggestions)
 
     def test_zero_importance_features_suggestion(self):
@@ -195,9 +196,9 @@ class TestImprovementSuggestions:
         feedback = TrainingFeedback(
             zero_importance_features=["useless_feat1", "useless_feat2"],
         )
-        
+
         suggestions = feedback.get_improvement_suggestions()
-        
+
         assert any("zero-importance" in s.lower() for s in suggestions)
 
 
@@ -221,9 +222,9 @@ class TestFormatFeedbackForLLM:
             memory_peak_mb=1800.0,
             memory_current_mb=1200.0,
         )
-        
+
         formatted = format_feedback_for_llm(feedback)
-        
+
         assert "## Training Results Analysis" in formatted
         assert "CV Performance" in formatted
         assert "0.8738" in formatted
@@ -236,9 +237,9 @@ class TestFormatFeedbackForLLM:
             warnings=["High variance detected"],
             errors=["GPU memory exhausted"],
         )
-        
+
         formatted = format_feedback_for_llm(feedback)
-        
+
         assert "Issues Detected" in formatted
         assert "High variance" in formatted
         assert "GPU memory" in formatted
@@ -246,8 +247,7 @@ class TestFormatFeedbackForLLM:
     def test_format_empty_feedback(self):
         """Test formatting with empty feedback still produces valid output."""
         feedback = TrainingFeedback()
-        
-        formatted = format_feedback_for_llm(feedback)
-        
-        assert "## Training Results Analysis" in formatted
 
+        formatted = format_feedback_for_llm(feedback)
+
+        assert "## Training Results Analysis" in formatted

@@ -56,4 +56,3 @@ class KaggleState:
 
     # Errors
     errors: list[str] = field(default_factory=list)
-

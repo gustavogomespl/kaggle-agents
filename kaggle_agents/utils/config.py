@@ -9,7 +9,6 @@ optional LangSmith tracing configuration.
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 
 class Config:
@@ -38,11 +37,13 @@ class Config:
 
     @staticmethod
     def configure_tracing(
-        langsmith_api_key: Optional[str] = None,
+        langsmith_api_key: str | None = None,
         project_name: str = "kaggle-agents",
     ) -> None:
         """Configure LangSmith tracing for observability (no-op if no API key)."""
-        api_key = langsmith_api_key or os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+        api_key = (
+            langsmith_api_key or os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+        )
         if not api_key:
             return
 
@@ -54,4 +55,3 @@ class Config:
         os.environ.setdefault("LANGCHAIN_API_KEY", api_key)
         os.environ.setdefault("LANGCHAIN_TRACING_V2", "true")
         os.environ.setdefault("LANGCHAIN_PROJECT", project_name)
-

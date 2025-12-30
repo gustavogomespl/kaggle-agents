@@ -11,47 +11,147 @@ Usage:
 """
 
 import argparse
-import json
-import os
 import csv
+import json
 from datetime import datetime
 from pathlib import Path
+
 
 # MLE-bench Lite competitions (22 total)
 MLEBENCH_LITE = [
     # Image Classification
-    {"id": "aerial-cactus-identification", "type": "binary_classification", "metric": "auc", "size_gb": 0.025},
-    {"id": "aptos2019-blindness-detection", "type": "multiclass_classification", "metric": "quadratic_weighted_kappa", "size_gb": 10.22},
-    {"id": "dog-breed-identification", "type": "multiclass_classification", "metric": "log_loss", "size_gb": 0.75},
-    {"id": "dogs-vs-cats-redux-kernels-edition", "type": "binary_classification", "metric": "log_loss", "size_gb": 0.85},
-    {"id": "leaf-classification", "type": "multiclass_classification", "metric": "log_loss", "size_gb": 0.036},
-    {"id": "plant-pathology-2020-fgvc7", "type": "multiclass_classification", "metric": "auc", "size_gb": 0.8},
-    {"id": "ranzcr-clip-catheter-line-classification", "type": "multilabel_classification", "metric": "auc", "size_gb": 13.13},
-    {"id": "siim-isic-melanoma-classification", "type": "binary_classification", "metric": "auc", "size_gb": 116.16},
-
+    {
+        "id": "aerial-cactus-identification",
+        "type": "binary_classification",
+        "metric": "auc",
+        "size_gb": 0.025,
+    },
+    {
+        "id": "aptos2019-blindness-detection",
+        "type": "multiclass_classification",
+        "metric": "quadratic_weighted_kappa",
+        "size_gb": 10.22,
+    },
+    {
+        "id": "dog-breed-identification",
+        "type": "multiclass_classification",
+        "metric": "log_loss",
+        "size_gb": 0.75,
+    },
+    {
+        "id": "dogs-vs-cats-redux-kernels-edition",
+        "type": "binary_classification",
+        "metric": "log_loss",
+        "size_gb": 0.85,
+    },
+    {
+        "id": "leaf-classification",
+        "type": "multiclass_classification",
+        "metric": "log_loss",
+        "size_gb": 0.036,
+    },
+    {
+        "id": "plant-pathology-2020-fgvc7",
+        "type": "multiclass_classification",
+        "metric": "auc",
+        "size_gb": 0.8,
+    },
+    {
+        "id": "ranzcr-clip-catheter-line-classification",
+        "type": "multilabel_classification",
+        "metric": "auc",
+        "size_gb": 13.13,
+    },
+    {
+        "id": "siim-isic-melanoma-classification",
+        "type": "binary_classification",
+        "metric": "auc",
+        "size_gb": 116.16,
+    },
     # Image To Image / Regression
     {"id": "denoising-dirty-documents", "type": "regression", "metric": "rmse", "size_gb": 0.06},
-    {"id": "histopathologic-cancer-detection", "type": "binary_classification", "metric": "auc", "size_gb": 7.76},
-
+    {
+        "id": "histopathologic-cancer-detection",
+        "type": "binary_classification",
+        "metric": "auc",
+        "size_gb": 7.76,
+    },
     # Text Classification
-    {"id": "detecting-insults-in-social-commentary", "type": "binary_classification", "metric": "auc", "size_gb": 0.002},
-    {"id": "jigsaw-toxic-comment-classification-challenge", "type": "multilabel_classification", "metric": "auc", "size_gb": 0.06},
-    {"id": "random-acts-of-pizza", "type": "binary_classification", "metric": "auc", "size_gb": 0.003},
-    {"id": "spooky-author-identification", "type": "multiclass_classification", "metric": "log_loss", "size_gb": 0.002},
-
+    {
+        "id": "detecting-insults-in-social-commentary",
+        "type": "binary_classification",
+        "metric": "auc",
+        "size_gb": 0.002,
+    },
+    {
+        "id": "jigsaw-toxic-comment-classification-challenge",
+        "type": "multilabel_classification",
+        "metric": "auc",
+        "size_gb": 0.06,
+    },
+    {
+        "id": "random-acts-of-pizza",
+        "type": "binary_classification",
+        "metric": "auc",
+        "size_gb": 0.003,
+    },
+    {
+        "id": "spooky-author-identification",
+        "type": "multiclass_classification",
+        "metric": "log_loss",
+        "size_gb": 0.002,
+    },
     # Tabular
-    {"id": "new-york-city-taxi-fare-prediction", "type": "regression", "metric": "rmse", "size_gb": 5.7},
-    {"id": "nomad2018-predict-transparent-conductors", "type": "regression", "metric": "rmsle", "size_gb": 0.006},
-    {"id": "tabular-playground-series-dec-2021", "type": "regression", "metric": "rmse", "size_gb": 0.7},
-    {"id": "tabular-playground-series-may-2022", "type": "regression", "metric": "rmse", "size_gb": 0.57},
-
+    {
+        "id": "new-york-city-taxi-fare-prediction",
+        "type": "regression",
+        "metric": "rmse",
+        "size_gb": 5.7,
+    },
+    {
+        "id": "nomad2018-predict-transparent-conductors",
+        "type": "regression",
+        "metric": "rmsle",
+        "size_gb": 0.006,
+    },
+    {
+        "id": "tabular-playground-series-dec-2021",
+        "type": "regression",
+        "metric": "rmse",
+        "size_gb": 0.7,
+    },
+    {
+        "id": "tabular-playground-series-may-2022",
+        "type": "regression",
+        "metric": "rmse",
+        "size_gb": 0.57,
+    },
     # Audio
-    {"id": "mlsp-2013-birds", "type": "multilabel_classification", "metric": "auc", "size_gb": 0.585},
-    {"id": "the-icml-2013-whale-challenge-right-whale-redux", "type": "binary_classification", "metric": "auc", "size_gb": 0.29},
-
+    {
+        "id": "mlsp-2013-birds",
+        "type": "multilabel_classification",
+        "metric": "auc",
+        "size_gb": 0.585,
+    },
+    {
+        "id": "the-icml-2013-whale-challenge-right-whale-redux",
+        "type": "binary_classification",
+        "metric": "auc",
+        "size_gb": 0.29,
+    },
     # Seq->Seq
-    {"id": "text-normalization-challenge-english-language", "type": "seq2seq", "metric": "accuracy", "size_gb": 0.01},
-    {"id": "text-normalization-challenge-russian-language", "type": "seq2seq", "metric": "accuracy", "size_gb": 0.01},
+    {
+        "id": "text-normalization-challenge-english-language",
+        "type": "seq2seq",
+        "metric": "accuracy",
+        "size_gb": 0.01,
+    },
+    {
+        "id": "text-normalization-challenge-russian-language",
+        "type": "seq2seq",
+        "metric": "accuracy",
+        "size_gb": 0.01,
+    },
 ]
 
 
@@ -113,7 +213,7 @@ def run_evaluation(
         comp_info = get_competition_info(comp_id)
         print(f"  Problem type: {comp_info['type']}", flush=True)
         print(f"  Metric: {comp_info['metric']}", flush=True)
-        print(f"  Calling solve_mlebench()...", flush=True)
+        print("  Calling solve_mlebench()...", flush=True)
 
         try:
             result = solve_mlebench(
@@ -125,7 +225,7 @@ def run_evaluation(
                 enable_checkpoint_recovery=True,
             )
 
-            print(f"  solve_mlebench() returned!", flush=True)
+            print("  solve_mlebench() returned!", flush=True)
             print(f"  Success: {result.success}", flush=True)
             print(f"  Error: {result.error}", flush=True)
 
@@ -151,6 +251,7 @@ def run_evaluation(
 
         except Exception as e:
             import traceback
+
             error_tb = traceback.format_exc()
             print(f"  EXCEPTION in solve_mlebench: {e}", flush=True)
             print(f"  Traceback:\n{error_tb}", flush=True)
@@ -218,38 +319,21 @@ def run_evaluation(
 
 def main():
     parser = argparse.ArgumentParser(description="MLE-bench Evaluation for Kaggle Agents")
+    parser.add_argument("-c", "--competition", type=str, help="Single competition ID to evaluate")
     parser.add_argument(
-        "-c", "--competition",
-        type=str,
-        help="Single competition ID to evaluate"
+        "--lite", action="store_true", help="Run all 22 MLE-bench Lite competitions"
     )
+    parser.add_argument("--small", action="store_true", help="Run only small competitions (<1GB)")
     parser.add_argument(
-        "--lite",
-        action="store_true",
-        help="Run all 22 MLE-bench Lite competitions"
-    )
-    parser.add_argument(
-        "--small",
-        action="store_true",
-        help="Run only small competitions (<1GB)"
-    )
-    parser.add_argument(
-        "-o", "--output",
+        "-o",
+        "--output",
         type=str,
         default="./mlebench_results",
-        help="Output directory for results"
+        help="Output directory for results",
     )
+    parser.add_argument("--max-iterations", type=int, default=3, help="Maximum workflow iterations")
     parser.add_argument(
-        "--max-iterations",
-        type=int,
-        default=3,
-        help="Maximum workflow iterations"
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=3000,
-        help="Timeout per component in seconds"
+        "--timeout", type=int, default=3000, help="Timeout per component in seconds"
     )
 
     args = parser.parse_args()

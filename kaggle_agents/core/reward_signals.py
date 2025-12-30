@@ -13,6 +13,7 @@ from .state import DevelopmentResult, KaggleState
 @dataclass
 class RewardComponents:
     """Individual reward components."""
+
     functional: float  # Execution success rate
     performance: float  # Kaggle score
     improvement: float  # Delta from previous
@@ -73,10 +74,10 @@ class RewardCalculator:
 
         # Calculate combined reward
         r_combined = (
-            self.weights["functional"] * r_functional +
-            self.weights["performance"] * r_performance +
-            self.weights["improvement"] * r_improvement +
-            self.weights["semantics"] * r_semantics
+            self.weights["functional"] * r_functional
+            + self.weights["performance"] * r_performance
+            + self.weights["improvement"] * r_improvement
+            + self.weights["semantics"] * r_semantics
         )
 
         return RewardComponents(
@@ -201,6 +202,7 @@ class RewardCalculator:
 
 # RLPrompt Stabilization Techniques
 
+
 class RewardNormalizer:
     """
     Normalize rewards for stable RL training (RLPrompt pattern).
@@ -242,7 +244,7 @@ class RewardNormalizer:
 
         # Keep only recent window
         if len(self.reward_history) > self.window_size:
-            self.reward_history = self.reward_history[-self.window_size:]
+            self.reward_history = self.reward_history[-self.window_size :]
 
         # Calculate z-score
         if len(self.reward_history) < 2:
@@ -250,7 +252,7 @@ class RewardNormalizer:
 
         mean = sum(self.reward_history) / len(self.reward_history)
         variance = sum((r - mean) ** 2 for r in self.reward_history) / len(self.reward_history)
-        std = variance ** 0.5
+        std = variance**0.5
 
         if std < 1e-6:
             return 0.0

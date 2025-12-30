@@ -13,12 +13,13 @@ This module provides sandboxed Python code execution with:
 import re
 import subprocess
 import sys
-import time
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from queue import Queue, Empty
+from queue import Empty, Queue
 from typing import Any
+
 
 @dataclass
 class ExecutionResult:
@@ -95,9 +96,9 @@ class ExecutionProgress:
         # Detect fold completion patterns
         # Pattern: "Fold X best AUC: Y.YYYY" or "Fold X score: Y.YYYY"
         fold_patterns = [
-            r'fold\s*(\d+)\s*(?:best\s+)?(?:auc|score|accuracy|f1|rmse|mae)[:=]\s*([\d.]+)',
-            r'=+\s*fold\s*(\d+)\s*=+',
-            r'fold\s*(\d+)\s*(?:of\s*\d+)?\s*(?:completed?|finished?|done)',
+            r"fold\s*(\d+)\s*(?:best\s+)?(?:auc|score|accuracy|f1|rmse|mae)[:=]\s*([\d.]+)",
+            r"=+\s*fold\s*(\d+)\s*=+",
+            r"fold\s*(\d+)\s*(?:of\s*\d+)?\s*(?:completed?|finished?|done)",
         ]
 
         for pattern in fold_patterns:
@@ -120,39 +121,44 @@ class ExecutionProgress:
                     pass
 
         # Detect Final Validation Performance
-        if 'final validation performance' in line_lower:
-            match = re.search(r'([\d.]+)', line)
+        if "final validation performance" in line_lower:
+            match = re.search(r"([\d.]+)", line)
             if match:
                 self.current_cv_score = float(match.group(1))
                 updated = True
 
         # Detect OOF/test prediction saves
-        if 'saved oof' in line_lower or 'oof_pred' in line_lower:
+        if "saved oof" in line_lower or "oof_pred" in line_lower:
             self.oof_predictions_saved = True
             updated = True
 
-        if 'saved test' in line_lower or 'test_pred' in line_lower:
+        if "saved test" in line_lower or "test_pred" in line_lower:
             self.test_predictions_saved = True
             updated = True
 
         # Detect model saves
-        if ('saved model' in line_lower or 'saving model' in line_lower or
-            '.pkl' in line_lower or '.joblib' in line_lower or '.pth' in line_lower):
+        if (
+            "saved model" in line_lower
+            or "saving model" in line_lower
+            or ".pkl" in line_lower
+            or ".joblib" in line_lower
+            or ".pth" in line_lower
+        ):
             # Extract model name if possible
-            match = re.search(r'(\w+\.(pkl|joblib|pth|pt|h5))', line_lower)
+            match = re.search(r"(\w+\.(pkl|joblib|pth|pt|h5))", line_lower)
             if match and match.group(1) not in self.models_saved:
                 self.models_saved.append(match.group(1))
                 updated = True
 
         # Detect phase changes
-        if 'loading' in line_lower or 'preparing' in line_lower:
-            self.current_phase = 'initializing'
-        elif 'training' in line_lower or 'fitting' in line_lower:
-            self.current_phase = 'training'
-        elif 'validating' in line_lower or 'evaluating' in line_lower:
-            self.current_phase = 'validating'
-        elif 'predicting' in line_lower or 'inference' in line_lower:
-            self.current_phase = 'predicting'
+        if "loading" in line_lower or "preparing" in line_lower:
+            self.current_phase = "initializing"
+        elif "training" in line_lower or "fitting" in line_lower:
+            self.current_phase = "training"
+        elif "validating" in line_lower or "evaluating" in line_lower:
+            self.current_phase = "validating"
+        elif "predicting" in line_lower or "inference" in line_lower:
+            self.current_phase = "predicting"
 
         self.last_output = line.strip()[:200]
         return updated
@@ -226,6 +232,7 @@ class CodeExecutor:
         """
         # Lazy import to avoid circular dependency
         from ..core.config import get_config
+
         self.config = get_config()
         self.timeout = timeout
 
@@ -243,7 +250,9 @@ class CodeExecutor:
 
         # Auto-fix sys.exit() calls
         if "sys.exit(1)" in code:
-            code = code.replace("sys.exit(1)", 'raise ValueError("Missing required data or configuration")')
+            code = code.replace(
+                "sys.exit(1)", 'raise ValueError("Missing required data or configuration")'
+            )
             fixes_applied.append("Replaced sys.exit(1) with ValueError")
 
         if "sys.exit(0)" in code:
@@ -252,7 +261,7 @@ class CodeExecutor:
 
         # Generic sys.exit() with variable
         if "sys.exit(" in code:
-            code = re.sub(r'sys\.exit\([^)]*\)', 'raise RuntimeError("Execution terminated")', code)
+            code = re.sub(r"sys\.exit\([^)]*\)", 'raise RuntimeError("Execution terminated")', code)
             fixes_applied.append("Replaced remaining sys.exit() calls with RuntimeError")
 
         # Auto-fix other termination calls
@@ -265,7 +274,7 @@ class CodeExecutor:
             fixes_applied.append("Replaced quit() with pass")
 
         if "os._exit(" in code:
-            code = re.sub(r'os\._exit\([^)]*\)', 'raise RuntimeError("Forced exit")', code)
+            code = re.sub(r"os\._exit\([^)]*\)", 'raise RuntimeError("Forced exit")', code)
             fixes_applied.append("Replaced os._exit() with RuntimeError")
 
         if fixes_applied:
@@ -297,7 +306,7 @@ class CodeExecutor:
         # Check 3: Early stopping rounds misuse (common API error)
         if "early_stopping_rounds=" in code and ".fit(" in code:
             # Check if it's being passed as a parameter to fit()
-            if re.search(r'\.fit\([^)]*early_stopping_rounds=', code):
+            if re.search(r"\.fit\([^)]*early_stopping_rounds=", code):
                 return False, (
                     "API Error: early_stopping_rounds cannot be passed to fit(). "
                     "Use callbacks=[lgb.early_stopping(100)] or callbacks=[xgb.callback.EarlyStopping(100)] instead."
@@ -305,7 +314,10 @@ class CodeExecutor:
 
         # Check 4: Has basic structure for ML code
         required_patterns = [
-            ("import pandas" in code or "import numpy" in code, "Missing required imports (pandas or numpy)"),
+            (
+                "import pandas" in code or "import numpy" in code,
+                "Missing required imports (pandas or numpy)",
+            ),
         ]
 
         for has_pattern, error_msg in required_patterns:
@@ -315,11 +327,11 @@ class CodeExecutor:
         # Check 5: Warning about categorical features (informational only)
         # This is a soft check - we warn but don't fail
         has_categorical_check = (
-            "select_dtypes" in code or
-            "LabelEncoder" in code or
-            "OneHotEncoder" in code or
-            "TargetEncoder" in code or
-            "CatBoost" in code
+            "select_dtypes" in code
+            or "LabelEncoder" in code
+            or "OneHotEncoder" in code
+            or "TargetEncoder" in code
+            or "CatBoost" in code
         )
 
         if (not has_categorical_check and "LGBMClassifier" in code) or "XGBClassifier" in code:
@@ -328,7 +340,7 @@ class CodeExecutor:
 
         return True, "Validation passed"
 
-    def extract_performance_metric(self, stdout: str) :
+    def extract_performance_metric(self, stdout: str):
         """
         Extracts validation performance score from code output (MLE-STAR pattern).
 
@@ -344,7 +356,7 @@ class CodeExecutor:
                     # Extract score after the colon
                     score_str = line.split(":")[-1].strip()
                     # Remove any non-numeric characters except decimal point and minus
-                    score_str = re.sub(r'[^\d.\-]', '', score_str)
+                    score_str = re.sub(r"[^\d.\-]", "", score_str)
                     return float(score_str)
                 except (ValueError, IndexError):
                     continue
@@ -395,7 +407,7 @@ class CodeExecutor:
 
         try:
             # Write code to file
-            with open(script_file, 'w', encoding='utf-8') as f:
+            with open(script_file, "w", encoding="utf-8") as f:
                 f.write(code)
 
             # Execute in subprocess with REAL-TIME STREAMING
@@ -420,7 +432,7 @@ class CodeExecutor:
             def read_stream(stream, queue, prefix=""):
                 """Read from stream and put lines in queue."""
                 try:
-                    for line in iter(stream.readline, ''):
+                    for line in iter(stream.readline, ""):
                         if line:
                             queue.put((prefix, line))
                 except Exception:
@@ -430,12 +442,10 @@ class CodeExecutor:
 
             # Start reader threads
             stdout_thread = threading.Thread(
-                target=read_stream, 
-                args=(process.stdout, stdout_queue, "")
+                target=read_stream, args=(process.stdout, stdout_queue, "")
             )
             stderr_thread = threading.Thread(
-                target=read_stream, 
-                args=(process.stderr, stderr_queue, "⚠️ ")
+                target=read_stream, args=(process.stderr, stderr_queue, "⚠️ ")
             )
             stdout_thread.daemon = True
             stderr_thread.daemon = True
@@ -456,7 +466,7 @@ class CodeExecutor:
                 while True:
                     try:
                         prefix, line = stdout_queue.get_nowait()
-                        line_stripped = line.rstrip('\n\r')
+                        line_stripped = line.rstrip("\n\r")
                         stdout_lines.append(line)
                         # Print structured logs with special formatting
                         if line_stripped.startswith("[LOG:"):
@@ -465,18 +475,27 @@ class CodeExecutor:
                             print(f"      📊 {line_stripped}")
                         elif "Trial" in line_stripped or "trial" in line_stripped:
                             print(f"      🔬 {line_stripped}")
-                        elif "✓" in line_stripped or "✅" in line_stripped:
-                            print(f"      {line_stripped}")
-                        elif "⏱️" in line_stripped or "time" in line_stripped.lower():
+                        elif "✓" in line_stripped or "✅" in line_stripped or "⏱️" in line_stripped or "time" in line_stripped.lower():
                             print(f"      {line_stripped}")
                         elif "Final Validation Performance" in line_stripped:
                             print(f"      🎯 {line_stripped}")
-                        else:
-                            # Regular output - only print important lines
-                            if any(kw in line_stripped.lower() for kw in 
-                                   ['loading', 'training', 'fold', 'score', 'accuracy', 
-                                    'auc', 'error', 'warning', 'saved', 'complete']):
-                                print(f"      {prefix}{line_stripped}")
+                        # Regular output - only print important lines
+                        elif any(
+                            kw in line_stripped.lower()
+                            for kw in [
+                                "loading",
+                                "training",
+                                "fold",
+                                "score",
+                                "accuracy",
+                                "auc",
+                                "error",
+                                "warning",
+                                "saved",
+                                "complete",
+                            ]
+                        ):
+                            print(f"      {prefix}{line_stripped}")
                         output_printed = True
                         last_output_time = time.time()
                     except Empty:
@@ -485,10 +504,10 @@ class CodeExecutor:
                 while True:
                     try:
                         prefix, line = stderr_queue.get_nowait()
-                        line_stripped = line.rstrip('\n\r')
+                        line_stripped = line.rstrip("\n\r")
                         stderr_lines.append(line)
                         # Only print non-Optuna stderr
-                        if not re.match(r'\[I \d{4}-\d{2}-\d{2}', line_stripped):
+                        if not re.match(r"\[I \d{4}-\d{2}-\d{2}", line_stripped):
                             print(f"      {prefix}{line_stripped}")
                         output_printed = True
                     except Empty:
@@ -534,8 +553,8 @@ class CodeExecutor:
                     stdout_thread.join(timeout=1)
                     stderr_thread.join(timeout=1)
 
-                    stdout = ''.join(stdout_lines)
-                    stderr = ''.join(stderr_lines)
+                    stdout = "".join(stdout_lines)
+                    stderr = "".join(stderr_lines)
 
                     # Track artifacts after execution (partial)
                     artifacts_after = self._get_artifacts(working_path)
@@ -558,7 +577,9 @@ class CodeExecutor:
                 time_since_output = time.time() - last_output_time
                 if time_since_output >= progress_interval:
                     remaining = self.timeout - elapsed
-                    print(f"      ⏳ Execution in progress... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)")
+                    print(
+                        f"      ⏳ Execution in progress... ({elapsed:.0f}s elapsed, {remaining:.0f}s remaining)"
+                    )
                     last_output_time = time.time()
 
                 # Sleep briefly before next check
@@ -569,8 +590,8 @@ class CodeExecutor:
             stderr_thread.join(timeout=1)
 
             # Combine collected output
-            stdout = ''.join(stdout_lines)
-            stderr = ''.join(stderr_lines)
+            stdout = "".join(stdout_lines)
+            stderr = "".join(stderr_lines)
             execution_time = time.time() - start_time
 
             # Create result object compatible with subprocess.run
@@ -676,7 +697,9 @@ class CodeExecutor:
                 print("    Execution successful")
                 return result, attempt + 1
 
-            print(f"   L Execution failed: {result.errors[0] if result.errors else 'Unknown error'}")
+            print(
+                f"   L Execution failed: {result.errors[0] if result.errors else 'Unknown error'}"
+            )
 
         return result, max_retries
 
@@ -691,7 +714,7 @@ class CodeExecutor:
             Tuple of (is_valid, error_message)
         """
         try:
-            compile(code, '<string>', 'exec')
+            compile(code, "<string>", "exec")
             return True, None
         except SyntaxError as e:
             error_msg = f"Syntax error at line {e.lineno}: {e.msg}"
@@ -735,20 +758,20 @@ class CodeExecutor:
             Filtered output with Optuna info logs removed
         """
         # Pattern for Optuna info logs: [I YYYY-MM-DD HH:MM:SS,...]
-        optuna_info_pattern = r'\[I \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+\][^\n]*\n?'
-        filtered = re.sub(optuna_info_pattern, '', output)
+        optuna_info_pattern = r"\[I \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+\][^\n]*\n?"
+        filtered = re.sub(optuna_info_pattern, "", output)
 
         # Also filter Optuna study creation messages
-        study_pattern = r'A new study created in memory with name:[^\n]*\n?'
-        filtered = re.sub(study_pattern, '', filtered)
+        study_pattern = r"A new study created in memory with name:[^\n]*\n?"
+        filtered = re.sub(study_pattern, "", filtered)
 
         # Filter Optuna trial completion messages
-        trial_pattern = r'Trial \d+ finished with value:[^\n]*\n?'
-        filtered = re.sub(trial_pattern, '', filtered)
+        trial_pattern = r"Trial \d+ finished with value:[^\n]*\n?"
+        filtered = re.sub(trial_pattern, "", filtered)
 
         # Filter Optuna sampler messages
-        sampler_pattern = r'\[I[^\]]*\].*?(?:Sampler|TPE|CMA|Grid)[^\n]*\n?'
-        filtered = re.sub(sampler_pattern, '', filtered)
+        sampler_pattern = r"\[I[^\]]*\].*?(?:Sampler|TPE|CMA|Grid)[^\n]*\n?"
+        filtered = re.sub(sampler_pattern, "", filtered)
 
         return filtered.strip()
 
@@ -814,7 +837,7 @@ class CodeExecutor:
             for line in stderr_filtered.splitlines():
                 clean_line = line
                 if clean_line.startswith("⚠️"):
-                    clean_line = clean_line[len("⚠️"):]
+                    clean_line = clean_line[len("⚠️") :]
 
                 if skip_next_context:
                     if clean_line.strip() and clean_line[:1].isspace():
@@ -872,7 +895,7 @@ class CodeExecutor:
             # If no specific error found, add generic stderr (but not if only Optuna logs)
             if not errors and stderr_filtered.strip():
                 # Double-check it's not just leftover Optuna formatting
-                if not re.match(r'^\s*\[.*?\]\s*$', stderr_filtered.strip()):
+                if not re.match(r"^\s*\[.*?\]\s*$", stderr_filtered.strip()):
                     error_hint = re.search(
                         r"(Traceback|Error|Exception|Segmentation fault|SIGSEGV|Killed|Out of memory|OOM|CUDA error)",
                         stderr_filtered,
@@ -1028,6 +1051,7 @@ class ArtifactValidator:
 
 
 # ==================== Convenience Functions ====================
+
 
 def execute_code(
     code: str,

@@ -19,14 +19,6 @@ from ...core.config import (
     get_llm_for_role,
     is_metric_minimization,
 )
-
-# Re-export temperature utilities for backward compatibility
-from .code_generator import (
-    TEMPERATURE_SETTINGS,
-    CodeGeneratorMixin,
-    get_dynamic_temperature,
-)
-from .refinement import RefinementMixin
 from ...core.state import (
     AblationComponent,
     CodeAttempt,
@@ -37,23 +29,22 @@ from ...core.state import (
 )
 from ...optimization import create_optimizer, create_preference_collector
 from ...prompts.templates.developer_prompts import (
-    DEBUG_CODE_PROMPT,
     DEVELOPER_CORE_IDENTITY,
-    FIX_CODE_PROMPT,
     HARD_CONSTRAINTS,
-    build_context,
-    build_dynamic_instructions,
-    compose_generate_prompt,
-    format_component_details,
-    format_error_info,
 )
 from ...tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
+
+# Re-export temperature utilities for backward compatibility
+from .code_generator import (
+    CodeGeneratorMixin,
+)
 from .dspy_modules import CodeFixerModule, CodeGeneratorModule
 from .grpo import GRPOMixin
 from .mlebench import MLEBenchMixin
 from .quiet_star import QuietStarMixin
+from .refinement import RefinementMixin
 from .retry import RetryMixin
 from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin
@@ -110,9 +101,7 @@ class DeveloperAgent(
 
         if self.use_dspy:
             optimizer = create_optimizer()
-            self.generator_module = optimizer.load_optimized_prompt(
-                "developer_generator"
-            )
+            self.generator_module = optimizer.load_optimized_prompt("developer_generator")
             self.fixer_module = optimizer.load_optimized_prompt("developer_fixer")
 
             if self.generator_module is None:
@@ -214,9 +203,7 @@ class DeveloperAgent(
 
         if self.executor.timeout != desired_timeout:
             self.executor.timeout = desired_timeout
-            print(
-                f"Component timeout set to: {desired_timeout}s ({desired_timeout / 60:.1f} min)"
-            )
+            print(f"Component timeout set to: {desired_timeout}s ({desired_timeout / 60:.1f} min)")
 
         result, attempt_records = self._implement_component(component, state)
 
@@ -251,9 +238,7 @@ class DeveloperAgent(
                 }
 
         code_retry_count = _coerce_int(state.get("code_retry_count"), 0)
-        max_component_retries = _coerce_int(
-            os.getenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES"), 3
-        )
+        max_component_retries = _coerce_int(os.getenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES"), 3)
         max_component_retries = max(1, max_component_retries)
         min_component_score = None
         min_component_score_env = os.getenv("KAGGLE_AGENTS_MIN_COMPONENT_SCORE")
@@ -261,9 +246,7 @@ class DeveloperAgent(
             try:
                 min_component_score = float(min_component_score_env)
             except ValueError:
-                print(
-                    f"⚠️ Invalid KAGGLE_AGENTS_MIN_COMPONENT_SCORE='{min_component_score_env}'"
-                )
+                print(f"⚠️ Invalid KAGGLE_AGENTS_MIN_COMPONENT_SCORE='{min_component_score_env}'")
                 min_component_score = None
         skip_due_to_retries = False
 
@@ -276,17 +259,13 @@ class DeveloperAgent(
                     f"for {component.name}. Skipping."
                 )
 
-        data_not_found = not result.success and "Data files not found" in (
-            result.stderr or ""
-        )
+        data_not_found = not result.success and "Data files not found" in (result.stderr or "")
         should_advance = result.success or data_not_found or skip_due_to_retries
         state_updates = {
             "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
             "code_retry_count": 0 if should_advance else code_retry_count,
-            "current_component_index": current_index + 1
-            if should_advance
-            else current_index,
+            "current_component_index": current_index + 1 if should_advance else current_index,
             "last_updated": datetime.now(),
             "code_attempts": attempt_records,
         }
@@ -317,7 +296,9 @@ class DeveloperAgent(
                 print("Stacking will fail for this model.")
 
             submission_candidates = [
-                Path(state.get("sample_submission_path")) if state.get("sample_submission_path") else None,
+                Path(state.get("sample_submission_path"))
+                if state.get("sample_submission_path")
+                else None,
                 working_dir / "submission.csv",
                 working_dir / "sample_submission.csv",
             ]
@@ -353,7 +334,9 @@ class DeveloperAgent(
                             state=state,
                             metric_name=competition_info.evaluation_metric,
                         ):
-                            print("🏁 Objective reached (MLE-bench) - stopping remaining components")
+                            print(
+                                "🏁 Objective reached (MLE-bench) - stopping remaining components"
+                            )
                             state_updates["skip_remaining_components"] = True
                             state_updates["current_component_index"] = len(ablation_plan)
                     else:
@@ -363,14 +346,14 @@ class DeveloperAgent(
 
                 current_best_score = state.get("best_single_model_score")
                 metric_name = competition_info.evaluation_metric
-                if min_component_score is not None and not state_updates.get("skip_remaining_components"):
+                if min_component_score is not None and not state_updates.get(
+                    "skip_remaining_components"
+                ):
                     score_for_gate = None
                     score_source = None
                     if run_mode == "mlebench" and isinstance(grading, dict):
                         score = grading.get("score")
-                        if grading.get("valid_submission") and isinstance(
-                            score, (int, float)
-                        ):
+                        if grading.get("valid_submission") and isinstance(score, (int, float)):
                             score_for_gate = float(score)
                             score_source = "mlebench"
                     if score_for_gate is None and isinstance(new_cv_score, (int, float)):
@@ -454,15 +437,12 @@ class DeveloperAgent(
             state_updates[cache_key] = result
             print(f"Cached successful result for: {component.name}")
 
-            if (
-                component.component_type == "model"
-                and self._should_run_refinement(
-                    component,
-                    state,
-                    new_cv_score,
-                    execution_time_s=result.execution_time,
-                    component_timeout_s=desired_timeout,
-                )
+            if component.component_type == "model" and self._should_run_refinement(
+                component,
+                state,
+                new_cv_score,
+                execution_time_s=result.execution_time,
+                component_timeout_s=desired_timeout,
             ):
                 print("\nADK Refinement Loop: Trying to improve score...")
                 best_code = result.code
@@ -482,9 +462,13 @@ class DeveloperAgent(
                         print("📊 Training feedback extracted from logs")
 
                         if training_feedback.fold_scores:
-                            print(f"   CV: {training_feedback.cv_mean:.4f} ± {training_feedback.cv_std:.4f}")
+                            print(
+                                f"   CV: {training_feedback.cv_mean:.4f} ± {training_feedback.cv_std:.4f}"
+                            )
                         if training_feedback.best_optuna_trial:
-                            print(f"   Best Optuna trial: {training_feedback.best_optuna_trial.get('score', 0):.4f}")
+                            print(
+                                f"   Best Optuna trial: {training_feedback.best_optuna_trial.get('score', 0):.4f}"
+                            )
                         if training_feedback.slowest_step:
                             print(f"   Slowest step: {training_feedback.slowest_step}")
 
@@ -571,9 +555,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 if eng_train.exists() and eng_test.exists():
                     state_updates["current_train_path"] = str(eng_train)
                     state_updates["current_test_path"] = str(eng_test)
-                    print(
-                        "  🔄 Pipeline Update: Pointing subsequent agents to engineered data:"
-                    )
+                    print("  🔄 Pipeline Update: Pointing subsequent agents to engineered data:")
                     print(f"     Train: {eng_train.name}")
                     print(f"     Test:  {eng_test.name}")
 
@@ -661,12 +643,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
             if working_dir.exists():
                 existing_items = sorted(
-                    f.name + ("/" if f.is_dir() else "")
-                    for f in working_dir.iterdir()
+                    f.name + ("/" if f.is_dir() else "") for f in working_dir.iterdir()
                 )
-                error_msg += (
-                    f"Found: {existing_items if existing_items else 'Empty dir'}\n"
-                )
+                error_msg += f"Found: {existing_items if existing_items else 'Empty dir'}\n"
             else:
                 error_msg += "Working directory doesn't exist\n"
 
@@ -732,9 +711,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             # Chain-of-Thought: Generate explicit step-by-step thinking
             print("\n💭 Chain-of-Thought: Step-by-step reasoning...")
             dataset_info = self._get_dataset_info(working_dir, state)
-            cot_result = self._generate_chain_of_thought(
-                component, state, data_info=dataset_info
-            )
+            cot_result = self._generate_chain_of_thought(component, state, data_info=dataset_info)
             print(f"   Summary: {cot_result.thinking_summary[:100]}...")
 
             # Store CoT in state for debugging
@@ -749,7 +726,11 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         print("\nGenerating code...")
         code = self._generate_code(
-            component, competition_info, working_dir, domain, state,
+            component,
+            competition_info,
+            working_dir,
+            domain,
+            state,
             reasoning_trace=reasoning_trace,
             cot_result=cot_result,
         )
@@ -849,7 +830,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
                 # Exit condition: confidence is good enough
                 if self_eval.confidence >= CONFIDENCE_THRESHOLD and self_eval.proceed:
-                    print(f"   ✓ Confidence threshold reached ({self_eval.confidence:.2f} >= {CONFIDENCE_THRESHOLD})")
+                    print(
+                        f"   ✓ Confidence threshold reached ({self_eval.confidence:.2f} >= {CONFIDENCE_THRESHOLD})"
+                    )
                     break
 
                 # Apply fixes if available
@@ -866,7 +849,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 print(f"   Using best code version (confidence: {best_confidence:.2f})")
                 code = best_code
 
-            print(f"   Final Quiet-STaR confidence: {max(best_confidence, self_eval.confidence):.2f}")
+            print(
+                f"   Final Quiet-STaR confidence: {max(best_confidence, self_eval.confidence):.2f}"
+            )
 
         print("\nExecuting code...")
         max_retries = 3
@@ -890,12 +875,19 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             try:
                 cv_folds = max(2, min(int(cv_folds_override), 10))
             except ValueError:
-                cv_folds = 2 if run_mode == "mlebench" else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
+                cv_folds = (
+                    2
+                    if run_mode == "mlebench"
+                    else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
+                )
+        elif isinstance(state_cv_folds, int) and state_cv_folds >= 2:
+            cv_folds = min(state_cv_folds, 10)
         else:
-            if isinstance(state_cv_folds, int) and state_cv_folds >= 2:
-                cv_folds = min(state_cv_folds, 10)
-            else:
-                cv_folds = 2 if run_mode == "mlebench" else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
+            cv_folds = (
+                2
+                if run_mode == "mlebench"
+                else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
+            )
         env_overrides = {
             "KAGGLE_AGENTS_COMPONENT_TIMEOUT_S": str(getattr(self.executor, "timeout", "")),
             "KAGGLE_AGENTS_RUN_MODE": run_mode,
@@ -950,21 +942,15 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     errors=[],
                 ), attempt_records
 
-            print(
-                f"Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}"
-            )
+            print(f"Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}")
 
             if attempt == 0:
                 print("\nGetting meta-evaluator feedback...")
-                error_msg = (
-                    exec_result.errors[0] if exec_result.errors else exec_result.stderr
-                )
+                error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
                 meta_feedback = self._get_meta_feedback(code, error_msg, component.name)
                 print(f"Meta-Feedback:\n{meta_feedback}\n")
 
-            error_msg = (
-                exec_result.errors[0] if exec_result.errors else exec_result.stderr
-            )
+            error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
             attempt_records.append(
                 CodeAttempt(
                     component_name=component.name,
@@ -999,15 +985,18 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 
         # If all retries failed, try debug iterations
         print("\nEntering debug mode...")
-        debug_error_msg = (
-            exec_result.errors[0] if exec_result.errors else exec_result.stderr
-        )
+        debug_error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
         if debug_error_msg:
             snippet = debug_error_msg.replace("\n", " ")[:400]
             print(f"Last error passed to debugger: {snippet}")
         code, exec_result, debug_success = self._debug_code(
-            code, exec_result, working_dir, max_iterations=5, meta_feedback=meta_feedback,
-            component_name=component.name, component_type=component.component_type,
+            code,
+            exec_result,
+            working_dir,
+            max_iterations=5,
+            meta_feedback=meta_feedback,
+            component_name=component.name,
+            component_type=component.component_type,
             state=state,  # Pass state for Meta-Evaluator guidance injection
         )
 

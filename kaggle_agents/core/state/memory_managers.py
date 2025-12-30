@@ -3,7 +3,7 @@ Memory helper functions for updating state.
 """
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 from .memory import (
     DataInsights,
@@ -12,11 +12,14 @@ from .memory import (
     ModelPerformanceRecord,
 )
 
+
 if TYPE_CHECKING:
     from .base import KaggleState
 
 
-def update_model_performance(state: "KaggleState", record: ModelPerformanceRecord) -> dict[str, Any]:
+def update_model_performance(
+    state: "KaggleState", record: ModelPerformanceRecord
+) -> dict[str, Any]:
     """
     Update model performance history and track best models by type.
 
@@ -77,8 +80,8 @@ def update_error_memory(
     error_pattern: str,
     solution: str,
     success: bool,
-    affected_model: Optional[str] = None,
-    affected_component: Optional[str] = None,
+    affected_model: str | None = None,
+    affected_component: str | None = None,
     root_cause: str = "",
     prevention_strategy: str = "",
 ) -> dict[str, Any]:
@@ -130,22 +133,21 @@ def update_error_memory(
             last_seen=now,
         )
         return {"error_pattern_memory": [delta]}
-    else:
-        # Create new error pattern
-        new_pattern = ErrorPatternMemory(
-            error_type=error_type,
-            error_pattern=error_pattern,
-            occurrences=1,
-            solutions_tried=[solution] if solution else [],
-            successful_solutions=[solution] if success and solution else [],
-            affected_models=[affected_model] if affected_model else [],
-            affected_components=[affected_component] if affected_component else [],
-            root_cause=root_cause,
-            prevention_strategy=prevention_strategy,
-            first_seen=now,
-            last_seen=now,
-        )
-        return {"error_pattern_memory": [new_pattern]}
+    # Create new error pattern
+    new_pattern = ErrorPatternMemory(
+        error_type=error_type,
+        error_pattern=error_pattern,
+        occurrences=1,
+        solutions_tried=[solution] if solution else [],
+        successful_solutions=[solution] if success and solution else [],
+        affected_models=[affected_model] if affected_model else [],
+        affected_components=[affected_component] if affected_component else [],
+        root_cause=root_cause,
+        prevention_strategy=prevention_strategy,
+        first_seen=now,
+        last_seen=now,
+    )
+    return {"error_pattern_memory": [new_pattern]}
 
 
 def aggregate_feature_importance(state: "KaggleState", top_k: int = 20) -> dict[str, Any]:
@@ -213,7 +215,7 @@ def get_best_hyperparameters(state: "KaggleState", model_type: str) -> dict[str,
 
     # Search through hyperparameter history
     history = state.get("hyperparameter_history", [])
-    best: Optional[dict[str, Any]] = None
+    best: dict[str, Any] | None = None
     best_score = float("-inf")
 
     for record in history:
@@ -239,9 +241,9 @@ def update_hyperparameter_history(
     hyperparameters: dict[str, Any],
     cv_score: float,
     success: bool = True,
-    issues: Optional[list[str]] = None,
+    issues: list[str] | None = None,
     data_size: int = 0,
-    n_classes: Optional[int] = None,
+    n_classes: int | None = None,
     iteration: int = 0,
 ) -> dict[str, Any]:
     """
@@ -462,7 +464,9 @@ def get_memory_summary_for_planning(state: "KaggleState") -> str:
             elif isinstance(em, dict):
                 solutions = em.get("successful_solutions", [])
                 if solutions:
-                    insights.append(f"- {em.get('error_type', 'unknown')}: Fix with '{solutions[0]}'")
+                    insights.append(
+                        f"- {em.get('error_type', 'unknown')}: Fix with '{solutions[0]}'"
+                    )
 
     # Best hyperparameters
     best_hp = state.get("best_hyperparameters_by_model", {})

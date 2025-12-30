@@ -1,8 +1,9 @@
 """Tests for cross-validation utilities."""
 
-import pandas as pd
 import numpy as np
-from sklearn.model_selection import StratifiedKFold, KFold, TimeSeriesSplit
+import pandas as pd
+from sklearn.model_selection import KFold, StratifiedKFold, TimeSeriesSplit
+
 from kaggle_agents.utils.cross_validation import AdaptiveCrossValidator
 
 

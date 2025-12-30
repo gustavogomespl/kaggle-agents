@@ -4,7 +4,7 @@ Result data structures from various workflow stages.
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 
 @dataclass
@@ -30,9 +30,9 @@ class CodeAttempt:
     stage: Literal["generate", "fix", "debug", "refine"]
     attempt: int
     success: bool
-    cv_score: Optional[float] = None
-    error: Optional[str] = None
-    meta_feedback: Optional[str] = None
+    cv_score: float | None = None
+    error: str | None = None
+    meta_feedback: str | None = None
     code_excerpt: str = ""
     stdout_tail: str = ""
     stderr_tail: str = ""
@@ -57,12 +57,12 @@ class ValidationResult:
 class SubmissionResult:
     """Result from Kaggle submission."""
 
-    submission_id: Optional[str]
-    public_score: Optional[float]
-    private_score: Optional[float] = None
-    percentile: Optional[float] = None
-    cv_score: Optional[float] = None
-    file_path: Optional[str] = None
+    submission_id: str | None
+    public_score: float | None
+    private_score: float | None = None
+    percentile: float | None = None
+    cv_score: float | None = None
+    file_path: str | None = None
     valid: bool = True
-    error: Optional[str] = None
+    error: str | None = None
     submitted_at: datetime = field(default_factory=datetime.now)
