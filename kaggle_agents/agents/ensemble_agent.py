@@ -34,6 +34,371 @@ class EnsembleAgent:
                 pairs[name] = (oof_path, test_path)
         return pairs
 
+    def _validate_oof_alignment(
+        self,
+        models_dir: Path,
+        train_ids: np.ndarray,
+        expected_class_order: list[str],
+    ) -> dict[str, tuple[Path, Path]]:
+        """Validate and filter OOFs by row and class alignment.
+
+        Args:
+            models_dir: Directory containing model artifacts
+            train_ids: IDs from original train.csv (expected row order)
+            expected_class_order: Class order from sample_submission
+
+        Returns:
+            Dictionary of valid prediction pairs (name -> (oof_path, test_path))
+        """
+        valid_pairs: dict[str, tuple[Path, Path]] = {}
+
+        for oof_path in models_dir.glob("oof_*.npy"):
+            name = oof_path.stem.replace("oof_", "", 1)
+            test_path = models_dir / f"test_{name}.npy"
+
+            if not test_path.exists():
+                continue
+
+            # 1. Verify class_order
+            class_order_path = models_dir / f"class_order_{name}.npy"
+            if class_order_path.exists():
+                saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+                if saved_order != expected_class_order:
+                    print(f"   ⚠️ {name}: class order mismatch, skipping")
+                    continue
+            # If class_order file doesn't exist, try global class_order.npy
+            else:
+                global_class_order = models_dir / "class_order.npy"
+                if global_class_order.exists():
+                    saved_order = np.load(global_class_order, allow_pickle=True).tolist()
+                    if saved_order != expected_class_order:
+                        print(f"   ⚠️ {name}: global class order mismatch, skipping")
+                        continue
+
+            # 2. Verify train_ids (row order)
+            train_ids_path = models_dir / f"train_ids_{name}.npy"
+            if train_ids_path.exists():
+                saved_ids = np.load(train_ids_path, allow_pickle=True)
+                if not np.array_equal(saved_ids, train_ids):
+                    print(f"   ⚠️ {name}: train IDs mismatch, skipping")
+                    continue
+            else:
+                # Metadata missing: enter with caution
+                print(f"   ⚠️ {name}: alignment metadata missing, entering with caution")
+
+            valid_pairs[name] = (oof_path, test_path)
+
+        return valid_pairs
+
+    def _compute_oof_score(
+        self,
+        oof_path: Path,
+        y_true: np.ndarray,
+        metric_name: str = "log_loss",
+    ) -> float:
+        """Compute model score via OOF predictions (on-the-fly if needed)."""
+        from sklearn.metrics import log_loss, mean_squared_error
+
+        oof = np.load(oof_path)
+        # Clip and normalize for log_loss
+        oof = np.clip(oof, 1e-15, 1 - 1e-15)
+        if oof.ndim > 1 and oof.shape[1] > 1:
+            oof = oof / oof.sum(axis=1, keepdims=True)
+
+        if metric_name == "log_loss":
+            return log_loss(y_true, oof)
+        elif metric_name in ["rmse", "mse", "mean_squared_error"]:
+            return np.sqrt(mean_squared_error(y_true, oof.ravel() if oof.ndim > 1 else oof))
+        return float("inf")
+
+    def _filter_by_score_threshold(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        y_true: np.ndarray,
+        metric_name: str,
+        model_scores: dict[str, float] | None = None,
+        threshold_pct: float = 0.20,
+    ) -> tuple[dict[str, tuple[Path, Path]], dict[str, float]]:
+        """Filter models with score within X% of best. Computes scores on-the-fly if needed.
+
+        Args:
+            prediction_pairs: Dictionary of prediction pairs
+            y_true: True labels
+            metric_name: Metric name (log_loss, rmse, etc.)
+            model_scores: Pre-computed CV scores (optional)
+            threshold_pct: Maximum % worse than best (default 20%)
+
+        Returns:
+            Tuple of (filtered_pairs, computed_scores)
+        """
+        if model_scores is None:
+            model_scores = {}
+
+        computed_scores: dict[str, float] = {}
+        for name, (oof_path, _) in prediction_pairs.items():
+            if name in model_scores:
+                computed_scores[name] = model_scores[name]
+            else:
+                # Compute on-the-fly and cache
+                computed_scores[name] = self._compute_oof_score(oof_path, y_true, metric_name)
+                print(f"   Computed OOF score for {name}: {computed_scores[name]:.6f}")
+
+        # Find best score
+        best_score = min(computed_scores.values()) if computed_scores else float("inf")
+
+        # Filter by threshold
+        filtered: dict[str, tuple[Path, Path]] = {}
+        for name, pair in prediction_pairs.items():
+            score = computed_scores.get(name, float("inf"))
+            threshold = best_score * (1 + threshold_pct)
+            if score <= threshold:
+                filtered[name] = pair
+                print(f"   ✅ {name}: score {score:.6f} (within threshold)")
+            else:
+                print(f"   ⚠️ {name}: score {score:.6f} > threshold {threshold:.6f}, skipping")
+
+        return filtered, computed_scores
+
+    def _tune_meta_model(
+        self,
+        meta_X: np.ndarray,
+        y: np.ndarray,
+        problem_type: str,
+    ) -> LogisticRegression | Ridge:
+        """Tune meta-model regularization using cross-validation.
+
+        Uses grid search over C (classification) or alpha (regression) values
+        with explicit StratifiedKFold/KFold and proper clip/normalize before log_loss.
+        """
+        from sklearn.metrics import log_loss, mean_squared_error
+        from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
+
+        if problem_type == "classification":
+            best_score = float("inf")
+            best_C = 0.01
+            # Explicit StratifiedKFold with shuffle
+            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+
+            for C in [0.001, 0.01, 0.1, 1.0]:
+                try:
+                    # Don't pass multi_class (deprecated)
+                    model = LogisticRegression(
+                        C=C, random_state=42, max_iter=1000, solver="lbfgs"
+                    )
+                    # cross_val_predict to get OOF predictions
+                    oof_preds = cross_val_predict(model, meta_X, y, cv=cv, method="predict_proba")
+                    # CLIP and NORMALIZE before log_loss
+                    oof_preds = np.clip(oof_preds, 1e-15, 1 - 1e-15)
+                    oof_preds = oof_preds / oof_preds.sum(axis=1, keepdims=True)
+                    mean_score = log_loss(y, oof_preds)
+                    if mean_score < best_score:
+                        best_score = mean_score
+                        best_C = C
+                except Exception as e:
+                    print(f"      ⚠️ C={C} failed: {e}")
+                    continue
+
+            print(f"   Meta-model tuning: best C={best_C} (OOF log_loss={best_score:.4f})")
+            return LogisticRegression(C=best_C, random_state=42, max_iter=1000, solver="lbfgs")
+        else:
+            best_score = float("inf")
+            best_alpha = 1.0
+            cv = KFold(n_splits=3, shuffle=True, random_state=42)
+
+            for alpha in [0.1, 1.0, 10.0, 100.0]:
+                try:
+                    model = Ridge(alpha=alpha, random_state=42)
+                    oof_preds = cross_val_predict(model, meta_X, y, cv=cv)
+                    mean_score = np.sqrt(mean_squared_error(y, oof_preds))
+                    if mean_score < best_score:
+                        best_score = mean_score
+                        best_alpha = alpha
+                except Exception as e:
+                    print(f"      ⚠️ alpha={alpha} failed: {e}")
+                    continue
+
+            print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
+            return Ridge(alpha=best_alpha, random_state=42)
+
+    def _dirichlet_weight_search(
+        self,
+        oof_stack: np.ndarray,
+        y_true: np.ndarray,
+        problem_type: str,
+        metric_name: str,
+        n_samples: int = 300,
+    ) -> np.ndarray:
+        """Fallback: weight search via Dirichlet sampling on the simplex.
+
+        Args:
+            oof_stack: Stacked OOF predictions (n_models, n_samples, n_classes)
+            y_true: True labels
+            problem_type: 'classification' or 'regression'
+            metric_name: Metric name for scoring
+            n_samples: Number of Dirichlet samples
+
+        Returns:
+            Optimal weights array
+        """
+        from sklearn.metrics import log_loss, mean_absolute_error, mean_squared_error
+
+        n_models = oof_stack.shape[0]
+        best_weights = np.ones(n_models) / n_models
+        best_score = float("inf")
+
+        # Sample weights from simplex via Dirichlet(1,1,...,1)
+        rng = np.random.default_rng(42)
+        for _ in range(n_samples):
+            weights = rng.dirichlet(np.ones(n_models))
+            blended = np.average(oof_stack, axis=0, weights=weights)
+
+            try:
+                if problem_type == "classification":
+                    blended = np.clip(blended, 1e-15, 1 - 1e-15)
+                    if blended.ndim > 1 and blended.shape[1] > 1:
+                        blended = blended / blended.sum(axis=1, keepdims=True)
+                    # Classification metrics
+                    if metric_name in ["auc", "roc_auc"]:
+                        from sklearn.metrics import roc_auc_score
+
+                        # Negate because we minimize, but AUC should be maximized
+                        score = -roc_auc_score(
+                            y_true, blended, multi_class="ovr", average="weighted"
+                        )
+                    else:
+                        # Default: log_loss for classification
+                        score = log_loss(y_true, blended)
+                else:
+                    # Regression
+                    if blended.ndim > 1:
+                        blended = blended.ravel()
+                    if metric_name in ["mae", "mean_absolute_error"]:
+                        score = mean_absolute_error(y_true, blended)
+                    elif metric_name in ["mse", "mean_squared_error"]:
+                        score = mean_squared_error(y_true, blended)
+                    else:
+                        # Default: RMSE for regression
+                        score = np.sqrt(mean_squared_error(y_true, blended))
+
+                if score < best_score:
+                    best_score = score
+                    best_weights = weights
+            except Exception:
+                continue
+
+        print(f"   Dirichlet search ({n_samples} samples): best score {best_score:.6f}")
+        return best_weights
+
+    def create_oof_weighted_blend(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        y_true: np.ndarray,
+        problem_type: str,
+        metric_name: str,
+    ) -> tuple[np.ndarray, float, dict[str, float]]:
+        """Weighted blend using saved OOF predictions.
+
+        Args:
+            prediction_pairs: Dictionary of (oof_path, test_path) pairs
+            y_true: True labels
+            problem_type: 'classification' or 'regression'
+            metric_name: Metric name for optimization
+
+        Returns:
+            Tuple of (test_predictions, oof_score, weights_dict)
+        """
+        from sklearn.metrics import log_loss, mean_absolute_error, mean_squared_error
+
+        names = list(prediction_pairs.keys())
+        n_models = len(names)
+
+        print(f"   Creating OOF weighted blend with {n_models} models...")
+        print(f"   Problem type: {problem_type}, Metric: {metric_name}")
+
+        # Load OOF and test predictions
+        oof_list = [np.load(oof) for oof, _ in prediction_pairs.values()]
+        test_list = [np.load(test) for _, test in prediction_pairs.values()]
+
+        # Stack: (n_models, n_samples, n_classes)
+        oof_stack = np.stack(oof_list, axis=0)
+        test_stack = np.stack(test_list, axis=0)
+
+        # Helper function to compute score based on problem_type and metric_name
+        def compute_score(blended: np.ndarray) -> float:
+            if problem_type == "classification":
+                blended = np.clip(blended, 1e-15, 1 - 1e-15)
+                if blended.ndim > 1 and blended.shape[1] > 1:
+                    blended = blended / blended.sum(axis=1, keepdims=True)
+                # Classification metrics
+                if metric_name in ["auc", "roc_auc"]:
+                    from sklearn.metrics import roc_auc_score
+
+                    # Negate because we minimize, but AUC should be maximized
+                    return -roc_auc_score(
+                        y_true, blended, multi_class="ovr", average="weighted"
+                    )
+                else:
+                    # Default: log_loss for classification
+                    return log_loss(y_true, blended)
+            else:
+                # Regression
+                if blended.ndim > 1:
+                    blended = blended.ravel()
+                if metric_name in ["mae", "mean_absolute_error"]:
+                    return mean_absolute_error(y_true, blended)
+                elif metric_name in ["mse", "mean_squared_error"]:
+                    return mean_squared_error(y_true, blended)
+                else:
+                    # Default: RMSE for regression
+                    return np.sqrt(mean_squared_error(y_true, blended))
+
+        # Objective for optimization
+        def objective(weights: np.ndarray) -> float:
+            weights = np.array(weights) / np.sum(weights)
+            blended = np.average(oof_stack, axis=0, weights=weights)
+            return compute_score(blended)
+
+        # Try scipy.optimize.minimize, else use Dirichlet fallback
+        try:
+            from scipy.optimize import minimize
+
+            init_weights = np.ones(n_models) / n_models
+            result = minimize(
+                objective,
+                init_weights,
+                method="SLSQP",
+                bounds=[(0, 1)] * n_models,
+                constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1},
+            )
+            opt_weights = result.x / result.x.sum()
+            print(f"   SciPy optimization: best score {result.fun:.6f}")
+        except ImportError:
+            print("   SciPy not available, using Dirichlet fallback")
+            opt_weights = self._dirichlet_weight_search(
+                oof_stack, y_true, problem_type, metric_name, n_samples=300
+            )
+
+        # Calculate final score using the same metric
+        blended_oof = np.average(oof_stack, axis=0, weights=opt_weights)
+        oof_score = compute_score(blended_oof)
+
+        # For display, negate back if AUC (since we negated for minimization)
+        display_score = -oof_score if metric_name in ["auc", "roc_auc"] else oof_score
+
+        # Generate test predictions
+        blended_test = np.average(test_stack, axis=0, weights=opt_weights)
+        if problem_type == "classification":
+            blended_test = np.clip(blended_test, 1e-15, 1 - 1e-15)
+            if blended_test.ndim > 1 and blended_test.shape[1] > 1:
+                blended_test = blended_test / blended_test.sum(axis=1, keepdims=True)
+
+        weights_dict = dict(zip(names, opt_weights))
+        print(f"   Weighted blend: OOF score={display_score:.6f}")
+        for name, weight in weights_dict.items():
+            print(f"      {name}: {weight:.4f}")
+
+        return blended_test, oof_score, weights_dict
+
     def _validate_class_order(
         self, models_dir: Path, sample_submission_path: Path
     ) -> tuple[bool, str]:
@@ -213,13 +578,9 @@ class EnsembleAgent:
         # Create meta-feature matrix
         meta_X = np.column_stack(meta_features)
 
-        # Train meta-model
-        print("    Training meta-model (LogisticRegression/Ridge)...")
-        if problem_type == "classification":
-            meta_model = LogisticRegression(random_state=42, max_iter=1000)
-        else:
-            meta_model = Ridge(random_state=42)
-
+        # Train meta-model with tuned regularization
+        print("    Tuning and training meta-model...")
+        meta_model = self._tune_meta_model(meta_X, y.values if hasattr(y, "values") else y, problem_type)
         meta_model.fit(meta_X, y)
 
         # We don't need to retrain base models if we use the saved test preds!

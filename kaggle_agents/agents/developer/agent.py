@@ -434,6 +434,14 @@ class DeveloperAgent(
                 state_updates["baseline_cv_score"] = new_cv_score
                 print(f"Updated baseline CV score: {new_cv_score:.4f}")
 
+        # Track OOF availability for ensemble (even if ablation study rejected the model)
+        if result.success and component.component_type == "model":
+            oof_file = working_dir / "models" / f"oof_{component.name}.npy"
+            if oof_file.exists():
+                oof_key = f"oof_available_{component.name}"
+                state_updates[oof_key] = True
+                print(f"   OOF file available for ensemble: {component.name}")
+
         if result.success and should_keep_component and not force_retry:
             cache_key = f"component_result_{component.name}"
             state_updates[cache_key] = result

@@ -108,7 +108,45 @@ def create_tabular_fallback_plan(
         ]
     )
 
-    # ALWAYS add stacking ensemble (combines the 4 models above)
+    # Add diverse models for better ensemble (different from tree-based GBMs)
+    plan.extend(
+        [
+            {
+                "name": "extratrees_tuned",
+                "component_type": "model",
+                "description": "ExtraTrees (Extremely Randomized Trees) with tuned n_estimators=500, max_depth tuned via simple grid.",
+                "estimated_impact": 0.16,
+                "rationale": "ExtraTrees uses random splits, decorrelated from GBMs. Great for ensemble diversity.",
+                "code_outline": "ExtraTreesClassifier/Regressor with n_estimators=500, max_depth tuned, 5-fold CV, save OOF/test preds",
+            },
+            {
+                "name": "ridge_classifier_tuned",
+                "component_type": "model",
+                "description": "Ridge Classifier with StandardScaler and alpha tuning. Linear model for diversity.",
+                "estimated_impact": 0.12,
+                "rationale": "Linear models capture different patterns than trees. Fast to train, adds diversity.",
+                "code_outline": "Pipeline([StandardScaler, RidgeClassifier(alpha tuned)]), 5-fold CV, save OOF/test preds",
+            },
+            {
+                "name": "linearsvc_calibrated",
+                "component_type": "model",
+                "description": "Linear SVM with CalibratedClassifierCV for probability outputs. StandardScaler required.",
+                "estimated_impact": 0.11,
+                "rationale": "SVM with linear kernel captures linear boundaries. Calibration enables predict_proba for ensemble.",
+                "code_outline": "Pipeline([StandardScaler, CalibratedClassifierCV(LinearSVC())]), 5-fold CV, save OOF/test preds",
+            },
+            {
+                "name": "gradient_boosting_sklearn",
+                "component_type": "model",
+                "description": "Scikit-learn GradientBoosting (different implementation from LightGBM/XGBoost).",
+                "estimated_impact": 0.14,
+                "rationale": "Sklearn GB has different regularization behavior, adds diversity to the ensemble.",
+                "code_outline": "GradientBoostingClassifier with n_estimators=200, learning_rate=0.1, max_depth=5, 5-fold CV",
+            },
+        ]
+    )
+
+    # ALWAYS add stacking ensemble (combines all models above)
     plan.append(
         {
             "name": "stacking_ensemble",
