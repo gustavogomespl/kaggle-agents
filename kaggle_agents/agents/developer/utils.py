@@ -30,6 +30,11 @@ class DeveloperUtilsMixin:
             import pandas as pd
 
             train_path = working_dir / "train.csv"
+            if not train_path.exists() and state:
+                data_files = state.get("data_files", {}) if isinstance(state, dict) else {}
+                train_csv = data_files.get("train_csv")
+                if train_csv:
+                    train_path = Path(train_csv)
 
             if not train_path.exists():
                 return "Dataset info not available (file not found)"

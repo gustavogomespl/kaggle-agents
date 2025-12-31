@@ -44,6 +44,16 @@ def build_image_model_instructions(
         instructions.append(
             f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)"
         )
+    if isinstance(data_files, dict):
+        train_dir = data_files.get("train") or ""
+        test_dir = data_files.get("test") or ""
+        if train_dir:
+            instructions.append(f"  - Use training images from: {train_dir} (do not hardcode paths)")
+            instructions.append(
+                "  - Detect image extension by scanning train dir (tif is common); do not assume jpg/png"
+            )
+        if test_dir:
+            instructions.append(f"  - Use test images from: {test_dir} (do not hardcode paths)")
 
     if is_image_to_image:
         clean_path = ""

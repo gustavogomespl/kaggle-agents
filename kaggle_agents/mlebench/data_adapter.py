@@ -149,7 +149,7 @@ class MLEBenchDataAdapter:
         Returns:
             'tabular', 'image', 'audio', or 'text'
         """
-        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"}
         audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
 
         def _dir_contains_ext(dir_path: Path, exts: set[str], limit: int = 200) -> bool:
@@ -409,7 +409,7 @@ class MLEBenchDataAdapter:
         )
         if train_csv:
             info.train_csv_path = train_csv
-            if data_type == "tabular":
+            if data_type == "tabular" and (info.train_path is None or info.train_path.is_file()):
                 info.train_path = train_csv
             print(f"   Train CSV: {train_csv.name}")
 
@@ -459,7 +459,7 @@ class MLEBenchDataAdapter:
         test_csv = self._find_csv_file(public_dir, ["test.csv", "test*.csv"])
         if test_csv:
             info.test_csv_path = test_csv
-            if data_type == "tabular":
+            if data_type == "tabular" and (info.test_path is None or info.test_path.is_file()):
                 info.test_path = test_csv
             print(f"   Test CSV: {test_csv.name}")
 
