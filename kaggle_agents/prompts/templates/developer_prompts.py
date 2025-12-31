@@ -48,12 +48,16 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 1. predict_proba() for classification (NOT predict())
 2. CV folds must respect `KAGGLE_AGENTS_CV_FOLDS` (default 5): StratifiedKFold(n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5")), shuffle=True, random_state=42)
 3. Pipeline/ColumnTransformer for preprocessing - fit INSIDE CV folds only
+   - If using manual scaling (e.g., Keras/TF), fit scaler on TRAIN fold only, then transform val/test
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
-5. Clamp predictions: np.clip(predictions, 0, 1) before saving
+5. Clamp predictions: np.clip(predictions, 1e-15, 1 - 1e-15) before saving
+   - Multiclass log_loss: re-normalize so each row sums to 1 after clipping
+   - Multi-label: DO NOT normalize across classes (sigmoid per class)
 6. Match sample_submission.csv exactly: columns, IDs, shape
-7. Print "Final Validation Performance: {score:.6f}" at the end (CRITICAL: Meta-Evaluator depends on this exact string)
-8. Set random_state=42 everywhere for reproducibility
-9. MANDATORY SOFT-DEADLINE PATTERN (prevents hard timeout kills):
+7. If using logits, apply softmax/sigmoid BEFORE log_loss and submission creation
+8. Print "Final Validation Performance: {score:.6f}" at the end (CRITICAL: Meta-Evaluator depends on this exact string)
+9. Set random_state=42 everywhere for reproducibility
+10. MANDATORY SOFT-DEADLINE PATTERN (prevents hard timeout kills):
 
    For sklearn/manual training loops:
    ```python
@@ -135,7 +139,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
    print(f"Final Validation Performance: {best_val_loss:.6f}")
    ```
 
-10. MODEL CHECKPOINTING - FULL MODEL SAVE (CRITICAL):
+11. MODEL CHECKPOINTING - FULL MODEL SAVE (CRITICAL):
     Due to disjointed train/inference environments, ALWAYS save the FULL MODEL object.
 
     ```python

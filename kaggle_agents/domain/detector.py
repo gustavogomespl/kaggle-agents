@@ -272,6 +272,61 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             return "text"
         return "tabular"
 
+    def _find_train_file(self, data_dir: Path) -> Path | None:
+        """Find a train.csv/train.parquet file in the data directory or one level below."""
+        candidates = [data_dir / "train.csv", data_dir / "train.parquet"]
+        for path in candidates:
+            if path.exists():
+                return path
+
+        if data_dir.exists():
+            for child in data_dir.iterdir():
+                if not child.is_dir():
+                    continue
+                for name in ("train.csv", "train.parquet"):
+                    path = child / name
+                    if path.exists():
+                        return path
+        return None
+
+    def _detect_tabular_from_csv(
+        self, competition_info: CompetitionInfo, data_dir: Path
+    ) -> tuple[DomainType, float] | None:
+        """
+        Heuristic override: if train.csv is wide with many numeric columns,
+        treat the competition as tabular even if images exist.
+        """
+        train_path = self._find_train_file(data_dir)
+        if not train_path:
+            return None
+
+        try:
+            if train_path.suffix.lower() == ".parquet":
+                if train_path.stat().st_size > 200 * 1024 * 1024:
+                    return None
+                df = pd.read_parquet(train_path)
+            else:
+                df = pd.read_csv(train_path, nrows=50)
+        except Exception:
+            return None
+
+        if df.empty:
+            return None
+
+        n_cols = len(df.columns)
+        if n_cols < 8:
+            return None
+
+        numeric_cols = df.select_dtypes(include="number").columns
+        numeric_ratio = len(numeric_cols) / max(n_cols, 1)
+
+        # Strong signal: many numeric feature columns
+        if len(numeric_cols) >= 10 or (n_cols >= 12 and numeric_ratio >= 0.5):
+            is_regression = "regression" in (competition_info.problem_type or "").lower()
+            return ("tabular_regression", 0.92) if is_regression else ("tabular_classification", 0.92)
+
+        return None
+
     def detect(
         self,
         competition_info: CompetitionInfo,
@@ -297,10 +352,18 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         # Step 1: If no LLM, use sophisticated structural heuristics
         # (detects image_to_image, segmentation, time_series, etc.)
         if self.llm is None:
+            tabular_override = self._detect_tabular_from_csv(competition_info, data_dir)
+            if tabular_override:
+                return tabular_override
             return self._detect_from_structure(competition_info, data_dir)
 
         # Step 2: Detect data type for context (used in LLM prompt)
         data_type = self._detect_data_type(data_dir)
+
+        # Tabular override for mixed datasets (e.g., images + rich numeric features)
+        tabular_override = self._detect_tabular_from_csv(competition_info, data_dir)
+        if tabular_override:
+            return tabular_override
 
         # Step 3: Use LLM for granular domain classification (LLM-First)
         # Scan files to provide context to LLM

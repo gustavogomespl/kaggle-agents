@@ -18,10 +18,13 @@ def build_cv_instructions(working_dir: str, component_name: str) -> list[str]:
         "        # ... train/val split ...",
         "    ```",
         "  - IF NOT EXISTS: Use StratifiedKFold(n_splits=int(os.getenv('KAGGLE_AGENTS_CV_FOLDS','5')), shuffle=True, random_state=42)",
+        "  - CRITICAL: Fit preprocessing/scalers INSIDE each CV fold (fit on X_train, transform X_val/X_test)",
         f"  - CRITICAL: MUST save Out-of-Fold (OOF) predictions during CV to models/oof_{component_name}.npy",
         "  - OOF predictions enable proper stacking ensemble (meta-model trained on OOF)",
         "  - MUST print 'Final Validation Performance: {score}'",
         "  - If metric is NaN/inf, replace with 0.0 before printing Final Validation Performance",
+        "  - Multiclass log_loss: after clipping, renormalize rows to sum to 1",
+        "  - If OOF rows are empty due to early stop, compute log_loss on rows with sum>0",
         "  - MUST handle class imbalance with class_weight='balanced'",
     ]
 

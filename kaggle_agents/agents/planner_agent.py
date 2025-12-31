@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+import os
 from typing import Any
 
 import dspy
@@ -423,6 +424,20 @@ Domain: {domain}
         sota_summary = json.dumps(sota_analysis, indent=2)
         domain_guidance = get_domain_guidance(domain)
 
+        # Resolve max components (allow override via env)
+        run_mode = state.get("run_mode", "")
+        objective = state.get("objective", "") or ""
+        fast_mode = bool(state.get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
+        max_components = 3 if fast_mode else 6
+        override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
+        if override:
+            try:
+                override_val = int(override)
+                if override_val >= 2:
+                    max_components = override_val
+            except ValueError:
+                print(f"  ⚠️ Invalid KAGGLE_AGENTS_MAX_COMPONENTS='{override}', using default")
+
         # Print curriculum insights
         if "No previous iteration" not in curriculum_insights:
             print(curriculum_insights)
@@ -484,7 +499,7 @@ IMPORTANT: Use the curriculum insights above to:
 
 Generate a plan that leverages proven successful strategies and avoids known pitfalls.
 
-Return a JSON array with 3-5 components. Each component must have:
+Return a JSON array with up to {max_components} components. Each component must have:
 - name: unique identifier
 - component_type: one of [feature_engineering, model, preprocessing, ensemble]
 - description: what this component does
@@ -985,6 +1000,14 @@ Return a JSON array with 3-5 components. Each component must have:
 
         # Limit components (quality over quantity)
         max_components = 3 if fast_mode else 6
+        override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
+        if override:
+            try:
+                override_val = int(override)
+                if override_val >= 2:
+                    max_components = override_val
+            except ValueError:
+                print(f"  ⚠️ Invalid KAGGLE_AGENTS_MAX_COMPONENTS='{override}', using default")
         if len(valid_plan) > max_components:
             print(
                 f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top {max_components} by impact"

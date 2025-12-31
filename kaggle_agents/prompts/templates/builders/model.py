@@ -148,7 +148,8 @@ def build_model_component_instructions(
                 "  - If sample_submission has >2 target columns, determine multi-class vs multi-label using train labels:",
                 "    - Multi-class: exactly one positive per row -> softmax",
                 "    - Multi-label: multiple positives per row -> sigmoid per class (no normalization)",
-                "  - For multi-class log_loss: probabilities must sum to 1 per row (clip to [1e-15, 1-1e-15])",
+                "  - For multi-class log_loss: probabilities must sum to 1 per row (clip to [1e-15, 1-1e-15] then renormalize)",
+                "  - If using logits (TF/PyTorch), apply softmax BEFORE log_loss and submission",
                 "  - For log_loss: avoid overconfidence (label_smoothing / calibration) and clip probabilities",
                 "  - Map class index order to sample_submission columns (do NOT sort labels independently)",
             ]
