@@ -660,6 +660,10 @@ Return a JSON object:
         print("ENSEMBLE AGENT: Creating Model Ensemble")
         print("=" * 60)
 
+        errors = []
+        if isinstance(state, dict):
+            errors = list(state.get("errors", []) or [])
+
         # check for temporal ensemble opportunity first if in later iterations
         current_iteration = state.get("current_iteration", 0)
         submissions = state.get("submissions", []) if isinstance(state, dict) else state.submissions
@@ -783,7 +787,9 @@ Return a JSON object:
                 print("   ⚠️ No accepted model OOF files found")
 
             accepted_names = accepted_oof_names
-            if len(accepted_names) < 2:
+            has_acceptance_metadata = bool(accepted_component_names)
+            accepted_filter_active = bool(accepted_names)
+            if has_acceptance_metadata and len(accepted_names) < 2:
                 print(
                     "\n   ⚠️  Not enough accepted model components for ensemble "
                     f"(have {len(accepted_names)}, need 2+)"
@@ -802,7 +808,7 @@ Return a JSON object:
             # Check if we have multiple models
             if len(models_trained) < 2:
                 prediction_pairs = self._find_prediction_pairs(models_dir)
-                if prediction_pairs and accepted_names:
+                if prediction_pairs and accepted_filter_active:
                     filtered = {
                         name: pair
                         for name, pair in prediction_pairs.items()
@@ -1114,26 +1120,18 @@ Return a JSON object:
                     # Scanner looks for "submission_iter_*.csv".
                     # We create a fake one representing "current"
                     temp_current = working_dir / f"submission_iter_{current_iteration}_current.csv"
-                    import shutil
-
                     shutil.copy2(current_sub, temp_current)
 
                 self.create_temporal_ensemble(
                     working_dir, submissions, current_iteration, metric_name
                 )
 
-            return (
-                {"errors": [*errors, error_msg]}
-                if errors
-                else {
-                    "best_model": {
-                        "name": f"ensemble_{ensemble_strategy}",
-                        "path": ensemble_path,
-                        "mean_cv_score": best_model.get("mean_cv_score", 0.0),
-                        "is_ensemble": True,
-                    }
-                }
-            )
+            errors.append(error_msg)
+            return {
+                "errors": errors,
+                "ensemble_skipped": True,
+                "skip_reason": "exception",
+            }
 
 
 def ensemble_agent_node(state: KaggleState) -> dict[str, Any]:
