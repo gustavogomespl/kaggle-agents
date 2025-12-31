@@ -998,6 +998,41 @@ Return a JSON array with up to {max_components} components. Each component must 
                 )
                 valid_plan = filtered_plan
 
+        # If an NN/MLP is dominant in tabular tasks, avoid tree models.
+        avoid_tree_models = False
+        if domain.startswith("tabular"):
+            best_name = str((state or {}).get("best_single_model_name", "")).lower()
+            if any(token in best_name for token in ("mlp", "nn", "neural", "keras")):
+                avoid_tree_models = True
+                tree_signals = [
+                    "lightgbm",
+                    "lgbm",
+                    "xgboost",
+                    "xgb",
+                    "catboost",
+                    "randomforest",
+                    "random_forest",
+                    "extratrees",
+                    "extra_trees",
+                    "gradientboost",
+                    "gbdt",
+                ]
+                filtered_plan = []
+                removed = []
+                for comp in valid_plan:
+                    if comp.component_type == "model":
+                        text = f"{comp.name} {comp.code}".lower()
+                        if any(sig in text for sig in tree_signals):
+                            removed.append(comp.name)
+                            continue
+                    filtered_plan.append(comp)
+                if removed:
+                    print(
+                        "  ⚠️  Removed tree models due to NN-dominant results: "
+                        + ", ".join(removed)
+                    )
+                valid_plan = filtered_plan
+
         # Limit components (quality over quantity)
         max_components = 3 if fast_mode else 6
         override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
@@ -1046,6 +1081,15 @@ Return a JSON array with up to {max_components} components. Each component must 
                     tested=False,
                     actual_impact=None,
                 )
+            elif avoid_tree_models and tabular_domain:
+                baseline = AblationComponent(
+                    name="baseline_tabular_mlp",
+                    component_type="model",
+                    code="Tabular MLP with StandardScaler, Dropout, softmax for multiclass.",
+                    estimated_impact=0.18 if not fast_mode else 0.12,
+                    tested=False,
+                    actual_impact=None,
+                )
             else:
                 baseline = AblationComponent(
                     name="baseline_lightgbm",
@@ -1060,14 +1104,24 @@ Return a JSON array with up to {max_components} components. Each component must 
 
         elif model_count == 1 and require_two_models:
             print("  ⚠️  Only 1 'model' component found - adding second baseline model")
-            baseline_model = AblationComponent(
-                name="baseline_xgboost",
-                component_type="model",
-                code="",
-                estimated_impact=0.18,
-                tested=False,
-                actual_impact=None,
-            )
+            if avoid_tree_models and tabular_domain:
+                baseline_model = AblationComponent(
+                    name="baseline_tabular_mlp_2",
+                    component_type="model",
+                    code="Tabular MLP variant with wider layers or batchnorm.",
+                    estimated_impact=0.16 if not fast_mode else 0.10,
+                    tested=False,
+                    actual_impact=None,
+                )
+            else:
+                baseline_model = AblationComponent(
+                    name="baseline_xgboost",
+                    component_type="model",
+                    code="",
+                    estimated_impact=0.18,
+                    tested=False,
+                    actual_impact=None,
+                )
             valid_plan.append(baseline_model)
             print(f"     Added: {baseline_model.name}")
 

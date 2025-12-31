@@ -10,6 +10,8 @@ def build_ensemble_instructions(target_col: str = "target") -> list[str]:
         "  - Combine predictions from multiple models",
         "  - PREFERRED STRATEGY: Stacking Ensemble (best performance)",
         "    - Load OOF predictions from models/oof_*.npy files",
+        "    - Match test predictions by name: models/test_{name}.npy for each oof_{name}.npy",
+        "    - DO NOT hardcode filenames like test_preds_mlp.npy; discover pairs dynamically",
         "    - Stack OOF predictions: oof_stack = np.column_stack([oof1, oof2, ...])",
         "    - Train meta-model (LogisticRegression/Ridge) on stacked OOF",
         "    - Load test predictions from each model and stack them",

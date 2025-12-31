@@ -50,6 +50,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 3. Pipeline/ColumnTransformer for preprocessing - fit INSIDE CV folds only
    - If using manual scaling (e.g., Keras/TF), fit scaler on TRAIN fold only, then transform val/test
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
+   - Save test predictions: np.save('models/test_{component_name}.npy', test_predictions)
 5. Clamp predictions: np.clip(predictions, 1e-15, 1 - 1e-15) before saving
    - Multiclass log_loss: re-normalize so each row sums to 1 after clipping
    - Multi-label: DO NOT normalize across classes (sigmoid per class)

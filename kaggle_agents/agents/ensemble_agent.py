@@ -1,5 +1,7 @@
 """Ensemble agent for model stacking and blending."""
 
+import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -752,9 +754,67 @@ Return a JSON object:
                     )
                     print(f"      {i}. {artifacts_str}")
 
+            accepted_component_names: set[str] = set()
+            if isinstance(state, dict):
+                for key in state.keys():
+                    if isinstance(key, str) and key.startswith("component_result_"):
+                        accepted_component_names.add(key.replace("component_result_", "", 1))
+
+            accepted_oof_names: set[str] = set()
+            if accepted_component_names:
+                accepted_oof_names = {
+                    name
+                    for name in accepted_component_names
+                    if (models_dir / f"oof_{name}.npy").exists()
+                }
+
+            if accepted_component_names:
+                print(
+                    "   ✅ Accepted components: " + ", ".join(sorted(accepted_component_names))
+                )
+            else:
+                print("   ⚠️ No accepted component keys found")
+
+            if accepted_oof_names:
+                print(
+                    "   ✅ Accepted model OOFs: " + ", ".join(sorted(accepted_oof_names))
+                )
+            else:
+                print("   ⚠️ No accepted model OOF files found")
+
+            accepted_names = accepted_oof_names
+            if len(accepted_names) < 2:
+                print(
+                    "\n   ⚠️  Not enough accepted model components for ensemble "
+                    f"(have {len(accepted_names)}, need 2+)"
+                )
+                best_submission = working_dir / "submission_best.csv"
+                if best_submission.exists():
+                    shutil.copy(best_submission, working_dir / "submission.csv")
+                    print("      ✅ Restored submission.csv from submission_best.csv")
+                return {
+                    "ensemble_skipped": True,
+                    "skip_reason": (
+                        f"insufficient_accepted_models (have {len(accepted_names)}, need 2+)"
+                    ),
+                }
+
             # Check if we have multiple models
             if len(models_trained) < 2:
                 prediction_pairs = self._find_prediction_pairs(models_dir)
+                if prediction_pairs and accepted_names:
+                    filtered = {
+                        name: pair
+                        for name, pair in prediction_pairs.items()
+                        if name in accepted_names
+                    }
+                    dropped = set(prediction_pairs) - set(filtered)
+                    if dropped:
+                        print(
+                            "   ⚠️ Excluding prediction pairs from non-accepted components: "
+                            + ", ".join(sorted(dropped))
+                        )
+                    prediction_pairs = filtered
                 if prediction_pairs:
                     missing_tests = [
                         p.stem.replace("oof_", "", 1)
@@ -785,6 +845,10 @@ Return a JSON object:
                 print(
                     "      Reason: Ensemble requires at least 2 trained models or 2 OOF/Test pairs"
                 )
+                best_submission = working_dir / "submission_best.csv"
+                if best_submission.exists():
+                    shutil.copy(best_submission, working_dir / "submission.csv")
+                    print("      ✅ Restored submission.csv from submission_best.csv")
                 print("      Skipping ensemble step")
                 return {
                     "ensemble_skipped": True,
