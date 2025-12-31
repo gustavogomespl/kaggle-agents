@@ -34,6 +34,52 @@ class EnsembleAgent:
                 pairs[name] = (oof_path, test_path)
         return pairs
 
+    def _validate_class_order(
+        self, models_dir: Path, sample_submission_path: Path
+    ) -> tuple[bool, str]:
+        """Validate that saved predictions use canonical class order.
+
+        Checks if class_order.npy exists and matches sample_submission columns.
+        This prevents ensemble degradation from misaligned class predictions.
+
+        Args:
+            models_dir: Directory containing model artifacts
+            sample_submission_path: Path to sample_submission.csv
+
+        Returns:
+            Tuple of (is_valid, message)
+        """
+        class_order_path = models_dir / "class_order.npy"
+
+        if not class_order_path.exists():
+            return False, (
+                "class_order.npy not found - predictions may have misaligned class orders. "
+                "Ensemble averaging may produce degraded results."
+            )
+
+        if not sample_submission_path.exists():
+            return False, "sample_submission.csv not found for class order validation"
+
+        try:
+            # Load saved class order
+            saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+
+            # Load expected class order from sample submission
+            sample_sub = pd.read_csv(sample_submission_path)
+            expected_order = sample_sub.columns[1:].tolist()
+
+            if saved_order != expected_order:
+                return False, (
+                    f"Class order mismatch! "
+                    f"Saved: {saved_order[:5]}... "
+                    f"Expected: {expected_order[:5]}..."
+                )
+
+            return True, f"Class order validated ({len(saved_order)} classes)"
+
+        except Exception as e:
+            return False, f"Class order validation error: {e}"
+
     def _ensemble_from_predictions(
         self,
         prediction_pairs: dict[str, tuple[Path, Path]],
@@ -44,6 +90,16 @@ class EnsembleAgent:
         if not sample_submission_path.exists():
             print("   ❌ Sample submission not found, cannot build prediction ensemble")
             return False
+
+        # Validate class order alignment before ensembling
+        if prediction_pairs:
+            models_dir = list(prediction_pairs.values())[0][0].parent
+            is_valid, msg = self._validate_class_order(models_dir, sample_submission_path)
+            if is_valid:
+                print(f"   ✅ {msg}")
+            else:
+                print(f"   ⚠️  Class order warning: {msg}")
+                # Continue but warn - older models may not have class_order.npy
 
         sample_sub = pd.read_csv(sample_submission_path)
         preds_list = []
@@ -808,7 +864,14 @@ Return a JSON object:
             # Check if we have multiple models
             if len(models_trained) < 2:
                 prediction_pairs = self._find_prediction_pairs(models_dir)
+                best_single_model_name = (
+                    state.get("best_single_model_name")
+                    if isinstance(state, dict)
+                    else getattr(state, "best_single_model_name", None)
+                )
+
                 if prediction_pairs and accepted_filter_active:
+                    # Case 1: Filter by accepted models only
                     filtered = {
                         name: pair
                         for name, pair in prediction_pairs.items()
@@ -821,6 +884,51 @@ Return a JSON object:
                             + ", ".join(sorted(dropped))
                         )
                     prediction_pairs = filtered
+                elif prediction_pairs and not accepted_filter_active:
+                    # Case 2: No accepted components - use ONLY best single model to avoid degradation
+                    if best_single_model_name and best_single_model_name in prediction_pairs:
+                        print(
+                            f"\n   ⚠️ No accepted components found. Using best single model: {best_single_model_name}"
+                        )
+                        print("      Reason: Ensembling unvalidated models causes score degradation")
+
+                        # Use only the best single model's predictions
+                        _, test_path = prediction_pairs[best_single_model_name]
+                        preds = np.load(test_path)
+                        preds = np.asarray(preds, dtype=np.float32)
+
+                        sample_path = (
+                            Path(sample_submission_path)
+                            if sample_submission_path
+                            else working_dir / "sample_submission.csv"
+                        )
+                        if sample_path.exists():
+                            sample_sub = pd.read_csv(sample_path)
+                            if preds.ndim == 1:
+                                sample_sub.iloc[:, 1] = preds
+                            else:
+                                sample_sub.iloc[:, 1:] = preds
+                            sample_sub.to_csv(working_dir / "submission.csv", index=False)
+                            print(f"   ✅ Using best single model predictions: {best_single_model_name}")
+                            return {
+                                "ensemble_skipped": True,
+                                "skip_reason": "using_best_single_model",
+                                "best_model_used": best_single_model_name,
+                            }
+                    else:
+                        # No accepted components and no valid best_single_model - fall back to submission_best.csv
+                        print("\n   ⚠️ No accepted components and no best_single_model_name tracked.")
+                        print("      Falling back to submission_best.csv to avoid ensemble degradation.")
+                        best_submission = working_dir / "submission_best.csv"
+                        if best_submission.exists():
+                            shutil.copy(best_submission, working_dir / "submission.csv")
+                            print("      ✅ Restored submission.csv from submission_best.csv")
+                        return {
+                            "ensemble_skipped": True,
+                            "skip_reason": "no_accepted_components_no_best_model",
+                        }
+
+                # Check for missing test files
                 if prediction_pairs:
                     missing_tests = [
                         p.stem.replace("oof_", "", 1)
@@ -829,6 +937,8 @@ Return a JSON object:
                     ]
                     if missing_tests:
                         print(f"   ⚠️ Missing test_* for: {', '.join(missing_tests[:5])}")
+
+                    # Only ensemble if we have 2+ ACCEPTED models
                     if len(prediction_pairs) >= 2:
                         print("\n   ✅ Using prediction-only ensemble from OOF/Test pairs")
                         output_path = working_dir / "submission.csv"

@@ -161,6 +161,7 @@ class RetryMixin:
             exec_result = self.executor.execute(
                 code=simplified_code,
                 working_dir=working_dir,
+                component_type=component.component_type,
             )
 
             if exec_result.success:
@@ -403,7 +404,9 @@ class RetryMixin:
             response = debug_llm.invoke(messages)
             debugged_code = self._extract_code_from_response(get_text_content(response.content))
 
-            test_result = self.executor.execute(debugged_code, working_dir)
+            test_result = self.executor.execute(
+                debugged_code, working_dir, component_type=component_type
+            )
 
             if test_result.success:
                 print("Debug successful!")

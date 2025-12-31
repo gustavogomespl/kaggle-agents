@@ -518,7 +518,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                         )
 
                         print("Executing refined code...")
-                        refined_exec = self.executor.execute(refined_code, working_dir)
+                        refined_exec = self.executor.execute(
+                            refined_code, working_dir, component_type=component.component_type
+                        )
 
                         if refined_exec.success:
                             refined_score = self._extract_cv_score(refined_exec.stdout)
@@ -907,6 +909,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             exec_result = self.executor.execute(
                 code=code,
                 working_dir=working_dir,
+                component_type=component.component_type,
             )
             for k, old in prev_env.items():
                 if old is None:

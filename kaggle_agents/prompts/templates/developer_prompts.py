@@ -51,6 +51,27 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
    - If using manual scaling (e.g., Keras/TF), fit scaler on TRAIN fold only, then transform val/test
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
    - Save test predictions: np.save('models/test_{component_name}.npy', test_predictions)
+   - **CRITICAL CLASS ORDER ALIGNMENT (PREVENTS ENSEMBLE DEGRADATION)**:
+     Predictions MUST be reordered to sample_submission column order BEFORE saving:
+     ```python
+     # Get canonical class order from sample_submission
+     sample_sub = pd.read_csv(sample_submission_path)
+     class_order = sample_sub.columns[1:].tolist()
+
+     # Get LabelEncoder's class order
+     le_classes = label_encoder.classes_.tolist()
+
+     # Compute reorder indices: map from LabelEncoder order to submission order
+     reorder_idx = [le_classes.index(c) for c in class_order]
+
+     # Reorder predictions before saving
+     oof_preds = oof_preds[:, reorder_idx]
+     test_preds = test_preds[:, reorder_idx]
+
+     # Save canonical class order for ensemble validation
+     np.save('models/class_order.npy', class_order)
+     ```
+   - This ensures all models save predictions in the SAME column order, enabling correct ensemble averaging.
 5. Clamp predictions: np.clip(predictions, 1e-15, 1 - 1e-15) before saving
    - Multiclass log_loss: re-normalize so each row sums to 1 after clipping
    - Multi-label: DO NOT normalize across classes (sigmoid per class)

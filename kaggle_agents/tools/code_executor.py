@@ -282,12 +282,65 @@ class CodeExecutor:
 
         return code, fixes_applied
 
-    def validate_code_before_execution(self, code: str) -> tuple[bool, str]:
+    def detect_model_training(self, code: str) -> list[str]:
+        """
+        Detect model training patterns in code.
+
+        Used to validate that preprocessing/feature_engineering components
+        do not contain model training, which violates their contract.
+
+        Args:
+            code: Python code to analyze
+
+        Returns:
+            List of detected training patterns (empty if none found)
+        """
+        training_patterns = [
+            # Sklearn-style fit patterns
+            (r"\.fit\s*\(", ".fit() call"),
+            (r"\.fit_transform\s*\(", ".fit_transform() call"),
+
+            # Tree-based models
+            (r"RandomForest(?:Classifier|Regressor)\s*\(", "RandomForest model"),
+            (r"(?:LGBM|LightGBM)(?:Classifier|Regressor)\s*\(", "LightGBM model"),
+            (r"(?:XGB|XGBoost)(?:Classifier|Regressor)\s*\(", "XGBoost model"),
+            (r"CatBoost(?:Classifier|Regressor)\s*\(", "CatBoost model"),
+            (r"GradientBoosting(?:Classifier|Regressor)\s*\(", "GradientBoosting model"),
+            (r"ExtraTrees(?:Classifier|Regressor)\s*\(", "ExtraTrees model"),
+
+            # Linear models
+            (r"LogisticRegression\s*\(", "LogisticRegression model"),
+            (r"(?:Linear|Ridge|Lasso|ElasticNet)(?:Regression|Classifier)\s*\(", "Linear model"),
+            (r"(?:SVC|SVR)\s*\(", "SVM model"),
+
+            # Neural network training
+            (r"model\.train\s*\(", "PyTorch model.train()"),
+            (r"\.fit\s*\([^)]*epochs", "Keras/TF model.fit() with epochs"),
+            (r"optimizer\.step\s*\(", "PyTorch optimizer.step()"),
+            (r"loss\.backward\s*\(", "PyTorch loss.backward()"),
+
+            # Cross-validation (implies training)
+            (r"cross_val_predict\s*\(", "cross_val_predict()"),
+            (r"cross_val_score\s*\(", "cross_val_score()"),
+        ]
+
+        detected = []
+        for pattern, description in training_patterns:
+            if re.search(pattern, code):
+                detected.append(description)
+
+        return detected
+
+    def validate_code_before_execution(
+        self, code: str, component_type: str | None = None
+    ) -> tuple[bool, str]:
         """
         Validates code meets requirements before execution (MLE-STAR pattern).
 
         Args:
             code: Python code to validate
+            component_type: Type of component ('preprocessing', 'feature_engineering', 'model', etc.)
+                           Used to validate that preprocessing doesn't train models.
 
         Returns:
             Tuple of (is_valid, message)
@@ -324,7 +377,54 @@ class CodeExecutor:
             if not has_pattern:
                 return False, error_msg
 
-        # Check 5: Warning about categorical features (informational only)
+        # Check 5: Block model training in preprocessing/feature_engineering components
+        # These component types should ONLY transform data, not train ML models
+        if component_type in ("preprocessing", "feature_engineering"):
+            training_patterns = self.detect_model_training(code)
+
+            if training_patterns:
+                # Allow certain patterns for legitimate preprocessing uses
+                # e.g., LabelEncoder.fit_transform for encoding, StandardScaler.fit for scaling
+                allowed_patterns = {
+                    ".fit() call",  # Could be scaler.fit() which is allowed
+                    ".fit_transform() call",  # Could be encoder.fit_transform() which is allowed
+                }
+
+                # Check if patterns are for feature importance-based selection (allowed)
+                is_feature_selection = (
+                    "feature_importances_" in code
+                    or "get_score(" in code  # XGBoost feature importance
+                    or "feature_importance(" in code  # LightGBM
+                    or "SelectFromModel" in code
+                )
+
+                # Filter out allowed patterns
+                blocked_patterns = [
+                    p for p in training_patterns
+                    if p not in allowed_patterns or any(
+                        model in p for model in [
+                            "RandomForest", "LightGBM", "XGBoost", "CatBoost",
+                            "LogisticRegression", "GradientBoosting", "SVM",
+                            "Linear model", "ExtraTrees", "cross_val"
+                        ]
+                    )
+                ]
+
+                if blocked_patterns and not is_feature_selection:
+                    return False, (
+                        f"Model training detected in {component_type} component: "
+                        f"{', '.join(blocked_patterns)}. "
+                        f"Preprocessing/feature_engineering components MUST NOT train models. "
+                        f"Move model training to a 'model' component instead."
+                    )
+                elif blocked_patterns:
+                    # It's feature selection - just warn but allow
+                    print(
+                        f"   ⚠️  {component_type} uses models for feature selection: "
+                        f"{', '.join(blocked_patterns)}"
+                    )
+
+        # Check 6: Warning about categorical features (informational only)
         # This is a soft check - we warn but don't fail
         has_categorical_check = (
             "select_dtypes" in code
@@ -367,6 +467,7 @@ class CodeExecutor:
         code: str,
         working_dir: str,
         expected_artifacts: list = None,
+        component_type: str | None = None,
     ) -> ExecutionResult:
         """
         Execute Python code in a subprocess.
@@ -375,6 +476,8 @@ class CodeExecutor:
             code: Python code to execute
             working_dir: Working directory for execution
             expected_artifacts: List of expected output files/directories
+            component_type: Type of component ('preprocessing', 'feature_engineering', 'model', etc.)
+                           Used to validate that preprocessing doesn't train models.
 
         Returns:
             ExecutionResult with execution details
@@ -383,7 +486,7 @@ class CodeExecutor:
         code, _fixes_applied = self.sanitize_code(code)
 
         # PRE-EXECUTION VALIDATION (MLE-STAR Pattern)
-        is_valid, validation_msg = self.validate_code_before_execution(code)
+        is_valid, validation_msg = self.validate_code_before_execution(code, component_type)
         if not is_valid:
             print(f"   ⚠️  Code validation failed: {validation_msg}")
             return ExecutionResult(
