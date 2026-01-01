@@ -140,6 +140,125 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
         }
 
 
+def data_validation_node(state: KaggleState) -> dict[str, Any]:
+    """
+    Validate and normalize data paths before planning.
+
+    Ensures image competitions use image directories (not label CSVs).
+    """
+    print("\n" + "=" * 60)
+    print("= DATA VALIDATION")
+    print("=" * 60)
+
+    working_dir = Path(state["working_directory"])
+    data_files = dict(state.get("data_files") or {})
+    data_type = str(data_files.get("data_type", "")).lower()
+
+    image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"}
+
+    def _dir_has_ext(dir_path: Path, exts: set[str], limit: int = 200) -> bool:
+        if not dir_path.exists() or not dir_path.is_dir():
+            return False
+        checked = 0
+        for p in dir_path.rglob("*"):
+            if not p.is_file():
+                continue
+            checked += 1
+            if p.suffix.lower() in exts:
+                return True
+            if checked >= limit:
+                break
+        return False
+
+    def _first_dir_with_images(candidates: list[Path | str | None]) -> Path | None:
+        for candidate in candidates:
+            if not candidate:
+                continue
+            path = Path(candidate)
+            if _dir_has_ext(path, image_exts):
+                return path
+        return None
+
+    train_candidates = [
+        data_files.get("train"),
+        working_dir / "train",
+        working_dir / "train_images",
+        working_dir / "train_imgs",
+        working_dir / "images" / "train",
+        working_dir / "images",
+    ]
+    test_candidates = [
+        data_files.get("test"),
+        working_dir / "test",
+        working_dir / "test_images",
+        working_dir / "test_imgs",
+        working_dir / "images" / "test",
+        working_dir / "images",
+    ]
+
+    train_dir = _first_dir_with_images(train_candidates)
+    test_dir = _first_dir_with_images(test_candidates)
+
+    if test_dir and not train_dir:
+        base = test_dir.parent
+        train_dir = _first_dir_with_images(
+            [
+                base / "train",
+                base / "train_images",
+                base / "train_imgs",
+                base / "images" / "train",
+                base / "images",
+            ]
+        )
+
+    if train_dir and not test_dir:
+        base = train_dir.parent
+        test_dir = _first_dir_with_images(
+            [
+                base / "test",
+                base / "test_images",
+                base / "test_imgs",
+                base / "images" / "test",
+                base / "images",
+            ]
+        )
+
+    train_csv = data_files.get("train_csv") or str(working_dir / "train.csv")
+    train_csv_path = Path(train_csv) if train_csv else None
+    has_train_csv = bool(train_csv_path and train_csv_path.exists())
+
+    detected_type = data_type
+    if train_dir or test_dir:
+        detected_type = "image"
+    elif has_train_csv and data_type in {"", "tabular"}:
+        detected_type = "tabular"
+
+    updates: dict[str, Any] = {"last_updated": datetime.now()}
+
+    if detected_type and detected_type != data_type:
+        print(f"   Data type override: {data_type or 'unknown'} -> {detected_type}")
+        data_files["data_type"] = detected_type
+
+    if train_dir:
+        print(f"   Train images: {train_dir}")
+        data_files["train"] = str(train_dir)
+        updates["current_train_path"] = str(train_dir)
+        updates["train_data_path"] = str(train_dir)
+    elif has_train_csv and detected_type == "tabular":
+        print(f"   Train CSV: {train_csv_path}")
+        data_files["train_csv"] = str(train_csv_path)
+        updates["train_data_path"] = str(train_csv_path)
+
+    if test_dir:
+        print(f"   Test images: {test_dir}")
+        data_files["test"] = str(test_dir)
+        updates["current_test_path"] = str(test_dir)
+        updates["test_data_path"] = str(test_dir)
+
+    updates["data_files"] = data_files
+    return updates
+
+
 def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     """
     Detect competition domain using LLM-First approach.
@@ -204,8 +323,26 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
                 print(f"      Expected rows: {sub_meta.get('expected_rows', 'unknown')}")
                 print(f"      ID pattern: {sub_meta.get('id_pattern', 'unknown')}")
 
+    if not domain or confidence < 0.5:
+        data_type = str(data_files.get("data_type", "")).lower()
+        fallback_domain = None
+        if data_type == "image":
+            fallback_domain = "image_classification"
+        elif data_type == "audio":
+            fallback_domain = "audio_classification"
+        elif data_type == "text":
+            fallback_domain = "text_classification"
+        elif data_type == "tabular":
+            fallback_domain = "tabular"
+        if fallback_domain:
+            print(f"   Fallback domain from data_type='{data_type}': {fallback_domain}")
+            domain = fallback_domain
+            confidence = max(confidence, 0.6)
+
     print(f"\n Domain Detected: {domain}")
     print(f"   Confidence: {confidence:.1%}")
+
+    competition_info.domain = domain
 
     return {
         "domain_detected": domain,
@@ -693,6 +830,7 @@ def create_workflow() -> StateGraph:
 
     # Add nodes
     workflow.add_node("data_download", data_download_node)
+    workflow.add_node("data_validation", data_validation_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
@@ -710,8 +848,9 @@ def create_workflow() -> StateGraph:
     # Start → Data Download
     workflow.set_entry_point("data_download")
 
-    # Data Download → Domain Detection
-    workflow.add_edge("data_download", "domain_detection")
+    # Data Download → Data Validation → Domain Detection
+    workflow.add_edge("data_download", "data_validation")
+    workflow.add_edge("data_validation", "domain_detection")
 
     # Domain Detection → Search
     workflow.add_edge("domain_detection", "search")
@@ -946,6 +1085,7 @@ def create_mlebench_workflow() -> StateGraph:
     workflow = StateGraph(KaggleState)
 
     # Add nodes (skip data_download)
+    workflow.add_node("data_validation", data_validation_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
@@ -961,10 +1101,11 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("reporting", reporting_agent_node)
 
-    # Entry point: domain_detection (data already loaded)
-    workflow.set_entry_point("domain_detection")
+    # Entry point: data_validation (data already loaded)
+    workflow.set_entry_point("data_validation")
 
-    # Domain Detection → Search
+    # Data Validation → Domain Detection → Search
+    workflow.add_edge("data_validation", "domain_detection")
     workflow.add_edge("domain_detection", "search")
 
     # Search → Planner
@@ -1040,6 +1181,7 @@ def create_simple_workflow() -> StateGraph:
 
     # Add nodes
     workflow.add_node("data_download", data_download_node)
+    workflow.add_node("data_validation", data_validation_node)
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
@@ -1047,7 +1189,8 @@ def create_simple_workflow() -> StateGraph:
 
     # Linear flow
     workflow.set_entry_point("data_download")
-    workflow.add_edge("data_download", "domain_detection")
+    workflow.add_edge("data_download", "data_validation")
+    workflow.add_edge("data_validation", "domain_detection")
     workflow.add_edge("domain_detection", "search")
     workflow.add_edge("search", "planner")
     workflow.add_edge("planner", "developer")
