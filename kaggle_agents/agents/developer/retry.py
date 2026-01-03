@@ -285,14 +285,20 @@ class RetryMixin:
         )
         print(f"   🌡️  Fix temperature: {fix_temperature} (attempt {attempt + 1})")
 
+        fixed_code: str | None = None
+
         if self.use_dspy:
-            result = self.fixer_module(
-                code=code,
-                error=error_text,
-                error_type=error_info["error_type"],
-            )
-            fixed_code = self._extract_code_from_response(result.fixed_code)
-        else:
+            try:
+                result = self.fixer_module(
+                    code=code,
+                    error=error_text,
+                    error_type=error_info["error_type"],
+                )
+                fixed_code = self._extract_code_from_response(result.fixed_code)
+            except Exception as e:
+                print(f"   ⚠️ DSPy fixer failed: {e}. Falling back to direct LLM fix.")
+
+        if fixed_code is None:
             prompt = FIX_CODE_PROMPT.format(
                 code=code,
                 error=error_text,
@@ -306,14 +312,20 @@ class RetryMixin:
                 HumanMessage(content=prompt),
             ]
 
-            # Create LLM with dynamic temperature for fixing
-            fix_llm = get_llm_for_role(
-                role="developer",
-                temperature=fix_temperature,
-                max_tokens=self.config.llm.max_tokens,
-            )
-            response = fix_llm.invoke(messages)
-            fixed_code = self._extract_code_from_response(get_text_content(response.content))
+            try:
+                # Create LLM with dynamic temperature for fixing
+                fix_llm = get_llm_for_role(
+                    role="developer",
+                    temperature=fix_temperature,
+                    max_tokens=self.config.llm.max_tokens,
+                )
+                response = fix_llm.invoke(messages)
+                fixed_code = self._extract_code_from_response(
+                    get_text_content(response.content)
+                )
+            except Exception as e:
+                print(f"   ⚠️ Fallback fixer failed: {e}. Returning original code.")
+                return code
 
         return fixed_code
 

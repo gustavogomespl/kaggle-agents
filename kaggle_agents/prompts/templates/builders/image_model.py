@@ -25,6 +25,7 @@ def build_image_model_instructions(
         "  - Avoid heavy backbones (e.g., resnet152) unless you have ample time budget",
         "  - Use ONE framework per run (PyTorch OR Keras) and keep inference consistent",
         "  - If using TensorFlow: tf.io.read_file + tf.image.decode_jpeg/png(channels=3), tf.ensure_shape, Dataset.ignore_errors(), Dataset.repeat()",
+        "  - Avoid tf.image.decode_image unless you also call tf.ensure_shape and set static shape",
         "  - If using TensorFlow: avoid .numpy() inside tf.data map; use tf.print/tf.debugging for logs",
         "  - Save best full model: PyTorch -> models/best_model.pth, Keras -> models/best_model.keras",
         "  - PyTorch must save full model object (torch.save(model, ...)), NOT state_dict",

@@ -1723,6 +1723,22 @@ Return a JSON object:
                 except Exception as e:
                     print(f"   ⚠️ Failed to load train data for OOF gating: {e}")
                     return None, None
+                sample_path = (
+                    Path(sample_submission_path)
+                    if sample_submission_path
+                    else working_dir / "sample_submission.csv"
+                )
+                class_order: list[str] | None = None
+                if sample_path.exists():
+                    try:
+                        sample_sub = pd.read_csv(sample_path)
+                        class_order = sample_sub.columns[1:].tolist()
+                        if class_order and all(col in train_df.columns for col in class_order):
+                            # Ambiguous multi-label layout; skip gating to avoid wrong metric.
+                            return None, None
+                    except Exception:
+                        class_order = None
+
                 target_col = None
                 for col in ("target", "label", train_df.columns[-1]):
                     if col in train_df.columns:
@@ -1730,34 +1746,35 @@ Return a JSON object:
                         break
                 if not target_col:
                     return None, None
+
                 y_series = train_df[target_col]
                 n_unique = y_series.nunique(dropna=True)
-                problem_type = "classification" if n_unique < 20 else "regression"
-                y_vals: np.ndarray
+                unique_ratio = n_unique / max(len(y_series), 1)
+
+                if class_order and len(class_order) > 1:
+                    problem_type = "classification"
+                elif y_series.dtype.kind in {"O", "U", "S"}:
+                    problem_type = "classification"
+                elif unique_ratio <= 0.2 and n_unique <= 200:
+                    problem_type = "classification"
+                else:
+                    problem_type = "regression"
+
                 if problem_type == "classification":
                     if y_series.dtype.kind in {"O", "U", "S"}:
-                        sample_path = (
-                            Path(sample_submission_path)
-                            if sample_submission_path
-                            else working_dir / "sample_submission.csv"
-                        )
-                        if sample_path.exists():
-                            try:
-                                sample_sub = pd.read_csv(sample_path)
-                                class_order = sample_sub.columns[1:].tolist()
-                                mapping = {label: idx for idx, label in enumerate(class_order)}
-                                mapped = y_series.map(mapping)
-                                if mapped.isnull().any():
-                                    return None, None
-                                y_vals = mapped.to_numpy()
-                            except Exception:
+                        if class_order:
+                            mapping = {label: idx for idx, label in enumerate(class_order)}
+                            mapped = y_series.map(mapping)
+                            if mapped.isnull().any():
                                 return None, None
+                            y_vals = mapped.to_numpy()
                         else:
                             y_vals, _ = pd.factorize(y_series)
                     else:
                         y_vals = y_series.to_numpy()
                 else:
                     y_vals = y_series.to_numpy()
+
                 return y_vals, problem_type
 
             # DEBUG: Detailed information about available models

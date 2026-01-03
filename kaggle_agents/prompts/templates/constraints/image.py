@@ -20,6 +20,27 @@ train_transform = transforms.Compose([
 val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
 ```
 
+### 1b. TensorFlow Image Decode Safety (CRITICAL)
+`tf.image.decode_image` can return tensors without static shape, causing
+`ValueError: 'images' contains no shape` during resize. Use format-specific decoders.
+
+```python
+def decode_image(path: tf.Tensor) -> tf.Tensor:
+    img = tf.io.read_file(path)
+    img = tf.image.decode_jpeg(img, channels=3)  # or decode_png
+    img = tf.ensure_shape(img, [None, None, 3])
+    img = tf.image.resize(img, (224, 224))
+    return img
+
+dataset = dataset.map(decode_image, num_parallel_calls=tf.data.AUTOTUNE)
+dataset = dataset.apply(tf.data.Dataset.ignore_errors())
+```
+
+If you must use `tf.py_function`, always set shape after:
+```python
+img.set_shape((224, 224, 3))
+```
+
 ### 2. Negative Strides (numpy/torch error)
 `np.flip()`, `np.rot90()` create negative strides that PyTorch can't handle.
 
