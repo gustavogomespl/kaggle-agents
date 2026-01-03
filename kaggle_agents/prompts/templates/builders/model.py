@@ -307,6 +307,19 @@ def build_dynamic_instructions(
     competition_info = state.get("competition_info")
     metric_name = competition_info.evaluation_metric if competition_info else ""
 
+    if metric_name:
+        metric_lower = str(metric_name).lower()
+        instructions.extend(
+            [
+                "\n📏 METRIC REQUIREMENT (CONSISTENT EVALUATION):",
+                f"  - Use competition metric '{metric_name}' for Final Validation Performance",
+            ]
+        )
+        if is_classification and ("log" in metric_lower or "loss" in metric_lower):
+            instructions.append(
+                "  - For log_loss metrics: compute log_loss on OOF predictions (clip + renormalize); do NOT print accuracy/AUC"
+            )
+
     # Build budget instructions
     instructions.extend(build_budget_instructions(timeout_hint))
 

@@ -35,18 +35,18 @@ def create_image_fallback_plan(
             {
                 "name": f"efficientnet_b0_fast_{task}",
                 "component_type": "model",
-                "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern. Save full model to models/best_model.pth.",
+                "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern. Save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras).",
                 "estimated_impact": 0.30,
                 "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
-                "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save full model to models/best_model.pth, implement _check_deadline() pattern",
+                "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras), implement _check_deadline() pattern",
             },
             {
                 "name": "tta_inference_only",
                 "component_type": "ensemble",
-                "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.pth and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
+                "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.* (auto-detect extension) and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
                 "estimated_impact": 0.05,
                 "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
-                "code_outline": "Load full model from models/best_model.pth, for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
+                "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
             },
         ]
 
@@ -58,7 +58,7 @@ def create_image_fallback_plan(
             "description": f"EfficientNet-B0 pre-trained fine-tuned for {task}. PyTorch DataLoader with ImageFolder or custom Dataset. Data augmentation (rotation, flip, color jitter). Use transfer learning from ImageNet weights.",
             "estimated_impact": 0.28,
             "rationale": "EfficientNet achieves SOTA on ImageNet with excellent efficiency. Transfer learning transfers learned features. Data augmentation prevents overfitting on small datasets.",
-            "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, CV folds via KAGGLE_AGENTS_CV_FOLDS, save full model to models/best_model.pth and OOF predictions for ensemble",
+            "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, CV folds via KAGGLE_AGENTS_CV_FOLDS, save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras) and OOF predictions for ensemble",
         },
         {
             "name": f"resnet50_{task}",

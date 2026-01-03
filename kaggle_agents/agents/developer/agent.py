@@ -7,6 +7,7 @@ with automatic retry and debugging capabilities.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from datetime import datetime
@@ -123,6 +124,87 @@ class DeveloperAgent(
         # Quiet-STaR: Store last self-evaluation for state persistence
         self._last_self_evaluation: SelfEvaluation | None = None
 
+    def _write_execution_logs_and_manifest(
+        self,
+        component: AblationComponent,
+        exec_result: ExecutionResult,
+        working_dir: Path,
+        attempt: int,
+        expected_artifacts: list[str] | None,
+    ) -> tuple[Path | None, Path | None]:
+        logs_dir = working_dir / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_component = "".join(
+            c if (c.isalnum() or c in ("-", "_", ".")) else "_" for c in component.name
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        attempt_id = attempt + 1
+        log_path = logs_dir / f"{safe_component}_attempt{attempt_id}_{timestamp}.log"
+        manifest_path = logs_dir / f"{safe_component}_attempt{attempt_id}_{timestamp}.json"
+
+        expected = expected_artifacts or []
+        missing_expected = [
+            rel for rel in expected if not (working_dir / rel).exists()
+        ]
+
+        models_dir = working_dir / "models"
+        model_files: list[str] = []
+        if models_dir.exists():
+            for ext in (".pth", ".pt", ".keras", ".h5", ".joblib", ".pkl"):
+                for p in models_dir.glob(f"*{ext}"):
+                    model_files.append(str(p.relative_to(working_dir)))
+
+        manifest = {
+            "component": component.name,
+            "component_type": component.component_type,
+            "attempt": attempt_id,
+            "success": exec_result.success,
+            "execution_time_s": exec_result.execution_time,
+            "exit_code": exec_result.exit_code,
+            "expected_artifacts": expected,
+            "missing_expected_artifacts": missing_expected,
+            "artifacts_created": exec_result.artifacts_created,
+            "cv_score": self._extract_cv_score(exec_result.stdout),
+            "submission_exists": (working_dir / "submission.csv").exists(),
+            "oof_exists": (working_dir / "models" / f"oof_{component.name}.npy").exists(),
+            "test_preds_exists": (working_dir / "models" / f"test_{component.name}.npy").exists(),
+            "model_files": sorted(model_files),
+            "log_path": str(log_path),
+        }
+
+        try:
+            with open(log_path, "w", encoding="utf-8") as handle:
+                handle.write(f"component={component.name}\n")
+                handle.write(f"component_type={component.component_type}\n")
+                handle.write(f"attempt={attempt_id}\n")
+                handle.write(f"success={exec_result.success}\n")
+                handle.write(f"execution_time_s={exec_result.execution_time:.2f}\n")
+                handle.write(f"exit_code={exec_result.exit_code}\n")
+                handle.write("\n[STDOUT]\n")
+                handle.write(exec_result.stdout or "")
+                handle.write("\n\n[STDERR]\n")
+                handle.write(exec_result.stderr or "")
+        except Exception as exc:
+            print(f"⚠️ Failed to write execution log: {exc}")
+            log_path = None
+
+        try:
+            with open(manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(manifest, handle, indent=2, sort_keys=True, ensure_ascii=True)
+        except Exception as exc:
+            print(f"⚠️ Failed to write execution manifest: {exc}")
+            manifest_path = None
+
+        if log_path:
+            exec_result.artifacts_created.append(str(log_path.relative_to(working_dir)))
+        if manifest_path:
+            exec_result.artifacts_created.append(
+                str(manifest_path.relative_to(working_dir))
+            )
+
+        return log_path, manifest_path
+
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute the developer agent.
@@ -210,7 +292,7 @@ class DeveloperAgent(
         result, attempt_records = self._implement_component(component, state)
 
         should_keep_component = True
-        new_cv_score = 0.0
+        new_cv_score: float | None = None
         force_retry = False
 
         if result.success and component.component_type == "model":
@@ -422,6 +504,41 @@ class DeveloperAgent(
                     best_path = working_dir / "submission_best.csv"
                     shutil.copy(submission_path, best_path)
                     print("Saved to submission_best.csv")
+
+                    models_dir = working_dir / "models"
+                    model_exts = {".pth", ".pt", ".keras", ".h5", ".joblib", ".pkl"}
+                    model_candidates: list[Path] = []
+                    if models_dir.exists():
+                        for rel in result.artifacts_created:
+                            rel_path = Path(rel)
+                            if rel_path.parts[:1] == ("models",) and rel_path.suffix in model_exts:
+                                model_candidates.append(working_dir / rel_path)
+                        if not model_candidates:
+                            for ext in model_exts:
+                                model_candidates.extend(models_dir.glob(f"*{ext}"))
+                            if model_candidates:
+                                with_name = [
+                                    p for p in model_candidates if component.name in p.name
+                                ]
+                                if with_name:
+                                    model_candidates = with_name
+                    if model_candidates:
+                        try:
+                            best_model_path = max(
+                                model_candidates, key=lambda p: p.stat().st_mtime
+                            )
+                            best_model_target = (
+                                models_dir / f"best_model{best_model_path.suffix}"
+                            )
+                            shutil.copy(best_model_path, best_model_target)
+                            state_updates["best_single_model_checkpoint"] = str(
+                                best_model_target
+                            )
+                            print(
+                                f"Saved best model checkpoint to {best_model_target.name}"
+                            )
+                        except Exception as e:
+                            print(f"⚠️ Failed to save best model checkpoint: {e}")
             else:
                 print("Warning: submission.csv not found after successful execution")
 
@@ -433,6 +550,38 @@ class DeveloperAgent(
             ):
                 state_updates["baseline_cv_score"] = new_cv_score
                 print(f"Updated baseline CV score: {new_cv_score:.4f}")
+
+        if result.success and component.component_type in {"model", "ensemble"}:
+            submission_path = working_dir / "submission.csv"
+            best_submission = working_dir / "submission_best.csv"
+            baseline_score = state.get("baseline_cv_score") or state.get(
+                "best_single_model_score"
+            )
+            score_for_gate = new_cv_score
+            if score_for_gate is None:
+                extracted = self._extract_cv_score(result.stdout)
+                if isinstance(extracted, (int, float)):
+                    score_for_gate = float(extracted)
+
+            if (
+                isinstance(baseline_score, (int, float))
+                and isinstance(score_for_gate, (int, float))
+                and submission_path.exists()
+                and best_submission.exists()
+            ):
+                is_minimize = is_metric_minimization(metric_name)
+                is_worse = (
+                    score_for_gate > float(baseline_score)
+                    if is_minimize
+                    else score_for_gate < float(baseline_score)
+                )
+                if is_worse:
+                    shutil.copy(best_submission, submission_path)
+                    print(
+                        "Restored submission.csv from submission_best.csv (score worse than baseline)"
+                    )
+                    state_updates["submission_reverted"] = True
+                    state_updates["submission_revert_reason"] = "worse_than_baseline"
 
         # Track OOF availability for ensemble (even if ablation study rejected the model)
         if result.success and component.component_type == "model":
@@ -591,6 +740,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             (DevelopmentResult, attempt_records)
         """
         competition_info = state["competition_info"]
+        metric_name = competition_info.evaluation_metric
         working_dir = Path(state["working_directory"])
         domain = state.get("domain_detected", "tabular")
         attempt_records: list[CodeAttempt] = []
@@ -908,6 +1058,17 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             "KAGGLE_AGENTS_CV_FOLDS": str(cv_folds),
         }
         prev_env: dict[str, str | None] = {k: os.getenv(k) for k in env_overrides}
+        require_oof_env = os.getenv("KAGGLE_AGENTS_REQUIRE_OOF", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        expected_artifacts = None
+        if component.component_type == "model" and require_oof_env:
+            expected_artifacts = [
+                f"models/oof_{component.name}.npy",
+                f"models/test_{component.name}.npy",
+            ]
 
         for attempt in range(max_retries):
             print(f"\nAttempt {attempt + 1}/{max_retries}")
@@ -917,7 +1078,15 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             exec_result = self.executor.execute(
                 code=code,
                 working_dir=working_dir,
+                expected_artifacts=expected_artifacts,
                 component_type=component.component_type,
+            )
+            self._write_execution_logs_and_manifest(
+                component=component,
+                exec_result=exec_result,
+                working_dir=working_dir,
+                attempt=attempt,
+                expected_artifacts=expected_artifacts,
             )
             for k, old in prev_env.items():
                 if old is None:

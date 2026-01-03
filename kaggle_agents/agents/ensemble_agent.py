@@ -618,6 +618,10 @@ class EnsembleAgent:
             selected_oof = avg_oof
             selected_weights = np.ones(len(oof_list)) / len(oof_list)
 
+        selected_score = self._score_predictions(
+            selected_oof, y_encoded, problem_type, metric_name
+        )
+
         if problem_type == "classification":
             final_test_preds = np.clip(final_test_preds, 1e-15, 1 - 1e-15)
             if final_test_preds.ndim > 1 and final_test_preds.shape[1] > 1:
@@ -675,6 +679,7 @@ class EnsembleAgent:
             "base_model_names": model_names,
             "stacking_method": best_method,
             "weights": audit_weights.tolist() if audit_weights is not None else None,
+            "oof_score": selected_score,
             "calibration": calibration_summaries,
             "audit": {
                 "dominant_model": audit.dominant_model,
@@ -1149,6 +1154,7 @@ class EnsembleAgent:
         X: pd.DataFrame,
         y: pd.Series,
         problem_type: str,
+        metric_name: str = "",
         n_iterations: int = 100,
     ) -> dict[str, Any]:
         """
@@ -1252,10 +1258,18 @@ class EnsembleAgent:
         weights = ensemble_counts / ensemble_counts.sum()
         print(f"    Final Caruana Weights: {weights}")
 
+        oof_score = self._score_predictions(
+            current_ensemble_preds,
+            y.values if hasattr(y, "values") else y,
+            problem_type,
+            metric_name,
+        )
+
         return {
             "base_models": valid_models,
             "base_model_names": valid_names,
             "weights": weights.tolist(),
+            "oof_score": oof_score,
         }
 
     def create_temporal_ensemble(
@@ -1663,6 +1677,88 @@ Return a JSON object:
                 else getattr(state, "competition_info", None)
             )
             metric_name = getattr(comp_info, "evaluation_metric", "") if comp_info else ""
+            if isinstance(state, dict):
+                baseline_score = state.get("best_single_model_score") or state.get(
+                    "baseline_cv_score"
+                )
+            else:
+                baseline_score = getattr(state, "best_single_model_score", None) or getattr(
+                    state, "baseline_cv_score", None
+                )
+            baseline_score_val = (
+                float(baseline_score)
+                if isinstance(baseline_score, (int, float)) and np.isfinite(baseline_score)
+                else None
+            )
+
+            def _should_revert_ensemble(ensemble_score: float | None) -> tuple[bool, str]:
+                if baseline_score_val is None:
+                    return False, "no_baseline"
+                if ensemble_score is None:
+                    return True, "missing_oof_score"
+                try:
+                    score_val = float(ensemble_score)
+                except (TypeError, ValueError):
+                    return True, "invalid_oof_score"
+                if not np.isfinite(score_val):
+                    return True, "non_finite_oof_score"
+                is_minimize = is_metric_minimization(metric_name)
+                if is_minimize:
+                    return score_val >= baseline_score_val, "not_improved"
+                return score_val <= baseline_score_val, "not_improved"
+
+            def _load_oof_target() -> tuple[np.ndarray | None, str | None]:
+                candidate_paths = [
+                    current_train_path,
+                    train_data_path,
+                    str(working_dir / "train.csv"),
+                ]
+                train_path = next(
+                    (Path(p) for p in candidate_paths if p and Path(p).exists()), None
+                )
+                if not train_path:
+                    return None, None
+                try:
+                    train_df = pd.read_csv(train_path)
+                except Exception as e:
+                    print(f"   ⚠️ Failed to load train data for OOF gating: {e}")
+                    return None, None
+                target_col = None
+                for col in ("target", "label", train_df.columns[-1]):
+                    if col in train_df.columns:
+                        target_col = col
+                        break
+                if not target_col:
+                    return None, None
+                y_series = train_df[target_col]
+                n_unique = y_series.nunique(dropna=True)
+                problem_type = "classification" if n_unique < 20 else "regression"
+                y_vals: np.ndarray
+                if problem_type == "classification":
+                    if y_series.dtype.kind in {"O", "U", "S"}:
+                        sample_path = (
+                            Path(sample_submission_path)
+                            if sample_submission_path
+                            else working_dir / "sample_submission.csv"
+                        )
+                        if sample_path.exists():
+                            try:
+                                sample_sub = pd.read_csv(sample_path)
+                                class_order = sample_sub.columns[1:].tolist()
+                                mapping = {label: idx for idx, label in enumerate(class_order)}
+                                mapped = y_series.map(mapping)
+                                if mapped.isnull().any():
+                                    return None, None
+                                y_vals = mapped.to_numpy()
+                            except Exception:
+                                return None, None
+                        else:
+                            y_vals, _ = pd.factorize(y_series)
+                    else:
+                        y_vals = y_series.to_numpy()
+                else:
+                    y_vals = y_series.to_numpy()
+                return y_vals, problem_type
 
             # DEBUG: Detailed information about available models
             dev_results = state.get("development_results", [])
@@ -1819,9 +1915,44 @@ Return a JSON object:
                         if self._ensemble_from_predictions(
                             prediction_pairs, sample_path, output_path
                         ):
+                            ensemble_oof_score = None
+                            if baseline_score_val is not None:
+                                y_vals, inferred_problem_type = _load_oof_target()
+                                if y_vals is not None and inferred_problem_type:
+                                    try:
+                                        oof_list = [
+                                            np.load(oof_path)
+                                            for oof_path, _ in prediction_pairs.values()
+                                        ]
+                                        avg_oof = np.mean(oof_list, axis=0)
+                                        ensemble_oof_score = self._score_predictions(
+                                            avg_oof, y_vals, inferred_problem_type, metric_name
+                                        )
+                                        print(
+                                            f"   📊 Prediction-only ensemble OOF score: {ensemble_oof_score:.6f}"
+                                        )
+                                    except Exception as e:
+                                        print(
+                                            f"   ⚠️ Failed to compute OOF score for prediction-only ensemble: {e}"
+                                        )
+
+                            revert, reason = _should_revert_ensemble(ensemble_oof_score)
+                            if revert:
+                                best_submission = working_dir / "submission_best.csv"
+                                if best_submission.exists():
+                                    shutil.copy(best_submission, working_dir / "submission.csv")
+                                    print("      ✅ Restored submission.csv from submission_best.csv")
+                                return {
+                                    "ensemble_skipped": True,
+                                    "skip_reason": reason,
+                                    "ensemble_oof_score": ensemble_oof_score,
+                                    "baseline_score": baseline_score_val,
+                                }
+
                             return {
                                 "ensemble_created": True,
                                 "ensemble_method": "prediction_average",
+                                "ensemble_oof_score": ensemble_oof_score,
                             }
 
                 print(
@@ -2008,6 +2139,21 @@ Return a JSON object:
                             submission_path = working_dir / "submission.csv"
                             sub_df.to_csv(submission_path, index=False)
                             print(f"  ✅ Saved ensemble submission to {submission_path}")
+                            ensemble_oof_score = (
+                                ensemble.get("oof_score") if isinstance(ensemble, dict) else None
+                            )
+                            revert, reason = _should_revert_ensemble(ensemble_oof_score)
+                            if revert:
+                                best_submission = working_dir / "submission_best.csv"
+                                if best_submission.exists():
+                                    shutil.copy(best_submission, submission_path)
+                                    print("      ✅ Restored submission.csv from submission_best.csv")
+                                return {
+                                    "ensemble_skipped": True,
+                                    "skip_reason": reason,
+                                    "ensemble_oof_score": ensemble_oof_score,
+                                    "baseline_score": baseline_score_val,
+                                }
                     else:
                         print(
                             f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"
@@ -2015,7 +2161,7 @@ Return a JSON object:
 
             elif "caruana" in ensemble_strategy.lower():
                 ensemble = self.create_caruana_ensemble(
-                    top_models, top_model_names, working_dir, X, y, problem_type
+                    top_models, top_model_names, working_dir, X, y, problem_type, metric_name
                 )
 
                 # Generate Final Submission using Test Preds (Weighted Average)
@@ -2072,6 +2218,21 @@ Return a JSON object:
                         submission_path = working_dir / "submission.csv"
                         sub_df.to_csv(submission_path, index=False)
                         print(f"  ✅ Saved ensemble submission to {submission_path}")
+                        ensemble_oof_score = (
+                            ensemble.get("oof_score") if isinstance(ensemble, dict) else None
+                        )
+                        revert, reason = _should_revert_ensemble(ensemble_oof_score)
+                        if revert:
+                            best_submission = working_dir / "submission_best.csv"
+                            if best_submission.exists():
+                                shutil.copy(best_submission, submission_path)
+                                print("      ✅ Restored submission.csv from submission_best.csv")
+                            return {
+                                "ensemble_skipped": True,
+                                "skip_reason": reason,
+                                "ensemble_oof_score": ensemble_oof_score,
+                                "baseline_score": baseline_score_val,
+                            }
                     else:
                         print(
                             f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"

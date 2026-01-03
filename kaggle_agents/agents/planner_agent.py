@@ -1590,7 +1590,7 @@ Return a JSON array with up to {max_components} components. Each component must 
                     "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained model and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
                     "estimated_impact": 0.05,
                     "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
-                    "code_outline": "Load models/best_model.pth, for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
+                    "code_outline": "Load models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
                 },
             ]
 

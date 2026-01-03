@@ -30,6 +30,7 @@ def build_ensemble_instructions(target_col: str = "target") -> list[str]:
         "  - ENSEMBLE AUDIT (POST-BLEND):",
         "    - Check for dominance (>80% weight) and models that add noise",
         "    - If average beats meta-model, revisit OOF hygiene and calibration",
+        "  - GATE: If ensemble OOF score is worse than best single-model OOF, keep submission_best.csv",
     ]
     instructions.extend(build_calibration_instructions())
     return instructions

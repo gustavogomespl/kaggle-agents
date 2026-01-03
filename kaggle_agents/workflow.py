@@ -5,6 +5,7 @@ This module defines the complete agent workflow using LangGraph's StateGraph,
 implementing the full pipeline from SOTA search to submission.
 """
 
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -153,6 +154,15 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
     working_dir = Path(state["working_directory"])
     data_files = dict(state.get("data_files") or {})
     data_type = str(data_files.get("data_type", "")).lower()
+    forced_type = (
+        os.getenv("KAGGLE_AGENTS_FORCE_DATA_TYPE")
+        or os.getenv("KAGGLE_AGENTS_DATA_TYPE")
+        or ""
+    ).strip().lower()
+    if forced_type in {"tabular", "image", "audio", "text"}:
+        print(f"   Data type forced via env: {forced_type}")
+        data_type = forced_type
+        data_files["data_type"] = forced_type
 
     image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"}
 
@@ -199,6 +209,10 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
     train_dir = _first_dir_with_images(train_candidates)
     test_dir = _first_dir_with_images(test_candidates)
 
+    if forced_type == "tabular":
+        train_dir = None
+        test_dir = None
+
     if test_dir and not train_dir:
         base = test_dir.parent
         train_dir = _first_dir_with_images(
@@ -227,11 +241,12 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
     train_csv_path = Path(train_csv) if train_csv else None
     has_train_csv = bool(train_csv_path and train_csv_path.exists())
 
-    detected_type = data_type
-    if train_dir or test_dir:
-        detected_type = "image"
-    elif has_train_csv and data_type in {"", "tabular"}:
-        detected_type = "tabular"
+    detected_type = data_type or ""
+    if not forced_type:
+        if train_dir or test_dir:
+            detected_type = "image"
+        elif has_train_csv and data_type in {"", "tabular"}:
+            detected_type = "tabular"
 
     updates: dict[str, Any] = {"last_updated": datetime.now()}
 

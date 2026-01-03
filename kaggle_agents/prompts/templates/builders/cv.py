@@ -21,6 +21,7 @@ def build_cv_instructions(working_dir: str, component_name: str) -> list[str]:
         "  - CRITICAL: Fit preprocessing/scalers INSIDE each CV fold (fit on X_train, transform X_val/X_test)",
         f"  - CRITICAL: MUST save Out-of-Fold (OOF) predictions during CV to models/oof_{component_name}.npy",
         "  - OOF predictions enable proper stacking ensemble (meta-model trained on OOF)",
+        "  - AFTER saving OOF/Test: print lines 'Saved OOF predictions to ...' and 'Saved test predictions to ...'",
         "  - MUST print 'Final Validation Performance: {score}'",
         "  - If metric is NaN/inf, replace with 0.0 before printing Final Validation Performance",
         "  - Multiclass log_loss: after clipping, renormalize rows to sum to 1",

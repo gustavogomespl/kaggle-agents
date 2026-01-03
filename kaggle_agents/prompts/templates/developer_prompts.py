@@ -284,6 +284,7 @@ DO NOT: `pd.read_csv('train.csv')`  # Will fail with FileNotFoundError
 
 DO THIS INSTEAD:
 ```python
+import os
 from pathlib import Path
 
 train_dir = Path('/path/to/train')
@@ -306,15 +307,28 @@ Image IDs in CSV may not include file extensions. Validate paths before creating
 ```python
 from pathlib import Path
 
-def validate_image_paths(image_ids: list, base_dir: Path, extensions=('.jpg', '.jpeg', '.png', '.tif', '.tiff')) -> list:
+def validate_image_paths(
+    image_ids: list,
+    base_dir: Path,
+    extensions=(".jpg", ".jpeg", ".png", ".tif", ".tiff"),
+    allow_missing: bool = False,
+) -> list:
     # Validate and resolve image paths, trying multiple extensions.
     valid_paths = []
     missing = []
 
+    if base_dir.exists():
+        discovered = {
+            p.suffix.lower() for p in base_dir.iterdir() if p.is_file()
+        }
+        discovered = [ext for ext in discovered if ext in extensions]
+        if discovered:
+            extensions = tuple(sorted(discovered))
+
     for img_id in image_ids:
         found = False
         # Try exact path first (in case extension is included in ID)
-        for ext in [''] + list(extensions):
+        for ext in [""] + list(extensions):
             path = base_dir / f"{img_id}{ext}"
             if path.exists():
                 valid_paths.append(path)
@@ -325,14 +339,20 @@ def validate_image_paths(image_ids: list, base_dir: Path, extensions=('.jpg', '.
 
     if missing:
         print(f"[LOG:WARNING] {len(missing)} images not found: {missing[:5]}...")
+        if allow_missing:
+            return valid_paths
         raise FileNotFoundError(f"Missing {len(missing)} images. Check paths and extensions.")
 
     print(f"[LOG:INFO] Validated {len(valid_paths)} image paths")
     return valid_paths
 
 # USE BEFORE CREATING DATASET:
-train_images = validate_image_paths(train_df['id'].tolist(), Path('train/'))
-test_images = validate_image_paths(test_df['id'].tolist(), Path('test/'))
+# train_dir/test_dir should come from data_files or detected paths.
+train_dir = Path(data_files["train"]) if "train" in data_files else Path("train")
+test_dir = Path(data_files["test"]) if "test" in data_files else Path("test")
+allow_missing = os.getenv("KAGGLE_AGENTS_ALLOW_MISSING_IMAGES", "0").lower() in {"1", "true", "yes"}
+train_images = validate_image_paths(train_df["id"].tolist(), train_dir, allow_missing=allow_missing)
+test_images = validate_image_paths(test_df["id"].tolist(), test_dir, allow_missing=allow_missing)
 ```
 
 WHY: CSV often has IDs like "abc123" but files are "abc123.tif". Without validation,
