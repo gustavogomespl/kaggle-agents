@@ -391,6 +391,7 @@ class DeveloperAgent(
                 None,
             )
             grading = None
+            metric_name = competition_info.evaluation_metric
             if submission_path:
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
@@ -429,7 +430,6 @@ class DeveloperAgent(
                         )
 
                 current_best_score = state.get("best_single_model_score")
-                metric_name = competition_info.evaluation_metric
                 if min_component_score is not None and not state_updates.get(
                     "skip_remaining_components"
                 ):
