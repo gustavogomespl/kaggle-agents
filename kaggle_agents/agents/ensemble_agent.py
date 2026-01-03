@@ -1,5 +1,6 @@
 """Ensemble agent for model stacking and blending."""
 
+import os
 import re
 import shutil
 from pathlib import Path
@@ -13,7 +14,10 @@ from sklearn.model_selection import cross_val_predict
 
 from ..core.config import get_config, is_metric_minimization
 from ..core.state import KaggleState
+from ..utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
+from ..utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
 from ..utils.llm_utils import get_text_content
+from ..utils.oof_validation import print_oof_summary, validate_oof_stack
 
 
 class EnsembleAgent:
@@ -89,6 +93,99 @@ class EnsembleAgent:
             valid_pairs[name] = (oof_path, test_path)
 
         return valid_pairs
+
+    def _encode_labels(
+        self, y: np.ndarray | pd.Series, class_order: list[str] | None
+    ) -> tuple[np.ndarray, list[str]]:
+        """Encode labels to integer indices with optional class order."""
+        y_array = np.asarray(y)
+
+        if class_order:
+            cat = pd.Categorical(y_array, categories=class_order)
+            if (cat.codes < 0).any():
+                print("   ⚠️ Label encoding mismatch with class_order, using sorted uniques")
+            else:
+                return cat.codes.astype(int), class_order
+
+        classes, y_encoded = np.unique(y_array, return_inverse=True)
+        return y_encoded.astype(int), classes.tolist()
+
+    def _load_cv_folds(
+        self,
+        name: str,
+        models_dir: Path,
+        folds_path: Path | None,
+        n_samples: int,
+    ) -> np.ndarray | None:
+        """Load per-model or global fold assignments when available."""
+        fold_assignment_path = models_dir / f"fold_assignment_{name}.npy"
+        if fold_assignment_path.exists():
+            try:
+                folds = np.load(fold_assignment_path)
+                if len(folds) == n_samples:
+                    return folds
+                print(f"   ⚠️ Fold assignment length mismatch for {name}")
+            except Exception as e:
+                print(f"   ⚠️ Failed to load fold_assignment for {name}: {e}")
+
+        if folds_path is not None and folds_path.exists():
+            try:
+                folds_df = pd.read_csv(folds_path)
+                if "fold" in folds_df.columns and len(folds_df) == n_samples:
+                    return folds_df["fold"].to_numpy()
+                print("   ⚠️ folds.csv missing 'fold' column or length mismatch")
+            except Exception as e:
+                print(f"   ⚠️ Failed to read folds.csv: {e}")
+
+        return None
+
+    def _score_predictions(
+        self,
+        preds: np.ndarray,
+        y_true: np.ndarray,
+        problem_type: str,
+        metric_name: str,
+    ) -> float:
+        """Return a score where LOWER is better."""
+        from sklearn.metrics import accuracy_score, log_loss, mean_absolute_error, mean_squared_error
+
+        metric = (metric_name or "").lower()
+        if not metric:
+            metric = "log_loss" if problem_type == "classification" else "rmse"
+
+        if problem_type == "classification":
+            preds = np.clip(preds, 1e-15, 1 - 1e-15)
+            if preds.ndim > 1 and preds.shape[1] > 1:
+                preds = preds / preds.sum(axis=1, keepdims=True)
+
+            if "auc" in metric:
+                from sklearn.metrics import roc_auc_score
+
+                if preds.ndim > 1 and preds.shape[1] > 1:
+                    score = roc_auc_score(y_true, preds, multi_class="ovr", average="weighted")
+                else:
+                    score = roc_auc_score(y_true, preds)
+            elif "acc" in metric:
+                if preds.ndim > 1 and preds.shape[1] > 1:
+                    pred_labels = np.argmax(preds, axis=1)
+                else:
+                    pred_labels = (preds >= 0.5).astype(int)
+                score = accuracy_score(y_true, pred_labels)
+            else:
+                score = log_loss(y_true, preds)
+        else:
+            if preds.ndim > 1:
+                preds = preds.ravel()
+            if "mae" in metric:
+                score = mean_absolute_error(y_true, preds)
+            elif "mse" in metric:
+                score = mean_squared_error(y_true, preds)
+            else:
+                score = np.sqrt(mean_squared_error(y_true, preds))
+
+        if is_metric_minimization(metric):
+            return score
+        return -score
 
     def _compute_oof_score(
         self,
@@ -220,6 +317,45 @@ class EnsembleAgent:
             print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
             return Ridge(alpha=best_alpha, random_state=42)
 
+    def _constrained_meta_learner(
+        self,
+        oof_stack: np.ndarray,
+        y_true: np.ndarray,
+        problem_type: str,
+        metric_name: str,
+    ) -> tuple[np.ndarray, float]:
+        """Learn non-negative weights that sum to 1."""
+        n_models = oof_stack.shape[0]
+
+        def objective(weights: np.ndarray) -> float:
+            weights = np.array(weights, dtype=float)
+            weights = weights / weights.sum() if weights.sum() > 0 else np.ones(n_models) / n_models
+            blended = np.average(oof_stack, axis=0, weights=weights)
+            return self._score_predictions(blended, y_true, problem_type, metric_name)
+
+        try:
+            from scipy.optimize import minimize
+
+            init_weights = np.ones(n_models) / n_models
+            result = minimize(
+                objective,
+                init_weights,
+                method="SLSQP",
+                bounds=[(0, 1)] * n_models,
+                constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1},
+            )
+            opt_weights = result.x / result.x.sum()
+            best_score = objective(opt_weights)
+            print(f"   Constrained weights: score {best_score:.6f}")
+            return opt_weights, best_score
+        except Exception as e:
+            print(f"   ⚠️ Constrained optimization failed: {e}")
+            opt_weights = self._dirichlet_weight_search(
+                oof_stack, y_true, problem_type, metric_name, n_samples=300
+            )
+            best_score = objective(opt_weights)
+            return opt_weights, best_score
+
     def _dirichlet_weight_search(
         self,
         oof_stack: np.ndarray,
@@ -288,6 +424,269 @@ class EnsembleAgent:
 
         print(f"   Dirichlet search ({n_samples} samples): best score {best_score:.6f}")
         return best_weights
+
+    def _stack_from_prediction_pairs(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        y: pd.Series,
+        problem_type: str,
+        metric_name: str,
+        models_dir: Path,
+        expected_class_order: list[str] | None,
+        train_ids: np.ndarray | None,
+        folds_path: Path | None,
+        enable_calibration: bool,
+        enable_post_calibration: bool,
+        n_targets: int | None,
+        calibration_method: str = "auto",
+    ) -> tuple[dict[str, Any] | None, np.ndarray | None]:
+        """Build stacking ensemble directly from saved OOF/Test predictions."""
+        if len(prediction_pairs) < 2:
+            return None, None
+
+        valid_pairs, results = validate_oof_stack(
+            prediction_pairs,
+            models_dir,
+            train_ids=train_ids,
+            expected_class_order=expected_class_order,
+            folds_path=folds_path,
+            strict_mode=False,
+            problem_type=problem_type,
+        )
+        print_oof_summary(results)
+        if len(valid_pairs) < 2:
+            return None, None
+
+        model_names = list(valid_pairs.keys())
+
+        if problem_type == "classification":
+            y_encoded, class_order = self._encode_labels(y, expected_class_order)
+        else:
+            y_encoded = np.asarray(y)
+            class_order = expected_class_order
+
+        oof_list: list[np.ndarray] = []
+        test_list: list[np.ndarray] = []
+        calibration_summaries: list[dict[str, Any]] = []
+
+        for name, (oof_path, test_path) in valid_pairs.items():
+            try:
+                oof_raw = np.load(oof_path)
+                test_raw = np.load(test_path)
+            except Exception as e:
+                print(f"   ⚠️ Failed to load predictions for {name}: {e}")
+                continue
+
+            oof_raw = np.asarray(oof_raw, dtype=float)
+            test_raw = np.asarray(test_raw, dtype=float)
+
+            if enable_calibration and problem_type == "classification":
+                try:
+                    cv_folds = self._load_cv_folds(
+                        name, models_dir, folds_path, n_samples=len(y_encoded)
+                    )
+                    result = calibrate_oof_predictions(
+                        oof_path,
+                        y_encoded,
+                        method=calibration_method,
+                        cv_folds=cv_folds,
+                        save_both=True,
+                    )
+                    use_cal = (
+                        result.method != "none"
+                        and result.brier_after < result.brier_before
+                        and result.calibrator is not None
+                    )
+
+                    if use_cal:
+                        cal_path = models_dir / f"oof_cal_{name}.npy"
+                        oof_preds = np.load(cal_path)
+                        test_preds = calibrate_test_predictions(
+                            test_path, result.calibrator, result.method
+                        )
+                    else:
+                        oof_preds = oof_raw
+                        test_preds = test_raw
+
+                    calibration_summaries.append(
+                        {
+                            "model": name,
+                            "method": result.method if use_cal else "none",
+                            "brier_before": result.brier_before,
+                            "brier_after": result.brier_after,
+                            "improvement_pct": result.improvement_pct if use_cal else 0.0,
+                        }
+                    )
+                except Exception as e:
+                    print(f"   ⚠️ Calibration failed for {name}: {e}")
+                    oof_preds = oof_raw
+                    test_preds = test_raw
+            else:
+                oof_preds = oof_raw
+                test_preds = test_raw
+
+            if n_targets == 1 and oof_preds.ndim == 2 and oof_preds.shape[1] == 2:
+                oof_preds = oof_preds[:, 1]
+            if n_targets == 1 and test_preds.ndim == 2 and test_preds.shape[1] == 2:
+                test_preds = test_preds[:, 1]
+
+            if oof_preds.ndim == 2 and oof_preds.shape[1] == 1:
+                oof_preds = oof_preds.squeeze()
+            if test_preds.ndim == 2 and test_preds.shape[1] == 1:
+                test_preds = test_preds.squeeze()
+
+            oof_list.append(oof_preds)
+            test_list.append(test_preds)
+
+        if len(oof_list) < 2:
+            return None, None
+
+        oof_stack = np.stack(oof_list, axis=0)
+        test_stack = np.stack(test_list, axis=0)
+
+        if oof_list[0].ndim == 1:
+            meta_X = np.column_stack(oof_list)
+            meta_X_test = np.column_stack(test_list)
+            binary_single_col = True
+            n_features_per_model = 1
+        else:
+            meta_X = np.concatenate(oof_list, axis=1)
+            meta_X_test = np.concatenate(test_list, axis=1)
+            binary_single_col = False
+            n_features_per_model = oof_list[0].shape[1]
+
+        avg_oof = np.average(oof_stack, axis=0)
+        avg_score = self._score_predictions(avg_oof, y_encoded, problem_type, metric_name)
+        print(f"   [META] Simple average: {avg_score:.6f}")
+
+        weights_constrained, constrained_score = self._constrained_meta_learner(
+            oof_stack, y_encoded, problem_type, metric_name
+        )
+        print(f"   [META] Constrained: {constrained_score:.6f}")
+
+        meta_score = float("inf")
+        meta_oof_preds = None
+        meta_model = None
+        try:
+            meta_model = self._tune_meta_model(meta_X, y_encoded, problem_type)
+            if problem_type == "classification":
+                from sklearn.model_selection import StratifiedKFold, cross_val_predict
+
+                cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+                meta_oof_preds = cross_val_predict(
+                    meta_model, meta_X, y_encoded, cv=cv, method="predict_proba"
+                )
+                if binary_single_col and meta_oof_preds.ndim > 1:
+                    meta_oof_preds = meta_oof_preds[:, 1]
+            else:
+                from sklearn.model_selection import KFold, cross_val_predict
+
+                cv = KFold(n_splits=3, shuffle=True, random_state=42)
+                meta_oof_preds = cross_val_predict(meta_model, meta_X, y_encoded, cv=cv)
+
+            meta_score = self._score_predictions(
+                meta_oof_preds, y_encoded, problem_type, metric_name
+            )
+            print(f"   [META] Meta-model: {meta_score:.6f}")
+        except Exception as e:
+            print(f"   ⚠️ Meta-model evaluation failed: {e}")
+
+        scores = {
+            "average": avg_score,
+            "constrained": constrained_score,
+            "meta": meta_score,
+        }
+        best_method = min(scores, key=scores.get)
+        print(f"   [META] Best method: {best_method}")
+
+        if best_method == "meta" and meta_model is not None:
+            meta_model.fit(meta_X, y_encoded)
+            if problem_type == "classification" and hasattr(meta_model, "predict_proba"):
+                final_test_preds = meta_model.predict_proba(meta_X_test)
+                if binary_single_col and final_test_preds.ndim > 1:
+                    final_test_preds = final_test_preds[:, 1]
+            else:
+                final_test_preds = meta_model.predict(meta_X_test)
+            selected_oof = meta_oof_preds if meta_oof_preds is not None else avg_oof
+            selected_weights = None
+        elif best_method == "constrained":
+            final_test_preds = np.average(test_stack, axis=0, weights=weights_constrained)
+            selected_oof = np.average(oof_stack, axis=0, weights=weights_constrained)
+            selected_weights = weights_constrained
+        else:
+            final_test_preds = np.average(test_stack, axis=0, weights=np.ones(len(oof_list)))
+            selected_oof = avg_oof
+            selected_weights = np.ones(len(oof_list)) / len(oof_list)
+
+        if problem_type == "classification":
+            final_test_preds = np.clip(final_test_preds, 1e-15, 1 - 1e-15)
+            if final_test_preds.ndim > 1 and final_test_preds.shape[1] > 1:
+                final_test_preds = final_test_preds / final_test_preds.sum(axis=1, keepdims=True)
+
+        calibration_info = {}
+        if problem_type == "classification" and enable_post_calibration:
+            final_test_preds, calibration_info = post_calibrate_ensemble(
+                selected_oof, final_test_preds, y_encoded, method=calibration_method
+            )
+
+        audit_weights = selected_weights
+        if audit_weights is None and meta_model is not None and hasattr(meta_model, "coef_"):
+            coefs = meta_model.coef_
+            if coefs.ndim == 2:
+                coefs = np.mean(np.abs(coefs), axis=0)
+            weights = []
+            for i in range(len(oof_list)):
+                start = i * n_features_per_model
+                end = start + n_features_per_model
+                weights.append(float(np.mean(np.abs(coefs[start:end]))))
+            audit_weights = np.array(weights)
+            if audit_weights.sum() > 0:
+                audit_weights = audit_weights / audit_weights.sum()
+
+        audit = full_ensemble_audit(
+            model_names,
+            oof_stack,
+            y_encoded,
+            problem_type,
+            metric_name,
+            weights=audit_weights,
+            calibration_info=calibration_info,
+        )
+
+        if calibration_summaries:
+            print("   [CAL] Base model calibration summary:")
+            for summary in calibration_summaries:
+                if summary["method"] == "none":
+                    print(f"      {summary['model']}: no improvement")
+                else:
+                    print(
+                        f"      {summary['model']}: "
+                        f"{summary['brier_before']:.4f} -> {summary['brier_after']:.4f} "
+                        f"({summary['improvement_pct']:.2f}%)"
+                    )
+
+        if audit.warnings:
+            print("   [AUDIT] Warnings:")
+            for warning in audit.warnings:
+                print(f"      - {warning}")
+
+        ensemble = {
+            "meta_model": meta_model if best_method == "meta" else None,
+            "base_model_names": model_names,
+            "stacking_method": best_method,
+            "weights": audit_weights.tolist() if audit_weights is not None else None,
+            "calibration": calibration_summaries,
+            "audit": {
+                "dominant_model": audit.dominant_model,
+                "dominance_weight": audit.dominance_weight,
+                "warnings": audit.warnings,
+                "notes": audit.notes,
+                "calibration": audit.calibration,
+            },
+            "class_order": class_order,
+        }
+
+        return ensemble, final_test_preds
 
     def create_oof_weighted_blend(
         self,
@@ -522,7 +921,13 @@ class EnsembleAgent:
         X: pd.DataFrame,
         y: pd.Series,
         problem_type: str,
-    ) -> Any:
+        metric_name: str = "",
+        sample_submission_path: Path | None = None,
+        train_ids: np.ndarray | None = None,
+        expected_class_order: list[str] | None = None,
+        n_targets: int | None = None,
+        folds_path: Path | None = None,
+    ) -> tuple[dict[str, Any], np.ndarray | None]:
         """Create stacking ensemble from best models using saved OOF predictions.
 
         Args:
@@ -534,10 +939,63 @@ class EnsembleAgent:
             problem_type: 'classification' or 'regression'
 
         Returns:
-            Trained meta-model
+            Tuple of (ensemble_dict, final_test_predictions or None)
         """
         # Generate out-of-fold predictions from base models
         print(f"  Creating stacking ensemble with {len(models)} base models...")
+
+        models_dir = working_dir / "models"
+        prediction_pairs = {
+            name: (models_dir / f"oof_{name}.npy", models_dir / f"test_{name}.npy")
+            for name in model_names
+            if (models_dir / f"oof_{name}.npy").exists()
+            and (models_dir / f"test_{name}.npy").exists()
+        }
+
+        enable_calibration = os.getenv("KAGGLE_AGENTS_STACKING_CALIBRATION", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+        }
+        enable_post_calibration = os.getenv(
+            "KAGGLE_AGENTS_STACKING_POST_CALIBRATION", "1"
+        ).lower() not in {"0", "false", "no"}
+        calibration_method = os.getenv(
+            "KAGGLE_AGENTS_STACKING_CALIBRATION_METHOD", "auto"
+        ).lower()
+        if n_targets is None and sample_submission_path and sample_submission_path.exists():
+            try:
+                sample_head = pd.read_csv(sample_submission_path, nrows=1)
+                n_targets = sample_head.shape[1] - 1
+                if expected_class_order is None and sample_head.shape[1] > 2:
+                    expected_class_order = sample_head.columns[1:].tolist()
+            except Exception as e:
+                print(f"   ⚠️ Failed to read sample submission for targets: {e}")
+
+        if prediction_pairs:
+            print(f"  Found {len(prediction_pairs)} prediction pairs for stacking")
+            ensemble, final_test_preds = self._stack_from_prediction_pairs(
+                prediction_pairs=prediction_pairs,
+                y=y,
+                problem_type=problem_type,
+                metric_name=metric_name,
+                models_dir=models_dir,
+                expected_class_order=expected_class_order,
+                train_ids=train_ids,
+                folds_path=folds_path,
+                enable_calibration=enable_calibration,
+                enable_post_calibration=enable_post_calibration,
+                n_targets=n_targets,
+                calibration_method=calibration_method,
+            )
+            if ensemble is not None and final_test_preds is not None:
+                name_to_model = dict(zip(model_names, models, strict=False))
+                ensemble["base_models"] = [
+                    name_to_model[name]
+                    for name in ensemble.get("base_model_names", [])
+                    if name in name_to_model
+                ]
+                return ensemble, final_test_preds
 
         meta_features = []
         valid_models = []
@@ -586,11 +1044,17 @@ class EnsembleAgent:
         # We don't need to retrain base models if we use the saved test preds!
         # But we keep them in the return dict for completeness
 
-        return {
-            "meta_model": meta_model,
-            "base_models": valid_models,
-            "base_model_names": valid_names,
-        }
+        return (
+            {
+                "meta_model": meta_model,
+                "base_models": valid_models,
+                "base_model_names": valid_names,
+                "stacking_method": "meta",
+                "weights": None,
+                "class_order": None,
+            },
+            None,
+        )
 
     def create_blending_ensemble(
         self,
@@ -953,30 +1417,74 @@ class EnsembleAgent:
         Returns:
             Predictions
         """
-        base_models = ensemble["base_models"]
-        meta_model = ensemble["meta_model"]
+        base_models = ensemble.get("base_models", [])
+        meta_model = ensemble.get("meta_model")
+        stacking_method = ensemble.get("stacking_method", "meta")
+        weights = ensemble.get("weights")
+
+        if stacking_method in {"average", "constrained"} and weights is not None:
+            weights_array = np.array(weights, dtype=float)
+            if weights_array.sum() <= 0:
+                weights_array = np.ones(len(base_models)) / len(base_models)
+            else:
+                weights_array = weights_array / weights_array.sum()
+
+            predictions = []
+            multi_class = False
+            for model in base_models:
+                if problem_type == "classification" and hasattr(model, "predict_proba"):
+                    preds = model.predict_proba(X)
+                    if preds.ndim > 1 and preds.shape[1] > 2:
+                        multi_class = True
+                        predictions.append(preds)
+                    elif preds.ndim > 1:
+                        predictions.append(preds[:, 1])
+                    else:
+                        predictions.append(preds)
+                else:
+                    predictions.append(model.predict(X))
+
+            blended = np.average(predictions, axis=0, weights=weights_array)
+            if problem_type == "classification" and multi_class:
+                blended = np.clip(blended, 1e-15, 1 - 1e-15)
+                blended = blended / blended.sum(axis=1, keepdims=True)
+            return blended
 
         # Generate predictions from base models
         meta_features = []
+        binary_single_col = False
         for model in base_models:
             if problem_type == "classification":
                 if hasattr(model, "predict_proba"):
                     preds = model.predict_proba(X)
-                    if preds.ndim > 1:
+                    if preds.ndim > 1 and preds.shape[1] > 2:
+                        meta_features.append(preds)
+                    elif preds.ndim > 1:
                         meta_features.append(preds[:, 1])
+                        binary_single_col = True
                     else:
                         meta_features.append(preds)
+                        binary_single_col = True
                 else:
                     meta_features.append(model.predict(X))
             else:
                 meta_features.append(model.predict(X))
 
         # Create meta-features
-        meta_X = np.column_stack(meta_features)
+        if meta_features and isinstance(meta_features[0], np.ndarray) and meta_features[0].ndim > 1:
+            meta_X = np.concatenate(meta_features, axis=1)
+        else:
+            meta_X = np.column_stack(meta_features)
 
         # Predict with meta-model
+        if meta_model is None:
+            raise ValueError("Stacking meta_model is missing")
+
         if problem_type == "classification" and hasattr(meta_model, "predict_proba"):
-            return meta_model.predict_proba(meta_X)[:, 1]
+            preds = meta_model.predict_proba(meta_X)
+            if binary_single_col and preds.ndim > 1:
+                return preds[:, 1]
+            return preds
         return meta_model.predict(meta_X)
 
     def predict_blending(
@@ -1404,6 +1912,23 @@ Return a JSON object:
                 if sample_submission_path
                 else working_dir / "sample_submission.csv"
             )
+            train_ids = (
+                train_df["id"].to_numpy() if "id" in train_df.columns else train_df.index.to_numpy()
+            )
+            expected_class_order = None
+            n_targets = None
+            if sample_sub_path.exists():
+                try:
+                    sample_head = pd.read_csv(sample_sub_path, nrows=1)
+                    n_targets = sample_head.shape[1] - 1
+                    if sample_head.shape[1] > 2:
+                        expected_class_order = sample_head.columns[1:].tolist()
+                except Exception as e:
+                    print(f"   ⚠️ Failed to read sample submission for class order: {e}")
+
+            folds_path = working_dir / "folds.csv"
+            if not folds_path.exists():
+                folds_path = None
 
             # Load top models (top 3 by CV score)
             print("\n   🔍 Loading top models for ensemble...")
@@ -1445,19 +1970,44 @@ Return a JSON object:
 
             # Create ensemble
             if "stack" in ensemble_strategy.lower():
-                ensemble = self.create_stacking_ensemble(
-                    top_models, top_model_names, working_dir, X, y, problem_type
+                ensemble, final_preds = self.create_stacking_ensemble(
+                    top_models,
+                    top_model_names,
+                    working_dir,
+                    X,
+                    y,
+                    problem_type,
+                    metric_name=metric_name,
+                    sample_submission_path=sample_sub_path,
+                    train_ids=train_ids,
+                    expected_class_order=expected_class_order,
+                    n_targets=n_targets,
+                    folds_path=folds_path,
                 )
-                if test_features is None:
+                if final_preds is None and test_features is None:
                     print("  ⚠️ Skipping stacking submission because test features are unavailable")
                 else:
-                    final_preds = self.predict_stacking(ensemble, test_features, problem_type)
+                    if final_preds is None:
+                        final_preds = self.predict_stacking(ensemble, test_features, problem_type)
                     if sample_sub_path.exists():
                         sub_df = pd.read_csv(sample_sub_path)
-                        sub_df.iloc[:, 1] = final_preds
-                        submission_path = working_dir / "submission.csv"
-                        sub_df.to_csv(submission_path, index=False)
-                        print(f"  ✅ Saved ensemble submission to {submission_path}")
+                        save_ok = True
+                        if final_preds.ndim == 1:
+                            sub_df.iloc[:, 1] = final_preds
+                        else:
+                            if final_preds.shape[1] != (len(sub_df.columns) - 1):
+                                print(
+                                    "  ⚠️ Prediction column mismatch: "
+                                    f"preds={final_preds.shape[1]}, sample_cols={len(sub_df.columns) - 1}"
+                                )
+                                save_ok = False
+                            else:
+                                sub_df.iloc[:, 1:] = final_preds
+
+                        if save_ok:
+                            submission_path = working_dir / "submission.csv"
+                            sub_df.to_csv(submission_path, index=False)
+                            print(f"  ✅ Saved ensemble submission to {submission_path}")
                     else:
                         print(
                             f"  ⚠️ Sample submission not found at {sample_sub_path}, skipping submission save"

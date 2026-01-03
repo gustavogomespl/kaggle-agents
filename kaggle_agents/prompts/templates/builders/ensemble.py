@@ -2,10 +2,12 @@
 Ensemble instruction builder.
 """
 
+from .cv import build_calibration_instructions
+
 
 def build_ensemble_instructions(target_col: str = "target") -> list[str]:
     """Build ensemble instructions."""
-    return [
+    instructions = [
         "\nENSEMBLE REQUIREMENTS:",
         "  - Combine predictions from multiple models",
         "  - PREFERRED STRATEGY: Stacking Ensemble (best performance)",
@@ -25,4 +27,9 @@ def build_ensemble_instructions(target_col: str = "target") -> list[str]:
         "    - If sample has 2 cols: fill columns[1] only",
         "    - If sample has >2 cols: fill ALL target columns in order (columns[1:])",
         "  - Print which models were used and their contribution/weights",
+        "  - ENSEMBLE AUDIT (POST-BLEND):",
+        "    - Check for dominance (>80% weight) and models that add noise",
+        "    - If average beats meta-model, revisit OOF hygiene and calibration",
     ]
+    instructions.extend(build_calibration_instructions())
+    return instructions

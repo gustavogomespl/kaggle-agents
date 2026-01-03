@@ -15,6 +15,8 @@ from .context import (
 )
 from .cv import (
     build_cv_instructions,
+    build_calibration_instructions,
+    build_oof_hygiene_instructions,
     build_stacking_oof_instructions,
 )
 from .ensemble import build_ensemble_instructions
@@ -37,6 +39,8 @@ __all__ = [
     "build_mlebench_objective_instructions",
     # CV
     "build_cv_instructions",
+    "build_calibration_instructions",
+    "build_oof_hygiene_instructions",
     "build_stacking_oof_instructions",
     # Optuna
     "build_optuna_tuning_instructions",

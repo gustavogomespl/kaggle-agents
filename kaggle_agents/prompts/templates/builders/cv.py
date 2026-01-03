@@ -31,7 +31,7 @@ def build_cv_instructions(working_dir: str, component_name: str) -> list[str]:
 
 def build_stacking_oof_instructions(working_dir: str, component_name: str) -> list[str]:
     """Build stacking/OOF instructions."""
-    return [
+    instructions = [
         "\nSTACKING & OOF REQUIREMENTS (CRITICAL):",
         "  1. Initialize `oof_preds` array of zeros with shape (n_train, n_classes) for multi-class.",
         "  2. Initialize `test_preds` array of zeros with shape (n_test, n_classes) for multi-class.",
@@ -73,6 +73,8 @@ def build_stacking_oof_instructions(working_dir: str, component_name: str) -> li
         "  8. Ensemble will ONLY run if BOTH oof_{name}.npy AND test_{name}.npy exist for at least 2 models.",
         "  9. This enables the Ensemble Agent to use Stacking/Blending later.",
     ]
+    instructions.extend(build_oof_hygiene_instructions(working_dir, component_name))
+    return instructions
 
 
 def build_multi_seed_instructions(working_dir: str, component_name: str) -> list[str]:
@@ -121,4 +123,32 @@ def build_multi_seed_instructions(working_dir: str, component_name: str) -> list
         "    print(f'   Multi-seed: average of {len(valid_oof)}/{len(seeds)} seeds')",
         "    ```",
         "  - DO NOT create separate folds.csv per seed (complexity + misalignment risk)",
+    ]
+
+
+def build_oof_hygiene_instructions(working_dir: str, component_name: str) -> list[str]:
+    """Build OOF hygiene instructions for robust stacking."""
+    return [
+        "\nOOF HYGIENE (STACKING SAFETY):",
+        "  - Validate OOF arrays BEFORE saving: no NaN/inf, correct shapes, no empty rows.",
+        "  - Save fold assignments used for each row (enables leakage checks):",
+        "    ```python",
+        "    # folds.csv must align with train rows",
+        "    folds = pd.read_csv('folds.csv')",
+        "    fold_assignment = folds['fold'].values",
+        f"    np.save(str(Path('{working_dir}') / 'models' / 'fold_assignment_{component_name}.npy'), fold_assignment)",
+        "    ```",
+        "  - Ensure train row order is consistent: use the same index/order for X, y, and OOF.",
+        "  - If you drop rows, reset index for train and folds so alignment stays exact.",
+    ]
+
+
+def build_calibration_instructions() -> list[str]:
+    """Build probability calibration instructions."""
+    return [
+        "\nPROBABILITY CALIBRATION (RECOMMENDED BEFORE ENSEMBLE):",
+        "  - Calibrate OOF probabilities per model before blending.",
+        "  - Prefer Platt scaling (logistic) as default; use isotonic if reliability curves are concave.",
+        "  - Save both raw and calibrated OOF: oof_raw_{name}.npy and oof_cal_{name}.npy.",
+        "  - Choose calibrated only if Brier/log_loss improves; otherwise keep raw.",
     ]
