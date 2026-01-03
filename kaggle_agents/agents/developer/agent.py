@@ -8,6 +8,7 @@ with automatic retry and debugging capabilities.
 from __future__ import annotations
 
 import json
+import math
 import os
 import shutil
 from datetime import datetime
@@ -224,6 +225,7 @@ class DeveloperAgent(
 
         working_dir = Path(state["working_directory"])
         competition_info = state["competition_info"]
+        metric_name = getattr(competition_info, "evaluation_metric", "")
 
         if not ablation_plan:
             print("No ablation plan found. Run Planner Agent first.")
@@ -261,6 +263,15 @@ class DeveloperAgent(
             except (TypeError, ValueError):
                 return default
 
+        def _coerce_score(value: Any) -> float | None:
+            try:
+                score = float(value)
+            except (TypeError, ValueError):
+                return None
+            if not math.isfinite(score):
+                return None
+            return score
+
         # Allow runners (e.g., MLE-bench) to cap runtime per component via state.
         base_timeout = _coerce_int(
             state.get("timeout_per_component"),
@@ -293,6 +304,9 @@ class DeveloperAgent(
 
         should_keep_component = True
         new_cv_score: float | None = None
+        primary_score: float | None = None
+        primary_score_source: str | None = None
+        grading: dict[str, Any] | None = None
         force_retry = False
 
         if result.success and component.component_type == "model":
@@ -306,9 +320,17 @@ class DeveloperAgent(
                 errors=result.errors,
             )
 
-            should_keep_component, new_cv_score = self._validate_component_improvement(
-                component, exec_result, state
-            )
+            if run_mode == "mlebench":
+                new_cv_score = self._extract_cv_score(result.stdout)
+                should_keep_component = True
+                if new_cv_score is None:
+                    print(
+                        "⚠️ No CV score found; skipping rollback in MLE-bench mode."
+                    )
+            else:
+                should_keep_component, new_cv_score = self._validate_component_improvement(
+                    component, exec_result, state
+                )
 
             if not should_keep_component:
                 print("\nROLLBACK: Component did not improve score - discarding")
@@ -390,8 +412,6 @@ class DeveloperAgent(
                 (p for p in submission_candidates if p is not None and p.exists()),
                 None,
             )
-            grading = None
-            metric_name = competition_info.evaluation_metric
             if submission_path:
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
@@ -406,11 +426,15 @@ class DeveloperAgent(
                         submission_path=submission_path,
                     )
                     state_updates["mlebench_grade"] = grading
-                    score = grading.get("score")
-                    if grading.get("valid_submission") and isinstance(score, (int, float)):
-                        state_updates["current_performance_score"] = float(score)
+                    score = (
+                        _coerce_score(grading.get("score"))
+                        if grading.get("valid_submission")
+                        else None
+                    )
+                    if score is not None:
+                        state_updates["current_performance_score"] = score
                         print(
-                            f"✅ MLE-bench grade: score={float(score):.5f} "
+                            f"✅ MLE-bench grade: score={score:.5f} "
                             f"above_median={bool(grading.get('above_median', False))}"
                         )
 
@@ -429,31 +453,38 @@ class DeveloperAgent(
                             f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
                         )
 
+                if run_mode == "mlebench" and isinstance(grading, dict):
+                    grade_score = (
+                        _coerce_score(grading.get("score"))
+                        if grading.get("valid_submission")
+                        else None
+                    )
+                    if grade_score is not None:
+                        primary_score = grade_score
+                        primary_score_source = "mlebench"
+
+                if primary_score is None:
+                    cv_score = _coerce_score(new_cv_score)
+                    if cv_score is not None:
+                        primary_score = cv_score
+                        primary_score_source = "cv"
+
                 current_best_score = state.get("best_single_model_score")
                 if min_component_score is not None and not state_updates.get(
                     "skip_remaining_components"
                 ):
-                    score_for_gate = None
-                    score_source = None
-                    if run_mode == "mlebench" and isinstance(grading, dict):
-                        score = grading.get("score")
-                        if grading.get("valid_submission") and isinstance(score, (int, float)):
-                            score_for_gate = float(score)
-                            score_source = "mlebench"
-                    if score_for_gate is None and isinstance(new_cv_score, (int, float)):
-                        score_for_gate = float(new_cv_score)
-                        score_source = "cv"
+                    score_for_gate = primary_score
+                    score_source = primary_score_source
+                    if score_for_gate is None:
+                        cv_score = _coerce_score(new_cv_score)
+                        if cv_score is not None:
+                            score_for_gate = cv_score
+                            score_source = "cv"
                     if score_for_gate is None:
                         extracted = self._extract_cv_score(result.stdout)
-                        if isinstance(extracted, (int, float)):
-                            score_for_gate = float(extracted)
+                        score_for_gate = _coerce_score(extracted)
+                        if score_for_gate is not None:
                             score_source = "cv"
-
-                    if score_for_gate is not None:
-                        import math
-
-                        if not math.isfinite(score_for_gate):
-                            score_for_gate = None
 
                     if score_for_gate is None:
                         is_minimize = is_metric_minimization(metric_name)
@@ -486,19 +517,19 @@ class DeveloperAgent(
                             )
 
                 is_best = False
-                if new_cv_score is not None:
+                if primary_score is not None:
                     if current_best_score is None:
                         is_best = True
                     else:
                         improvement = calculate_score_improvement(
-                            new_cv_score, current_best_score, metric_name
+                            primary_score, current_best_score, metric_name
                         )
                         if improvement > 0:
                             is_best = True
 
                 if is_best:
-                    print(f"New Best Single Model! ({new_cv_score:.4f})")
-                    state_updates["best_single_model_score"] = new_cv_score
+                    print(f"New Best Single Model! ({primary_score:.4f})")
+                    state_updates["best_single_model_score"] = primary_score
                     state_updates["best_single_model_name"] = component.name
 
                     best_path = working_dir / "submission_best.csv"
@@ -545,23 +576,94 @@ class DeveloperAgent(
             if (
                 result.success
                 and should_keep_component
-                and new_cv_score is not None
+                and (primary_score is not None or new_cv_score is not None)
                 and not force_retry
             ):
-                state_updates["baseline_cv_score"] = new_cv_score
-                print(f"Updated baseline CV score: {new_cv_score:.4f}")
+                baseline_score = primary_score if primary_score is not None else new_cv_score
+                baseline_candidate = _coerce_score(baseline_score)
+                if baseline_candidate is not None:
+                    if run_mode == "mlebench":
+                        baseline_current = _coerce_score(state.get("baseline_cv_score"))
+                        if baseline_current is None:
+                            should_update = True
+                        else:
+                            improvement = calculate_score_improvement(
+                                baseline_candidate, baseline_current, metric_name
+                            )
+                            should_update = improvement > 0
+                        if should_update:
+                            state_updates["baseline_cv_score"] = baseline_candidate
+                            if primary_score_source == "mlebench":
+                                print(
+                                    f"Updated baseline MLE-bench score: {baseline_candidate:.4f}"
+                                )
+                            else:
+                                print(
+                                    f"Updated baseline CV score: {baseline_candidate:.4f}"
+                                )
+                    else:
+                        state_updates["baseline_cv_score"] = baseline_candidate
+                        print(f"Updated baseline CV score: {baseline_candidate:.4f}")
 
         if result.success and component.component_type in {"model", "ensemble"}:
             submission_path = working_dir / "submission.csv"
             best_submission = working_dir / "submission_best.csv"
-            baseline_score = state.get("baseline_cv_score") or state.get(
-                "best_single_model_score"
-            )
-            score_for_gate = new_cv_score
+            if run_mode == "mlebench":
+                baseline_score = state.get("baseline_cv_score") or state.get(
+                    "best_single_model_score"
+                )
+            else:
+                baseline_score = state.get("baseline_cv_score") or state.get(
+                    "best_single_model_score"
+                )
+
+            if run_mode == "mlebench" and grading is None and submission_path.exists():
+                grading = self._grade_with_mlebench(
+                    competition_name=competition_info.name,
+                    submission_path=submission_path,
+                )
+                state_updates["mlebench_grade"] = grading
+                score = (
+                    _coerce_score(grading.get("score"))
+                    if isinstance(grading, dict) and grading.get("valid_submission")
+                    else None
+                )
+                if score is not None:
+                    state_updates["current_performance_score"] = score
+                    print(
+                        f"✅ MLE-bench grade: score={score:.5f} "
+                        f"above_median={bool(grading.get('above_median', False))}"
+                    )
+                    if self._should_stop_on_mlebench_grade(
+                        grading=grading,
+                        state=state,
+                        metric_name=metric_name,
+                    ):
+                        print(
+                            "🏁 Objective reached (MLE-bench) - stopping remaining components"
+                        )
+                        state_updates["skip_remaining_components"] = True
+                        state_updates["current_component_index"] = len(ablation_plan)
+                else:
+                    if isinstance(grading, dict):
+                        print(
+                            f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
+                        )
+
+            if primary_score is None and run_mode == "mlebench" and isinstance(grading, dict):
+                grade_score = (
+                    _coerce_score(grading.get("score"))
+                    if grading.get("valid_submission")
+                    else None
+                )
+                if grade_score is not None:
+                    primary_score = grade_score
+                    primary_score_source = "mlebench"
+
+            score_for_gate = primary_score
             if score_for_gate is None:
                 extracted = self._extract_cv_score(result.stdout)
-                if isinstance(extracted, (int, float)):
-                    score_for_gate = float(extracted)
+                score_for_gate = _coerce_score(extracted)
 
             if (
                 isinstance(baseline_score, (int, float))
@@ -582,6 +684,24 @@ class DeveloperAgent(
                     )
                     state_updates["submission_reverted"] = True
                     state_updates["submission_revert_reason"] = "worse_than_baseline"
+
+            if (
+                run_mode == "mlebench"
+                and component.component_type == "ensemble"
+                and isinstance(score_for_gate, (int, float))
+                and submission_path.exists()
+            ):
+                baseline_current = _coerce_score(baseline_score)
+                if baseline_current is None:
+                    is_minimize = is_metric_minimization(metric_name)
+                    baseline_current = float("inf") if is_minimize else float("-inf")
+                improvement = calculate_score_improvement(
+                    score_for_gate, baseline_current, metric_name
+                )
+                if improvement > 0:
+                    state_updates["baseline_cv_score"] = float(score_for_gate)
+                    shutil.copy(submission_path, best_submission)
+                    print("Updated submission_best.csv with improved MLE-bench score")
 
         # Track OOF availability for ensemble (even if ablation study rejected the model)
         if result.success and component.component_type == "model":
