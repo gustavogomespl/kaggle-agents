@@ -86,9 +86,8 @@ def platt_scaling(
     if oof_probs.ndim == 1:
         # Binary classification
         return _platt_scaling_binary(oof_probs, y_true, cv_folds, n_cv_splits)
-    else:
-        # Multiclass: per-class calibration
-        return _platt_scaling_multiclass(oof_probs, y_true, cv_folds, n_cv_splits)
+    # Multiclass: per-class calibration
+    return _platt_scaling_multiclass(oof_probs, y_true, cv_folds, n_cv_splits)
 
 
 def _platt_scaling_binary(

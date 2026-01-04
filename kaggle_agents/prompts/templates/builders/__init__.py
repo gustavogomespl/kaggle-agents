@@ -14,8 +14,8 @@ from .context import (
     build_context,
 )
 from .cv import (
-    build_cv_instructions,
     build_calibration_instructions,
+    build_cv_instructions,
     build_oof_hygiene_instructions,
     build_stacking_oof_instructions,
 )

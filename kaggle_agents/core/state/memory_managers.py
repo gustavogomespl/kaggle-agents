@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def update_model_performance(
-    state: "KaggleState", record: ModelPerformanceRecord
+    state: KaggleState, record: ModelPerformanceRecord
 ) -> dict[str, Any]:
     """
     Update model performance history and track best models by type.
@@ -77,7 +77,7 @@ def update_model_performance(
 
 
 def update_error_memory(
-    state: "KaggleState",
+    state: KaggleState,
     error_type: str,
     error_pattern: str,
     solution: str,
@@ -152,7 +152,7 @@ def update_error_memory(
     return {"error_pattern_memory": [new_pattern]}
 
 
-def aggregate_feature_importance(state: "KaggleState", top_k: int = 20) -> dict[str, Any]:
+def aggregate_feature_importance(state: KaggleState, top_k: int = 20) -> dict[str, Any]:
     """
     Aggregate feature importance across all model performance records.
 
@@ -196,7 +196,7 @@ def aggregate_feature_importance(state: "KaggleState", top_k: int = 20) -> dict[
     }
 
 
-def get_best_hyperparameters(state: "KaggleState", model_type: str) -> dict[str, Any]:
+def get_best_hyperparameters(state: KaggleState, model_type: str) -> dict[str, Any]:
     """
     Get best hyperparameters for a model type based on history.
 
@@ -238,7 +238,7 @@ def get_best_hyperparameters(state: "KaggleState", model_type: str) -> dict[str,
 
 
 def update_hyperparameter_history(
-    state: "KaggleState",
+    state: KaggleState,
     model_type: str,
     hyperparameters: dict[str, Any],
     cv_score: float,
@@ -324,7 +324,7 @@ def update_hyperparameter_history(
 
 
 def update_strategy_effectiveness(
-    state: "KaggleState",
+    state: KaggleState,
     strategy: str,
     score_improvement: float,
 ) -> dict[str, Any]:
@@ -383,7 +383,7 @@ def update_strategy_effectiveness(
     return updates
 
 
-def get_memory_summary_for_planning(state: "KaggleState") -> str:
+def get_memory_summary_for_planning(state: KaggleState) -> str:
     """
     Generate a summary of structured memory for planning agents.
 

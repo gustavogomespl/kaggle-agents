@@ -40,12 +40,12 @@ if TYPE_CHECKING:
 class RetryMixin:
     """Mixin providing retry and debug capabilities."""
 
-    llm: "BaseChatModel"
-    executor: "CodeExecutor"
+    llm: BaseChatModel
+    executor: CodeExecutor
     use_dspy: bool
     fixer_module: Any
     config: Any
-    _preference_collector: "PreferenceCollector"
+    _preference_collector: PreferenceCollector
 
     def _should_skip_component(
         self,
@@ -332,14 +332,14 @@ class RetryMixin:
     def _debug_code(
         self,
         code: str,
-        exec_result: "ExecutionResult",
+        exec_result: ExecutionResult,
         working_dir: Path,
         max_iterations: int = 10,
         meta_feedback: str | None = None,
         component_name: str = "",
         component_type: str = "",
         state: dict | None = None,
-    ) -> tuple[str, "ExecutionResult", bool]:
+    ) -> tuple[str, ExecutionResult, bool]:
         """
         Debug code iteratively with loop-safety, configurable timeouts, and dynamic temperature.
 

@@ -644,11 +644,10 @@ class DeveloperAgent(
                         )
                         state_updates["skip_remaining_components"] = True
                         state_updates["current_component_index"] = len(ablation_plan)
-                else:
-                    if isinstance(grading, dict):
-                        print(
-                            f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
-                        )
+                elif isinstance(grading, dict):
+                    print(
+                        f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
+                    )
 
             if primary_score is None and run_mode == "mlebench" and isinstance(grading, dict):
                 grade_score = (
@@ -852,7 +851,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                             print(f"     Train: {eng_train.name} ({len(eng_train_df.columns)} columns)")
                             print(f"     Test:  {eng_test.name} ({len(eng_test_df.columns)} columns)")
                         else:
-                            print(f"  ⚠️ WARNING: Feature engineering produced insufficient columns:")
+                            print("  ⚠️ WARNING: Feature engineering produced insufficient columns:")
                             print(f"     Train: {len(eng_train_df.columns)} columns (need >= {min_train_cols})")
                             print(f"     Test:  {len(eng_test_df.columns)} columns (need >= {min_test_cols})")
                             print("     Keeping original train/test paths")

@@ -419,7 +419,7 @@ class CodeExecutor:
                         f"Preprocessing/feature_engineering components MUST NOT train models. "
                         f"Move model training to a 'model' component instead."
                     )
-                elif blocked_patterns:
+                if blocked_patterns:
                     # It's feature selection - just warn but allow
                     print(
                         f"   ⚠️  {component_type} uses models for feature selection: "

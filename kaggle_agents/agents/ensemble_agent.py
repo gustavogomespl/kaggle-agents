@@ -1,7 +1,6 @@
 """Ensemble agent for model stacking and blending."""
 
 import os
-import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -147,7 +146,12 @@ class EnsembleAgent:
         metric_name: str,
     ) -> float:
         """Return a score where LOWER is better."""
-        from sklearn.metrics import accuracy_score, log_loss, mean_absolute_error, mean_squared_error
+        from sklearn.metrics import (
+            accuracy_score,
+            log_loss,
+            mean_absolute_error,
+            mean_squared_error,
+        )
 
         metric = (metric_name or "").lower()
         if not metric:
@@ -204,7 +208,7 @@ class EnsembleAgent:
 
         if metric_name == "log_loss":
             return log_loss(y_true, oof)
-        elif metric_name in ["rmse", "mse", "mean_squared_error"]:
+        if metric_name in ["rmse", "mse", "mean_squared_error"]:
             return np.sqrt(mean_squared_error(y_true, oof.ravel() if oof.ndim > 1 else oof))
         return float("inf")
 
@@ -297,25 +301,24 @@ class EnsembleAgent:
 
             print(f"   Meta-model tuning: best C={best_C} (OOF log_loss={best_score:.4f})")
             return LogisticRegression(C=best_C, random_state=42, max_iter=1000, solver="lbfgs")
-        else:
-            best_score = float("inf")
-            best_alpha = 1.0
-            cv = KFold(n_splits=3, shuffle=True, random_state=42)
+        best_score = float("inf")
+        best_alpha = 1.0
+        cv = KFold(n_splits=3, shuffle=True, random_state=42)
 
-            for alpha in [0.1, 1.0, 10.0, 100.0]:
-                try:
-                    model = Ridge(alpha=alpha, random_state=42)
-                    oof_preds = cross_val_predict(model, meta_X, y, cv=cv)
-                    mean_score = np.sqrt(mean_squared_error(y, oof_preds))
-                    if mean_score < best_score:
-                        best_score = mean_score
-                        best_alpha = alpha
-                except Exception as e:
-                    print(f"      ⚠️ alpha={alpha} failed: {e}")
-                    continue
+        for alpha in [0.1, 1.0, 10.0, 100.0]:
+            try:
+                model = Ridge(alpha=alpha, random_state=42)
+                oof_preds = cross_val_predict(model, meta_X, y, cv=cv)
+                mean_score = np.sqrt(mean_squared_error(y, oof_preds))
+                if mean_score < best_score:
+                    best_score = mean_score
+                    best_alpha = alpha
+            except Exception as e:
+                print(f"      ⚠️ alpha={alpha} failed: {e}")
+                continue
 
-            print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
-            return Ridge(alpha=best_alpha, random_state=42)
+        print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
+        return Ridge(alpha=best_alpha, random_state=42)
 
     def _constrained_meta_learner(
         self,
@@ -741,20 +744,17 @@ class EnsembleAgent:
                     return -roc_auc_score(
                         y_true, blended, multi_class="ovr", average="weighted"
                     )
-                else:
-                    # Default: log_loss for classification
-                    return log_loss(y_true, blended)
-            else:
-                # Regression
-                if blended.ndim > 1:
-                    blended = blended.ravel()
-                if metric_name in ["mae", "mean_absolute_error"]:
-                    return mean_absolute_error(y_true, blended)
-                elif metric_name in ["mse", "mean_squared_error"]:
-                    return mean_squared_error(y_true, blended)
-                else:
-                    # Default: RMSE for regression
-                    return np.sqrt(mean_squared_error(y_true, blended))
+                # Default: log_loss for classification
+                return log_loss(y_true, blended)
+            # Regression
+            if blended.ndim > 1:
+                blended = blended.ravel()
+            if metric_name in ["mae", "mean_absolute_error"]:
+                return mean_absolute_error(y_true, blended)
+            if metric_name in ["mse", "mean_squared_error"]:
+                return mean_squared_error(y_true, blended)
+            # Default: RMSE for regression
+            return np.sqrt(mean_squared_error(y_true, blended))
 
         # Objective for optimization
         def objective(weights: np.ndarray) -> float:
@@ -1753,11 +1753,7 @@ Return a JSON object:
                 n_unique = y_series.nunique(dropna=True)
                 unique_ratio = n_unique / max(len(y_series), 1)
 
-                if class_order and len(class_order) > 1:
-                    problem_type = "classification"
-                elif y_series.dtype.kind in {"O", "U", "S"}:
-                    problem_type = "classification"
-                elif unique_ratio <= 0.2 and n_unique <= 200:
+                if (class_order and len(class_order) > 1) or y_series.dtype.kind in {"O", "U", "S"} or (unique_ratio <= 0.2 and n_unique <= 200):
                     problem_type = "classification"
                 else:
                     problem_type = "regression"
@@ -2144,15 +2140,14 @@ Return a JSON object:
                         save_ok = True
                         if final_preds.ndim == 1:
                             sub_df.iloc[:, 1] = final_preds
+                        elif final_preds.shape[1] != (len(sub_df.columns) - 1):
+                            print(
+                                "  ⚠️ Prediction column mismatch: "
+                                f"preds={final_preds.shape[1]}, sample_cols={len(sub_df.columns) - 1}"
+                            )
+                            save_ok = False
                         else:
-                            if final_preds.shape[1] != (len(sub_df.columns) - 1):
-                                print(
-                                    "  ⚠️ Prediction column mismatch: "
-                                    f"preds={final_preds.shape[1]}, sample_cols={len(sub_df.columns) - 1}"
-                                )
-                                save_ok = False
-                            else:
-                                sub_df.iloc[:, 1:] = final_preds
+                            sub_df.iloc[:, 1:] = final_preds
 
                         if save_ok:
                             submission_path = working_dir / "submission.csv"

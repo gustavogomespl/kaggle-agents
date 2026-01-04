@@ -294,7 +294,7 @@ def print_oof_summary(results: list[OOFSanityResult]) -> None:
     with_warnings = sum(1 for r in results if r.is_valid and r.warnings)
     invalid = total - valid
 
-    print(f"\n   OOF VALIDATION SUMMARY:")
+    print("\n   OOF VALIDATION SUMMARY:")
     print(f"   Total models: {total}")
     print(f"   Valid: {valid} ({100 * valid / total:.1f}%)")
     if with_warnings > 0:

@@ -284,7 +284,7 @@ class AgentConfig:
         return issues
 
     @classmethod
-    def from_env(cls, overrides: dict | None = None) -> "AgentConfig":
+    def from_env(cls, overrides: dict | None = None) -> AgentConfig:
         """
         Create configuration from environment variables with optional overrides.
 

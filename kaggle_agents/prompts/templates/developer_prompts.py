@@ -11,21 +11,6 @@ Builder functions are now in the builders/ submodule for better organization.
 # Re-export builders for backward compatibility
 from .builders import (
     DynamicContext,
-    build_budget_instructions,
-    build_context,
-    build_cv_instructions,
-    build_dynamic_instructions,
-    build_ensemble_instructions,
-    build_feature_engineering_instructions,
-    build_image_model_instructions,
-    build_iteration_context,
-    build_mlebench_objective_instructions,
-    build_model_component_instructions,
-    build_optuna_tuning_instructions,
-    build_performance_gap_instructions,
-    build_previous_results_context,
-    build_stacking_oof_instructions,
-    build_standard_requirements,
 )
 
 

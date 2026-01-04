@@ -100,7 +100,7 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         "multi_modal": "Combination of multiple data types",
     }
 
-    def __init__(self, llm: "BaseChatModel | None" = None):
+    def __init__(self, llm: BaseChatModel | None = None):
         """
         Initialize the domain detector.
 
@@ -593,7 +593,7 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 def detect_competition_domain(
     competition_info: CompetitionInfo,
     data_directory: Path | str,
-    llm: "BaseChatModel | None" = None,
+    llm: BaseChatModel | None = None,
 ) -> tuple[DomainType, float]:
     """
     Convenience function to detect competition domain.

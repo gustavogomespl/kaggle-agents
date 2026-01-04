@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 
 
 @dataclass
@@ -146,12 +146,12 @@ class HyperparameterHistory:
 
 
 def merge_error_pattern_memory(
-    existing: list["ErrorPatternMemory"],
-    new: list["ErrorPatternMemory"],
-) -> list["ErrorPatternMemory"]:
+    existing: list[ErrorPatternMemory],
+    new: list[ErrorPatternMemory],
+) -> list[ErrorPatternMemory]:
     """Merge error pattern memory entries by (error_type, error_pattern)."""
 
-    def _normalize(entry: Any) -> Optional["ErrorPatternMemory"]:
+    def _normalize(entry: Any) -> ErrorPatternMemory | None:
         if isinstance(entry, ErrorPatternMemory):
             return entry
         if isinstance(entry, dict):
