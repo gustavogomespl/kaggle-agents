@@ -4,6 +4,26 @@ Image-specific constraints for computer vision tasks.
 
 IMAGE_CONSTRAINTS = """## IMAGE TASK REQUIREMENTS:
 
+### 0. Image Path Resolution (CRITICAL)
+Image datasets may be organized as `train/` or `train/images/` (same for test).
+Always resolve the actual image directory before loading files:
+
+```python
+def resolve_image_dir(base_dir: Path, split: str) -> Path:
+    candidates = [
+        base_dir / split,
+        base_dir / split / "images",
+        base_dir / "images" / split,
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]  # fallback
+
+train_dir = resolve_image_dir(base_dir, "train")
+test_dir = resolve_image_dir(base_dir, "test")
+```
+
 ### 1. Variable Image Dimensions (CRITICAL)
 Images often have different sizes. DataLoader's `torch.stack()` fails on different sizes.
 

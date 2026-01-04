@@ -809,6 +809,9 @@ def _get_component_guidance(component_type: str) -> str:
 - Preferred: Stacking with LogisticRegression/Ridge meta-learner
 - Fallback: Weighted average if OOF files missing
 - Can use correlation analysis to select diverse models
+- MUST validate shapes:
+  - Load test.csv (or sample_submission) to get n_test
+  - Skip any model where oof.shape[0] != n_train or test.shape[0] != n_test
 
 ### Final Output:
 - Create submission.csv with final ensemble predictions

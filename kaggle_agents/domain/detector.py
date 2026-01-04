@@ -289,13 +289,39 @@ Respond with ONLY the category name, nothing else. Example: image_classification
                         return path
         return None
 
+    def _has_image_assets(self, data_dir: Path) -> bool:
+        """Return True if the data directory contains image assets."""
+        if not data_dir.exists():
+            return False
+
+        image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"}
+        candidate_dirs = [
+            p
+            for p in data_dir.iterdir()
+            if p.is_dir() and p.name.lower().startswith(("train", "test", "images"))
+        ]
+        if not candidate_dirs:
+            candidate_dirs = [data_dir]
+
+        for dir_path in candidate_dirs:
+            for i, file_path in enumerate(dir_path.rglob("*")):
+                if i >= 200:
+                    break
+                if file_path.is_file() and file_path.suffix.lower() in image_exts:
+                    return True
+
+        return False
+
     def _detect_tabular_from_csv(
         self, competition_info: CompetitionInfo, data_dir: Path
     ) -> tuple[DomainType, float] | None:
         """
         Heuristic override: if train.csv is wide with many numeric columns,
-        treat the competition as tabular even if images exist.
+        treat the competition as tabular when no strong image signal exists.
         """
+        if self._has_image_assets(data_dir):
+            return None
+
         train_path = self._find_train_file(data_dir)
         if not train_path:
             return None
@@ -365,6 +391,8 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         if tabular_override:
             return tabular_override
 
+        structural_result = self._detect_from_structure(competition_info, data_dir)
+
         # Step 3: Use LLM for granular domain classification (LLM-First)
         # Scan files to provide context to LLM
         files = []
@@ -429,13 +457,20 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             domain = content.strip().lower().replace(" ", "_")
 
             if domain in self.DOMAINS:
+                if (
+                    domain.startswith("tabular")
+                    and structural_result[0].startswith("image")
+                    and structural_result[1] >= 0.8
+                    and data_type == "image"
+                ):
+                    return structural_result
                 return domain, 0.95  # type: ignore
             # LLM returned invalid domain, use structural heuristics
-            return self._detect_from_structure(competition_info, data_dir)
+            return structural_result
 
         except Exception:
             # LLM failed, use structural heuristics
-            return self._detect_from_structure(competition_info, data_dir)
+            return structural_result
 
     def get_domain_description(self, domain: DomainType) -> str:
         """Get a human-readable description of a domain."""
