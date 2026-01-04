@@ -16,6 +16,36 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 - Clamp predictions: `np.clip(predictions, 0, 1)` before saving
 - Match sample_submission.csv exactly: columns, IDs, shape
 
+### 2b. Multi-Modal Hybrid Best Practice
+If a competition has BOTH raw image directories (train/, test/, images/) AND a train.csv
+with many numeric feature columns, prioritize a HYBRID model:
+- CNN for images + MLP for tabular features
+- Concatenate CNN embedding with normalized tabular features before the head
+- Use Keras Functional API (multi-input) or equivalent
+- Use light image augmentation (rotation, zoom, flip)
+This is a common Kaggle best practice for multi_modal tasks and often beats separate models.
+
+Generic hybrid example (Keras Functional API):
+```python
+import tensorflow as tf
+
+img_input = tf.keras.Input(shape=(H, W, C), name="image")
+x = tf.keras.layers.Conv2D(32, 3, activation="relu")(img_input)
+x = tf.keras.layers.MaxPooling2D()(x)
+x = tf.keras.layers.Conv2D(64, 3, activation="relu")(x)
+x = tf.keras.layers.MaxPooling2D()(x)
+x = tf.keras.layers.Flatten()(x)
+
+tab_input = tf.keras.Input(shape=(n_features,), name="tabular")
+t = tf.keras.layers.Dense(128, activation="relu")(tab_input)
+
+combined = tf.keras.layers.Concatenate()([x, t])
+combined = tf.keras.layers.Dense(128, activation="relu")(combined)
+out = tf.keras.layers.Dense(num_classes, activation="softmax")(combined)
+
+model = tf.keras.Model(inputs=[img_input, tab_input], outputs=out)
+```
+
 ### 3. Soft-Deadline Pattern (MANDATORY)
 CRITICAL: The environment may kill your process at any time. Monitor time actively!
 

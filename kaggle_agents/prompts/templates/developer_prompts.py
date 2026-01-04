@@ -487,7 +487,41 @@ if len(train_df.columns) <= 2:
 - TABULAR competition (train.csv has many feature columns):
   → Use: LightGBM, XGBoost, CatBoost with hyperparameter tuning
 
-NEVER create dummy/random features to feed into tree models!"""
+NEVER create dummy/random features to feed into tree models!
+
+## CRITICAL: MULTI-MODAL HYBRID BEST PRACTICE
+When a competition has BOTH:
+1. Raw image directories (train/, test/, images/)
+2. train.csv with many numeric feature columns (hand-crafted / extracted features)
+Then prioritize a HYBRID model:
+- CNN for images + MLP for tabular features
+- Concatenate CNN embedding with normalized tabular features before the classifier head
+- Use Keras Functional API (multi-input) or equivalent
+- Use light image augmentation (rotation, zoom, flip)
+This is a common Kaggle best practice for multi_modal tasks and often beats separate models.
+
+Generic hybrid example (Keras Functional API):
+```python
+import tensorflow as tf
+
+# X_img: (N, H, W, C), X_tab: (N, n_features)
+img_input = tf.keras.Input(shape=(H, W, C), name="image")
+x = tf.keras.layers.Conv2D(32, 3, activation="relu")(img_input)
+x = tf.keras.layers.MaxPooling2D()(x)
+x = tf.keras.layers.Conv2D(64, 3, activation="relu")(x)
+x = tf.keras.layers.MaxPooling2D()(x)
+x = tf.keras.layers.Flatten()(x)
+
+tab_input = tf.keras.Input(shape=(n_features,), name="tabular")
+t = tf.keras.layers.Dense(128, activation="relu")(tab_input)
+
+combined = tf.keras.layers.Concatenate()([x, t])
+combined = tf.keras.layers.Dense(128, activation="relu")(combined)
+out = tf.keras.layers.Dense(num_classes, activation="softmax")(combined)
+
+model = tf.keras.Model(inputs=[img_input, tab_input], outputs=out)
+```
+"""
 
 
 # ==================== Logging Format ====================

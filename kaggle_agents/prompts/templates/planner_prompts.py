@@ -46,6 +46,19 @@ CRITICAL RULES:
 - USE: LightGBM, XGBoost, CatBoost with Optuna hyperparameter tuning
 - Neural Networks can add ensemble diversity
 
+### CRITICAL: MULTI-MODAL HYBRID PRIORITY
+If domain == "multi_modal" OR signals show BOTH raw image directories AND rich tabular features:
+- PRIORITY #1: create component "hybrid_cnn_tabular"
+  - Input 1: Simple CNN (2-3 Conv2D + Pooling + Flatten) on raw images
+  - Input 2: Normalized tabular features (StandardScaler)
+  - Concatenate -> Dense layers -> output head
+  - Use image augmentation (rotation, zoom, flip)
+  - Resize images to ~96-128, grayscale if applicable
+  - Estimated impact: 0.40-0.50 (high, proven in Kaggle)
+- Other components (pure LGBM, ensemble) are secondary
+- Avoid separate models; hybrid is more robust here
+- Force at least 1 hybrid component in the ablation plan for multi_modal
+
 ### CRITICAL: NEVER suggest tree models (LightGBM/XGBoost/CatBoost) for image competitions!
 Tree-based models require tabular features. If train.csv only has id+label columns,
 this is an IMAGE competition and MUST use CNN models with transfer learning.
