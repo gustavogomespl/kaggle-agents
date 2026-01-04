@@ -121,12 +121,16 @@ class PromptOptimizer:
         print(f"   Training examples: {len(trainset)}")
 
         # Choose optimizer based on config
+        use_mipro_auto = False
         if self.config.dspy.optimizer == "MIPROv2":
+            # FIX: Use auto="medium" instead of num_candidates/num_trials
+            # DSPy MIPROv2 doesn't allow both parameters when auto is set
             optimizer = MIPROv2(
                 metric=metric,
-                num_candidates=20,
+                auto="medium",  # Let DSPy decide num_candidates/num_trials
                 init_temperature=1.0,
             )
+            use_mipro_auto = True
         elif self.config.dspy.optimizer == "BootstrapFewShot":
             optimizer = BootstrapFewShot(
                 metric=metric,
@@ -138,11 +142,19 @@ class PromptOptimizer:
 
         # Compile (optimize) the module
         print(f"   Running {self.config.dspy.optimizer} optimizer...")
-        optimized_module = optimizer.compile(
-            module,
-            trainset=trainset,
-            num_trials=self.config.dspy.max_iterations,
-        )
+        if use_mipro_auto:
+            # MIPROv2 with auto mode: don't pass num_trials (conflicts with auto)
+            optimized_module = optimizer.compile(
+                module,
+                trainset=trainset,
+            )
+        else:
+            # Other optimizers: pass num_trials to control optimization effort
+            optimized_module = optimizer.compile(
+                module,
+                trainset=trainset,
+                num_trials=self.config.dspy.max_iterations,
+            )
 
         # Save if path provided
         if save_path is None:

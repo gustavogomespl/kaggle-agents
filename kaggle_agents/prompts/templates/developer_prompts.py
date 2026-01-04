@@ -65,6 +65,13 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 6. Match sample_submission.csv exactly: columns, IDs, shape
 7. If using logits, apply softmax/sigmoid BEFORE log_loss and submission creation
 8. Print "Final Validation Performance: {score:.6f}" at the end (CRITICAL: Meta-Evaluator depends on this exact string)
+   **CRITICAL FOR LOG_LOSS METRICS**: The score MUST be log_loss (not accuracy/AUC). For multiclass:
+   ```python
+   from sklearn.metrics import log_loss
+   oof_score = log_loss(y_true, oof_preds_clipped)  # Use this, NOT accuracy
+   print(f"Final Validation Performance: {oof_score:.6f}")
+   ```
+   Lower log_loss is better (0.02 is excellent, 0.7+ is nearly random for 99 classes).
 9. Set random_state=42 everywhere for reproducibility
 10. MANDATORY SOFT-DEADLINE PATTERN (prevents hard timeout kills):
 

@@ -316,9 +316,12 @@ def build_dynamic_instructions(
             ]
         )
         if is_classification and ("log" in metric_lower or "loss" in metric_lower):
-            instructions.append(
-                "  - For log_loss metrics: compute log_loss on OOF predictions (clip + renormalize); do NOT print accuracy/AUC"
-            )
+            instructions.extend([
+                "  - For log_loss metrics: compute log_loss on OOF predictions (clip + renormalize)",
+                "  - CRITICAL: Final Validation Performance MUST be log_loss value (NOT accuracy/AUC)",
+                "  - Lower is better: 0.02 = excellent, 0.7+ = nearly random for multiclass",
+                "  - Use: `from sklearn.metrics import log_loss; score = log_loss(y_true, oof_preds)`",
+            ])
 
     # Build budget instructions
     instructions.extend(build_budget_instructions(timeout_hint))

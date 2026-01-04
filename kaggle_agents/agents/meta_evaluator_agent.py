@@ -1,8 +1,7 @@
 """
 Meta-Evaluator Agent with Reinforcement Learning.
 
-This agent uses a superior model (GPT-5) to analyze code generation
-results and optimize prompts for other agents using RL techniques.
+This agent analyzes code generation results and optimize prompts for other agents using RL techniques.
 
 Based on:
 - CodeRL+: Execution Semantics Alignment
@@ -87,7 +86,6 @@ class MetaEvaluatorAgent:
     Meta-agent that evaluates other agents and optimizes their prompts using RL.
 
     Features:
-    - Uses superior model (GPT-5) for better analysis
     - Analyzes code generation failures and successes
     - Extracts error patterns (PREFACE pattern)
     - Calculates reward signals (CodeRL+ pattern)

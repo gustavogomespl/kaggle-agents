@@ -1811,12 +1811,26 @@ Return a JSON object:
                     if (models_dir / f"oof_{name}.npy").exists()
                 }
 
+            # FIX: Fallback to direct file search if no state keys found
+            # This ensures models are included even if state registration failed
+            if not accepted_oof_names:
+                print("   🔍 No state keys found - scanning models directory directly...")
+                oof_files = list(models_dir.glob("oof_*.npy"))
+                for oof_file in oof_files:
+                    model_name = oof_file.stem.replace("oof_", "")
+                    test_file = models_dir / f"test_{model_name}.npy"
+                    if test_file.exists():
+                        accepted_oof_names.add(model_name)
+                        print(f"      Found: {model_name} (OOF + test predictions)")
+                    else:
+                        print(f"      ⚠️ Skipped {model_name}: missing test predictions")
+
             if accepted_component_names:
                 print(
                     "   ✅ Accepted components: " + ", ".join(sorted(accepted_component_names))
                 )
             else:
-                print("   ⚠️ No accepted component keys found")
+                print("   ⚠️ No accepted component keys found (using file-based discovery)")
 
             if accepted_oof_names:
                 print(
