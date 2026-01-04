@@ -6,8 +6,9 @@ Uses LLM to classify competition domain based on description and file metadata.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
 
@@ -19,8 +20,60 @@ from ..core.state import CompetitionInfo, DomainType, SubmissionFormatType
 from ..utils.llm_utils import get_text_content
 
 
+# =============================================================================
+# DETECTION SIGNAL DATACLASS
+# =============================================================================
+
+@dataclass
+class DetectionSignal:
+    """A single detection signal with source and confidence."""
+
+    domain: str  # DomainType or partial (e.g., "classification", "regression")
+    confidence: float
+    source: Literal["structural", "submission", "metric", "llm", "sota", "fallback"]
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
 # Image extensions for format detection
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"}
+
+# =============================================================================
+# EXTENDED CONSTANTS FOR MULTI-SIGNAL DETECTION
+# =============================================================================
+
+# Expanded patterns for image-to-image detection
+CLEAN_DIR_PATTERNS = [
+    # Existing patterns
+    "train_cleaned", "train_clean", "clean", "cleaned",
+    "gt", "ground_truth", "train_gt", "target", "targets", "train_target",
+    # New patterns for denoising, super-resolution, etc.
+    "hr", "high_res", "high_resolution", "hq", "high_quality",
+    "output", "outputs", "label", "labels",
+    "denoised", "restored", "enhanced", "original",
+]
+
+# Columns indicating time series data
+TIME_COLUMNS = ["date", "datetime", "timestamp", "time", "day", "week", "month", "year"]
+TIME_TARGETS = ["sales", "demand", "volume", "price", "count", "visitors", "quantity"]
+
+# Columns indicating object detection
+BBOX_COLUMNS = ["x", "y", "width", "height", "x_min", "y_min", "x_max", "y_max", "bbox", "confidence"]
+
+# Regression metrics
+REGRESSION_METRICS = ["rmse", "mae", "mse", "mape", "r2", "rmsle", "medae"]
+
+# Classification metrics
+CLASSIFICATION_METRICS = ["logloss", "auc", "accuracy", "f1", "precision", "recall", "map@k", "mrr"]
+
+# Source weights for signal fusion
+SOURCE_WEIGHTS = {
+    "structural": 1.0,    # Structural heuristics - most reliable
+    "submission": 0.9,    # Submission format analysis
+    "metric": 0.85,       # Evaluation metric signal
+    "llm": 0.7,           # LLM inference
+    "sota": 0.6,          # SOTA tags from notebooks
+    "fallback": 0.5,      # Fallback generic
+}
 
 
 class DomainDetector:
@@ -170,25 +223,14 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         # Image-to-image heuristic: look for paired train + clean/target directories
         if data_dir.exists():
             dir_map = {p.name.lower(): p for p in data_dir.iterdir() if p.is_dir()}
-            clean_dir_names = [
-                "train_cleaned",
-                "train_clean",
-                "clean",
-                "cleaned",
-                "gt",
-                "ground_truth",
-                "train_gt",
-                "target",
-                "targets",
-                "train_target",
-            ]
+            # Use expanded CLEAN_DIR_PATTERNS constant
             train_dir = None
             for name in ("train", "training", "train_images"):
                 if name in dir_map:
                     train_dir = dir_map[name]
                     break
             clean_dir = None
-            for name in clean_dir_names:
+            for name in CLEAN_DIR_PATTERNS:
                 if name in dir_map:
                     clean_dir = dir_map[name]
                     break
@@ -353,99 +395,421 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 
         return None
 
-    def detect(
+    # =========================================================================
+    # NEW MULTI-SIGNAL DETECTION METHODS
+    # =========================================================================
+
+    def _detect_time_series(self, train_path: Path | None) -> tuple[bool, float, dict[str, Any]]:
+        """Detect time series domain by datetime columns and target names."""
+        if not train_path or not train_path.exists():
+            return False, 0.0, {}
+
+        try:
+            df = pd.read_csv(train_path, nrows=100)
+        except Exception:
+            return False, 0.0, {}
+
+        cols_lower = [c.lower() for c in df.columns]
+
+        strong_time_cols = {"date", "datetime", "timestamp", "time"}
+        weak_time_cols = {"year", "month", "day", "week"}
+
+        present_strong = [c for c in df.columns if c.lower() in strong_time_cols]
+        present_weak = [c for c in df.columns if c.lower() in weak_time_cols]
+
+        # Signal 1: Typical time series targets
+        has_time_target = any(tt in cols_lower for tt in TIME_TARGETS)
+
+        # Signal 2: Try to parse column as datetime (favor strong time names)
+        date_parseable = False
+        date_col_found = None
+        parsed_unique = 0
+        for col in (present_strong or present_weak):
+            try:
+                parsed = pd.to_datetime(df[col].head(50), errors="coerce")
+            except Exception:
+                continue
+            non_null = int(parsed.notna().sum())
+            if non_null < max(5, int(len(parsed) * 0.6)):
+                continue
+            unique_vals = int(parsed.dropna().nunique())
+            if unique_vals < 3:
+                continue
+            date_parseable = True
+            date_col_found = col
+            parsed_unique = unique_vals
+            break
+
+        strong_signal = bool(present_strong)
+
+        if date_parseable and (strong_signal or has_time_target):
+            confidence = 0.70
+            if strong_signal:
+                confidence += 0.10
+            if has_time_target:
+                confidence += 0.10
+            confidence = min(0.90, confidence)
+            return True, confidence, {
+                "date_col": date_col_found,
+                "time_target": has_time_target,
+                "strong_time_col": strong_signal,
+                "weak_time_cols": len(present_weak),
+                "parsed_unique": parsed_unique,
+            }
+
+        return False, 0.0, {}
+
+    def _detect_object_detection(
+        self, sample_sub_path: Path | None, data_dir: Path
+    ) -> tuple[bool, float, dict[str, Any]]:
+        """Detect object detection domain by bbox columns or COCO JSON."""
+        metadata: dict[str, Any] = {}
+
+        # Signal 1: Bbox columns in sample_submission
+        if sample_sub_path and sample_sub_path.exists():
+            try:
+                df = pd.read_csv(sample_sub_path, nrows=5)
+                cols_lower = [c.lower() for c in df.columns]
+                bbox_matches = sum(1 for bc in BBOX_COLUMNS if bc in cols_lower)
+                if bbox_matches >= 2:
+                    return True, 0.92, {"bbox_cols": bbox_matches}
+
+                # PredictionString format (common in object detection)
+                if "predictionstring" in cols_lower:
+                    return True, 0.90, {"format": "prediction_string"}
+            except Exception:
+                pass
+
+        # Signal 2: COCO JSON annotations
+        if data_dir.exists():
+            coco_patterns = ["annotations.json", "train.json"]
+            for pattern in coco_patterns:
+                matches = list(data_dir.glob(f"**/{pattern}"))
+                if matches:
+                    return True, 0.88, {"coco_file": str(matches[0])}
+            # Also check for instances_*.json
+            instances_matches = list(data_dir.glob("**/instances_*.json"))
+            if instances_matches:
+                return True, 0.88, {"coco_file": str(instances_matches[0])}
+
+        return False, 0.0, {}
+
+    def _detect_segmentation(
+        self, sample_sub_path: Path | None
+    ) -> tuple[bool, float, dict[str, Any]]:
+        """Detect segmentation domain by RLE/mask columns."""
+        if not sample_sub_path or not sample_sub_path.exists():
+            return False, 0.0, {}
+
+        try:
+            df = pd.read_csv(sample_sub_path, nrows=10)
+            cols = df.columns.tolist()
+            cols_lower = [c.lower() for c in cols]
+
+            # EncodedPixels is a very strong indicator
+            if "EncodedPixels" in cols or "encodedpixels" in cols_lower:
+                return True, 0.95, {"format": "rle_encoded"}
+
+            # Other indicators
+            if any("rle" in c or "mask" in c for c in cols_lower):
+                return True, 0.90, {"format": "mask_column"}
+        except Exception:
+            pass
+
+        return False, 0.0, {}
+
+    def _detect_multimodal(
+        self, data_dir: Path, train_path: Path | None
+    ) -> tuple[bool, float, dict[str, Any]]:
+        """Detect multimodal domain: images + rich tabular features."""
+        has_images = self._has_image_assets(data_dir)
+
+        if not has_images or not train_path or not train_path.exists():
+            return False, 0.0, {}
+
+        try:
+            df = pd.read_csv(train_path, nrows=50)
+            n_cols = len(df.columns)
+            numeric_cols = len(df.select_dtypes(include="number").columns)
+
+            # Images + many numeric features = multimodal
+            if n_cols >= 8 and numeric_cols >= 5:
+                return True, 0.85, {"n_features": n_cols, "n_numeric": numeric_cols}
+        except Exception:
+            pass
+
+        return False, 0.0, {}
+
+    def _detect_from_metric(
+        self, competition_info: CompetitionInfo
+    ) -> tuple[str | None, float, dict[str, Any]]:
+        """Detect classification/regression by evaluation metric."""
+        metric = (competition_info.evaluation_metric or "").lower()
+
+        # Regression metrics
+        if any(m in metric for m in REGRESSION_METRICS):
+            return "regression", 0.88, {"metric": metric, "inferred": "regression"}
+
+        # Classification metrics
+        if any(m in metric for m in CLASSIFICATION_METRICS):
+            return "classification", 0.85, {"metric": metric, "inferred": "classification"}
+
+        return None, 0.0, {}
+
+    def _refine_domain_with_metric(
+        self, base_domain: str, signals: list[DetectionSignal]
+    ) -> str:
+        """Refine base domain by combining with metric signal."""
+        # Domains that need classification/regression suffix
+        base_domains = ["tabular", "image", "text", "audio"]
+
+        # Preserve specific domains that should not be overridden by metric
+        if base_domain in {
+            "object_detection",
+            "image_segmentation",
+            "image_to_image",
+            "time_series_forecasting",
+            "multi_modal",
+        }:
+            return base_domain
+
+        # Check if base domain needs refinement
+        domain_base = base_domain.split("_")[0]  # "tabular_classification" -> "tabular"
+        if domain_base not in base_domains:
+            return base_domain  # Already specific (e.g., time_series_forecasting)
+
+        # If already has suffix, keep it
+        if "_classification" in base_domain or "_regression" in base_domain:
+            return base_domain
+
+        # Look for metric signal
+        metric_signal = next((s for s in signals if s.source == "metric"), None)
+        if metric_signal:
+            suffix = metric_signal.domain  # "classification" or "regression"
+            return f"{domain_base}_{suffix}"
+
+        # Default: classification
+        return f"{domain_base}_classification"
+
+    def _extract_sota_tags(self, state: dict[str, Any] | None) -> str | None:
+        """Extract keywords from SOTA solutions for LLM context."""
+        if not state:
+            return None
+
+        sota_solutions = state.get("sota_solutions", [])
+        if not sota_solutions:
+            return None
+
+        # Collect models and strategies mentioned
+        models: list[str] = []
+        strategies: list[str] = []
+        for sol in sota_solutions[:5]:  # Top 5 solutions
+            models.extend(sol.get("models_used", []))
+            strategies.extend(sol.get("strategies", []))
+
+        # Remove duplicates and limit
+        models = list(set(models))[:5]
+        strategies = list(set(strategies))[:3]
+
+        if not models and not strategies:
+            return None
+
+        tags = []
+        if models:
+            tags.append(f"Models: {', '.join(models)}")
+        if strategies:
+            tags.append(f"Strategies: {', '.join(strategies)}")
+
+        return " | ".join(tags)
+
+    def _fuse_signals(self, signals: list[DetectionSignal]) -> tuple[str, float]:
+        """Fuse signals using weights and boost for agreement."""
+        if not signals:
+            return "tabular_classification", 0.50
+
+        # Group signals by domain and calculate weighted scores
+        domain_scores: dict[str, float] = {}
+        domain_signals: dict[str, list[DetectionSignal]] = {}
+
+        for signal in signals:
+            weighted_conf = signal.confidence * SOURCE_WEIGHTS.get(signal.source, 0.5)
+            domain_scores[signal.domain] = domain_scores.get(signal.domain, 0) + weighted_conf
+            domain_signals.setdefault(signal.domain, []).append(signal)
+
+        # Find domain with highest score among valid domains
+        valid_domains = [domain for domain in domain_scores if domain in self.DOMAINS]
+        if valid_domains:
+            best_domain = max(valid_domains, key=lambda d: domain_scores[d])
+        else:
+            metric_signal = next(
+                (
+                    s
+                    for s in signals
+                    if s.source == "metric" and s.domain in {"classification", "regression"}
+                ),
+                None,
+            )
+            if metric_signal:
+                best_domain = f"tabular_{metric_signal.domain}"
+            else:
+                best_domain = "tabular_classification"
+            domain_scores.setdefault(best_domain, 0.0)
+            domain_signals.setdefault(best_domain, [])
+
+        agreeing_signals = domain_signals.get(best_domain, [])
+
+        # Calculate base confidence (weighted average of agreeing signals)
+        total_weight = sum(SOURCE_WEIGHTS.get(s.source, 0.5) for s in agreeing_signals)
+        if agreeing_signals:
+            base_confidence = domain_scores[best_domain] / max(total_weight, 1)
+        else:
+            base_confidence = 0.50
+
+        # Boost for agreement
+        n_agreeing = len(agreeing_signals)
+        n_sources = len(set(s.source for s in agreeing_signals))
+
+        if n_agreeing >= 3 or n_sources >= 2:
+            boost = 0.15 if n_sources >= 2 else 0.10
+        else:
+            boost = 0.0
+
+        final_confidence = min(0.98, base_confidence + boost)
+        return best_domain, final_confidence
+
+    def _log_detection_results(
+        self,
+        signals: list[DetectionSignal],
+        final_domain: str,
+        final_confidence: float,
+    ) -> None:
+        """Rich logging of all signals and scores for debug."""
+        print("\n" + "=" * 60)
+        print("= DOMAIN DETECTION RESULTS")
+        print("=" * 60)
+
+        # Group scores by domain
+        domain_scores: dict[str, list[tuple[str, float, float]]] = {}
+        for s in signals:
+            weighted = s.confidence * SOURCE_WEIGHTS.get(s.source, 0.5)
+            domain_scores.setdefault(s.domain, []).append((s.source, s.confidence, weighted))
+
+        # Show each domain with its signals
+        print("\n📊 Signals by Domain:")
+        for domain, signal_list in sorted(
+            domain_scores.items(), key=lambda x: -sum(s[2] for s in x[1])
+        ):
+            total = sum(s[2] for s in signal_list)
+            print(f"\n  {domain}: (total score: {total:.3f})")
+            for source, conf, weighted in signal_list:
+                weight = SOURCE_WEIGHTS.get(source, 0.5)
+                print(f"    └─ {source}: conf={conf:.2f} × weight={weight:.1f} = {weighted:.3f}")
+
+        # Final result
+        print(f"\n✅ FINAL: {final_domain} (confidence: {final_confidence:.2f})")
+        print("=" * 60 + "\n")
+
+    def _call_llm_diagnostic(
+        self, competition_info: CompetitionInfo, data_dir: Path
+    ) -> tuple[DomainType | None, float]:
+        """Call LLM with diagnostic prompt when signals are weak."""
+        if not self.llm:
+            return None, 0.0
+
+        diagnostic_prompt = f"""Analyze this Kaggle competition and list the 3 most likely domains with reasons.
+
+Competition: {competition_info.name}
+Description: {(competition_info.description or "")[:1500]}
+Metric: {competition_info.evaluation_metric or "unknown"}
+
+Response format:
+1. <domain>: <short reason>
+2. <domain>: <short reason>
+3. <domain>: <short reason>
+
+Most likely domain (name only):"""
+
+        try:
+            response = self.llm.invoke(diagnostic_prompt)
+            content = (
+                get_text_content(response.content)
+                if hasattr(response, "content")
+                else str(response)
+            )
+
+            # Extract last domain mentioned (most likely)
+            lines = content.strip().split("\n")
+            last_line = lines[-1].strip().lower().replace(" ", "_")
+
+            if last_line in self.DOMAINS:
+                return last_line, 0.70  # type: ignore
+
+            # Try to find any valid domain in the response
+            for domain in self.DOMAINS:
+                if domain in content.lower():
+                    return domain, 0.65  # type: ignore
+
+        except Exception:
+            pass
+
+        return None, 0.0
+
+    def _call_llm_with_context(
         self,
         competition_info: CompetitionInfo,
-        data_directory: Path | str,
-    ) -> tuple[DomainType, float]:
-        """
-        Detect the domain type of a competition using LLM-First approach.
+        data_dir: Path,
+        data_type: str,
+        files: list[str],
+        sota_tags: str | None = None,
+    ) -> tuple[DomainType | None, float]:
+        """Call LLM with enhanced context for domain detection."""
+        if not self.llm:
+            return None, 0.0
 
-        Strategy:
-        1. If no LLM, use structural heuristics (_detect_from_structure)
-        2. If LLM available, use it for granular domain classification
-        3. Fallback to structural heuristics if LLM fails
+        # Build SOTA context
+        sota_context = f"\nSOTA approaches suggest: {sota_tags}" if sota_tags else ""
 
-        Args:
-            competition_info: Competition metadata
-            data_directory: Path to competition data files
-
-        Returns:
-            Tuple of (detected_domain, confidence_score)
-        """
-        data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
-
-        # Step 1: If no LLM, use sophisticated structural heuristics
-        # (detects image_to_image, segmentation, time_series, etc.)
-        if self.llm is None:
-            tabular_override = self._detect_tabular_from_csv(competition_info, data_dir)
-            if tabular_override:
-                return tabular_override
-            return self._detect_from_structure(competition_info, data_dir)
-
-        # Step 2: Detect data type for context (used in LLM prompt)
-        data_type = self._detect_data_type(data_dir)
-
-        # Tabular override for mixed datasets (e.g., images + rich numeric features)
-        tabular_override = self._detect_tabular_from_csv(competition_info, data_dir)
-        if tabular_override:
-            return tabular_override
-
-        structural_result = self._detect_from_structure(competition_info, data_dir)
-
-        # Step 3: Use LLM for granular domain classification (LLM-First)
-        # Scan files to provide context to LLM
-        files = []
-        if data_dir.exists():
-            for path in data_dir.glob("*"):
-                if path.is_file():
-                    files.append(path.name)
-                elif path.is_dir():
-                    # Analyze directory contents
-                    contents = list(path.glob("*"))[:100]
-                    if contents:
-                        extensions: dict[str, int] = {}
-                        for item in contents:
-                            ext = item.suffix.lower()
-                            extensions[ext] = extensions.get(ext, 0) + 1
-                        if extensions:
-                            dominant = max(extensions.items(), key=lambda x: x[1])
-                            files.append(
-                                f"{path.name}/ ({len(contents)} files, mostly {dominant[0]})"
-                            )
-            files = files[:20]  # Limit to 20 entries
-
-        # Enhanced prompt with data type hint
+        # Enhanced prompt with 1500 chars + metric + SOTA tags
         prompt = f"""Classify this Kaggle competition into exactly ONE category.
 
-Categories:
-- image_classification: Classify images into categories (dog breeds, cancer detection, plant diseases, species identification)
-- image_regression: Predict continuous values from images (age estimation, severity scores)
-- image_to_image: Transform images (denoising, super-resolution, style transfer) or pixel-level predictions
-- image_segmentation: Pixel-wise classification of images (mask prediction)
-- object_detection: Locate AND classify objects with bounding boxes in images
-- text_classification: Classify text (sentiment, toxicity, spam, author identification)
-- seq_to_seq: Sequence to sequence (translation, text normalization, summarization)
-- text_regression: Predict continuous values from text
-- audio_classification: Classify audio signals (speaker, music genre, species by sound)
-- audio_regression: Predict continuous values from audio
-- tabular_classification: Classify rows in structured CSV data
-- tabular_regression: Predict continuous values from structured CSV data
-- time_series_forecasting: Predict future values from temporal sequences
-- multi_modal: Combination of multiple data types (images + text + tabular)
+## Categories with Examples:
+- image_classification: Dog breeds, plant diseases, cancer detection
+- object_detection: Bounding boxes required (x,y,w,h), YOLO/RCNN tasks
+- image_segmentation: Pixel-wise masks, RLE encoding, semantic/instance segmentation
+- image_to_image: Denoising, super-resolution, inpainting, style transfer
+- time_series_forecasting: Sales prediction, demand forecasting, temporal data
+- tabular_classification/regression: Structured CSV with many numeric features
+- text_classification: Sentiment, toxicity, spam detection
+- seq_to_seq: Translation, summarization, text normalization
+- audio_classification/regression: Audio signal classification or prediction
+- multi_modal: Images + text + tabular combined (e.g., images WITH extracted features)
 
-Competition Name: {competition_info.name}
-Description: {(competition_info.description or "")[:800]}
-Data Files: {files if files else ["No files found"]}
-Detected Data Type: {data_type}
+## Few-Shot Examples:
+- "Dog Breed Identification" + train/ images → image_classification
+- "Store Sales Forecasting" + date column → time_series_forecasting
+- "Global Wheat Detection" + bbox columns → object_detection
+- "Airbus Ship Detection" + EncodedPixels → image_segmentation
+- "Leaf Classification" + images/ + 192 feature columns (margin, shape, texture) → multi_modal
 
-IMPORTANT CLASSIFICATION RULES:
-1. "breed", "species", "identify", "classify", "categorize" → usually image_classification or text_classification
-2. object_detection REQUIRES bounding box predictions (x, y, width, height)
-3. image_segmentation REQUIRES pixel-wise masks or RLE encoding
-4. If task is to identify/classify items in images WITHOUT bounding boxes → image_classification
+## CRITICAL: Multi-modal Detection
+If the competition has BOTH:
+1. Image directories (train/, images/)
+2. AND train.csv with many numeric features (>5 columns of extracted features)
+→ This is likely MULTI_MODAL, not just image_classification!
 
-Respond with ONLY the category name, nothing else. Example: image_classification"""
+Competition: {competition_info.name}
+Description: {(competition_info.description or "")[:1500]}
+Files: {files if files else ["No files found"]}
+Data Type Detected: {data_type}
+Evaluation Metric: {competition_info.evaluation_metric or "unknown"}{sota_context}
+
+Think step by step:
+1. What is the primary data type? {data_type}
+2. Are there BOTH images AND numeric features?
+3. What does the submission format require?
+4. What metric is used? (regression metrics = *_regression, classification = *_classification)
+
+Final answer (category name only):"""
 
         try:
             response = self.llm.invoke(prompt)
@@ -456,21 +820,173 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             )
             domain = content.strip().lower().replace(" ", "_")
 
+            # Extract last line if multiple lines
+            if "\n" in domain:
+                domain = domain.split("\n")[-1].strip()
+
             if domain in self.DOMAINS:
-                if (
-                    domain.startswith("tabular")
-                    and structural_result[0].startswith("image")
-                    and structural_result[1] >= 0.8
-                    and data_type == "image"
-                ):
-                    return structural_result
                 return domain, 0.95  # type: ignore
-            # LLM returned invalid domain, use structural heuristics
-            return structural_result
 
         except Exception:
-            # LLM failed, use structural heuristics
-            return structural_result
+            pass
+
+        return None, 0.0
+
+    def detect(
+        self,
+        competition_info: CompetitionInfo,
+        data_directory: Path | str,
+        state: dict[str, Any] | None = None,
+    ) -> tuple[DomainType, float]:
+        """
+        Detect the domain type using multi-signal fusion.
+
+        Strategy:
+        1. Collect ALL structural signals (time series, object detection, etc.)
+        2. Collect metric signal (classification vs regression)
+        3. Call LLM with enhanced context (always participates if available)
+        4. If no strong signals, use diagnostic LLM fallback
+        5. Fuse all signals using weighted scoring
+        6. Refine domain with metric signal
+
+        Args:
+            competition_info: Competition metadata
+            data_directory: Path to competition data files
+            state: Optional workflow state for SOTA tags
+
+        Returns:
+            Tuple of (detected_domain, confidence_score)
+        """
+        data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
+        signals: list[DetectionSignal] = []
+
+        # Find key files
+        train_path = self._find_train_file(data_dir)
+        sample_sub = data_dir / "sample_submission.csv"
+        if not sample_sub.exists():
+            for p in data_dir.glob("**/sample_submission.csv"):
+                sample_sub = p
+                break
+
+        # =====================================================================
+        # STEP 1: Collect ALL structural signals
+        # =====================================================================
+
+        # Time series detection
+        is_ts, ts_conf, ts_meta = self._detect_time_series(train_path)
+        if is_ts:
+            signals.append(DetectionSignal(
+                "time_series_forecasting", ts_conf, "structural", ts_meta
+            ))
+
+        # Object detection
+        is_od, od_conf, od_meta = self._detect_object_detection(sample_sub, data_dir)
+        if is_od:
+            signals.append(DetectionSignal(
+                "object_detection", od_conf, "structural", od_meta
+            ))
+
+        # Segmentation detection
+        is_seg, seg_conf, seg_meta = self._detect_segmentation(sample_sub)
+        if is_seg:
+            signals.append(DetectionSignal(
+                "image_segmentation", seg_conf, "structural", seg_meta
+            ))
+
+        # Multimodal detection
+        is_mm, mm_conf, mm_meta = self._detect_multimodal(data_dir, train_path)
+        if is_mm:
+            signals.append(DetectionSignal(
+                "multi_modal", mm_conf, "structural", mm_meta
+            ))
+
+        # Existing heuristics (tabular override, image-to-image)
+        tabular_result = self._detect_tabular_from_csv(competition_info, data_dir)
+        if tabular_result:
+            signals.append(DetectionSignal(
+                tabular_result[0], tabular_result[1], "structural"
+            ))
+
+        structural_result = self._detect_from_structure(competition_info, data_dir)
+        signals.append(DetectionSignal(
+            structural_result[0], structural_result[1], "structural"
+        ))
+
+        # =====================================================================
+        # STEP 2: Metric signal (classification vs regression)
+        # =====================================================================
+        metric_type, metric_conf, metric_meta = self._detect_from_metric(competition_info)
+        if metric_type:
+            signals.append(DetectionSignal(
+                metric_type, metric_conf, "metric", metric_meta
+            ))
+
+        # =====================================================================
+        # STEP 3: LLM ALWAYS participates (if available)
+        # =====================================================================
+        if self.llm:
+            # Detect data type for context
+            data_type = self._detect_data_type(data_dir)
+
+            # Scan files to provide context
+            files = []
+            if data_dir.exists():
+                for path in data_dir.glob("*"):
+                    if path.is_file():
+                        files.append(path.name)
+                    elif path.is_dir():
+                        contents = list(path.glob("*"))[:100]
+                        if contents:
+                            extensions: dict[str, int] = {}
+                            for item in contents:
+                                ext = item.suffix.lower()
+                                extensions[ext] = extensions.get(ext, 0) + 1
+                            if extensions:
+                                dominant = max(extensions.items(), key=lambda x: x[1])
+                                files.append(
+                                    f"{path.name}/ ({len(contents)} files, mostly {dominant[0]})"
+                                )
+                files = files[:20]
+
+            # Extract SOTA tags if available
+            sota_tags = self._extract_sota_tags(state)
+
+            # Call LLM with enhanced context
+            llm_domain, llm_conf = self._call_llm_with_context(
+                competition_info, data_dir, data_type, files, sota_tags
+            )
+            if llm_domain:
+                signals.append(DetectionSignal(llm_domain, llm_conf, "llm"))
+
+        # =====================================================================
+        # STEP 4: Fallback: if no strong signal, use diagnostic LLM
+        # =====================================================================
+        max_conf = max((s.confidence for s in signals), default=0)
+        if max_conf < 0.6 and self.llm:
+            diagnostic_domain, diagnostic_conf = self._call_llm_diagnostic(
+                competition_info, data_dir
+            )
+            if diagnostic_domain:
+                signals.append(DetectionSignal(
+                    diagnostic_domain, diagnostic_conf, "llm"
+                ))
+
+        # =====================================================================
+        # STEP 5: Fuse all signals
+        # =====================================================================
+        domain, confidence = self._fuse_signals(signals)
+
+        # =====================================================================
+        # STEP 6: Refine domain with metric signal
+        # =====================================================================
+        domain = self._refine_domain_with_metric(domain, signals)
+
+        # =====================================================================
+        # STEP 7: Log results for debug
+        # =====================================================================
+        self._log_detection_results(signals, domain, confidence)
+
+        return domain, confidence  # type: ignore
 
     def get_domain_description(self, domain: DomainType) -> str:
         """Get a human-readable description of a domain."""
@@ -594,20 +1110,22 @@ def detect_competition_domain(
     competition_info: CompetitionInfo,
     data_directory: Path | str,
     llm: BaseChatModel | None = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[DomainType, float]:
     """
-    Convenience function to detect competition domain.
+    Convenience function to detect competition domain using multi-signal fusion.
 
     Args:
         competition_info: Competition metadata
         data_directory: Path to competition data
         llm: Optional LLM client
+        state: Optional workflow state for SOTA tags extraction
 
     Returns:
         Tuple of (domain_type, confidence)
     """
     detector = DomainDetector(llm=llm)
-    return detector.detect(competition_info, data_directory)
+    return detector.detect(competition_info, data_directory, state=state)
 
 
 def detect_submission_format(

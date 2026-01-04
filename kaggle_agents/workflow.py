@@ -303,8 +303,11 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
         print(f"   Warning: Could not get LLM for domain detection: {e}")
         llm = None
 
-    # Use LLM-First domain detection (delegated to detector.py)
-    domain, confidence = detect_competition_domain(competition_info, working_dir, llm=llm)
+    # Use multi-signal domain detection (delegated to detector.py)
+    # Pass state for SOTA tags extraction if available
+    domain, confidence = detect_competition_domain(
+        competition_info, working_dir, llm=llm, state=state
+    )
 
     # Check for image-to-image overrides (pixel-level submission format)
     data_files = state.get("data_files") or {}
