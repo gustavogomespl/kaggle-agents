@@ -11,6 +11,7 @@ Builder functions are now in the builders/ submodule for better organization.
 # Re-export builders for backward compatibility
 from .builders import (
     DynamicContext,
+    build_context,
 )
 
 
