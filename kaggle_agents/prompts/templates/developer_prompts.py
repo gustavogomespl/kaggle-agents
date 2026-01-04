@@ -12,6 +12,7 @@ Builder functions are now in the builders/ submodule for better organization.
 from .builders import (
     DynamicContext,
     build_context,
+    build_dynamic_instructions,
 )
 
 
