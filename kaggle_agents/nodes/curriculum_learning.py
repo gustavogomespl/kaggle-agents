@@ -68,7 +68,7 @@ ERROR_TO_SUBTASK_TEMPLATE = {
         "priority": 1,
         "guidance": """
         Solutions to try:
-        1. Add early_stopping_rounds=50 to XGBoost/LightGBM
+        1. Add early stopping (LightGBM callbacks; XGBoost 2.0+ constructor or callbacks for <2)
         2. Reduce n_estimators (try 100 instead of 1000)
         3. Reduce CV folds from 5 to 3
         4. Use simpler model (e.g., LogisticRegression as baseline)

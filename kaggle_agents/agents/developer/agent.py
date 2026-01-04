@@ -834,11 +834,31 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 eng_test = working_dir / "test_engineered.csv"
 
                 if eng_train.exists() and eng_test.exists():
-                    state_updates["current_train_path"] = str(eng_train)
-                    state_updates["current_test_path"] = str(eng_test)
-                    print("  🔄 Pipeline Update: Pointing subsequent agents to engineered data:")
-                    print(f"     Train: {eng_train.name}")
-                    print(f"     Test:  {eng_test.name}")
+                    # Validate that engineered data has actual features
+                    try:
+                        import pandas as pd
+                        eng_train_df = pd.read_csv(eng_train, nrows=5)
+                        eng_test_df = pd.read_csv(eng_test, nrows=5)
+
+                        # Need at least 3 columns: id + target + 1 feature (for train)
+                        # Or id + 1 feature (for test)
+                        min_train_cols = 3
+                        min_test_cols = 2
+
+                        if len(eng_train_df.columns) >= min_train_cols and len(eng_test_df.columns) >= min_test_cols:
+                            state_updates["current_train_path"] = str(eng_train)
+                            state_updates["current_test_path"] = str(eng_test)
+                            print("  🔄 Pipeline Update: Pointing subsequent agents to engineered data:")
+                            print(f"     Train: {eng_train.name} ({len(eng_train_df.columns)} columns)")
+                            print(f"     Test:  {eng_test.name} ({len(eng_test_df.columns)} columns)")
+                        else:
+                            print(f"  ⚠️ WARNING: Feature engineering produced insufficient columns:")
+                            print(f"     Train: {len(eng_train_df.columns)} columns (need >= {min_train_cols})")
+                            print(f"     Test:  {len(eng_test_df.columns)} columns (need >= {min_test_cols})")
+                            print("     Keeping original train/test paths")
+                    except Exception as e:
+                        print(f"  ⚠️ WARNING: Failed to validate engineered data: {e}")
+                        print("     Keeping original train/test paths")
 
         return state_updates
 

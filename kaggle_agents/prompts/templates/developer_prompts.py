@@ -191,7 +191,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 ## MUST NOT:
 - sys.exit(), exit(), quit(), raise SystemExit, os._exit()
 - try-except blocks that swallow errors silently (let them surface for debugging)
-- early_stopping_rounds as direct fit() parameter (use callbacks)
+- XGBoost: do not pass early_stopping_rounds/callbacks to fit() without a version check (see API Gotchas)
 - Subsample training data unless `KAGGLE_AGENTS_FAST_MODE=1` (FAST_MODE may subsample to meet budget, but keep determinism)
 - `pin_memory=True` in DataLoader (causes warnings/crashes). USE `pin_memory=False`.
 - `num_workers > 0` in DataLoader (safe default is 0 to avoid fork/spawn issues).
@@ -206,7 +206,34 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 - pd.concat() instead of .append() for pandas 2.0+
 - Optuna: set_verbosity(WARNING), n_trials <= 5, timeout=60 for validation
 - LightGBM callbacks: lgb.early_stopping(100), not early_stopping_rounds param
-- XGBoost callbacks: xgb.callback.EarlyStopping(rounds=100)
+- XGBoost 2.0+ (CRITICAL - API CHANGED):
+  - NEVER use `early_stopping_rounds` or `callbacks` as fit() parameters - they were REMOVED
+  - Use version-aware logic:
+    ```python
+    import xgboost as xgb
+
+    xgb_major = int(xgb.__version__.split(".")[0])
+    if xgb_major >= 2:
+        model = xgb.XGBClassifier(
+            early_stopping_rounds=100,  # In constructor for 2.0+
+            n_estimators=1000,
+            learning_rate=0.05,
+        )
+        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+    else:
+        model = xgb.XGBClassifier(
+            n_estimators=1000,
+            learning_rate=0.05,
+        )
+        model.fit(
+            X_train,
+            y_train,
+            eval_set=[(X_val, y_val)],
+            callbacks=[xgb.callback.EarlyStopping(rounds=100)],
+            verbose=False,
+        )
+    ```
+  - DO NOT use: model.fit(..., callbacks=[...]) for 2.0+  # WILL CRASH
 - Albumentations: `IAASharpen` is removed, use `Sharpen`. Ensure input is RGB (3 channels) for color transforms.
 
 

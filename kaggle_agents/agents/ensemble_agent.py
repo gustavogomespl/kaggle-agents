@@ -1693,7 +1693,9 @@ Return a JSON object:
 
             def _should_revert_ensemble(ensemble_score: float | None) -> tuple[bool, str]:
                 if baseline_score_val is None:
-                    return False, "no_baseline"
+                    # SAFE DEFAULT: If no baseline tracked, revert to be safe
+                    # This prevents using a potentially bad ensemble when we have no reference
+                    return True, "no_baseline_revert_safe"
                 if ensemble_score is None:
                     return True, "missing_oof_score"
                 try:

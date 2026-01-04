@@ -362,7 +362,9 @@ class CodeExecutor:
             if re.search(r"\.fit\([^)]*early_stopping_rounds=", code):
                 return False, (
                     "API Error: early_stopping_rounds cannot be passed to fit(). "
-                    "Use callbacks=[lgb.early_stopping(100)] or callbacks=[xgb.callback.EarlyStopping(100)] instead."
+                    "Use callbacks=[lgb.early_stopping(100)] for LightGBM, "
+                    "callbacks=[xgb.callback.EarlyStopping(100)] for XGBoost <2, "
+                    "or pass early_stopping_rounds in the XGBoost 2.0+ constructor."
                 )
 
         # Check 4: Has basic structure for ML code
