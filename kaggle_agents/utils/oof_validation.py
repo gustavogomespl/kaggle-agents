@@ -29,6 +29,45 @@ class OOFSanityResult:
     errors: list[str] = field(default_factory=list)
 
 
+def validate_class_order(
+    models_dir: Path,
+    model_name: str,
+    expected_class_order: list[str],
+) -> tuple[bool, str]:
+    """Validate that model predictions are in correct class order.
+
+    Args:
+        models_dir: Directory containing model artifacts
+        model_name: Name of the model to validate
+        expected_class_order: Expected class order from sample_submission columns
+
+    Returns:
+        Tuple of (is_valid, message)
+    """
+    # Try model-specific class order file first, then fallback to global
+    class_order_path = models_dir / f"class_order_{model_name}.npy"
+    if not class_order_path.exists():
+        class_order_path = models_dir / "class_order.npy"
+
+    if not class_order_path.exists():
+        return False, f"Missing class_order file for {model_name} - cannot verify alignment"
+
+    try:
+        model_class_order = np.load(class_order_path, allow_pickle=True).tolist()
+    except Exception as e:
+        return False, f"Error loading class_order for {model_name}: {e}"
+
+    if model_class_order != expected_class_order:
+        # Show first 3 classes for debugging
+        return False, (
+            f"Class order mismatch for {model_name}: "
+            f"model has {model_class_order[:3]}..., "
+            f"expected {expected_class_order[:3]}..."
+        )
+
+    return True, f"Class order validated for {model_name}"
+
+
 def compute_oof_statistics(oof_array: np.ndarray) -> dict[str, Any]:
     """Compute statistics for OOF predictions.
 

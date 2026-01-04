@@ -182,7 +182,14 @@ class CodeGeneratorMixin:
         context = build_context(state, component=component) if state else build_context({})
 
         # Prepare paths dictionary
+        # Explicitly distinguish INPUT_DIR (read-only data) from OUTPUT_DIR (writable)
+        # This prevents errors in Kaggle Kernels where /kaggle/input is read-only
+        input_dir = resolved_train_path.parent  # Parent of train.csv contains data
+        output_dir = working_dir  # working_dir is always writable
+
         paths = {
+            "input_dir": str(input_dir),  # READ-ONLY - data files location
+            "output_dir": str(output_dir),  # WRITABLE - for models, submission, etc.
             "train": str(resolved_train_path),
             "clean_train": str(clean_train_path),
             "train_csv": str(train_csv_path),

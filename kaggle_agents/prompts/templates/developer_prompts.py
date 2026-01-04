@@ -187,6 +187,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 - Convert predictions to integers for AUC/LogLoss metrics: NEVER `(predictions > 0.5).astype(int)`
 - Create dummy/fallback submissions with constant values (0.5, mean, zeros) when errors occur
 - Use broad `except Exception` clauses that hide FileNotFoundError, RuntimeError, ValueError
+- `generator.next()` (deprecated). ALWAYS use `next(generator)` for iterators (e.g., ImageDataGenerator)
 
 ## API Gotchas:
 - OneHotEncoder: sparse_output=False (NOT sparse=False) for sklearn 1.2+
@@ -759,11 +760,21 @@ Domain: {domain}
 Problem Type: {problem_type}
 Metric: {metric}
 
-## Paths
+## Paths (CRITICAL: Read vs Write Locations)
+# INPUT_DIR is READ-ONLY in Kaggle Kernels - NEVER write here!
+INPUT_DIR: {paths.get("input_dir", ".")}
+# OUTPUT_DIR is WRITABLE - use for all outputs (models, submission, etc.)
+OUTPUT_DIR: {paths.get("output_dir", ".")}
+
 Train: {paths.get("train", "train.csv")}
 Test: {paths.get("test", "test.csv")}
 Models: {paths.get("models", "models/")}
-Submission: {paths.get("submission", "submission.csv")}"""
+Submission: {paths.get("submission", "submission.csv")}
+
+## Path Usage Rules
+- Read data from: INPUT_DIR (train.csv, test.csv, images/, etc.)
+- Write outputs to: OUTPUT_DIR (models/, submission.csv, *.npy, etc.)
+- ALWAYS create MODELS_DIR explicitly: `Path('{paths.get("models", "models/")}').mkdir(parents=True, exist_ok=True)`"""
 
 
 def _get_component_guidance(component_type: str) -> str:

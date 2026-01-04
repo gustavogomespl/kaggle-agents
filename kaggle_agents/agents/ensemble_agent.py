@@ -16,7 +16,7 @@ from ..core.state import KaggleState
 from ..utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
 from ..utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
 from ..utils.llm_utils import get_text_content
-from ..utils.oof_validation import print_oof_summary, validate_oof_stack
+from ..utils.oof_validation import print_oof_summary, validate_class_order, validate_oof_stack
 
 
 class EnsembleAgent:
@@ -1794,11 +1794,14 @@ Return a JSON object:
                     )
                     print(f"      {i}. {artifacts_str}")
 
+            # Use oof_available_* keys instead of component_result_* keys
+            # This ensures ALL models with valid OOF files are included in ensemble,
+            # not just those that passed ablation study (which filters by score improvement)
             accepted_component_names: set[str] = set()
             if isinstance(state, dict):
                 for key in state.keys():
-                    if isinstance(key, str) and key.startswith("component_result_"):
-                        accepted_component_names.add(key.replace("component_result_", "", 1))
+                    if isinstance(key, str) and key.startswith("oof_available_"):
+                        accepted_component_names.add(key.replace("oof_available_", "", 1))
 
             accepted_oof_names: set[str] = set()
             if accepted_component_names:
@@ -1821,6 +1824,53 @@ Return a JSON object:
                 )
             else:
                 print("   ⚠️ No accepted model OOF files found")
+
+            # Validate class order for multiclass classification only
+            # For regression/binary tasks, class_order files may not exist - that's OK
+            sample_path = (
+                Path(sample_submission_path)
+                if sample_submission_path
+                else working_dir / "sample_submission.csv"
+            )
+            if sample_path.exists() and accepted_oof_names:
+                sample_sub = pd.read_csv(sample_path)
+                target_columns = sample_sub.columns[1:].tolist()
+
+                # Only validate class order for multiclass (>1 target column in submission)
+                is_multiclass = len(target_columns) > 1
+                if is_multiclass:
+                    print(f"   🔍 Multiclass detected ({len(target_columns)} classes) - validating class order")
+                    expected_class_order = target_columns
+
+                    validated_oof_names: set[str] = set()
+                    for model_name in accepted_oof_names:
+                        is_valid, msg = validate_class_order(
+                            models_dir, model_name, expected_class_order
+                        )
+                        if is_valid:
+                            validated_oof_names.add(model_name)
+                            print(f"   ✅ {msg}")
+                        else:
+                            # Check if class_order file is missing vs mismatched
+                            class_order_path = models_dir / f"class_order_{model_name}.npy"
+                            if not class_order_path.exists():
+                                class_order_path = models_dir / "class_order.npy"
+                            if not class_order_path.exists():
+                                # Missing file - warn but include (may still be valid)
+                                print(f"   ⚠️ {msg} - including anyway (missing file)")
+                                validated_oof_names.add(model_name)
+                            else:
+                                # Actual mismatch - exclude
+                                print(f"   ❌ {msg} - excluding from ensemble")
+
+                    # Update accepted_oof_names to only include validated models
+                    if validated_oof_names != accepted_oof_names:
+                        excluded = accepted_oof_names - validated_oof_names
+                        if excluded:
+                            print(f"   ⚠️ Excluded {len(excluded)} model(s) due to class order mismatch")
+                        accepted_oof_names = validated_oof_names
+                else:
+                    print("   ℹ️ Regression/binary task - skipping class order validation")
 
             accepted_names = accepted_oof_names
             has_acceptance_metadata = bool(accepted_component_names)

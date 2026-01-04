@@ -345,9 +345,13 @@ class CodeExecutor:
         Returns:
             Tuple of (is_valid, message)
         """
-        # Check 1: Has required output format
-        if "Final Validation Performance" not in code:
-            return False, "Missing required output: 'Final Validation Performance: {score}'"
+        # Check 1: Has required output format (only for model/ensemble components)
+        # Feature engineering and preprocessing components don't train models,
+        # so they can't produce a meaningful CV score - they should print "1.0" as placeholder
+        if component_type in ("model", "ensemble", None):
+            if "Final Validation Performance" not in code:
+                return False, "Missing required output: 'Final Validation Performance: {score}'"
+        # For preprocessing/feature_engineering, validation happens post-execution via artifacts
 
         # Check 2: No prohibited exit() calls (enhanced check)
         # Note: These should have been sanitized by sanitize_code() before validation
