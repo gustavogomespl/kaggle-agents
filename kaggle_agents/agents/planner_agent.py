@@ -174,6 +174,25 @@ class PlannerAgent:
         evolutionary_generation = state.get("evolutionary_generation", 0)
         use_eureka = bool(crossover_guidance) or evolutionary_generation > 0 or is_refinement
 
+        # Check for debug loop trigger from Meta-Evaluator (INNER LOOP REFINEMENT)
+        debug_result = self._handle_debug_loop_trigger(state)
+        if debug_result and debug_result.get("skip_normal_planning"):
+            print("\n" + "=" * 60)
+            print("= PLANNER AGENT: DEBUG LOOP (Inner Loop Refinement)")
+            print("=" * 60)
+            return {
+                "ablation_plan": debug_result["ablation_plan"],
+                "is_debug_iteration": True,
+                "debug_target": debug_result.get("debug_target"),
+                "debug_hints": debug_result.get("debug_hints", []),
+                "last_updated": datetime.now(),
+            }
+
+        # Detect multi-modal competition (images + rich tabular features)
+        multimodal_info = self._detect_multimodal_competition(state)
+        if multimodal_info.get("is_multimodal"):
+            print(f"\n  📋 Multi-modal Strategy: {multimodal_info.get('recommendation', '')[:100]}...")
+
         if use_eureka:
             print("\n" + "=" * 60)
             print("= PLANNER AGENT: Eureka Multi-Candidate Planning")
@@ -1347,6 +1366,183 @@ Return a JSON array with up to {max_components} components. Each component must 
             return True
 
         return False
+
+    def _detect_multimodal_competition(self, state: KaggleState | None) -> dict[str, Any]:
+        """
+        Detect if competition has both images AND rich tabular features.
+
+        Multi-modal competitions (like leaf-classification) have:
+        - Images in train/ or test/ directories
+        - Rich tabular features in train.csv (>10 columns)
+
+        Returns guidance for hybrid model strategies.
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            Dictionary with detection results and strategy recommendations
+        """
+        if state is None:
+            return {"type": "unknown", "is_multimodal": False}
+
+        from pathlib import Path
+
+        # Check for image files
+        data_dir = state.get("data_dir", "")
+        has_images = False
+        image_count = 0
+
+        if data_dir:
+            data_path = Path(data_dir)
+            if data_path.exists():
+                for subdir in ["train", "test", "images", "train_images", "test_images"]:
+                    subdir_path = data_path / subdir
+                    if subdir_path.exists() and subdir_path.is_dir():
+                        image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".tiff"}
+                        for f in subdir_path.iterdir():
+                            if f.suffix.lower() in image_extensions:
+                                has_images = True
+                                image_count += 1
+                                if image_count > 10:  # Found enough images
+                                    break
+                    if has_images:
+                        break
+
+        # Check if train.csv has rich tabular features
+        has_rich_tabular = False
+        tabular_feature_count = 0
+        train_csv_path = state.get("train_csv_path", "") or state.get("train_data_path", "")
+
+        if train_csv_path:
+            import pandas as pd
+
+            train_path = Path(train_csv_path)
+            if train_path.exists():
+                try:
+                    train_df = pd.read_csv(train_path, nrows=5)
+                    # Count non-ID, non-target columns
+                    exclude_cols = {"id", "target", "species", "label", "class", "image", "image_id"}
+                    feature_cols = [
+                        c for c in train_df.columns if c.lower() not in exclude_cols
+                    ]
+                    tabular_feature_count = len(feature_cols)
+                    has_rich_tabular = tabular_feature_count >= 10
+                except Exception:
+                    pass
+
+        # Determine competition type and strategy
+        if has_images and has_rich_tabular:
+            print("\n  🔍 MULTI-MODAL COMPETITION DETECTED:")
+            print(f"      - Has image files: {has_images}")
+            print(f"      - Tabular features: {tabular_feature_count}")
+
+            return {
+                "type": "multi_modal",
+                "is_multimodal": True,
+                "has_images": True,
+                "has_rich_tabular": True,
+                "tabular_features": tabular_feature_count,
+                "strategy": "hybrid_cnn_tabular",
+                "recommendation": (
+                    "Use Keras Functional API with multi-input model: "
+                    "CNN branch (EfficientNet) for images + MLP branch for tabular features. "
+                    "Alternatively, the pre-extracted tabular features may be sufficient "
+                    "for competitive performance with LightGBM/XGBoost alone."
+                ),
+                "priority_models": [
+                    "LightGBM with all tabular features (fast, often competitive)",
+                    "XGBoost with all tabular features",
+                    "Hybrid CNN+Tabular (best but slower)",
+                ],
+            }
+        if has_images:
+            return {
+                "type": "image_only",
+                "is_multimodal": False,
+                "has_images": True,
+                "has_rich_tabular": False,
+                "strategy": "efficientnet",
+                "recommendation": "Use transfer learning with EfficientNet or ResNet.",
+            }
+        return {
+            "type": "tabular_only",
+            "is_multimodal": False,
+            "has_images": False,
+            "has_rich_tabular": has_rich_tabular,
+            "tabular_features": tabular_feature_count,
+            "strategy": "lightgbm_xgboost",
+            "recommendation": "Use gradient boosting (LightGBM, XGBoost, CatBoost).",
+        }
+
+    def _handle_debug_loop_trigger(self, state: KaggleState) -> dict[str, Any] | None:
+        """
+        Handle debug loop trigger from Meta-Evaluator.
+
+        When a performance gap is detected, create a focused debug plan
+        for the underperforming model instead of the normal ablation plan.
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            Debug plan if triggered, None otherwise
+        """
+        trigger_debug = state.get("trigger_debug_loop", False)
+        if not trigger_debug:
+            return None
+
+        debug_target = state.get("debug_target_model", "unknown")
+        debug_hints = state.get("debug_hints", [])
+        performance_gap = state.get("performance_gap", 0.0)
+
+        print(f"\n  🔧 DEBUG LOOP TRIGGERED for: {debug_target}")
+        print(f"      Performance gap: {performance_gap:.2f}")
+        print("      Debug hints:")
+        for hint in debug_hints[:3]:
+            print(f"        - {hint}")
+
+        # Create focused debug plan
+        debug_components = [
+            AblationComponent(
+                name=f"debug_{debug_target}_labelencoder",
+                component_type="debug",
+                code=(
+                    f"# Debug {debug_target}: Verify LabelEncoder class order\n"
+                    "# Compare with other models' class_order.npy files\n"
+                    "# Ensure consistent encoding across all models"
+                ),
+                estimated_impact=0.8,
+            ),
+            AblationComponent(
+                name=f"debug_{debug_target}_preprocessing",
+                component_type="debug",
+                code=(
+                    f"# Debug {debug_target}: Check preprocessing pipeline\n"
+                    "# Verify train/val splits use same random_state\n"
+                    "# Compare feature scaling and encoding"
+                ),
+                estimated_impact=0.7,
+            ),
+            AblationComponent(
+                name=f"debug_{debug_target}_hyperparams",
+                component_type="debug",
+                code=(
+                    f"# Debug {debug_target}: Review hyperparameters\n"
+                    "# Check class_weight setting\n"
+                    "# Verify objective function matches metric"
+                ),
+                estimated_impact=0.6,
+            ),
+        ]
+
+        return {
+            "ablation_plan": debug_components,
+            "is_debug_iteration": True,
+            "debug_target": debug_target,
+            "debug_hints": debug_hints,
+            "skip_normal_planning": True,
+        }
 
     def _create_fallback_plan(
         self,

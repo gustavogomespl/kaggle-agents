@@ -161,6 +161,16 @@ class RobustnessAgent:
         validation_results.append(hyperparam_result)
         self._print_validation(hyperparam_result)
 
+        # 6. Data Shapes Validation (FAIL-FAST on duplicates)
+        shapes_result = self._validate_data_shapes(working_dir, state)
+        validation_results.append(shapes_result)
+        self._print_validation(shapes_result)
+
+        # 7. Model Performance Gap Detection (triggers debug loops)
+        gap_result = self._check_model_performance_gap(state)
+        validation_results.append(gap_result)
+        self._print_validation(gap_result)
+
         # Calculate overall score
         overall_score = sum(r.score for r in validation_results) / len(validation_results)
 
@@ -580,6 +590,226 @@ IMPORTANT:
             print("   Suggestions:")
             for suggestion in result.suggestions:
                 print(f"   - {suggestion}")
+
+    def _validate_data_shapes(
+        self, working_dir: Path, state: KaggleState
+    ) -> ValidationResult:
+        """
+        Module 6: Data shapes validation (FAIL-FAST on duplicates).
+
+        Validates engineered data shapes match original data.
+        DOES NOT auto-fix with drop_duplicates - forces code rewrite.
+        """
+        issues = []
+        suggestions = []
+        score = 1.0
+        details = {}
+
+        # Check train shapes
+        train_orig = working_dir / "train.csv"
+        train_eng = working_dir / "train_engineered.csv"
+
+        if train_orig.exists() and train_eng.exists():
+            try:
+                orig_df = pd.read_csv(train_orig)
+                eng_df = pd.read_csv(train_eng)
+
+                # Row count validation
+                if len(eng_df) != len(orig_df):
+                    issues.append(
+                        f"CRITICAL: train_engineered.csv has {len(eng_df)} rows, "
+                        f"but train.csv has {len(orig_df)} rows"
+                    )
+                    suggestions.append(
+                        "REWRITE feature engineering code - DO NOT use drop_duplicates()"
+                    )
+                    score = 0.0
+                    details["train_row_mismatch"] = {
+                        "original": len(orig_df),
+                        "engineered": len(eng_df),
+                    }
+
+                # Duplicate ID validation (FAIL-FAST - no auto-fix)
+                if "id" in eng_df.columns and eng_df["id"].duplicated().any():
+                    dup_count = eng_df["id"].duplicated().sum()
+                    dup_ids = eng_df[eng_df["id"].duplicated()]["id"].head(5).tolist()
+                    issues.append(
+                        f"CRITICAL: {dup_count} duplicate IDs in train_engineered.csv! "
+                        f"Examples: {dup_ids}"
+                    )
+                    suggestions.append(
+                        "FIX the feature engineering code that creates duplicates. "
+                        "DO NOT use drop_duplicates() - this corrupts data!"
+                    )
+                    score = 0.0
+                    details["train_duplicate_ids"] = dup_count
+                    details["action"] = "REWRITE_CODE"
+
+                # Target column validation
+                target_candidates = ["target", "species", "label", "class"]
+                has_target = any(col in eng_df.columns for col in target_candidates)
+                orig_target = [col for col in target_candidates if col in orig_df.columns]
+
+                if orig_target and not has_target:
+                    issues.append(
+                        f"CRITICAL: Target column '{orig_target[0]}' missing in train_engineered.csv"
+                    )
+                    suggestions.append(
+                        "Preserve target column when creating engineered features"
+                    )
+                    score = min(score, 0.3)
+                    details["missing_target"] = orig_target[0]
+
+                # Feature count warning (not critical)
+                if len(eng_df.columns) < len(orig_df.columns) * 0.5:
+                    issues.append(
+                        f"WARNING: train_engineered.csv has {len(eng_df.columns)} columns, "
+                        f"original has {len(orig_df.columns)} - features may be lost"
+                    )
+                    suggestions.append("Preserve original features when engineering new ones")
+                    score = min(score, 0.7)
+
+            except Exception as e:
+                issues.append(f"Error validating train data shapes: {e}")
+                score = min(score, 0.5)
+
+        # Check test shapes
+        test_orig = working_dir / "test.csv"
+        test_eng = working_dir / "test_engineered.csv"
+
+        if test_orig.exists() and test_eng.exists():
+            try:
+                orig_df = pd.read_csv(test_orig)
+                eng_df = pd.read_csv(test_eng)
+
+                if len(eng_df) != len(orig_df):
+                    issues.append(
+                        f"CRITICAL: test_engineered.csv has {len(eng_df)} rows, "
+                        f"but test.csv has {len(orig_df)} rows"
+                    )
+                    suggestions.append(
+                        "REWRITE feature engineering code - DO NOT use drop_duplicates()"
+                    )
+                    score = 0.0
+                    details["test_row_mismatch"] = {
+                        "original": len(orig_df),
+                        "engineered": len(eng_df),
+                    }
+
+                if "id" in eng_df.columns and eng_df["id"].duplicated().any():
+                    dup_count = eng_df["id"].duplicated().sum()
+                    issues.append(
+                        f"CRITICAL: {dup_count} duplicate IDs in test_engineered.csv!"
+                    )
+                    score = 0.0
+                    details["test_duplicate_ids"] = dup_count
+
+            except Exception as e:
+                issues.append(f"Error validating test data shapes: {e}")
+                score = min(score, 0.5)
+
+        passed = score >= 0.7
+
+        return ValidationResult(
+            module="data_shapes",
+            passed=passed,
+            score=score,
+            issues=issues,
+            suggestions=suggestions,
+            details=details,
+        )
+
+    def _check_model_performance_gap(self, state: KaggleState) -> ValidationResult:
+        """
+        Module 7: Model performance gap detection.
+
+        Detects when one model performs drastically worse than others,
+        triggering dedicated debug loops.
+        """
+        issues = []
+        suggestions = []
+        score = 1.0
+        details = {}
+
+        # Extract model scores from development results
+        # DevelopmentResult doesn't have component metadata - get it from ablation_plan
+        dev_results = state.get("development_results", [])
+        ablation_plan = state.get("ablation_plan", [])
+        model_scores = {}
+
+        for i, result in enumerate(dev_results):
+            # Get component metadata from ablation_plan (not from result)
+            component = ablation_plan[i] if i < len(ablation_plan) else None
+            component_type = component.component_type if component else None
+            component_name = component.name if component else f"component_{i}"
+
+            if component_type == "model":
+                # Try to extract score from stdout
+                stdout = getattr(result, "stdout", "") or ""
+
+                # Look for common score patterns (re is imported at module level)
+                patterns = [
+                    r"(?:CV|Validation|Val|OOF).*?(?:Score|Loss|logloss|LogLoss|RMSE|MAE|AUC).*?:\s*([\d.]+)",
+                    r"(?:Score|Loss|logloss|LogLoss).*?:\s*([\d.]+)",
+                    r"Final.*?(?:Score|Loss).*?:\s*([\d.]+)",
+                ]
+
+                for pattern in patterns:
+                    matches = re.findall(pattern, stdout, re.IGNORECASE)
+                    if matches:
+                        try:
+                            model_scores[component_name] = float(matches[-1])
+                            break
+                        except ValueError:
+                            continue
+
+        details["model_scores"] = model_scores
+
+        if len(model_scores) >= 2:
+            scores = list(model_scores.values())
+            max_gap = max(scores) - min(scores)
+            details["max_gap"] = max_gap
+
+            # For logloss (lower is better), gap > 1.0 is HUGE
+            if max_gap > 1.0:
+                worst_model = max(model_scores, key=model_scores.get)
+                best_model = min(model_scores, key=model_scores.get)
+
+                issues.append(
+                    f"PERFORMANCE GAP: {worst_model} (score {model_scores[worst_model]:.4f}) "
+                    f"is {max_gap:.2f} worse than {best_model} ({model_scores[best_model]:.4f})"
+                )
+                suggestions.extend([
+                    f"TRIGGER DEBUG LOOP for {worst_model}",
+                    "Check if label encoding is consistent between models",
+                    "Verify class_weight='balanced' is appropriate for this metric",
+                    "Compare data preprocessing between models",
+                    "Check if same train/val splits are used",
+                ])
+                score = 0.5
+                details["trigger_debug"] = True
+                details["worst_model"] = worst_model
+                details["best_model"] = best_model
+                details["action"] = "DEBUG_WORST_MODEL"
+
+            elif max_gap > 0.5:
+                # Moderate gap - warning only
+                issues.append(
+                    f"Moderate performance gap ({max_gap:.2f}) between models"
+                )
+                suggestions.append("Consider investigating model consistency")
+                score = 0.8
+
+        passed = score >= 0.7
+
+        return ValidationResult(
+            module="performance_gap",
+            passed=passed,
+            score=score,
+            issues=issues,
+            suggestions=suggestions,
+            details=details,
+        )
 
 
 # ==================== LangGraph Node Function ====================

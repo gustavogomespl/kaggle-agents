@@ -849,6 +849,171 @@ class EnsembleAgent:
         except Exception as e:
             return False, f"Class order validation error: {e}"
 
+    def _validate_all_models_class_order(
+        self,
+        models_dir: Path,
+        sample_submission_path: Path,
+    ) -> tuple[bool, list[str], list[str]]:
+        """Validate class order consistency across ALL models before ensemble.
+
+        This is a stricter check that validates each model has matching class order,
+        preventing silent corruption from averaging misaligned predictions.
+
+        Args:
+            models_dir: Directory containing model artifacts
+            sample_submission_path: Path to sample_submission.csv
+
+        Returns:
+            Tuple of (all_valid, valid_models, invalid_models)
+        """
+        if not sample_submission_path.exists():
+            return False, [], ["sample_submission.csv not found"]
+
+        try:
+            sample_sub = pd.read_csv(sample_submission_path)
+            expected_order = sample_sub.columns[1:].tolist()
+        except Exception as e:
+            return False, [], [f"Failed to read sample_submission: {e}"]
+
+        valid_models = []
+        invalid_models = []
+
+        # Check each model's class order file
+        class_order_files = list(models_dir.glob("class_order_*.npy")) + list(
+            models_dir.glob("classes_*.npy")
+        )
+
+        # Also check for global class_order.npy
+        global_class_order = models_dir / "class_order.npy"
+        if global_class_order.exists() and global_class_order not in class_order_files:
+            class_order_files.append(global_class_order)
+
+        for class_file in class_order_files:
+            try:
+                saved_order = np.load(class_file, allow_pickle=True).tolist()
+                model_name = class_file.stem.replace("class_order_", "").replace("classes_", "")
+
+                if saved_order == expected_order:
+                    valid_models.append(model_name)
+                else:
+                    invalid_models.append(
+                        f"{model_name}: expected {expected_order[:3]}..., got {saved_order[:3]}..."
+                    )
+            except Exception as e:
+                invalid_models.append(f"{class_file.name}: load error - {e}")
+
+        all_valid = len(invalid_models) == 0
+
+        if invalid_models:
+            print("   ⚠️  Class order mismatches detected:")
+            for msg in invalid_models[:3]:  # Show first 3
+                print(f"      - {msg}")
+            if len(invalid_models) > 3:
+                print(f"      ... and {len(invalid_models) - 3} more")
+
+        return all_valid, valid_models, invalid_models
+
+    def _reorder_predictions_to_canonical(
+        self,
+        predictions: np.ndarray,
+        model_classes: list[str] | np.ndarray,
+        canonical_classes: list[str],
+    ) -> np.ndarray:
+        """Reorder predictions from model's class order to canonical order.
+
+        This allows ensembling models that were trained with different LabelEncoder
+        orders, by remapping their prediction columns to the canonical order.
+
+        Args:
+            predictions: Model predictions array (n_samples, n_classes)
+            model_classes: Class order used by this model
+            canonical_classes: Target (canonical) class order from sample_submission
+
+        Returns:
+            Reordered predictions array
+        """
+        if isinstance(model_classes, np.ndarray):
+            model_classes = model_classes.tolist()
+
+        if model_classes == canonical_classes:
+            return predictions  # Already aligned
+
+        # Validate all classes present
+        model_set = set(model_classes)
+        canonical_set = set(canonical_classes)
+
+        if model_set != canonical_set:
+            missing = canonical_set - model_set
+            extra = model_set - canonical_set
+            raise ValueError(
+                f"Class set mismatch! "
+                f"Missing from model: {list(missing)[:5]}. "
+                f"Extra in model: {list(extra)[:5]}."
+            )
+
+        # Create reorder index: for each canonical class, find its index in model classes
+        reorder_idx = []
+        for canonical_class in canonical_classes:
+            try:
+                idx = model_classes.index(canonical_class)
+                reorder_idx.append(idx)
+            except ValueError:
+                raise ValueError(f"Class '{canonical_class}' not found in model's classes")
+
+        # Reorder columns
+        reordered = predictions[:, reorder_idx]
+        return reordered
+
+    def _load_and_align_predictions(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        models_dir: Path,
+        canonical_order: list[str],
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Load predictions and align to canonical class order.
+
+        Args:
+            prediction_pairs: Dict of model_name -> (oof_path, test_path)
+            models_dir: Directory containing model artifacts
+            canonical_order: Target class order from sample_submission
+
+        Returns:
+            Dict of model_name -> (aligned_oof, aligned_test)
+        """
+        aligned_pairs = {}
+
+        for name, (oof_path, test_path) in prediction_pairs.items():
+            try:
+                oof_preds = np.load(oof_path)
+                test_preds = np.load(test_path)
+
+                # Try to load model's class order
+                class_order_path = models_dir / f"class_order_{name}.npy"
+                if not class_order_path.exists():
+                    class_order_path = models_dir / f"classes_{name}.npy"
+                if not class_order_path.exists():
+                    class_order_path = models_dir / "class_order.npy"
+
+                if class_order_path.exists():
+                    model_order = np.load(class_order_path, allow_pickle=True).tolist()
+
+                    if model_order != canonical_order:
+                        print(f"   🔄 Reordering {name} predictions to canonical order")
+                        oof_preds = self._reorder_predictions_to_canonical(
+                            oof_preds, model_order, canonical_order
+                        )
+                        test_preds = self._reorder_predictions_to_canonical(
+                            test_preds, model_order, canonical_order
+                        )
+
+                aligned_pairs[name] = (oof_preds, test_preds)
+
+            except Exception as e:
+                print(f"   ⚠️  Failed to load/align {name}: {e}")
+                continue
+
+        return aligned_pairs
+
     def _ensemble_from_predictions(
         self,
         prediction_pairs: dict[str, tuple[Path, Path]],

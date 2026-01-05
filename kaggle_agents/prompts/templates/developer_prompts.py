@@ -529,6 +529,124 @@ out = tf.keras.layers.Dense(num_classes, activation="softmax")(combined)
 
 model = tf.keras.Model(inputs=[img_input, tab_input], outputs=out)
 ```
+
+## FILE ISOLATION (CRITICAL - PREVENTS OVERWRITES):
+
+### WRONG - Components overwriting each other:
+```python
+submission_df.to_csv("submission.csv")  # LightGBM writes, XGBoost overwrites!
+```
+
+### CORRECT - Each component saves to unique path:
+```python
+# During model training - save component-specific predictions
+submission_df.to_csv(f"models/preds_{component_name}.csv", index=False)
+np.save(f"models/oof_{component_name}.npy", oof_preds)
+np.save(f"models/test_{component_name}.npy", test_preds)
+
+# Only Ensemble Agent creates submission.csv!
+```
+
+### Rule:
+- Model components: NEVER write to `submission.csv` directly
+- Model components: Save to `models/preds_{component_name}.csv`
+- Ensemble Agent: Read all `models/preds_*.csv` or `models/test_*.npy`
+- Ensemble Agent: Create final `submission.csv`
+
+## ID COLUMN IMMUTABILITY (MANDATORY):
+
+### The 'id' column MUST remain exactly as in the original CSV:
+- DO NOT cast id to different type (int -> str or vice versa)
+- DO NOT reindex the DataFrame (unless you reassign id from original)
+- DO NOT drop the id column
+- DO NOT modify id values
+
+### Pattern for Feature Engineering:
+```python
+# CORRECT: Preserve original id
+train_df = pd.read_csv('train.csv')
+original_ids = train_df['id'].copy()  # Backup
+
+# ... create features ...
+
+# VERIFY id wasn't corrupted
+train_df['id'] = original_ids  # Restore if needed
+assert train_df['id'].equals(pd.read_csv('train.csv')['id']), "ID column was modified!"
+```
+
+### After ANY merge with target column:
+```python
+train_eng = train_eng.merge(train_orig[['id', target_col]], on='id', how='left')
+
+# MANDATORY NULL CHECK:
+assert not train_eng[target_col].isnull().any(), \
+    f"CRITICAL: {train_eng[target_col].isnull().sum()} NaN values in target after merge! " \
+    "ID types may have changed (int vs str)."
+```
+
+## CLASS ORDER METADATA (MANDATORY FOR MULTICLASS):
+
+### Every model component MUST save its class order:
+```python
+# After fitting LabelEncoder:
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# MANDATORY: Save class order metadata
+np.save(f"models/classes_{component_name}.npy", le.classes_)
+print(f"[LOG:INFO] Saved class order: {le.classes_[:5]}... ({len(le.classes_)} classes)")
+```
+
+### Why This Matters:
+- LabelEncoder order depends on training data order
+- Different random_state or data shuffling = different class order
+- Averaging predictions with mismatched orders = random guessing
+
+## ENGINEERED DATA VALIDATION (CRITICAL):
+
+### Before using train_engineered.csv/test_engineered.csv:
+```python
+import pandas as pd
+from pathlib import Path
+
+# Load both original and engineered
+train_orig = pd.read_csv(train_csv_path)
+train_eng_path = Path(train_engineered_path)
+
+if train_eng_path.exists():
+    train_eng = pd.read_csv(train_eng_path)
+
+    # CHECK 1: Fail if duplicates found (DO NOT auto-fix!)
+    if train_eng['id'].duplicated().any():
+        raise ValueError(
+            f"DUPLICATE IDS DETECTED! Found {train_eng['id'].duplicated().sum()} duplicates. "
+            "Fix the feature engineering code - do NOT use drop_duplicates()."
+        )
+
+    # CHECK 2: Row count must match
+    if len(train_eng) != len(train_orig):
+        print(f"[LOG:ERROR] Engineered data has {len(train_eng)} rows, original has {len(train_orig)}")
+        print("[LOG:INFO] Using original data instead")
+        train_df = train_orig
+    else:
+        # CHECK 3: Target column must exist (merge if missing)
+        if target_col not in train_eng.columns and target_col in train_orig.columns:
+            print(f"[LOG:INFO] Target '{target_col}' not in engineered data, merging from original")
+            train_eng = train_eng.merge(train_orig[['id', target_col]], on='id', how='left')
+            # Verify merge worked
+            assert not train_eng[target_col].isnull().any(), "Target merge failed - check ID types!"
+        train_df = train_eng
+else:
+    train_df = train_orig
+```
+
+### Prefer Original Features When Engineered Data is Broken:
+```python
+# If engineered data has fewer than 10 feature columns, use original
+if len(train_eng.columns) < 10:
+    print("[LOG:WARNING] Engineered data has too few features, using original train.csv")
+    train_df = train_orig  # Fall back to original
+```
 """
 
 

@@ -11,6 +11,7 @@ Based on:
 """
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
@@ -144,8 +145,21 @@ class MetaEvaluatorAgent:
         # Eureka: Perform evolutionary crossover for next generation planning
         crossover_guidance = self._evolutionary_crossover(state)
 
+        # Inner Loop Refinement: Check for performance gaps that need debug loops
+        debug_loop_trigger = self._check_performance_gap_for_debug(state)
+
         # Update state
-        return {
+        debug_updates = {}
+        if debug_loop_trigger.get("trigger_debug"):
+            debug_updates = {
+                "trigger_debug_loop": True,
+                "debug_target_model": debug_loop_trigger.get("worst_model"),
+                "debug_hints": debug_loop_trigger.get("debug_hints", []),
+                "performance_gap": debug_loop_trigger.get("gap"),
+            }
+            print(f"\n   ⚠️  TRIGGERING DEBUG LOOP for {debug_loop_trigger.get('worst_model')}")
+
+        result = {
             "failure_analysis": failure_analysis,
             "reward_signals": reward_signals,
             "refinement_guidance": refinement_guidance,
@@ -153,6 +167,109 @@ class MetaEvaluatorAgent:
             "iteration_memory": [iteration_memory],  # Append to list
             "last_updated": datetime.now(),
         }
+        result.update(debug_updates)  # Add debug loop trigger if applicable
+        return result
+
+    def _check_performance_gap_for_debug(self, state: KaggleState) -> dict[str, Any]:
+        """
+        Inner Loop Refinement: Detect when one model performs drastically worse.
+
+        Triggers a dedicated debug iteration when:
+        - Two or more models exist
+        - Performance gap > 1.0 (for logloss-like metrics)
+
+        This prevents moving forward with broken models in the ensemble.
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            Dictionary with trigger_debug, worst_model, gap, debug_hints
+        """
+        dev_results = state.get("development_results", [])
+        ablation_plan = state.get("ablation_plan", [])
+
+        if not dev_results:
+            return {"trigger_debug": False}
+
+        model_scores = {}
+
+        for i, result in enumerate(dev_results):
+            # Get component info
+            component = ablation_plan[i] if i < len(ablation_plan) else None
+            component_type = component.component_type if component else "unknown"
+            component_name = component.name if component else f"component_{i}"
+
+            if component_type != "model":
+                continue
+
+            # Try to extract score from stdout
+            # DevelopmentResult is a dataclass - use getattr for safety
+            stdout = getattr(result, "stdout", "") or ""
+
+            # Look for common score patterns
+            patterns = [
+                r"(?:CV|Validation|Val|OOF).*?(?:Score|Loss|logloss|LogLoss|RMSE|MAE|AUC).*?:\s*([\d.]+)",
+                r"(?:Score|Loss|logloss|LogLoss).*?:\s*([\d.]+)",
+                r"Final.*?(?:Score|Loss|Validation Performance).*?:\s*([\d.]+)",
+            ]
+
+            for pattern in patterns:
+                matches = re.findall(pattern, stdout, re.IGNORECASE)
+                if matches:
+                    try:
+                        model_scores[component_name] = float(matches[-1])
+                        break
+                    except ValueError:
+                        continue
+
+        # Need at least 2 models to compare
+        if len(model_scores) < 2:
+            return {"trigger_debug": False, "model_scores": model_scores}
+
+        scores = list(model_scores.values())
+        max_gap = max(scores) - min(scores)
+
+        # For logloss (lower is better), gap > 1.0 is HUGE
+        if max_gap > 1.0:
+            worst_model = max(model_scores, key=model_scores.get)
+            best_model = min(model_scores, key=model_scores.get)
+
+            debug_hints = [
+                "Check if LabelEncoder class order is consistent with other models",
+                "Verify class_weight='balanced' is appropriate for this metric",
+                "Compare data preprocessing between models",
+                "Check if same train/val splits are used (random_state)",
+                "Verify the objective function matches the competition metric",
+                "Check for data type mismatches (categorical vs numeric)",
+            ]
+
+            print("\n   📊 PERFORMANCE GAP DETECTED:")
+            print(f"      Worst: {worst_model} = {model_scores[worst_model]:.4f}")
+            print(f"      Best: {best_model} = {model_scores[best_model]:.4f}")
+            print(f"      Gap: {max_gap:.2f}")
+
+            return {
+                "trigger_debug": True,
+                "worst_model": worst_model,
+                "best_model": best_model,
+                "gap": max_gap,
+                "model_scores": model_scores,
+                "debug_hints": debug_hints,
+                "action": "PAUSE_AND_DEBUG",
+            }
+
+        if max_gap > 0.5:
+            # Moderate gap - warning only
+            print(f"\n   ⚠️  Moderate performance gap ({max_gap:.2f}) between models")
+            return {
+                "trigger_debug": False,
+                "gap": max_gap,
+                "model_scores": model_scores,
+                "warning": f"Moderate gap of {max_gap:.2f} detected",
+            }
+
+        return {"trigger_debug": False, "model_scores": model_scores}
 
     def _analyze_failures(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -757,7 +874,6 @@ class MetaEvaluatorAgent:
         context += "\n## Component Code and Performance Analysis\n"
 
         dev_results = state.get("development_results", [])
-        import re
 
         # Limit to 5 most recent components to reduce token usage
         recent_results = dev_results[-5:] if len(dev_results) > 5 else dev_results
