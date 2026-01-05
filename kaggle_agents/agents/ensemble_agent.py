@@ -2147,6 +2147,41 @@ Return a JSON object:
                     if missing_tests:
                         print(f"   ⚠️ Missing test_* for: {', '.join(missing_tests[:5])}")
 
+                    # Handle single model case (use directly without ensemble averaging)
+                    if len(prediction_pairs) == 1:
+                        single_model_name = list(prediction_pairs.keys())[0]
+                        print(f"\n   ℹ️ Single validated model available: {single_model_name}")
+                        print("      Using directly as submission (no ensemble needed)")
+
+                        _, test_path = prediction_pairs[single_model_name]
+                        preds = np.load(test_path)
+                        preds = np.asarray(preds, dtype=np.float32)
+
+                        sample_path = (
+                            Path(sample_submission_path)
+                            if sample_submission_path
+                            else working_dir / "sample_submission.csv"
+                        )
+                        if sample_path.exists():
+                            sample_sub = pd.read_csv(sample_path)
+                            # Validate shape before writing
+                            if preds.ndim == 1:
+                                assert preds.shape[0] == len(sample_sub), \
+                                    f"Row count mismatch: {preds.shape[0]} vs {len(sample_sub)}"
+                                sample_sub.iloc[:, 1] = preds
+                            else:
+                                assert preds.shape[0] == len(sample_sub), \
+                                    f"Row count mismatch: {preds.shape[0]} vs {len(sample_sub)}"
+                                sample_sub.iloc[:, 1:] = preds
+                            sample_sub.to_csv(working_dir / "submission.csv", index=False)
+                            print(f"   ✅ Single model submission created: {single_model_name}")
+                            return {
+                                "ensemble_skipped": True,
+                                "skip_reason": "single_model_available",
+                                "single_model_used": True,
+                                "model_name": single_model_name,
+                            }
+
                     # Only ensemble if we have 2+ ACCEPTED models
                     if len(prediction_pairs) >= 2:
                         print("\n   ✅ Using prediction-only ensemble from OOF/Test pairs")

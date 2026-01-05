@@ -23,6 +23,15 @@ def build_image_model_instructions(
         "  - Learning rate schedule: warmup for 5% of epochs, then cosine decay to 1e-6",
         "  - Use pretrained backbone (torchvision/timm) - efficientnet_b0 or resnet50 recommended",
         "  - Avoid heavy backbones (e.g., resnet152) unless you have ample time budget",
+        "\n  🔴 CRITICAL PREPROCESSING (model-specific normalization - DO NOT SKIP):",
+        "    - EfficientNet (TF/Keras): tf.keras.applications.efficientnet.preprocess_input() → scales to [-1, 1]",
+        "    - ResNet/VGG (TF/Keras): tf.keras.applications.resnet.preprocess_input() → ImageNet BGR mean subtraction",
+        "    - MobileNet (TF/Keras): tf.keras.applications.mobilenet_v2.preprocess_input() → scales to [-1, 1]",
+        "    - PyTorch timm: use timm.data.create_transform(is_training=False) or model.default_cfg['mean']/['std']",
+        "    - PyTorch torchvision: transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])",
+        "  - ⚠️ NEVER use simple /255.0 normalization for pretrained ImageNet models (breaks feature extraction!)",
+        "  - ⚠️ Using wrong preprocessing = near-random predictions (LogLoss ~4.0 for 120 classes)",
+        "  - For custom models trained from scratch: /255.0 or [0,1] normalization is acceptable",
         "  - Use ONE framework per run (PyTorch OR Keras) and keep inference consistent",
         "  - If using TensorFlow: tf.io.read_file + tf.image.decode_jpeg/png(channels=3), tf.ensure_shape, Dataset.ignore_errors(), Dataset.repeat()",
         "  - Avoid tf.image.decode_image unless you also call tf.ensure_shape and set static shape",
@@ -38,11 +47,17 @@ def build_image_model_instructions(
         "  - If dataset is huge (many images or >5GB), prefer 1 holdout split + smaller resolution (224/256) to avoid timeouts",
     ]
 
-    if suggested_epochs < 20:
-        instructions.append(f"  - ⚠️ Reduced epochs ({suggested_epochs}) due to previous timeout")
-        instructions.append(
-            "  - Consider using smaller model (efficientnet_b0) or lower resolution if still slow"
-        )
+    if suggested_epochs < 50:
+        instructions.extend([
+            f"\n  ⚠️ TIMEOUT ADAPTATION (epochs reduced to {suggested_epochs}):",
+            "    - Use EfficientNet-B0 (fastest/smallest) instead of B3/B4/B7",
+            "    - Reduce image resolution: 224 → 160 → 128 (smaller = faster)",
+            "    - Reduce batch size: 32 → 16 → 8 (if memory is tight)",
+            "    - Use 1-2 CV folds instead of 5 (faster validation)",
+            "    - Skip heavy augmentation (MixUp/CutMix) on validation set",
+            "    - Keep backbone frozen (don't unfreeze layers)",
+            "    - Reduce early_stopping_patience proportionally (e.g., patience=5 for 50 epochs)",
+        ])
 
     if isinstance(data_files, dict) and data_files.get("train_csv"):
         instructions.append(

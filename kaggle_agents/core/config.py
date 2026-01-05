@@ -80,6 +80,20 @@ class AblationConfig:
     code_preview_lines: int = 30  # number of lines to show in preview
     enable_refinement: bool = True  # enable iterative refinement of successful components
 
+    # Training adaptation settings (prevent cascade of epoch reductions)
+    max_epoch_reductions: int = field(
+        default_factory=lambda: int(os.getenv("KAGGLE_AGENTS_MAX_EPOCH_REDUCTIONS", "1"))
+    )  # max number of epoch reductions allowed (prevents 600→300→150→75 cascade)
+    min_epochs: int = field(
+        default_factory=lambda: int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "10"))
+    )  # minimum epochs floor for image models
+    epoch_reduction_factor: float = field(
+        default_factory=lambda: float(os.getenv("KAGGLE_AGENTS_EPOCH_REDUCTION", "0.5"))
+    )  # reduction factor when timeout occurs (0.5 = halve epochs)
+    undertrained_threshold: float = field(
+        default_factory=lambda: float(os.getenv("KAGGLE_AGENTS_UNDERTRAINED_THRESHOLD", "0.85"))
+    )  # score threshold relative to random baseline (0.85 = 85% of random is undertrained)
+
 
 @dataclass
 class ValidationConfig:

@@ -353,9 +353,13 @@ def build_dynamic_instructions(
     early_stopping_patience = int(state.get("early_stopping_patience", 30))  # SOTA uses 30
     min_epochs = int(os.getenv("KAGGLE_AGENTS_MIN_EPOCHS", "5"))
 
-    # Check if last run timed out and reduce epochs
+    # Check if last run timed out and reduce epochs (LIMIT: max 1 reduction to prevent cascade)
     suggested_epochs = epoch_budget
-    if dev_results:
+    epochs_already_reduced = state.get("epochs_already_reduced", False)
+    max_reductions = int(os.getenv("KAGGLE_AGENTS_MAX_EPOCH_REDUCTIONS", "1"))
+    reduction_count = state.get("epoch_reduction_count", 0)
+
+    if dev_results and reduction_count < max_reductions:
         last_result = dev_results[-1]
         last_stdout = str(getattr(last_result, "stdout", "") or "").lower()
         last_stderr = str(getattr(last_result, "stderr", "") or "").lower()
@@ -371,6 +375,12 @@ def build_dynamic_instructions(
         if timed_out:
             reduction_factor = float(os.getenv("KAGGLE_AGENTS_EPOCH_REDUCTION", "0.5"))
             suggested_epochs = max(min_epochs, int(epoch_budget * reduction_factor))
+            # Also reduce early_stopping_patience proportionally
+            early_stopping_patience = max(5, int(early_stopping_patience * reduction_factor))
+            # Track reduction to prevent cascade
+            state["epochs_already_reduced"] = True
+            state["epoch_reduction_count"] = reduction_count + 1
+            state["early_stopping_patience"] = early_stopping_patience
 
     # Component-type specific instructions
     if component.component_type == "model":

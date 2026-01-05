@@ -11,6 +11,8 @@ Based on:
 """
 
 import json
+import math
+import os
 import re
 from datetime import datetime
 from typing import Any
@@ -543,6 +545,134 @@ class MetaEvaluatorAgent:
                 "summary": f"Log analysis failed: {e}",
             }
 
+    def _detect_undertrained_models(
+        self,
+        state: KaggleState,
+    ) -> dict[str, Any] | None:
+        """
+        Detect if model performance indicates insufficient training.
+
+        Compares CV score against random baseline for the problem type,
+        respecting the metric direction (minimize vs maximize).
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            Diagnostic dict if undertrained, None otherwise
+        """
+        from ..core.config import is_metric_minimization
+
+        dev_results = state.get("development_results", [])
+        if not dev_results:
+            return None
+
+        # Get the best CV score from successful results
+        cv_scores = []
+        for result in dev_results:
+            if result.success and result.cv_score is not None:
+                cv_scores.append(result.cv_score)
+
+        if not cv_scores:
+            return None
+
+        # Determine metric and its direction
+        competition_info = state.get("competition_info")
+        metric_name = ""
+        problem_type = ""
+        n_classes = 2
+
+        if competition_info:
+            metric_name = str(getattr(competition_info, "evaluation_metric", "")).lower()
+            problem_type = str(getattr(competition_info, "problem_type", "")).lower()
+
+        # Determine if we're minimizing or maximizing
+        is_minimize = is_metric_minimization(metric_name) if metric_name else True
+
+        # Get best score based on metric direction
+        if is_minimize:
+            best_cv_score = min(cv_scores)
+        else:
+            best_cv_score = max(cv_scores)
+
+        # Try to infer n_classes from sample submission
+        sample_submission_path = state.get("sample_submission_path")
+        if sample_submission_path:
+            try:
+                import pandas as pd
+                sample_sub = pd.read_csv(sample_submission_path)
+                n_cols = sample_sub.shape[1]
+                if n_cols > 2:
+                    n_classes = n_cols - 1  # Subtract ID column
+            except Exception:
+                pass
+
+        # Calculate random baselines based on metric type
+        if is_minimize:
+            # Minimization metrics (log_loss, RMSE, etc.)
+            random_baselines = {
+                "multiclass": -math.log(1 / max(n_classes, 2)),  # log_loss for random
+                "binary": 0.693,  # -log(0.5) for binary log_loss
+            }
+            baseline_key = "multiclass" if n_classes > 2 else "binary"
+            baseline = random_baselines.get(baseline_key, 4.0)
+
+            # For minimization: score > threshold * baseline means undertrained
+            threshold = float(os.environ.get("KAGGLE_AGENTS_UNDERTRAINED_THRESHOLD", "0.85"))
+            is_undertrained = best_cv_score > baseline * threshold
+            comparison_msg = f"Score {best_cv_score:.4f} is too high (within {int((1-threshold)*100)}% of random baseline {baseline:.4f})"
+        else:
+            # Maximization metrics (accuracy, F1, AUC, etc.)
+            random_baselines = {
+                "accuracy_multiclass": 1.0 / max(n_classes, 2),  # random accuracy
+                "accuracy_binary": 0.5,
+                "auc": 0.5,  # random AUC
+                "f1": 0.0,  # worst F1
+            }
+
+            # Determine appropriate baseline
+            if "auc" in metric_name or "roc" in metric_name:
+                baseline = 0.5
+            elif "f1" in metric_name or "precision" in metric_name or "recall" in metric_name:
+                baseline = 0.0
+            else:
+                # Default to accuracy baseline
+                baseline = 1.0 / max(n_classes, 2)
+
+            # For maximization: score < threshold * optimal means undertrained
+            # Use a different threshold logic: if score is close to random baseline
+            threshold = float(os.environ.get("KAGGLE_AGENTS_UNDERTRAINED_THRESHOLD", "0.85"))
+            # For maximize metrics, undertrained means score is within 15% above baseline
+            # e.g., for binary accuracy: baseline=0.5, threshold=0.85 → 0.5 + 0.15*(1-0.5) = 0.575
+            undertrained_ceiling = baseline + (1 - threshold) * (1.0 - baseline)
+            is_undertrained = best_cv_score < undertrained_ceiling
+            comparison_msg = f"Score {best_cv_score:.4f} is too low (below {undertrained_ceiling:.4f}, near random baseline {baseline:.4f})"
+
+        if is_undertrained:
+            direction = "minimize" if is_minimize else "maximize"
+            print(f"   ⚠️ UNDERTRAINED MODEL DETECTED ({direction}): {comparison_msg}")
+            return {
+                "type": "UNDERTRAINED_MODEL",
+                "severity": "critical",
+                "cv_score": best_cv_score,
+                "random_baseline": baseline,
+                "n_classes": n_classes,
+                "metric_name": metric_name,
+                "is_minimize": is_minimize,
+                "message": comparison_msg,
+                "suggestions": [
+                    "Increase training epochs (model may not have converged)",
+                    "Verify preprocessing matches model requirements (e.g., preprocess_input for pretrained models)",
+                    "Check if learning rate is appropriate (may be too high or too low)",
+                    "Ensure data augmentation isn't too aggressive",
+                    "Verify class order alignment between predictions and ground truth labels",
+                ],
+                "planner_directive": "CRITICAL: Current model is near-random. Prioritize training convergence over new features.",
+                "developer_directive": "CRITICAL: Model is undertrained. Check preprocessing, increase epochs, verify label encoding.",
+            }
+
+        return None
+
     def _calculate_reward_signals(
         self,
         state: KaggleState,
@@ -735,8 +865,23 @@ class MetaEvaluatorAgent:
         # Analyze execution logs for semantic errors (LLM-driven)
         log_analysis = self._analyze_execution_logs(state)
 
+        # Detect undertrained models (critical for image/multiclass problems)
+        undertrained_info = self._detect_undertrained_models(state)
+
         # Build context for LLM
         context = self._build_evaluation_context(state, failure_analysis, reward_signals)
+
+        # Inject undertrained model detection into context (highest priority)
+        if undertrained_info:
+            context += "\n\n## ⚠️ CRITICAL: UNDERTRAINED MODEL DETECTED\n"
+            context += f"**Severity**: {undertrained_info.get('severity', 'critical')}\n"
+            context += f"**Message**: {undertrained_info.get('message', '')}\n"
+            context += f"**CV Score**: {undertrained_info.get('cv_score', 0):.4f}\n"
+            context += f"**Random Baseline**: {undertrained_info.get('random_baseline', 0):.4f}\n"
+            context += f"**Classes**: {undertrained_info.get('n_classes', 2)}\n\n"
+            context += "**Suggestions**:\n"
+            for sugg in undertrained_info.get("suggestions", []):
+                context += f"  - {sugg}\n"
 
         # Inject semantic analysis into context
         if log_analysis.get("has_semantic_errors"):
@@ -794,6 +939,16 @@ class MetaEvaluatorAgent:
             existing_dev = guidance.get("developer_guidance", "")
             dev_directives = " | ".join(log_analysis["developer_directives"])
             guidance["developer_guidance"] = f"PRIORITY: {dev_directives}. {existing_dev}"
+
+        # Inject undertrained model directives (HIGHEST priority - overrides everything)
+        if undertrained_info:
+            existing_planner = guidance.get("planner_guidance", "")
+            guidance["planner_guidance"] = f"🔴 {undertrained_info.get('planner_directive', '')} {existing_planner}"
+
+            existing_dev = guidance.get("developer_guidance", "")
+            guidance["developer_guidance"] = f"🔴 {undertrained_info.get('developer_directive', '')} {existing_dev}"
+
+            guidance["undertrained_analysis"] = undertrained_info
 
         # Store full analysis for downstream use
         guidance["semantic_analysis"] = log_analysis
