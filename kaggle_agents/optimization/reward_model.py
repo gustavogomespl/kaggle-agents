@@ -50,13 +50,15 @@ class PlannerRewardModel:
         self.weight_impact = weight_impact
         self.weight_completeness = weight_completeness
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         Evaluate a planner prediction.
 
         Args:
             example: DSPy example with expected outputs
             prediction: DSPy prediction from the model
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Reward score (0-1)
@@ -184,13 +186,15 @@ class DeveloperRewardModel:
     - Code quality (imports, structure)
     """
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         Evaluate developer code generation.
 
         Args:
             example: DSPy example
             prediction: Prediction with generated code
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Reward score (0-1)
@@ -264,13 +268,15 @@ class ValidationRewardModel:
     - Quality of suggestions
     """
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         Evaluate validation results.
 
         Args:
             example: DSPy example
             prediction: Prediction with validation results
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Reward score (0-1)
@@ -318,13 +324,15 @@ class KaggleScoreRewardModel:
         """
         self.target_percentile = target_percentile
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         Evaluate based on Kaggle score.
 
         Args:
             example: DSPy example with competition info
             prediction: Prediction with submission results
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Reward score (0-1)
@@ -389,13 +397,15 @@ class CombinedRewardModel:
         self.kaggle_model = KaggleScoreRewardModel()
         self.developer_model = DeveloperRewardModel()
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         Evaluate using combined metrics.
 
         Args:
             example: DSPy example
             prediction: Prediction with multiple outputs
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Combined reward score (0-1)
@@ -590,13 +600,15 @@ class ExecutionFeedbackRewardModel:
         feedback = parse_training_logs(stdout)
         return self.calculate_from_feedback(feedback, previous_score)
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         DSPy-compatible interface for reward calculation.
 
         Args:
             example: DSPy example (may contain previous_score)
             prediction: Prediction with stdout attribute
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Combined reward score
@@ -643,13 +655,15 @@ class AblationRewardModel:
             "ensemble",
         }
 
-    def __call__(self, example: dspy.Example, prediction: dspy.Prediction) -> float:
+    def __call__(self, example: dspy.Example, prediction: dspy.Prediction, *args, **kwargs) -> float:
         """
         Evaluate ablation study quality.
 
         Args:
             example: DSPy example
             prediction: Prediction with ablation_results
+            *args: Additional positional arguments (for DSPy compatibility)
+            **kwargs: Additional keyword arguments (for DSPy compatibility)
 
         Returns:
             Reward score (0-1)

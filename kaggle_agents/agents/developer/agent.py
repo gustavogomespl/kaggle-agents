@@ -418,6 +418,24 @@ class DeveloperAgent(
                 shutil.copy(submission_path, backup_path)
                 print(f"Backup submission saved: {backup_name}")
 
+                # Validate submission format before MLE-bench grading
+                sample_sub_path = (
+                    Path(state.get("sample_submission_path"))
+                    if state.get("sample_submission_path")
+                    else working_dir / "sample_submission.csv"
+                )
+                if sample_sub_path and sample_sub_path.exists():
+                    is_valid, validation_msg = self.executor.validate_submission_format(
+                        submission_path=submission_path,
+                        sample_submission_path=sample_sub_path,
+                        component_type=component.component_type,
+                    )
+                    if not is_valid:
+                        print(f"   ❌ Submission validation FAILED: {validation_msg}")
+                        # Continue to MLE-bench anyway - it will also fail but gives more info
+                    else:
+                        print(f"   {validation_msg}")
+
                 # In MLE-bench mode, grade after each successful model component so we can
                 # stop early once the objective is reached (medal/target/above-median).
                 if run_mode == "mlebench":
@@ -618,6 +636,23 @@ class DeveloperAgent(
                 )
 
             if run_mode == "mlebench" and grading is None and submission_path.exists():
+                # Validate submission format before MLE-bench grading (fallback path)
+                sample_sub_path = (
+                    Path(state.get("sample_submission_path"))
+                    if state.get("sample_submission_path")
+                    else working_dir / "sample_submission.csv"
+                )
+                if sample_sub_path and sample_sub_path.exists():
+                    is_valid, validation_msg = self.executor.validate_submission_format(
+                        submission_path=submission_path,
+                        sample_submission_path=sample_sub_path,
+                        component_type=component.component_type,
+                    )
+                    if not is_valid:
+                        print(f"   ❌ Submission validation FAILED: {validation_msg}")
+                    else:
+                        print(f"   {validation_msg}")
+
                 grading = self._grade_with_mlebench(
                     competition_name=competition_info.name,
                     submission_path=submission_path,

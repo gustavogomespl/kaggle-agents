@@ -341,7 +341,7 @@ class TrainingDataCollector:
         examples = self.get_examples(agent_name, min_score)
 
         required_inputs: dict[str, set[str]] = {
-            "planner": {"competition_info", "domain", "sota_summary", "domain_guidance"},
+            "planner": {"competition_info", "domain", "sota_details", "sota_summary", "domain_guidance", "memory_summary"},
             "developer_generator": {
                 "component_details",
                 "competition_context",
