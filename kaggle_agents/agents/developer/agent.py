@@ -1385,6 +1385,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     attempt=attempt,
                     component_type=component.component_type,
                     state=state,  # Pass state for Meta-Evaluator guidance
+                    paths=getattr(self, "_resolved_paths", None),  # Pass paths for FileNotFoundError fixes
                 )
 
         # If all retries failed, try debug iterations
@@ -1402,6 +1403,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             component_name=component.name,
             component_type=component.component_type,
             state=state,  # Pass state for Meta-Evaluator guidance injection
+            paths=getattr(self, "_resolved_paths", None),  # Pass paths for path-related error fixes
         )
 
         attempt_records.append(

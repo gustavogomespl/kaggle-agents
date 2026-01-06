@@ -245,6 +245,7 @@ class RetryMixin:
         attempt: int = 0,
         component_type: str = "model",
         state: dict | None = None,
+        paths: dict | None = None,
     ) -> str:
         """
         Fix code based on error with dynamic temperature.
@@ -261,6 +262,7 @@ class RetryMixin:
             attempt: Current fix attempt (0-indexed), used for temperature escalation
             component_type: Type of component being fixed
             state: Optional state dict for meta-evaluator guidance
+            paths: Optional resolved data paths for FileNotFoundError fixes
 
         Returns:
             Fixed code
@@ -299,11 +301,21 @@ class RetryMixin:
                 print(f"   ⚠️ DSPy fixer failed: {e}. Falling back to direct LLM fix.")
 
         if fixed_code is None:
+            # Format path context for FileNotFoundError fixes
+            path_context = ""
+            if paths:
+                path_context = f"""Train: {paths.get('train', 'N/A')}
+Test: {paths.get('test', 'N/A')}
+Sample Submission: {paths.get('sample_submission', 'N/A')}
+Models: {paths.get('models', 'models/')}
+Output Dir: {paths.get('output_dir', '.')}"""
+
             prompt = FIX_CODE_PROMPT.format(
                 code=code,
                 error=error_text,
                 error_type=error_info["error_type"],
                 meta_feedback=meta_feedback or "",
+                paths=path_context,
             )
 
             system_prompt = f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}"
@@ -339,6 +351,7 @@ class RetryMixin:
         component_name: str = "",
         component_type: str = "",
         state: dict | None = None,
+        paths: dict | None = None,
     ) -> tuple[str, ExecutionResult, bool]:
         """
         Debug code iteratively with loop-safety, configurable timeouts, and dynamic temperature.
@@ -399,12 +412,22 @@ class RetryMixin:
 
             issue = f"Code failed after {iteration + 1} attempts. Errors: {', '.join(exec_result.errors)}"
 
+            # Format path context for path-related errors
+            path_context = ""
+            if paths:
+                path_context = f"""Train: {paths.get('train', 'N/A')}
+Test: {paths.get('test', 'N/A')}
+Sample Submission: {paths.get('sample_submission', 'N/A')}
+Models: {paths.get('models', 'models/')}
+Output Dir: {paths.get('output_dir', '.')}"""
+
             prompt = DEBUG_CODE_PROMPT.format(
                 code=code,
                 issue=issue,
                 stdout=exec_result.stdout[-2000:] if exec_result.stdout else "",
                 stderr=exec_result.stderr[-2000:] if exec_result.stderr else "",
                 meta_feedback=meta_feedback or "",
+                paths=path_context,
             )
 
             debug_system_prompt = f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}\n\nYou are in DEBUG MODE. Fix the code carefully."

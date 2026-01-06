@@ -197,7 +197,28 @@ class CodeGeneratorMixin:
             "test_csv": str(test_csv_path),
             "models": str(models_dir),
             "submission": str(submission_output_path),
+            "sample_submission": str(sample_submission_path),
         }
+
+        # Store resolved paths for use by fix/debug functions
+        self._resolved_paths = paths
+
+        # Generate path constants header to inject into code
+        # This ensures the LLM cannot ignore the correct paths
+        path_header = f'''# === PATH CONSTANTS (AUTO-INJECTED - DO NOT MODIFY) ===
+from pathlib import Path
+
+TRAIN_PATH = Path("{resolved_train_path}")
+TEST_PATH = Path("{resolved_test_path}")
+SAMPLE_SUBMISSION_PATH = Path("{sample_submission_path}")
+MODELS_DIR = Path("{models_dir}")
+OUTPUT_DIR = Path("{working_dir}")
+
+# Create models directory
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# === END PATH CONSTANTS ===
+'''
 
         def _generate_with_llm() -> str:
             prompt = compose_generate_prompt(
@@ -247,4 +268,5 @@ class CodeGeneratorMixin:
         else:
             code = _generate_with_llm()
 
-        return code
+        # Prepend path constants header to ensure LLM-generated code uses correct paths
+        return path_header + "\n" + code
