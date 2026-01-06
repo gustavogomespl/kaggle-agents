@@ -364,10 +364,16 @@ class DeveloperAgent(
                     f"⚠️ Max component retries reached ({code_retry_count}/{max_component_retries}) "
                     f"for {component.name}. Skipping."
                 )
+                # Track failed component for planner to avoid in future iterations
+                failed_names = list(state.get("failed_component_names", []))
+                if component.name not in failed_names:
+                    failed_names.append(component.name)
+                    state["failed_component_names"] = failed_names
+                    print(f"   📝 Recorded {component.name} as failed component")
 
         data_not_found = not result.success and "Data files not found" in (result.stderr or "")
         should_advance = result.success or data_not_found or skip_due_to_retries
-        state_updates = {
+        state_updates: dict[str, Any] = {
             "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
             "code_retry_count": 0 if should_advance else code_retry_count,
@@ -375,6 +381,10 @@ class DeveloperAgent(
             "last_updated": datetime.now(),
             "code_attempts": attempt_records,
         }
+
+        # Persist failed component names if any were recorded
+        if state.get("failed_component_names"):
+            state_updates["failed_component_names"] = state["failed_component_names"]
 
         # GRPO: Persist reasoning trace in state
         if self._last_reasoning_trace is not None:

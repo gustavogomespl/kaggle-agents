@@ -182,6 +182,45 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
     NOTE: TorchScript (`torch.jit.script`) is an alternative but fails with dynamic control flow.
     Prefer `torch.save(model, ...)` for simplicity and reliability.
 
+12. INCREMENTAL OOF CHECKPOINT (CRITICAL FOR TIMEOUT RESILIENCE):
+    Save OOF/test predictions after EACH fold completes, not just at the end.
+    This ensures partial results are available if timeout occurs mid-training.
+
+    ```python
+    oof_preds = np.zeros((n_train, n_classes))
+    test_preds = np.zeros((n_test, n_classes))
+
+    for fold_idx, (train_idx, val_idx) in enumerate(fold_indices):
+        if _check_deadline():
+            print("[TIMEOUT] Soft deadline reached, stopping training")
+            break
+
+        # ... train model on fold ...
+
+        # Get predictions
+        oof_preds[val_idx] = model.predict_proba(X_val)
+        test_preds += model.predict_proba(X_test) / len(fold_indices)
+
+        # CHECKPOINT AFTER EACH FOLD (MANDATORY)
+        np.save(MODELS_DIR / f'oof_{COMPONENT_NAME}.npy', oof_preds)
+        np.save(MODELS_DIR / f'test_{COMPONENT_NAME}.npy', test_preds)
+        np.save(MODELS_DIR / f'class_order_{COMPONENT_NAME}.npy', np.array(class_order))
+        print(f"[LOG:CHECKPOINT] Saved OOF/test after fold {fold_idx}")
+
+    # Final metric (ALWAYS print, even if stopped early)
+    mask = oof_preds.sum(axis=1) > 0  # Only score rows that were predicted
+    if mask.any():
+        cv_score = metric(y_true[mask], oof_preds[mask])
+    else:
+        cv_score = 0.0
+    print(f"Final Validation Performance: {cv_score:.6f}")
+    ```
+
+    WHY THIS MATTERS:
+    - If XGBoost times out at fold 3, folds 0-2 are still saved
+    - Ensemble Agent can use partial OOF predictions
+    - No wasted computation from timed-out components
+
 ## MUST NOT:
 - sys.exit(), exit(), quit(), raise SystemExit, os._exit()
 - try-except blocks that swallow errors silently (let them surface for debugging)

@@ -112,6 +112,7 @@ class KaggleState(TypedDict):
     top_features: list[str]
     successful_strategies: list[str]
     failed_strategies: list[str]
+    failed_component_names: list[str]  # Component names that failed (for planner to avoid)
     strategy_effectiveness: dict[str, Any]
 
     # Prompt Optimization (DSPy)
@@ -245,6 +246,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         top_features=[],
         successful_strategies=[],
         failed_strategies=[],
+        failed_component_names=[],
         strategy_effectiveness={},
         # Prompt Optimization
         optimized_prompts={},

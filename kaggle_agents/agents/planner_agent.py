@@ -1627,6 +1627,7 @@ Return a JSON array with up to {max_components} components. Each component must 
             sota_analysis,
             curriculum_insights,
             fast_mode=fast_mode,
+            state=state,
         )
 
     def _create_tabular_fallback_plan(
@@ -1636,6 +1637,7 @@ Return a JSON array with up to {max_components} components. Each component must 
         curriculum_insights: str = "",
         *,
         fast_mode: bool = False,
+        state: KaggleState | None = None,
     ) -> list[dict[str, Any]]:
         """
         Create fallback plan for tabular competitions (classification/regression).
@@ -1646,14 +1648,24 @@ Return a JSON array with up to {max_components} components. Each component must 
             domain: Competition domain
             sota_analysis: SOTA analysis results
             curriculum_insights: Insights from previous iterations (optional)
+            fast_mode: Whether to use speed-optimized plan
+            state: Current workflow state (used to filter failed components)
 
         Returns:
             List of component dictionaries (5 components: 1 FE + 4 models + 1 ensemble)
         """
+        # Get failed components to avoid repeating them
+        failed_names = set()
+        if state:
+            failed_names = set(state.get("failed_component_names", []))
+            if failed_names:
+                print(f"   📋 Filtering out previously failed components: {failed_names}")
+
         # Note: Curriculum insights are logged but fallback uses fixed plan
         # In future iterations, could use insights to reorder components
         if fast_mode:
-            return [
+            # Full candidate pool with alternatives for failed components
+            all_fast_candidates = [
                 {
                     "name": "lightgbm_fast_cv",
                     "component_type": "model",
@@ -1670,15 +1682,62 @@ Return a JSON array with up to {max_components} components. Each component must 
                     "rationale": "Provides diversity vs LightGBM with similar compute budget; useful for a quick ensemble.",
                     "code_outline": "XGBClassifier/Regressor with fixed params, 3-fold CV when FAST_MODE, save OOF/test preds",
                 },
+                # ALTERNATIVE MODELS (used when primary models fail)
+                {
+                    "name": "catboost_fast_cv",
+                    "component_type": "model",
+                    "description": "CatBoost baseline tuned for speed (no Optuna). Handles categoricals natively. Respect time budget and fold count env vars.",
+                    "estimated_impact": 0.15,
+                    "rationale": "Alternative to XGBoost/LightGBM with different regularization; handles categoricals well.",
+                    "code_outline": "CatBoostClassifier/Regressor with sane defaults, 3-fold CV when FAST_MODE, save OOF/test preds",
+                },
+                {
+                    "name": "logistic_tfidf",
+                    "component_type": "model",
+                    "description": "Logistic Regression with TF-IDF features. Very fast fallback for text-heavy tabular data.",
+                    "estimated_impact": 0.12,
+                    "rationale": "Extremely fast linear model; useful when tree models timeout.",
+                    "code_outline": "TfidfVectorizer + LogisticRegression/Ridge, save OOF/test preds",
+                },
+                {
+                    "name": "random_forest_fast",
+                    "component_type": "model",
+                    "description": "Random Forest baseline with limited trees (n_estimators=200) for speed.",
+                    "estimated_impact": 0.13,
+                    "rationale": "Robust tree ensemble that rarely fails; good fallback option.",
+                    "code_outline": "RandomForestClassifier/Regressor with n_estimators=200, 3-fold CV, save OOF/test preds",
+                },
                 {
                     "name": "stacking_ensemble",
                     "component_type": "ensemble",
-                    "description": "Stack OOF predictions from LightGBM + XGBoost with LogisticRegression/Ridge meta-learner. Fallback to weighted average if needed.",
+                    "description": "Stack OOF predictions from available models with LogisticRegression/Ridge meta-learner. Fallback to weighted average if needed.",
                     "estimated_impact": 0.10,
                     "rationale": "Cheap ensemble step that often improves generalization without additional heavy training.",
                     "code_outline": "Load models/oof_*.npy + models/test_*.npy, fit meta-model on OOF, predict test, write submission",
                 },
             ]
+
+            # Filter out failed components
+            filtered_plan = [c for c in all_fast_candidates if c["name"] not in failed_names]
+
+            # Ensure we have at least 2 models (excluding ensemble) for meaningful stacking
+            model_count = sum(1 for c in filtered_plan if c["component_type"] == "model")
+            if model_count < 2:
+                print("   ⚠️ Less than 2 models available after filtering. Adding simple baseline.")
+                # Add a very simple baseline that's unlikely to fail
+                filtered_plan.insert(0, {
+                    "name": "simple_ridge_baseline",
+                    "component_type": "model",
+                    "description": "Simple Ridge regression baseline. Cannot fail, always produces predictions.",
+                    "estimated_impact": 0.08,
+                    "rationale": "Failsafe baseline that always works.",
+                    "code_outline": "StandardScaler + Ridge, 3-fold CV, save OOF/test preds",
+                })
+
+            # Keep top 2 models + ensemble (avoid bloated plans)
+            models = [c for c in filtered_plan if c["component_type"] == "model"][:2]
+            ensemble = [c for c in filtered_plan if c["component_type"] == "ensemble"][:1]
+            return models + ensemble
 
         plan = []
 
@@ -1743,6 +1802,22 @@ Return a JSON array with up to {max_components} components. Each component must 
                 "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5",
             }
         )
+
+        # Filter out failed components (if any)
+        if failed_names:
+            plan = [c for c in plan if c["name"] not in failed_names]
+            # Ensure we still have at least 1 model
+            model_count = sum(1 for c in plan if c["component_type"] == "model")
+            if model_count == 0:
+                print("   ⚠️ All models filtered out! Adding simple baseline.")
+                plan.insert(0, {
+                    "name": "simple_ridge_baseline",
+                    "component_type": "model",
+                    "description": "Simple Ridge regression baseline. Cannot fail, always produces predictions.",
+                    "estimated_impact": 0.08,
+                    "rationale": "Failsafe baseline that always works.",
+                    "code_outline": "StandardScaler + Ridge, 5-fold CV, save OOF/test preds",
+                })
 
         return plan
 
