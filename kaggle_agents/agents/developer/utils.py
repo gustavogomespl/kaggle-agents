@@ -128,7 +128,7 @@ class DeveloperUtilsMixin:
             if _analyze_csv(train_csv_path):
                 csv_found = True
 
-        # Fallback: Check standard CSV names in working directory
+        # Second: Check standard CSV names in working directory root
         if not csv_found:
             for csv_name in ["train.csv", "train_labels.csv", "metadata.csv"]:
                 csv_path = working_dir / csv_name
@@ -136,8 +136,19 @@ class DeveloperUtilsMixin:
                     csv_found = True
                     break
 
+        # Third: Scan for CSVs inside discovered data directories (CRITICAL for MLSP-2013-Birds)
+        # The training labels might be inside essential_data/, supplemental_data/, etc.
+        if not csv_found and found_dirs:
+            info_parts.append("  - No CSV at root, scanning inside data directories...")
+            for dirname, count, extensions in found_dirs:
+                if ".csv" in extensions:
+                    dir_path = working_dir / dirname
+                    for csv_file in sorted(dir_path.glob("*.csv"))[:3]:  # Limit to first 3
+                        if _analyze_csv(csv_file):
+                            csv_found = True
+
         if not csv_found:
-            info_parts.append("  - No CSV files found at standard locations")
+            info_parts.append("  - No CSV files found at standard locations or inside data directories")
             info_parts.append("  - You may need to scan directories directly for data files")
 
         # 3. CRITICAL PATH BUILDING GUIDANCE
