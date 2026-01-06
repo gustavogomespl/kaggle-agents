@@ -140,7 +140,22 @@ class MLEBenchDataAdapter:
             except Exception as e:
                 print(f"[MLEBenchDataAdapter]   Error listing base dir: {e}", flush=True)
 
-        return public_dir.exists()
+        # Return True if public_dir exists (even if empty).
+        # Empty directories will be handled by fallback logic in prepare_workspace().
+        # We allow prepare_workspace() to run so it can attempt recovery from raw/ or ZIP.
+        if public_dir.exists():
+            try:
+                has_contents = any(public_dir.iterdir())
+                if not has_contents:
+                    print(
+                        "[MLEBenchDataAdapter]   ⚠️ public/ exists but is EMPTY - fallback will be attempted in prepare_workspace()",
+                        flush=True,
+                    )
+            except PermissionError:
+                pass  # Will be handled in prepare_workspace()
+            return True
+
+        return False
 
     def detect_data_type(self, public_dir: Path) -> str:
         """
@@ -298,6 +313,57 @@ class MLEBenchDataAdapter:
                 return matches[0]
         return None
 
+    def _populate_from_fallback(self, competition_id: str, public_dir: Path) -> bool:
+        """
+        Attempt to populate empty public_dir from raw data or competition ZIP.
+
+        This is a fallback mechanism when MLE-bench's prepare step didn't populate
+        the public/ directory correctly.
+
+        Returns True if successful, False otherwise.
+        """
+        import shutil
+
+        base_dir = self.mle_cache / competition_id
+        raw_dir = base_dir / "raw"
+        comp_zip = base_dir / f"{competition_id}.zip"
+
+        # Strategy 1: Copy from raw/ if it exists and has contents
+        if raw_dir.exists():
+            try:
+                raw_contents = list(raw_dir.iterdir())
+                if raw_contents:
+                    print(f"   📂 Populating from raw/: {raw_dir}", flush=True)
+                    for item in raw_contents:
+                        dest = public_dir / item.name
+                        if dest.exists():
+                            continue  # Don't overwrite existing files
+                        if item.is_file():
+                            shutil.copy2(item, dest)
+                        else:
+                            shutil.copytree(item, dest, symlinks=True)
+                    print(f"   ✅ Copied {len(raw_contents)} items from raw/", flush=True)
+                    return True
+            except Exception as e:
+                print(f"   ⚠️ Failed to copy from raw/: {e}", flush=True)
+
+        # Strategy 2: Extract competition ZIP directly to public/
+        if comp_zip.exists():
+            print(f"   📦 Extracting from competition ZIP: {comp_zip}", flush=True)
+            try:
+                import zipfile
+
+                with zipfile.ZipFile(comp_zip, "r") as z:
+                    z.extractall(public_dir)
+                print("   ✅ Extracted competition ZIP to public/", flush=True)
+                return True
+            except Exception as e:
+                print(f"   ⚠️ Failed to extract competition ZIP: {e}", flush=True)
+
+        # No fallback available
+        print("   ❌ No fallback data source found", flush=True)
+        return False
+
     def _find_data_in_subdirs(
         self,
         parent_dir: Path,
@@ -401,6 +467,23 @@ class MLEBenchDataAdapter:
 
         # Extract ZIPs
         self._extract_zips(public_dir)
+
+        # Check if public_dir is still empty after extraction - attempt fallback
+        public_contents = list(public_dir.glob("*"))
+        if not public_contents:
+            print("   ⚠️ public/ is empty after extraction, attempting fallback...")
+            fallback_success = self._populate_from_fallback(competition_id, public_dir)
+            if fallback_success:
+                public_contents = list(public_dir.glob("*"))
+
+        # If still empty after fallback, raise a clear error
+        if not public_contents:
+            raise FileNotFoundError(
+                f"Competition data not found for '{competition_id}'.\n"
+                f"The public/ directory at {public_dir} is empty.\n"
+                f"Please run: mlebench prepare -c {competition_id}\n"
+                f"Or manually extract data to: {public_dir}"
+            )
 
         # Detect data type
         data_type = self.detect_data_type(public_dir)
