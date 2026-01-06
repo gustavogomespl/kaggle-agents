@@ -234,13 +234,25 @@ class MLEBenchRunner:
             _log(f"  Checking path: {comp_path}")
 
             if not self.data_adapter.is_competition_prepared(competition_id):
-                _log(f"Competition '{competition_id}' not prepared!", "ERROR")
-                _log(f"Expected path: {comp_path / 'public'}", "ERROR")
-                _log(f"Run: mlebench prepare -c {competition_id}", "ERROR")
-                raise FileNotFoundError(
-                    f"Competition '{competition_id}' not prepared. "
-                    f"Run: mlebench prepare -c {competition_id}"
-                )
+                _log(f"Competition '{competition_id}' not in MLE-bench cache", "WARN")
+                _log("Attempting auto-download from Kaggle API...", "INFO")
+
+                # Try to auto-prepare via Kaggle API
+                if self.data_adapter._auto_prepare_via_kaggle_api(competition_id):
+                    _log("Auto-download successful!", "INFO")
+                else:
+                    _log(f"Competition '{competition_id}' could not be prepared!", "ERROR")
+                    _log(f"Expected path: {comp_path / 'public'}", "ERROR")
+                    _log(f"Run: mlebench prepare -c {competition_id}", "ERROR")
+                    _log(
+                        "Or ensure Kaggle credentials are configured (~/.kaggle/kaggle.json)",
+                        "ERROR",
+                    )
+                    raise FileNotFoundError(
+                        f"Competition '{competition_id}' not prepared and auto-download failed.\n"
+                        f"Run: mlebench prepare -c {competition_id}\n"
+                        f"Or configure Kaggle API credentials."
+                    )
 
             _log("  Data is prepared!")
 

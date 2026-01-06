@@ -364,6 +364,51 @@ class MLEBenchDataAdapter:
         print("   ❌ No fallback data source found", flush=True)
         return False
 
+    def _auto_prepare_via_kaggle_api(self, competition_id: str) -> bool:
+        """
+        Auto-prepare competition data by downloading from Kaggle API.
+
+        This is called when MLE-bench cache doesn't exist but Kaggle credentials are available.
+
+        Returns True if successful, False otherwise.
+        """
+        comp_path = self.get_competition_path(competition_id)
+        public_dir = comp_path / "public"
+
+        print("   🌐 Attempting auto-download from Kaggle API...", flush=True)
+
+        try:
+            from ..tools.kaggle_api import KaggleAPIClient
+
+            client = KaggleAPIClient()  # Uses existing credentials
+
+            # Create public directory
+            public_dir.mkdir(parents=True, exist_ok=True)
+
+            # Download directly to public/
+            print(f"   📥 Downloading competition data: {competition_id}", flush=True)
+            client.download_competition_data(
+                competition_id,
+                path=str(public_dir),
+                quiet=False,
+            )
+
+            # Verify we got data
+            public_contents = list(public_dir.glob("*"))
+            if public_contents:
+                print(f"   ✅ Downloaded {len(public_contents)} items to {public_dir}", flush=True)
+                return True
+            else:
+                print("   ⚠️ Download completed but no files found", flush=True)
+                return False
+
+        except ImportError:
+            print("   ⚠️ Kaggle API client not available", flush=True)
+            return False
+        except Exception as e:
+            print(f"   ⚠️ Auto-download failed: {e}", flush=True)
+            return False
+
     def _find_data_in_subdirs(
         self,
         parent_dir: Path,
