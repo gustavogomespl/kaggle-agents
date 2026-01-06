@@ -939,6 +939,24 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             str(working_dir / "test.zip"),
         ]
 
+        # Dynamic fallback: scan ALL subdirectories for train/test data
+        # This handles non-standard competition structures (e.g., essential_data/, data/)
+        exclude_dirs = {"models", "__pycache__", ".git", ".ipynb_checkpoints"}
+        if working_dir.exists():
+            for subdir in working_dir.iterdir():
+                if not subdir.is_dir() or subdir.name in exclude_dirs:
+                    continue
+                # Add subdirectory-based candidates
+                train_candidates.extend([
+                    str(subdir / "train.csv"),
+                    str(subdir / "train"),
+                    str(subdir),  # The subdir itself may be the data source
+                ])
+                test_candidates.extend([
+                    str(subdir / "test.csv"),
+                    str(subdir / "test"),
+                ])
+
         prefer_asset_dir = str(domain).startswith(("image", "audio"))
 
         def _first_existing_path(candidates: list[str | None], prefer_dir: bool) -> Path:

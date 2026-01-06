@@ -298,6 +298,47 @@ class MLEBenchDataAdapter:
                 return matches[0]
         return None
 
+    def _find_data_in_subdirs(
+        self,
+        parent_dir: Path,
+        patterns: list[str],
+        exclude_dirs: set[str] | None = None,
+    ) -> Path | None:
+        """
+        Search for data files/dirs in subdirectories (generic fallback).
+
+        Args:
+            parent_dir: Directory to search in
+            patterns: List of file/dir names to look for (e.g., ["train.csv", "train"])
+            exclude_dirs: Directory names to skip
+
+        Returns:
+            First matching Path found, or None
+        """
+        if exclude_dirs is None:
+            exclude_dirs = {"models", "__pycache__", ".git", ".ipynb_checkpoints"}
+
+        for subdir in sorted(parent_dir.iterdir()):
+            if not subdir.is_dir() or subdir.name in exclude_dirs:
+                continue
+
+            # Check each pattern in this subdirectory
+            for pattern in patterns:
+                candidate = subdir / pattern
+                if candidate.exists():
+                    return candidate
+
+            # If subdir itself contains data files (wav, csv, png, etc.), return it
+            data_extensions = {".csv", ".wav", ".mp3", ".png", ".jpg", ".jpeg", ".npy", ".tif"}
+            try:
+                sample_files = list(subdir.glob("*"))[:20]
+                if any(f.suffix.lower() in data_extensions for f in sample_files if f.is_file()):
+                    return subdir
+            except PermissionError:
+                continue
+
+        return None
+
     def _detect_target_column(self, sample_sub_path: Path) -> str:
         """Detect target column from sample submission."""
         try:
@@ -481,6 +522,26 @@ class MLEBenchDataAdapter:
                 if info.test_path is None:
                     info.test_path = images_dir
                     print("   Test dir fallback: images/")
+
+        # Generic fallback: search ALL subdirectories for train/test data
+        # This handles non-standard structures like mlsp-2013-birds (essential_data/)
+        if info.train_path is None:
+            train_patterns = ["train.csv", "train", "train_images", "training"]
+            found = self._find_data_in_subdirs(public_dir, train_patterns)
+            if found:
+                if found.is_file() and found.suffix == ".csv":
+                    info.train_csv_path = found
+                info.train_path = found
+                print(f"   Train found in subdir: {found.relative_to(public_dir)}")
+
+        if info.test_path is None:
+            test_patterns = ["test.csv", "test", "test_images", "testing"]
+            found = self._find_data_in_subdirs(public_dir, test_patterns)
+            if found:
+                if found.is_file() and found.suffix == ".csv":
+                    info.test_csv_path = found
+                info.test_path = found
+                print(f"   Test found in subdir: {found.relative_to(public_dir)}")
 
         # Debug: list all files found
         all_files = list(public_dir.glob("*"))
