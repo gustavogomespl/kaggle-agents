@@ -82,6 +82,10 @@ def build_image_model_instructions(
         "    - This ensures all models produce compatible prediction shapes for ensemble averaging",
     ])
 
+    # Initialize defaults for data_files paths
+    train_dir = ""
+    test_dir = ""
+
     if isinstance(data_files, dict) and data_files.get("train_csv"):
         instructions.append(
             f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)"
@@ -96,6 +100,26 @@ def build_image_model_instructions(
             )
         if test_dir:
             instructions.append(f"  - Use test images from: {test_dir} (do not hardcode paths)")
+
+    # Add robust path building guidance for all image competitions
+    # Use train_dir if available from data_files, otherwise use 'train' as default
+    train_dir_for_guidance = train_dir if train_dir else "train"
+    instructions.extend([
+        "\n  🔴 ROBUST FILE PATH MAPPING (CRITICAL - IDs may not match filenames):",
+        "    - DO NOT assume `path = dir / f'{id}.jpg'` - this pattern frequently fails",
+        "    - INSTEAD: Scan directory first, build id_to_path mapping:",
+        "      ```python",
+        "      from pathlib import Path",
+        f"      img_dir = Path('{train_dir_for_guidance}')",
+        "      all_images = list(img_dir.rglob('*.*'))  # Get all files",
+        "      image_exts = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp'}",
+        "      all_images = [f for f in all_images if f.suffix.lower() in image_exts]",
+        "      id_to_path = {f.stem: f for f in all_images}",
+        "      df['image_path'] = df['id_col'].astype(str).map(id_to_path)",
+        "      df = df[df['image_path'].notna()]  # Filter to existing files",
+        "      ```",
+        "    - Print count of matched files to verify: `print(f'Found {len(df)} images')`",
+    ])
 
     if is_image_to_image:
         clean_path = ""

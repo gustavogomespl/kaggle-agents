@@ -182,11 +182,30 @@ def build_model_component_instructions(
         if is_audio:
             instructions.extend(
                 [
-                    "\n🔊 AUDIO MODELLING (CLASSIFICATION/REGRESSION):",
-                    "  - Convert audio to log-mel spectrograms (librosa) and treat as image inputs",
-                    "  - Use fixed duration: pad/trim to a consistent length per sample",
-                    "  - Ensure consistent sample rate (e.g., 32k or 44.1k) for all files",
-                    "  - Cache spectrograms to disk if repeated epochs to avoid recompute",
+                    "\n🔊 AUDIO MODELLING (ROBUST LOADING REQUIRED):",
+                    "  **CRITICAL: ROBUST FILE PATH MAPPING** (IDs in CSV often don't match filenames):",
+                    "    - DO NOT assume `path = dir / f'{id}.wav'` - this pattern frequently fails",
+                    "    - INSTEAD: Scan directory first, build id_to_path dict:",
+                    "      ```python",
+                    "      from pathlib import Path",
+                    "      audio_dir = Path('essential_data') if Path('essential_data').exists() else Path('train')",
+                    "      all_audio = list(audio_dir.rglob('*.wav')) + list(audio_dir.rglob('*.flac')) + list(audio_dir.rglob('*.mp3'))",
+                    "      id_to_path = {f.stem: f for f in all_audio}",
+                    "      df['audio_path'] = df['id_col'].astype(str).map(id_to_path)",
+                    "      df = df[df['audio_path'].notna()]  # Filter to existing files only",
+                    "      print(f'Loaded {len(df)} samples with valid audio paths')",
+                    "      ```",
+                    "  **AUDIO LOADING:**",
+                    "    - Use librosa.load(path, sr=target_sr) with consistent sample rate (32000 or 44100)",
+                    "    - Handle loading errors gracefully: wrap in try/except, skip bad files",
+                    "    - Convert to log-mel spectrograms and treat as image inputs (CNN/ViT)",
+                    "  **PREPROCESSING:**",
+                    "    - Use fixed duration: pad short clips, trim long clips to consistent length",
+                    "    - Normalize spectrograms per-sample or use dataset-wide mean/std",
+                    "    - Cache spectrograms to disk (.npy) if training multiple epochs",
+                    "  **EXTENSION DETECTION:**",
+                    "    - Detect audio extension by scanning directory (not all datasets use .wav)",
+                    "    - Common extensions: .wav, .flac, .mp3, .ogg",
                 ]
             )
         if not is_image_to_image:

@@ -17,73 +17,159 @@ class DeveloperUtilsMixin:
 
     def _get_dataset_info(self, working_dir: Path, state: "KaggleState" = None) -> str:
         """
-        Read dataset columns and basic info to provide to LLM.
+        Read dataset columns and file system structure to provide to LLM.
 
         Args:
-            working_dir: Working directory containing train.csv
+            working_dir: Working directory containing data files
             state: Current state (optional)
 
         Returns:
-            Formatted string with dataset information
+            Formatted string with dataset information including file system structure
         """
-        try:
-            import pandas as pd
+        import pandas as pd
 
-            train_path = working_dir / "train.csv"
-            if not train_path.exists() and state:
-                data_files = state.get("data_files", {}) if isinstance(state, dict) else {}
-                train_csv = data_files.get("train_csv")
-                if train_csv:
-                    train_path = Path(train_csv)
+        info_parts = []
+        data_files = {}
+        if state:
+            data_files = state.get("data_files", {}) if isinstance(state, dict) else {}
 
-            if not train_path.exists():
-                return "Dataset info not available (file not found)"
+        # 1. FILE SYSTEM STRUCTURE (CRITICAL for non-tabular competitions)
+        info_parts.append("**FILE SYSTEM STRUCTURE (Use this to build paths):**")
+        data_dirs_to_check = [
+            "train", "test", "audio", "images", "train_images", "test_images",
+            "essential_data", "supplemental_data", "data", "train_audio", "test_audio"
+        ]
 
-            df = pd.read_csv(train_path, nrows=5)
+        found_dirs = []
+        for dirname in data_dirs_to_check:
+            dir_path = working_dir / dirname
+            if dir_path.exists() and dir_path.is_dir():
+                try:
+                    files = [f for f in dir_path.rglob("*") if f.is_file()]
+                    count = len(files)
+                    if count == 0:
+                        continue
 
-            columns = df.columns.tolist()
-            dtypes = df.dtypes.to_dict()
-            target_col = "UNKNOWN"
+                    # Analyze extensions
+                    extensions: dict[str, int] = {}
+                    for f in files[:200]:
+                        ext = f.suffix.lower()
+                        if ext:
+                            extensions[ext] = extensions.get(ext, 0) + 1
 
-            if state and state.get("target_col"):
-                target_col = state["target_col"]
-            else:
-                target_candidates = [
-                    c
-                    for c in columns
-                    if c.lower()
-                    in [
-                        "target",
-                        "label",
-                        "y",
-                        "class",
-                        "loan_paid_back",
-                        "survived",
-                        "price",
-                        "sales",
+                    # Get sample filenames to show naming patterns
+                    sample_files = [f.name for f in files[:5]]
+
+                    # Extract ID patterns from filenames (stem without extension)
+                    sample_ids = [f.stem for f in files[:5]]
+
+                    dir_info = f"- Directory `{dirname}/`: {count} files found"
+                    info_parts.append(dir_info)
+
+                    if extensions:
+                        dominant_ext = max(extensions, key=extensions.get)
+                        info_parts.append(f"  - Dominant extension: `{dominant_ext}` ({extensions[dominant_ext]} files)")
+                        if len(extensions) > 1:
+                            other_exts = [f"{k}({v})" for k, v in extensions.items() if k != dominant_ext][:3]
+                            info_parts.append(f"  - Other extensions: {', '.join(other_exts)}")
+
+                    info_parts.append(f"  - Sample files: {sample_files}")
+                    info_parts.append(f"  - Sample IDs (stems): {sample_ids}")
+                    found_dirs.append((dirname, count, extensions))
+                except (PermissionError, OSError):
+                    continue
+
+        if not found_dirs:
+            info_parts.append("  - No standard data directories found. Check working directory structure.")
+
+        # 2. CSV FILE ANALYSIS
+        info_parts.append("\n**CSV FILES:**")
+
+        def _analyze_csv(csv_path: Path) -> bool:
+            """Analyze a CSV file and append info. Returns True if successful."""
+            if not csv_path.exists():
+                return False
+            try:
+                df = pd.read_csv(csv_path, nrows=5)
+                columns = df.columns.tolist()
+
+                info_parts.append(f"- `{csv_path.name}` (at {csv_path.parent.name}/): {len(columns)} columns")
+                info_parts.append(f"  - Columns: {', '.join(columns)}")
+
+                # Detect target column
+                target_col = "UNKNOWN"
+                if state and state.get("target_col"):
+                    target_col = state["target_col"]
+                else:
+                    target_candidates = [
+                        c for c in columns
+                        if c.lower() in ["target", "label", "y", "class", "species", "category"]
                     ]
-                ]
-                target_col = target_candidates[0] if target_candidates else "UNKNOWN"
+                    target_col = target_candidates[0] if target_candidates else columns[-1] if len(columns) > 1 else "UNKNOWN"
 
-            numeric_cols = [c for c, dtype in dtypes.items() if dtype in ["int64", "float64"]]
-            categorical_cols = [c for c, dtype in dtypes.items() if dtype == "object"]
+                info_parts.append(f"  - Likely target column: `{target_col}`")
 
-            return f"""
-            **CRITICAL**: Use these EXACT column names from the dataset:
+                # Show sample values for ID column (usually first column)
+                if columns:
+                    id_col = columns[0]
+                    sample_ids = df[id_col].astype(str).tolist()
+                    info_parts.append(f"  - Sample IDs from `{id_col}`: {sample_ids}")
 
-            Target Column: {target_col}
-            Total Columns: {len(columns)}
+                return True
+            except Exception as e:
+                info_parts.append(f"- `{csv_path.name}`: Error reading ({e})")
+                return False
 
-            Numeric Columns ({len(numeric_cols)}): {", ".join(numeric_cols[:10])}{"..." if len(numeric_cols) > 10 else ""}
-            Categorical Columns ({len(categorical_cols)}): {", ".join(categorical_cols[:10])}{"..." if len(categorical_cols) > 10 else ""}
+        csv_found = False
 
-            All Columns: {", ".join(columns)}
+        # First: Check train_csv from data_files (any filename)
+        if data_files.get("train_csv"):
+            train_csv_path = Path(data_files["train_csv"])
+            if _analyze_csv(train_csv_path):
+                csv_found = True
 
-            IMPORTANT: Always use target_col='{target_col}' in your code!
-            """
+        # Fallback: Check standard CSV names in working directory
+        if not csv_found:
+            for csv_name in ["train.csv", "train_labels.csv", "metadata.csv"]:
+                csv_path = working_dir / csv_name
+                if _analyze_csv(csv_path):
+                    csv_found = True
+                    break
 
-        except Exception as e:
-            return f"Dataset info not available (error: {e!s})"
+        if not csv_found:
+            info_parts.append("  - No CSV files found at standard locations")
+            info_parts.append("  - You may need to scan directories directly for data files")
+
+        # 3. CRITICAL PATH BUILDING GUIDANCE
+        if found_dirs:
+            audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
+            image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+            has_audio = any(
+                ext in audio_exts
+                for _, _, exts in found_dirs
+                for ext in exts
+            )
+            has_images = any(
+                ext in image_exts
+                for _, _, exts in found_dirs
+                for ext in exts
+            )
+
+            if has_audio or has_images:
+                info_parts.append("\n**PATH BUILDING GUIDANCE (CRITICAL):**")
+                info_parts.append("  - DO NOT assume `path = dir / f'{id}.ext'` - IDs often don't match filenames")
+                info_parts.append("  - INSTEAD: Scan directory first, build id_to_path mapping:")
+                info_parts.append("    ```python")
+                info_parts.append("    from pathlib import Path")
+                info_parts.append("    data_dir = Path('...')  # Use directory from FILE SYSTEM STRUCTURE above")
+                info_parts.append("    all_files = list(data_dir.rglob('*.*'))  # Get all files recursively")
+                info_parts.append("    id_to_path = {f.stem: f for f in all_files if f.is_file()}")
+                info_parts.append("    # Then: df['path'] = df['id_col'].map(id_to_path)")
+                info_parts.append("    # Filter: df = df[df['path'].notna()]")
+                info_parts.append("    ```")
+
+        return "\n".join(info_parts)
 
     def _get_domain_template(self, domain: str, component_type: str) -> str:
         """Get domain-specific code template.
