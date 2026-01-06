@@ -955,6 +955,8 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 test_candidates.extend([
                     str(subdir / "test.csv"),
                     str(subdir / "test"),
+                    # NOTE: Don't add str(subdir) here - arbitrary subdirs shouldn't count as test data.
+                    # The validation logic handles the case where test doesn't exist but train is a dir.
                 ])
 
         prefer_asset_dir = str(domain).startswith(("image", "audio"))
@@ -990,11 +992,39 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         train_exists = train_path.exists()
         test_exists = test_path.exists()
 
-        # For image/audio domains we only need the asset (dir/zip) to exist; test.csv may not be present
-        if not train_exists or not test_exists:
-            error_msg = f"Data files not found in {working_dir}\n"
-            error_msg += f"Expected: {train_path.name}, {test_path.name}\n"
+        # Check if sample_submission exists - it contains test IDs for many competition types
+        sample_sub_path = working_dir / "sample_submission.csv"
+        has_sample_submission = sample_sub_path.exists()
 
+        # Determine if we should fail due to missing data
+        should_fail = False
+        error_msg = ""
+
+        if not train_exists:
+            # Train data is ALWAYS required
+            should_fail = True
+            error_msg = f"Train data not found in {working_dir}\n"
+            error_msg += f"Expected: {train_path.name}\n"
+        elif not test_exists:
+            # Allow proceeding without separate test data ONLY if:
+            # - train_path is a DIRECTORY (not a CSV file)
+            # - AND sample_submission.csv exists (contains test IDs that reference files in that directory)
+            #
+            # IMPORTANT: Never use train.csv as test.csv - they contain different rows!
+            # Using train as test would produce invalid submissions (predictions on training data).
+            if train_path.is_dir() and has_sample_submission:
+                # For directory-based data (images, audio), test files may be in same dir with different IDs
+                test_path = train_path
+                test_exists = True
+                print(f"   ℹ️ No separate test dir. Using {train_path.name}/ for both (test IDs from sample_submission.csv)")
+            else:
+                should_fail = True
+                error_msg = f"Test data not found in {working_dir}\n"
+                error_msg += f"Expected: {test_path.name}\n"
+                if train_path.is_file():
+                    error_msg += f"Note: Cannot use {train_path.name} as test - they must be separate files\n"
+
+        if should_fail:
             if working_dir.exists():
                 existing_items = sorted(
                     f.name + ("/" if f.is_dir() else "") for f in working_dir.iterdir()
