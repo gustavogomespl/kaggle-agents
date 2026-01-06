@@ -180,6 +180,38 @@ class DeveloperUtilsMixin:
                 info_parts.append("    # Filter: df = df[df['path'].notna()]")
                 info_parts.append("    ```")
 
+        # 4. CUSTOM DATA FORMAT (from data_format_discovery_node)
+        if state and state.get("parsing_info"):
+            parsing_info = state["parsing_info"]
+            info_parts.append("\n**CUSTOM DATA FORMAT (discovered from competition page):**")
+            info_parts.append(f"  - Format type: `{parsing_info.get('format_type', 'unknown')}`")
+            info_parts.append(f"  - ID column: `{parsing_info.get('id_column', 'unknown')}`")
+            info_parts.append(f"  - Target column: `{parsing_info.get('target_column', 'unknown')}`")
+
+            if parsing_info.get("train_file"):
+                info_parts.append(f"  - Train file: `{parsing_info.get('train_file')}`")
+            if parsing_info.get("test_file"):
+                info_parts.append(f"  - Test file: `{parsing_info.get('test_file')}`")
+            if parsing_info.get("train_test_split_method"):
+                info_parts.append(f"  - Split method: `{parsing_info.get('train_test_split_method')}`")
+            if parsing_info.get("multi_label"):
+                info_parts.append("  - **Multi-label**: Yes (one sample can have multiple labels)")
+
+            if parsing_info.get("column_mapping"):
+                col_map = parsing_info["column_mapping"]
+                info_parts.append(f"  - Column mapping: {col_map}")
+
+            if parsing_info.get("notes"):
+                info_parts.append(f"  - **Notes**: {parsing_info.get('notes')}")
+
+            # Include loading code if available
+            loading_code = parsing_info.get("loading_code") or state.get("data_loading_code")
+            if loading_code:
+                info_parts.append("\n**DATA LOADING CODE (use this to load the data):**")
+                info_parts.append("```python")
+                info_parts.append(loading_code)
+                info_parts.append("```")
+
         return "\n".join(info_parts)
 
     def _get_domain_template(self, domain: str, component_type: str) -> str:

@@ -52,6 +52,11 @@ class KaggleState(TypedDict):
     target_col: str
     data_files: dict[str, Any]
 
+    # Data Format Discovery (for non-standard formats)
+    data_format_type: str | None  # "traditional", "generated", "custom", or "unknown"
+    parsing_info: dict[str, Any] | None  # LLM-generated parsing instructions
+    data_loading_code: str | None  # Python code to load non-standard data
+
     # Domain Detection
     domain_detected: DomainType | None
     domain_confidence: float
@@ -195,6 +200,10 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         sample_submission_path="",
         target_col="",
         data_files={},
+        # Data Format Discovery
+        data_format_type=None,
+        parsing_info=None,
+        data_loading_code=None,
         # Domain Detection
         domain_detected=None,
         domain_confidence=0.0,
