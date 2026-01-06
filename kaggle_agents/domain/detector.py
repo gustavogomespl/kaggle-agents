@@ -180,10 +180,17 @@ Respond with ONLY the category name, nothing else. Example: image_classification
             text_ratio = sum(counts.get(ext, 0) for ext in text_exts) / total
             tabular_ratio = sum(counts.get(ext, 0) for ext in tabular_exts) / total
 
+            # FIXED: Check audio FIRST - audio competitions often contain spectrogram images
+            # Also compare ratios to pick the dominant type when both exist
+            if audio_ratio >= 0.3:
+                # Audio takes priority if it's the dominant type or images are spectrograms
+                if audio_ratio >= image_ratio:
+                    return ("audio_classification", 0.90)
+                # Even if images dominate, if audio is significant, prefer audio
+                # (spectrograms are derived from audio, so the source data is audio)
+                return ("audio_classification", 0.85)
             if image_ratio >= 0.3:
                 return ("image_classification", 0.90)
-            if audio_ratio >= 0.3:
-                return ("audio_classification", 0.85)
             if text_ratio >= 0.3:
                 # Use regression hint if problem_type mentions it
                 if "regression" in (competition_info.problem_type or "").lower():
