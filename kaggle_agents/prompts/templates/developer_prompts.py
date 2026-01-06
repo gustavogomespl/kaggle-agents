@@ -874,6 +874,11 @@ def _format_task(component, competition_info, paths: dict[str, str]) -> str:
     problem_type = getattr(competition_info, "problem_type", "classification")
     metric = getattr(competition_info, "evaluation_metric", "accuracy")
 
+    train_path = paths.get("train", "train.csv")
+    test_path = paths.get("test", "test.csv")
+    models_path = paths.get("models", "models/")
+    submission_path = paths.get("submission", "submission.csv")
+
     return f"""## Task
 Component: {component_type} - {component_name}
 Goal: {component_code}
@@ -885,21 +890,53 @@ Domain: {domain}
 Problem Type: {problem_type}
 Metric: {metric}
 
-## Paths (CRITICAL: Read vs Write Locations)
+## Paths (CRITICAL - USE EXACTLY AS PROVIDED)
 # INPUT_DIR is READ-ONLY in Kaggle Kernels - NEVER write here!
 INPUT_DIR: {paths.get("input_dir", ".")}
 # OUTPUT_DIR is WRITABLE - use for all outputs (models, submission, etc.)
 OUTPUT_DIR: {paths.get("output_dir", ".")}
 
-Train: {paths.get("train", "train.csv")}
-Test: {paths.get("test", "test.csv")}
-Models: {paths.get("models", "models/")}
-Submission: {paths.get("submission", "submission.csv")}
+Train: {train_path}
+Test: {test_path}
+Models: {models_path}
+Submission: {submission_path}
 
-## Path Usage Rules
-- Read data from: INPUT_DIR (train.csv, test.csv, images/, etc.)
-- Write outputs to: OUTPUT_DIR (models/, submission.csv, *.npy, etc.)
-- ALWAYS create MODELS_DIR explicitly: `Path('{paths.get("models", "models/")}').mkdir(parents=True, exist_ok=True)`"""
+## PATH USAGE (MANDATORY - DO NOT HARDCODE)
+**CRITICAL**: Use the EXACT paths provided above. DO NOT hardcode 'train.csv' or 'test.csv'.
+
+```python
+# CORRECT: Use the provided paths EXACTLY
+from pathlib import Path
+
+TRAIN_PATH = Path("{train_path}")
+TEST_PATH = Path("{test_path}")
+MODELS_DIR = Path("{models_path}")
+SUBMISSION_PATH = Path("{submission_path}")
+
+# Create models directory
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Load data based on path type:
+if TRAIN_PATH.suffix == '.csv':
+    train_df = pd.read_csv(TRAIN_PATH)
+elif TRAIN_PATH.is_dir():
+    # For directory-based data (images, audio, etc.):
+    train_files = sorted(TRAIN_PATH.glob('*'))
+    print(f"Found {{len(train_files)}} files in {{TRAIN_PATH}}")
+```
+
+**NEVER** do this (WRONG - will cause FileNotFoundError):
+```python
+train_df = pd.read_csv('train.csv')  # WRONG!
+train_df = pd.read_csv(BASE_DIR / 'train.csv')  # WRONG!
+```
+
+The paths may point to:
+- CSV files: `train.csv`, `test.csv`
+- Directories: `supplemental_data/`, `train_images/`, `essential_data/`
+- Subdirectories: `essential_data/train.csv`
+
+Always check if the path is a file or directory before loading."""
 
 
 def _get_component_guidance(component_type: str) -> str:
