@@ -563,6 +563,15 @@ class MLEBenchDataAdapter:
             if not any(name == item[0] for item in items_to_link):
                 items_to_link.append((name, csv_file))
 
+        # Also link any subdirectories from public_dir (for competitions with nested data)
+        # This handles competitions like mlsp-2013-birds with essential_data/, supplemental_data/
+        for item in public_dir.iterdir():
+            if item.is_dir():
+                # Skip if already linked (e.g., train/, test/, clean dirs)
+                if not any(item.name == link[0] for link in items_to_link):
+                    items_to_link.append((item.name, item))
+                    print(f"      Linking subdirectory: {item.name}", flush=True)
+
         # Create symlinks
         for link_name, target in items_to_link:
             link_path = workspace / link_name
