@@ -559,18 +559,50 @@ class MLEBenchDataAdapter:
 
         # Find train data - check both directories and CSVs regardless of data_type
         # Train directory (for image/audio competitions)
-        for dir_name in [
+        # Include standard patterns AND non-standard patterns (essential_data, supplemental_data, etc.)
+        standard_train_dirs = [
             "train",
             "train_images",
             "train_imgs",
             "training",
             "images/train",
-        ]:
+        ]
+        # Non-standard patterns used by some MLE-bench competitions
+        nonstandard_data_dirs = [
+            "essential_data",
+            "supplemental_data",
+            "data",
+            "raw_data",
+            "audio",
+            "audio_data",
+        ]
+        for dir_name in standard_train_dirs:
             train_dir = public_dir / dir_name
             if train_dir.is_dir():
                 info.train_path = train_dir
                 print(f"   Train dir: {train_dir.name}/")
                 break
+
+        # If no standard train dir found, check non-standard directories for audio/image data
+        if info.train_path is None:
+            audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+            image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+            for dir_name in nonstandard_data_dirs:
+                data_dir = public_dir / dir_name
+                if data_dir.is_dir():
+                    # Check if this directory contains audio/image files
+                    sample_files = list(data_dir.glob("*"))[:50]
+                    has_audio = any(
+                        f.suffix.lower() in audio_exts for f in sample_files if f.is_file()
+                    )
+                    has_images = any(
+                        f.suffix.lower() in image_exts for f in sample_files if f.is_file()
+                    )
+                    if has_audio or has_images:
+                        info.train_path = data_dir
+                        dtype = "audio" if has_audio else "image"
+                        print(f"   Train dir (non-standard): {dir_name}/ [{dtype}]")
+                        break
 
         # Train CSV (labels for image competitions, or data for tabular)
         train_csv = self._find_csv_file(
@@ -611,18 +643,29 @@ class MLEBenchDataAdapter:
 
         # Find test data - check both directories and CSVs regardless of data_type
         # Test directory (for image/audio competitions)
-        for dir_name in [
+        standard_test_dirs = [
             "test",
             "test_images",
             "test_imgs",
             "testing",
             "images/test",
-        ]:
+        ]
+        for dir_name in standard_test_dirs:
             test_dir = public_dir / dir_name
             if test_dir.is_dir():
                 info.test_path = test_dir
                 print(f"   Test dir: {test_dir.name}/")
                 break
+
+        # If no standard test dir found but train was found in non-standard dir,
+        # check if the same directory contains test data (common in audio competitions)
+        if info.test_path is None and info.train_path and info.train_path.is_dir():
+            # Some competitions have train/test in same directory, split by CSV labels
+            # For these, point test_path to the same directory
+            parent_name = info.train_path.name.lower()
+            if parent_name in ["essential_data", "supplemental_data", "data", "audio", "audio_data"]:
+                info.test_path = info.train_path
+                print(f"   Test dir (shared with train): {info.train_path.name}/")
 
         # Test CSV
         test_csv = self._find_csv_file(public_dir, ["test.csv", "test*.csv"])
@@ -825,6 +868,36 @@ class MLEBenchDataAdapter:
         # Prefer the main data asset (dir/zip) for non-tabular domains; keep CSVs in `data_files`.
         train_data_path = info.train_path or info.train_csv_path
         test_data_path = info.test_path or info.test_csv_path
+
+        # Validate paths exist - if not, search workspace for actual data
+        workspace = info.workspace
+        if train_data_path and not Path(train_data_path).exists():
+            print(f"   ⚠️ Train path does not exist: {train_data_path}")
+            # Search workspace subdirectories for actual train data
+            found = self._find_data_in_subdirs(
+                workspace,
+                ["train.csv", "train", "essential_data", "supplemental_data", "data"],
+            )
+            if found:
+                train_data_path = found
+                print(f"   ✓ Found train data: {found}")
+
+        if test_data_path and not Path(test_data_path).exists():
+            print(f"   ⚠️ Test path does not exist: {test_data_path}")
+            # Search workspace subdirectories for actual test data
+            found = self._find_data_in_subdirs(
+                workspace,
+                ["test.csv", "test", "essential_data", "supplemental_data", "data"],
+            )
+            if found:
+                test_data_path = found
+                print(f"   ✓ Found test data: {found}")
+
+        # Final validation - warn if still missing
+        if train_data_path and not Path(train_data_path).exists():
+            print(f"   ⚠️ WARNING: Train data still not found! Path: {train_data_path}")
+        if test_data_path and not Path(test_data_path).exists():
+            print(f"   ⚠️ WARNING: Test data still not found! Path: {test_data_path}")
 
         return {
             "working_directory": str(info.workspace),

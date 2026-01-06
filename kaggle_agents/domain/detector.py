@@ -209,16 +209,29 @@ Respond with ONLY the category name, nothing else. Example: image_classification
                         total += 1
             return counts, total
 
-        # Prefer train/test folders if present
-        candidate_dirs = (
-            [
+        # Prefer train/test folders if present, but also check other data directories
+        exclude_dirs = {"models", "__pycache__", ".git", "logs", ".ipynb_checkpoints"}
+
+        if data_dir.exists():
+            # First priority: train/test prefixed directories
+            train_test_dirs = [
                 p
                 for p in data_dir.iterdir()
                 if p.is_dir() and p.name.lower().startswith(("train", "test"))
             ]
-            if data_dir.exists()
-            else []
-        )
+
+            # Second priority: other data directories (essential_data, supplemental_data, data, etc.)
+            other_data_dirs = [
+                p
+                for p in data_dir.iterdir()
+                if p.is_dir()
+                and p.name.lower() not in exclude_dirs
+                and not p.name.lower().startswith(("train", "test"))
+            ]
+
+            candidate_dirs = train_test_dirs + other_data_dirs
+        else:
+            candidate_dirs = []
 
         # Image-to-image heuristic: look for paired train + clean/target directories
         if data_dir.exists():
@@ -354,6 +367,30 @@ Respond with ONLY the category name, nothing else. Example: image_classification
 
         return False
 
+    def _has_audio_assets(self, data_dir: Path) -> bool:
+        """Return True if the data directory contains audio assets."""
+        if not data_dir.exists():
+            return False
+
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+
+        # Check ALL subdirectories (not just train/test prefixed)
+        # This handles non-standard structures like essential_data/, supplemental_data/
+        exclude_dirs = {"models", "__pycache__", ".git", "logs", ".ipynb_checkpoints"}
+
+        for item in data_dir.iterdir():
+            if item.is_file() and item.suffix.lower() in audio_exts:
+                return True
+            if item.is_dir() and item.name.lower() not in exclude_dirs:
+                # Sample up to 200 files to avoid scanning huge directories
+                for i, file_path in enumerate(item.rglob("*")):
+                    if i >= 200:
+                        break
+                    if file_path.is_file() and file_path.suffix.lower() in audio_exts:
+                        return True
+
+        return False
+
     def _detect_tabular_from_csv(
         self, competition_info: CompetitionInfo, data_dir: Path
     ) -> tuple[DomainType, float] | None:
@@ -362,6 +399,11 @@ Respond with ONLY the category name, nothing else. Example: image_classification
         treat the competition as tabular when no strong image signal exists.
         """
         if self._has_image_assets(data_dir):
+            return None
+
+        # Also block tabular if audio files exist
+        if self._has_audio_assets(data_dir):
+            print("   Audio assets detected - skipping tabular override")
             return None
 
         train_path = self._find_train_file(data_dir)

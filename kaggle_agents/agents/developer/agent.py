@@ -949,6 +949,24 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             str(working_dir / "test.zip"),
         ]
 
+        # Add common non-standard directories (prioritized for audio/image competitions)
+        # These are used by MLE-bench competitions like mlsp-2013-birds
+        nonstandard_data_dirs = [
+            "essential_data",
+            "supplemental_data",
+            "data",
+            "audio",
+            "audio_data",
+            "raw_data",
+        ]
+        for subdir_name in nonstandard_data_dirs:
+            subdir = working_dir / subdir_name
+            if subdir.is_dir():
+                train_candidates.append(str(subdir))
+                # For audio/image competitions, test might be in same dir as train
+                if str(domain).startswith(("image", "audio")):
+                    test_candidates.append(str(subdir))
+
         # Dynamic fallback: scan ALL subdirectories for train/test data
         # This handles non-standard competition structures (e.g., essential_data/, data/)
         exclude_dirs = {"models", "__pycache__", ".git", ".ipynb_checkpoints"}

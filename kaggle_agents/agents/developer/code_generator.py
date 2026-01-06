@@ -90,6 +90,96 @@ def get_dynamic_temperature(
 class CodeGeneratorMixin:
     """Mixin providing code generation capabilities to DeveloperAgent."""
 
+    def _validate_and_resolve_paths(
+        self,
+        train_path: Path,
+        test_path: Path,
+        working_dir: Path,
+    ) -> tuple[Path, Path]:
+        """
+        Validate paths exist and search for alternatives if not found.
+
+        For non-standard competition structures (e.g., mlsp-2013-birds with
+        essential_data/ subdirectory), the default train.csv path may not exist.
+        This method searches subdirectories for actual data files.
+
+        Args:
+            train_path: Initial train path
+            test_path: Initial test path
+            working_dir: Working directory to search
+
+        Returns:
+            Tuple of (resolved_train_path, resolved_test_path)
+        """
+        resolved_train = train_path
+        resolved_test = test_path
+
+        # Directories to search for data
+        data_subdirs = [
+            "train",
+            "test",
+            "essential_data",
+            "supplemental_data",
+            "data",
+            "audio",
+            "audio_data",
+        ]
+        # Extensions to look for
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+        image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
+
+        # Check if train path exists
+        if not train_path.exists():
+            print(f"   ⚠️ Train path not found: {train_path}")
+
+            # First check for train.csv in working_dir
+            if (working_dir / "train.csv").exists():
+                resolved_train = working_dir / "train.csv"
+                print(f"   ✓ Found train.csv in working_dir")
+            elif (working_dir / "train").exists():
+                resolved_train = working_dir / "train"
+                print(f"   ✓ Found train/ directory in working_dir")
+            else:
+                # Search subdirectories
+                for subdir_name in data_subdirs:
+                    subdir = working_dir / subdir_name
+                    if not subdir.is_dir():
+                        continue
+
+                    # Check for train.csv inside
+                    if (subdir / "train.csv").exists():
+                        resolved_train = subdir / "train.csv"
+                        print(f"   ✓ Found train.csv in {subdir_name}/")
+                        break
+
+                    # Check for audio/image files (non-tabular data)
+                    sample_files = list(subdir.glob("*"))[:50]
+                    has_audio = any(
+                        f.suffix.lower() in audio_exts for f in sample_files if f.is_file()
+                    )
+                    has_images = any(
+                        f.suffix.lower() in image_exts for f in sample_files if f.is_file()
+                    )
+                    if has_audio or has_images:
+                        resolved_train = subdir
+                        dtype = "audio" if has_audio else "image"
+                        print(f"   ✓ Found {dtype} data in {subdir_name}/")
+                        break
+
+        # Check if test path exists
+        if not test_path.exists():
+            # First check for test.csv in working_dir
+            if (working_dir / "test.csv").exists():
+                resolved_test = working_dir / "test.csv"
+            elif (working_dir / "test").exists():
+                resolved_test = working_dir / "test"
+            # For audio/image competitions, test data might be in same dir as train
+            elif resolved_train.is_dir() and resolved_train != train_path:
+                resolved_test = resolved_train
+                print(f"   ℹ️ Using train directory for test data (shared)")
+
+        return resolved_train, resolved_test
+
     def _generate_code(
         self: DeveloperAgent,
         component: AblationComponent,
@@ -127,6 +217,11 @@ class CodeGeneratorMixin:
             state.get("sample_submission_path")
             if state and state.get("sample_submission_path")
             else working_dir / "sample_submission.csv"
+        )
+
+        # Validate and fix paths if they don't exist
+        resolved_train_path, resolved_test_path = self._validate_and_resolve_paths(
+            resolved_train_path, resolved_test_path, working_dir
         )
         submission_output_path = working_dir / "submission.csv"
         models_dir = working_dir / "models"
