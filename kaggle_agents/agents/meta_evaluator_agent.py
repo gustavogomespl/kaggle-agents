@@ -568,10 +568,17 @@ class MetaEvaluatorAgent:
             return None
 
         # Get the best CV score from successful results
+        # Note: DevelopmentResult doesn't have cv_score attribute - extract from stdout
         cv_scores = []
         for result in dev_results:
-            if result.success and result.cv_score is not None:
-                cv_scores.append(result.cv_score)
+            if result.success and result.stdout:
+                # Extract CV score from stdout (pattern: "Final Validation Performance: X.XXXX")
+                match = re.search(r"Final Validation Performance[:\s]+([0-9.]+)", result.stdout)
+                if match:
+                    try:
+                        cv_scores.append(float(match.group(1)))
+                    except ValueError:
+                        pass
 
         if not cv_scores:
             return None
