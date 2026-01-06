@@ -541,6 +541,30 @@ class EnsembleAgent:
             oof_list.append(oof_preds)
             test_list.append(test_preds)
 
+        # Validate shapes after normalization (CRITICAL: prevents inhomogeneous array errors)
+        if oof_list:
+            oof_shapes = {tuple(o.shape) for o in oof_list}
+            test_shapes = {tuple(t.shape) for t in test_list}
+            model_names = list(valid_pairs.keys())[: len(oof_list)]
+
+            if len(oof_shapes) > 1 or len(test_shapes) > 1:
+                print(f"   ⚠️ Shape mismatch detected after normalization:")
+                print(f"      OOF shapes: {oof_shapes}")
+                print(f"      Test shapes: {test_shapes}")
+
+                # Find the most common shape and keep only compatible models
+                from collections import Counter
+
+                shape_counts = Counter(tuple(o.shape) for o in oof_list)
+                target_shape = shape_counts.most_common(1)[0][0]
+                print(f"      Keeping models with shape: {target_shape}")
+
+                valid_idx = [i for i, o in enumerate(oof_list) if tuple(o.shape) == target_shape]
+                oof_list = [oof_list[i] for i in valid_idx]
+                test_list = [test_list[i] for i in valid_idx]
+                kept_names = [model_names[i] for i in valid_idx] if len(model_names) > max(valid_idx) else []
+                print(f"      Kept {len(oof_list)} compatible models: {kept_names}")
+
         if len(oof_list) < 2:
             return None, None
 
@@ -1047,15 +1071,88 @@ class EnsembleAgent:
             preds_list.append(preds)
             names.append(name)
 
+        # Handle single model case (use directly without ensemble averaging)
+        if len(preds_list) == 1:
+            single_model_name = names[0]
+            print(f"\n   ℹ️ Single validated model available: {single_model_name}")
+            print("      Using as final submission (no ensemble averaging)")
+            ensemble_preds = preds_list[0]
+
+            if ensemble_preds.shape[0] != len(sample_sub):
+                print(
+                    f"   ❌ Prediction length mismatch: preds={ensemble_preds.shape[0]}, sample={len(sample_sub)}"
+                )
+                return False
+
+            if ensemble_preds.shape[1] == 1:
+                sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+            else:
+                if ensemble_preds.shape[1] != (len(sample_sub.columns) - 1):
+                    print(
+                        "   ❌ Prediction column mismatch: "
+                        f"preds={ensemble_preds.shape[1]}, sample_cols={len(sample_sub.columns) - 1}"
+                    )
+                    return False
+                sample_sub.iloc[:, 1:] = ensemble_preds
+
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            sample_sub.to_csv(output_path, index=False)
+            print(f"   ✅ Saved single-model submission to {output_path.name}")
+            return True
+
         if len(preds_list) < 2:
             print("   ⚠️  Not enough prediction pairs for ensemble")
             return False
 
-        # Ensure consistent shapes
+        # Ensure consistent shapes - filter incompatible models instead of failing
         shapes = {p.shape for p in preds_list}
         if len(shapes) != 1:
-            print(f"   ❌ Prediction shapes mismatch: {shapes}")
-            return False
+            print(f"   ⚠️ Prediction shapes mismatch: {shapes}")
+            print("      Attempting to keep only compatible models...")
+
+            # Find the most common shape
+            from collections import Counter
+
+            shape_counts = Counter(p.shape for p in preds_list)
+            target_shape = shape_counts.most_common(1)[0][0]
+            print(f"      Target shape: {target_shape}")
+
+            # Filter to keep only compatible models
+            valid_idx = [i for i, p in enumerate(preds_list) if p.shape == target_shape]
+            preds_list = [preds_list[i] for i in valid_idx]
+            names = [names[i] for i in valid_idx]
+            print(f"      Kept {len(preds_list)} compatible models: {names}")
+
+            if len(preds_list) < 1:
+                print("   ❌ No compatible models after filtering")
+                return False
+
+            if len(preds_list) == 1:
+                # Use single model fallback
+                print("      Using single compatible model as fallback")
+                ensemble_preds = preds_list[0]
+
+                if ensemble_preds.shape[0] != len(sample_sub):
+                    print(
+                        f"   ❌ Prediction length mismatch: preds={ensemble_preds.shape[0]}, sample={len(sample_sub)}"
+                    )
+                    return False
+
+                if ensemble_preds.shape[1] == 1:
+                    sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+                else:
+                    if ensemble_preds.shape[1] != (len(sample_sub.columns) - 1):
+                        print(
+                            "   ❌ Prediction column mismatch: "
+                            f"preds={ensemble_preds.shape[1]}, sample_cols={len(sample_sub.columns) - 1}"
+                        )
+                        return False
+                    sample_sub.iloc[:, 1:] = ensemble_preds
+
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                sample_sub.to_csv(output_path, index=False)
+                print(f"   ✅ Saved single-model submission to {output_path.name}")
+                return True
 
         stacked = np.stack(preds_list, axis=0)  # (n_models, n_samples, n_cols)
         ensemble_preds = stacked.mean(axis=0)

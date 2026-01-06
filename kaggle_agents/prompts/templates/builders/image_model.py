@@ -59,6 +59,29 @@ def build_image_model_instructions(
             "    - Reduce early_stopping_patience proportionally (e.g., patience=5 for 50 epochs)",
         ])
 
+    # Always add input size consistency and binary output instructions
+    instructions.extend([
+        "\n  🔴 INPUT SIZE CONSISTENCY (CRITICAL FOR ENSEMBLE):",
+        "    - SAVE the image size used during training as metadata:",
+        "      ```python",
+        "      IMG_HEIGHT, IMG_WIDTH = 160, 160  # or whatever you use",
+        "      np.save(f'models/input_size_{component_name}.npy', np.array([IMG_HEIGHT, IMG_WIDTH]))",
+        "      ```",
+        "    - AT INFERENCE: Load the saved size and resize test images to match:",
+        "      ```python",
+        "      input_size = np.load(f'models/input_size_{component_name}.npy')",
+        "      test_images = tf.image.resize(test_images, input_size)  # or transforms.Resize(tuple(input_size))",
+        "      ```",
+        "    - NEVER assume 224x224 - always check the saved size metadata",
+        "    - If input_size file doesn't exist, default to model.input_shape[1:3] or 224x224",
+        "\n  🔴 BINARY CLASSIFICATION OUTPUT FORMAT (CRITICAL FOR ENSEMBLE):",
+        "    - Use SINGLE sigmoid output: `Dense(1, activation='sigmoid')` or `nn.Sigmoid()`",
+        "    - DO NOT use softmax with 2 classes (causes shape mismatch in ensemble)",
+        "    - Save predictions as shape (N,) or (N, 1), NEVER (N, 2)",
+        "    - For test predictions: `preds = model.predict(X_test).flatten()`",
+        "    - This ensures all models produce compatible prediction shapes for ensemble averaging",
+    ])
+
     if isinstance(data_files, dict) and data_files.get("train_csv"):
         instructions.append(
             f"  - Labels are in Train CSV at: {data_files['train_csv']} (not inside train/)"
