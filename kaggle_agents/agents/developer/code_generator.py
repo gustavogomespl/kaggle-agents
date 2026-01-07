@@ -366,6 +366,7 @@ class CodeGeneratorMixin:
         # This ensures the LLM cannot ignore the correct paths
         path_header = f'''# === PATH CONSTANTS (AUTO-INJECTED - DO NOT MODIFY) ===
 from pathlib import Path
+import pandas as pd
 
 TRAIN_PATH = Path("{resolved_train_path}")
 TEST_PATH = Path("{resolved_test_path}")
@@ -383,22 +384,70 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
                 label_paths_code += f'    Path("{lf}"),\n'
             label_paths_code += "]\n"
             path_header += label_paths_code
-            # Add helper function for parsing label files
+            # Add helper function for parsing label files (handles variable-width multi-label rows)
             path_header += """
 # MANDATORY: Parse label files - DO NOT use dummy labels (np.zeros)
-def parse_label_file(label_path):
-    '''Parse label file with automatic delimiter detection.'''
+# This handles VARIABLE-WIDTH multi-label files (e.g., rec_id,label1 vs rec_id,label1,label2,label3)
+def parse_label_file(label_path, hidden_marker='?'):
+    '''Parse variable-width label file with automatic delimiter detection.
+
+    Returns DataFrame with columns: ['rec_id', 'label'] in long format
+    (one row per rec_id-label pair for multi-label files).
+    '''
     import csv
     content = Path(label_path).read_text(encoding='utf-8', errors='ignore')
-    sample = '\\n'.join(content.strip().split('\\n')[:20])
+    lines = content.strip().split('\\n')
+    sample = '\\n'.join(lines[:20])
+
+    # Auto-detect delimiter
     try:
         dialect = csv.Sniffer().sniff(sample, delimiters=',\\t ;|')
         delimiter = dialect.delimiter
     except csv.Error:
         delimiter = ',' if ',' in sample else '\\t' if '\\t' in sample else ' '
-    if delimiter == ' ':
-        return pd.read_csv(label_path, sep=r'\\s+', engine='python', header=None)
-    return pd.read_csv(label_path, sep=delimiter, engine='python', header=None)
+
+    # Parse line-by-line to handle variable-width rows
+    rows = []
+    for line in lines:
+        parts = line.strip().split(delimiter)
+        if len(parts) < 2:
+            continue
+        rec_id = parts[0].strip()
+        # Skip header row if detected
+        if rec_id.lower() in ('rec_id', 'id', 'recording_id', 'filename'):
+            continue
+        # Each subsequent part is a label
+        for label in parts[1:]:
+            label = label.strip()
+            if label and label != hidden_marker:
+                rows.append({'rec_id': rec_id, 'label': label})
+
+    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['rec_id', 'label'])
+
+def parse_id_mapping_file(mapping_path):
+    '''Parse ID to filename mapping file (e.g., rec_id2filename.txt).
+
+    Returns dict: {rec_id: filename}
+    '''
+    import csv
+    content = Path(mapping_path).read_text(encoding='utf-8', errors='ignore')
+    lines = content.strip().split('\\n')
+    sample = '\\n'.join(lines[:20])
+
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=',\\t ;|')
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = ',' if ',' in sample else '\\t' if '\\t' in sample else ' '
+
+    id_map = {}
+    for line in lines:
+        parts = line.strip().split(delimiter)
+        if len(parts) >= 2:
+            rec_id, filename = parts[0].strip(), parts[1].strip()
+            if rec_id.lower() not in ('rec_id', 'id', 'recording_id'):
+                id_map[rec_id] = filename
+    return id_map
 """
 
         # Add audio source path if available

@@ -162,8 +162,22 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
     # ✅ CORRECT (MANDATORY): Full model save - preserves architecture + weights
     torch.save(model, 'model.pth')
 
-    # Loading (works without class definition):
-    model = torch.load('model.pth', map_location=device)
+    # Loading - use version-aware helper to handle PyTorch 2.4+ compatibility:
+    def load_model(path, device='cpu'):
+        """Load full model checkpoint (compatible with PyTorch <2.4 and 2.4+)."""
+        import re
+        import torch
+        # PyTorch 2.4+ requires weights_only=False for full model objects
+        # Earlier versions don't have this parameter
+        # Parse version safely (handles suffixes like +cu121, a0, .dev, etc.)
+        match = re.match(r'^(\d+)\.(\d+)', torch.__version__)
+        if match:
+            major, minor = int(match.group(1)), int(match.group(2))
+            if (major, minor) >= (2, 4):
+                return torch.load(path, map_location=device, weights_only=False)
+        return torch.load(path, map_location=device)
+
+    model = load_model('model.pth', device=device)
     model.eval()
     ```
 
@@ -173,7 +187,14 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
     torch.save(model.state_dict(), 'model.pth')
     ```
 
-    WHY THIS MATTERS:
+    PYTORCH VERSION NOTES:
+    - PyTorch 2.4+ changed `torch.load()` to default to `weights_only=True` for security
+    - This BREAKS loading of full model objects (UnpicklingError)
+    - The `load_model()` helper above handles both old and new PyTorch versions
+    - Error on PyTorch 2.4+ without fix: "WeightsUnpickler error: Unsupported global"
+    - Error on PyTorch <2.4 with weights_only: "unexpected keyword argument 'weights_only'"
+
+    WHY FULL MODEL SAVE MATTERS:
     - Training agent defines: `self.net = nn.Sequential(...)`
     - Inference agent defines: `self.layers = nn.Sequential(...)`
     - state_dict keys are "net.0.weight" vs "layers.0.weight" = MISMATCH!

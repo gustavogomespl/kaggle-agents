@@ -64,35 +64,44 @@ for ext in ['*.wav', '*.mp3', '*.flac', '*.ogg', '*.m4a']:
     audio_files.extend(TRAIN_PATH.rglob(ext.upper()))  # Handle .WAV, .MP3
 ```
 
-### 3. Robust Label File Parsing
-Audio competition labels often come in non-standard formats (.txt with varying delimiters).
+### 3. Robust Label File Parsing (CRITICAL FOR AUDIO COMPETITIONS)
+Audio competition labels often come in VARIABLE-WIDTH formats (.txt with varying number of labels per row).
+Example: rec_id,label1 vs rec_id,label1,label2,label3 (multi-label format)
+
+IMPORTANT: Do NOT use parse_label_file() directly - use the injected version at the top of your code.
+If LABEL_FILES is defined, those are the label files to use.
 
 ```python
-import csv
-from pathlib import Path
+# USE THE INJECTED parse_label_file() function - it handles variable-width rows!
+# It returns a DataFrame with columns: ['rec_id', 'label'] in long format
 
-def parse_label_file(path: Path) -> pd.DataFrame:
-    \"\"\"Parse label file with automatic delimiter detection.\"\"\"
-    # Read sample for format detection
-    content = path.read_text(encoding='utf-8', errors='ignore')
-    sample = '\\n'.join(content.strip().split('\\n')[:20])
+# Example usage:
+if 'LABEL_FILES' in dir() and LABEL_FILES:
+    for lf in LABEL_FILES:
+        if lf.exists():
+            labels_df = parse_label_file(lf)
+            print(f"Loaded {len(labels_df)} label records from {lf.name}")
+            # labels_df has columns: rec_id, label
+            # Pivot to wide format for multi-label:
+            label_matrix = labels_df.pivot_table(
+                index='rec_id', columns='label', aggfunc='size', fill_value=0
+            )
+            label_matrix = (label_matrix > 0).astype(int)  # Binary labels
+            break
 
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=',\\t ;|')
-        delimiter = dialect.delimiter
-    except csv.Error:
-        # Fallback: try common delimiters
-        for delim in [',', '\\t', ' ', ';']:
-            if delim in sample:
-                delimiter = delim
-                break
-        else:
-            delimiter = ','
+# For ID to filename mapping:
+if 'parse_id_mapping_file' in dir():
+    for lf in LABEL_FILES:
+        if '2filename' in str(lf) or 'id2file' in str(lf).lower():
+            id_map = parse_id_mapping_file(lf)
+            print(f"Loaded {len(id_map)} ID mappings from {lf.name}")
+            break
+```
 
-    # For space-delimited, use regex separator
-    if delimiter == ' ':
-        return pd.read_csv(path, sep=r'\\s+', engine='python', header=None)
-    return pd.read_csv(path, sep=delimiter, engine='python')
+NEVER USE THIS PATTERN (fails on variable-width rows):
+```python
+# WRONG - crashes with "Expected 2 fields, saw 3":
+labels_df = pd.read_csv(label_file, header=None, names=['rec_id', 'label'])
 ```
 
 ### 4. Mel Spectrogram Processing
@@ -102,11 +111,14 @@ Use consistent parameters and normalize properly.
 import librosa
 import numpy as np
 
-# Standard parameters for audio classification
-SR = 22050  # Sample rate
+# Sample rate recommendations:
+# - Bird/wildlife calls: SR = 32000 or 44100 (high-frequency vocalizations)
+# - General audio/speech: SR = 22050 (standard)
+# - Music: SR = 44100 or 48000
+SR = 32000  # Higher for bird competitions - captures up to 16kHz
 DURATION = 5  # seconds
 N_MELS = 128
-N_FFT = 1024
+N_FFT = 2048  # Higher resolution for better frequency discrimination
 HOP_LENGTH = 512
 
 def load_and_process_audio(path: Path) -> np.ndarray:

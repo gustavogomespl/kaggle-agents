@@ -222,10 +222,39 @@ class DeveloperUtilsMixin:
             component_type: Component type (e.g., 'model', 'preprocessing')
 
         Returns:
-            Domain-specific code template string (empty - templates removed in refactoring)
+            Domain-specific code template string for audio, otherwise empty
         """
-        # Domain-specific templates removed in favor of agentic approach
-        # Agent uses SOTA solutions and feedback instead of hardcoded templates
+        # Audio domain: Provide essential templates for audio processing
+        # These are critical because audio competitions often have non-standard formats
+        if domain == "audio" and component_type in ("model", "preprocessing"):
+            try:
+                from ...prompts.templates.audio_template import (
+                    AUDIO_CONSTRAINTS,
+                    AUDIO_CONFIG_TEMPLATE,
+                    AUDIO_LOAD_TEMPLATE,
+                    AUDIO_MELSPEC_TEMPLATE,
+                )
+                return f"""
+## Audio Domain Guidelines
+
+{AUDIO_CONSTRAINTS}
+
+## Recommended Audio Configuration
+
+{AUDIO_CONFIG_TEMPLATE}
+
+## Audio Loading Function (use this pattern)
+
+{AUDIO_LOAD_TEMPLATE}
+
+## Mel Spectrogram Conversion (use this pattern)
+
+{AUDIO_MELSPEC_TEMPLATE}
+"""
+            except ImportError:
+                pass
+
+        # Other domains: use agentic approach with SOTA solutions and feedback
         return ""
 
     def _extract_code_from_response(self, response: str) -> str:
