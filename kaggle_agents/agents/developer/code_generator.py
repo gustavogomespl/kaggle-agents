@@ -229,6 +229,9 @@ class CodeGeneratorMixin:
         train_csv_path = data_files.get("train_csv", "")
         test_csv_path = data_files.get("test_csv", "")
         clean_train_path = data_files.get("clean_train", "")
+        # Non-standard label files (e.g., .txt files for MLSP 2013 Birds)
+        label_files = data_files.get("label_files", [])
+        audio_source_path = data_files.get("audio_source", "")
 
         competition_context = f"""
         Name: {competition_info.name}
@@ -236,6 +239,9 @@ class CodeGeneratorMixin:
         Problem Type: {competition_info.problem_type}
         Metric: {competition_info.evaluation_metric}
         """
+
+        # Format label files for prompt
+        label_files_str = ", ".join(label_files) if label_files else "None"
 
         data_paths = f"""
         Train: {resolved_train_path}
@@ -246,6 +252,8 @@ class CodeGeneratorMixin:
         Models: {models_dir}
         Sample Submission: {sample_submission_path}
         Submission Output: {submission_output_path}
+        Label Files (TXT): {label_files_str}
+        Audio Source: {audio_source_path if audio_source_path else "None"}
         """
 
         if state is not None:
@@ -293,6 +301,9 @@ class CodeGeneratorMixin:
             "models": str(models_dir),
             "submission": str(submission_output_path),
             "sample_submission": str(sample_submission_path),
+            # Non-standard label files (e.g., MLSP 2013 Birds .txt files)
+            "label_files": label_files,
+            "audio_source": audio_source_path,
         }
 
         # Store resolved paths for use by fix/debug functions
@@ -311,9 +322,20 @@ OUTPUT_DIR = Path("{working_dir}")
 
 # Create models directory
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
-
-# === END PATH CONSTANTS ===
 '''
+        # Add label files paths if available (for non-standard formats like MLSP 2013 Birds)
+        if label_files:
+            label_paths_code = "\n# Non-standard label files (e.g., .txt files)\nLABEL_FILES = [\n"
+            for lf in label_files:
+                label_paths_code += f'    Path("{lf}"),\n'
+            label_paths_code += "]\n"
+            path_header += label_paths_code
+
+        # Add audio source path if available
+        if audio_source_path:
+            path_header += f'\n# Audio source directory\nAUDIO_SOURCE_DIR = Path("{audio_source_path}")\n'
+
+        path_header += "\n# === END PATH CONSTANTS ===\n"
 
         def _generate_with_llm() -> str:
             prompt = compose_generate_prompt(

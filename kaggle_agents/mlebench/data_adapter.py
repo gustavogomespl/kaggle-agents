@@ -34,6 +34,10 @@ class MLEBenchDataInfo:
     target_column: str = "target"
     id_column: str = "id"
     extra_files: list[Path] = field(default_factory=list)
+    # Non-standard label files (e.g., .txt files for MLSP 2013 Birds)
+    label_files: list[Path] = field(default_factory=list)
+    # Audio source directory (e.g., essential_data/src_wavs)
+    audio_source_path: Path | None = None
 
 
 class MLEBenchDataAdapter:
@@ -294,6 +298,104 @@ class MLEBenchDataAdapter:
                 return matches[0]
         return None
 
+    def _find_label_files(
+        self,
+        directory: Path,
+        recursive: bool = True,
+    ) -> list[Path]:
+        """
+        Find label files in directory (CSV and TXT formats).
+
+        This handles non-standard formats like MLSP 2013 Birds which uses:
+        - rec_labels_test_hidden.txt (multi-label training labels)
+        - rec_id2filename.txt (maps rec_id -> audio filename)
+        - CVfolds_2.txt (cross-validation fold assignments)
+
+        Args:
+            directory: Directory to search in
+            recursive: Whether to search recursively
+
+        Returns:
+            List of label file paths found
+        """
+        label_patterns = [
+            # Standard CSV patterns
+            "**/train_labels.csv",
+            "**/labels.csv",
+            "**/train.csv",
+            # Non-standard TXT patterns (MLSP 2013 Birds, etc.)
+            "**/rec_labels*.txt",
+            "**/*_labels*.txt",
+            "**/labels*.txt",
+            "**/CVfolds*.txt",
+            "**/rec_id2filename*.txt",
+            "**/*2filename*.txt",
+            # Additional patterns for other non-standard formats
+            "**/train_metadata*.txt",
+            "**/metadata*.txt",
+        ]
+
+        if not recursive:
+            # Convert to non-recursive patterns
+            label_patterns = [p.replace("**/", "") for p in label_patterns]
+
+        found_files = []
+        for pattern in label_patterns:
+            try:
+                matches = list(directory.glob(pattern))
+                for match in matches:
+                    if match.is_file() and match not in found_files:
+                        found_files.append(match)
+            except Exception:
+                continue
+
+        return found_files
+
+    def _find_audio_source_dir(self, directory: Path) -> Path | None:
+        """
+        Find the directory containing source audio files.
+
+        Handles non-standard structures like MLSP 2013 Birds where audio is in:
+        - essential_data/src_wavs/
+
+        Args:
+            directory: Parent directory to search in
+
+        Returns:
+            Path to audio source directory, or None
+        """
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+
+        # Common audio source directory patterns
+        audio_dir_patterns = [
+            "src_wavs",
+            "wavs",
+            "audio",
+            "audio_files",
+            "raw_audio",
+            "train_audio",
+        ]
+
+        # First check direct subdirectories
+        for subdir_name in audio_dir_patterns:
+            subdir = directory / subdir_name
+            if subdir.is_dir():
+                # Verify it contains audio files
+                sample_files = list(subdir.glob("*"))[:20]
+                if any(f.suffix.lower() in audio_exts for f in sample_files if f.is_file()):
+                    return subdir
+
+        # Then recursively search for directories with audio files
+        for subdir in directory.rglob("*"):
+            if not subdir.is_dir():
+                continue
+            # Check if this directory contains audio files
+            sample_files = list(subdir.glob("*"))[:20]
+            if any(f.suffix.lower() in audio_exts for f in sample_files if f.is_file()):
+                return subdir
+
+        return None
+
     def _find_first_zip(self, directory: Path, kind: str) -> Path | None:
         """Find a likely train/test ZIP in a directory."""
         kind_norm = kind.strip().lower()
@@ -439,8 +541,14 @@ class MLEBenchDataAdapter:
                 if candidate.exists():
                     return candidate
 
-            # If subdir itself contains data files (wav, csv, png, etc.), return it
-            data_extensions = {".csv", ".wav", ".mp3", ".png", ".jpg", ".jpeg", ".npy", ".tif"}
+            # If subdir itself contains data files (wav, csv, txt, png, etc.), return it
+            # Added .txt for non-standard label formats (MLSP 2013 Birds)
+            data_extensions = {
+                ".csv", ".txt",  # Label files
+                ".wav", ".mp3", ".flac", ".ogg",  # Audio
+                ".png", ".jpg", ".jpeg", ".bmp", ".tif",  # Images
+                ".npy",  # Arrays
+            }
             try:
                 sample_files = list(subdir.glob("*"))[:20]
                 if any(f.suffix.lower() in data_extensions for f in sample_files if f.is_file()):
@@ -614,6 +722,38 @@ class MLEBenchDataAdapter:
                 info.train_path = train_csv
             print(f"   Train CSV: {train_csv.name}")
 
+        # =========================================================================
+        # NON-STANDARD LABEL FILE SEARCH (MLSP 2013 Birds, etc.)
+        # =========================================================================
+        # Search for label files in non-standard formats (.txt files in essential_data/)
+        # This is critical for competitions like MLSP 2013 Birds where:
+        # - Labels are in essential_data/rec_labels_test_hidden.txt
+        # - ID mapping is in essential_data/rec_id2filename.txt
+        # - Audio files are in essential_data/src_wavs/
+        if info.train_csv_path is None or data_type == "audio":
+            for data_subdir in nonstandard_data_dirs:
+                subdir_path = public_dir / data_subdir
+                if subdir_path.is_dir():
+                    # Search for label files in this subdirectory
+                    label_files = self._find_label_files(subdir_path, recursive=True)
+                    if label_files:
+                        info.label_files.extend(label_files)
+                        for lf in label_files:
+                            rel_path = lf.relative_to(public_dir)
+                            print(f"   Label file found: {rel_path}")
+
+                    # Search for audio source directory
+                    if data_type == "audio" and info.audio_source_path is None:
+                        audio_src = self._find_audio_source_dir(subdir_path)
+                        if audio_src:
+                            info.audio_source_path = audio_src
+                            rel_path = audio_src.relative_to(public_dir)
+                            print(f"   Audio source dir: {rel_path}/")
+                            # Also set train_path to audio source if not already set
+                            if info.train_path is None:
+                                info.train_path = audio_src
+                                print(f"   Train dir (from audio source): {rel_path}/")
+
         # Image-to-image: look for "clean"/target image directories (e.g., train_cleaned)
         clean_dir_candidates = [
             "train_cleaned",
@@ -785,6 +925,24 @@ class MLEBenchDataAdapter:
         if info.sample_submission_path and info.sample_submission_path.exists():
             items_to_link.append(("sample_submission.csv", info.sample_submission_path))
 
+        # Add audio source directory if found (for MLSP-like competitions)
+        if info.audio_source_path and info.audio_source_path.is_dir():
+            # Link audio source as 'audio' for easy access
+            if not any("audio" == item[0] for item in items_to_link):
+                items_to_link.append(("audio", info.audio_source_path))
+                print(f"      Found audio source: {info.audio_source_path}", flush=True)
+
+        # Add non-standard label files (.txt files from essential_data/, etc.)
+        # This is critical for MLSP 2013 Birds and similar competitions
+        if info.label_files:
+            for label_file in info.label_files:
+                if label_file.exists():
+                    # Keep original name to avoid confusion
+                    name = label_file.name
+                    if not any(name == item[0] for item in items_to_link):
+                        items_to_link.append((name, label_file))
+                        print(f"      Found label file: {name}", flush=True)
+
         # Also link ZIPs (common in CV competitions); keep original names for transparency.
         for zip_file in public_dir.glob("*.zip"):
             items_to_link.append((zip_file.name, zip_file))
@@ -899,6 +1057,9 @@ class MLEBenchDataAdapter:
         if test_data_path and not Path(test_data_path).exists():
             print(f"   ⚠️ WARNING: Test data still not found! Path: {test_data_path}")
 
+        # Build label files list (both CSV and TXT formats)
+        label_file_paths = [str(lf) for lf in info.label_files if lf.exists()]
+
         return {
             "working_directory": str(info.workspace),
             "train_data_path": str(train_data_path or ""),
@@ -915,6 +1076,10 @@ class MLEBenchDataAdapter:
                 if info.sample_submission_path
                 else "",
                 "data_type": info.data_type,
+                # Non-standard label files (.txt for MLSP 2013 Birds, etc.)
+                "label_files": label_file_paths,
+                # Audio source directory (e.g., essential_data/src_wavs)
+                "audio_source": str(info.audio_source_path) if info.audio_source_path else "",
             },
         }
 
