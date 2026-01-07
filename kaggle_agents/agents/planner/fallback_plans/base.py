@@ -96,14 +96,6 @@ def create_fallback_plan(
     """
     print(f"  [DEBUG] Creating fallback plan for domain: '{domain}'")
 
-    # SAFETY CHECK: Prevent tabular models for image competitions
-    if is_image_competition_without_features(state):
-        print(
-            "  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)"
-        )
-        print("            Tree models (LightGBM/XGBoost) require tabular features!")
-        return create_image_fallback_plan("image_classification", sota_analysis, fast_mode=False)
-
     run_mode = str((state or {}).get("run_mode", "")).lower()
     objective = str((state or {}).get("objective", "")).lower()
     timeout_cap = (state or {}).get("timeout_per_component")
@@ -120,11 +112,30 @@ def create_fallback_plan(
         or (isinstance(timeout_cap, int) and timeout_cap <= 1200)
     )
 
+    # Get competition name for domain-specific settings (MUST be before safety check)
+    competition_name = ""
+    if state:
+        comp_info = state.get("competition_info")
+        if comp_info:
+            competition_name = getattr(comp_info, "name", "") or getattr(comp_info, "id", "") or ""
+        if not competition_name:
+            competition_name = str(state.get("competition_id", "") or state.get("competition_name", ""))
+
+    # SAFETY CHECK: Prevent tabular models for image competitions
+    if is_image_competition_without_features(state):
+        print(
+            "  [WARNING] Forcing IMAGE fallback plan (detected image competition without features)"
+        )
+        print("            Tree models (LightGBM/XGBoost) require tabular features!")
+        return create_image_fallback_plan(
+            "image_classification", sota_analysis, fast_mode=fast_mode, competition_name=competition_name
+        )
+
     # Route to domain-specific fallback method
     if domain in ("image_to_image", "image_segmentation"):
         return create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
     if domain in IMAGE_DOMAINS or domain.startswith("image_"):
-        return create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
+        return create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode, competition_name=competition_name)
     if domain in TEXT_DOMAINS or domain.startswith("text_"):
         return create_text_fallback_plan(domain, sota_analysis)
     if domain in AUDIO_DOMAINS or domain.startswith("audio_"):

@@ -2,6 +2,12 @@
 Image competition fallback plans.
 
 Includes image classification/regression and image-to-image tasks.
+
+CRITICAL NOTES FOR MEDICAL IMAGING (e.g., RANZCR, chest X-rays):
+- Use higher resolution (384-512) for thin structures like catheters
+- Train more epochs (10-20) with early stopping
+- Use GroupKFold on PatientID to prevent leakage
+- Unfreeze backbone for domain adaptation from ImageNet to X-rays
 """
 
 from typing import Any
@@ -12,6 +18,7 @@ def create_image_fallback_plan(
     sota_analysis: dict[str, Any],
     *,
     fast_mode: bool = False,
+    competition_name: str = "",
 ) -> list[dict[str, Any]]:
     """
     Create fallback plan for image competitions (PyTorch/TensorFlow DataLoaders).
@@ -22,6 +29,7 @@ def create_image_fallback_plan(
         domain: Competition domain (image_classification, image_regression, etc.)
         sota_analysis: SOTA analysis results
         fast_mode: If True, return minimal 2-component plan for speed
+        competition_name: Name of competition for domain-specific settings
 
     Returns:
         List of component dictionaries (2 in fast mode, 3 normally)
@@ -29,26 +37,65 @@ def create_image_fallback_plan(
     is_regression = "regression" in domain
     task = "regression" if is_regression else "classification"
 
+    # Detect medical imaging competitions that need special handling
+    comp_lower = competition_name.lower() if competition_name else ""
+    is_medical = any(kw in comp_lower for kw in [
+        "ranzcr", "rsna", "siim", "chest", "xray", "x-ray", "medical", "radiology",
+        "ct", "mri", "dicom", "catheter", "pneumonia", "covid", "lung"
+    ])
+
     # FAST MODE: Only 2 components for maximum speed (MLE-bench optimization)
     if fast_mode:
-        return [
-            {
-                "name": f"efficientnet_b0_fast_{task}",
-                "component_type": "model",
-                "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern. Save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras).",
-                "estimated_impact": 0.30,
-                "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
-                "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras), implement _check_deadline() pattern",
-            },
-            {
-                "name": "tta_inference_only",
-                "component_type": "ensemble",
-                "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.* (auto-detect extension) and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
-                "estimated_impact": 0.05,
-                "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
-                "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
-            },
-        ]
+        # Medical imaging needs different settings even in fast mode
+        if is_medical:
+            return [
+                {
+                    "name": f"efficientnet_b0_medical_{task}",
+                    "component_type": "model",
+                    "description": """EfficientNet-B0 for MEDICAL IMAGING with domain-appropriate settings.
+
+CRITICAL MEDICAL IMAGING REQUIREMENTS:
+1. **TARGET COLUMNS**: Read sample_submission.csv FIRST to get N_CLASSES (e.g., RANZCR has 11 columns)
+2. **RESOLUTION**: Use IMG_SIZE=384 (NOT 224) - thin catheters/lines need higher resolution
+3. **EPOCHS**: Train for 10-15 epochs with early stopping (patience=3), NOT just 2 epochs
+4. **BACKBONE**: Unfreeze last 2 blocks of backbone for X-ray domain adaptation
+5. **CV**: Use GroupKFold on PatientID column to prevent patient-level leakage
+6. **BATCH SIZE**: Use 32-64 (NOT 128) to fit higher resolution images in memory
+
+Mixed precision training. Save full model to models/best_model.pth.""",
+                    "estimated_impact": 0.35,
+                    "rationale": "Medical imaging requires higher resolution and more training than natural images. Domain shift from ImageNet to X-rays requires backbone fine-tuning.",
+                    "code_outline": "efficientnet_b0(pretrained=True), unfreeze last 2 blocks, IMG_SIZE=384, BATCH_SIZE=32, 10-15 epochs with early stopping, GroupKFold on PatientID, save to models/best_model.pth",
+                },
+                {
+                    "name": "tta_inference_only",
+                    "component_type": "ensemble",
+                    "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.* (auto-detect extension) and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv with ALL target columns.",
+                    "estimated_impact": 0.05,
+                    "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
+                    "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv with N_CLASSES columns",
+                },
+            ]
+        else:
+            # Standard (non-medical) fast mode
+            return [
+                {
+                    "name": f"efficientnet_b0_fast_{task}",
+                    "component_type": "model",
+                    "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern. Save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras).",
+                    "estimated_impact": 0.30,
+                    "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
+                    "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras), implement _check_deadline() pattern",
+                },
+                {
+                    "name": "tta_inference_only",
+                    "component_type": "ensemble",
+                    "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.* (auto-detect extension) and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
+                    "estimated_impact": 0.05,
+                    "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
+                    "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
+                },
+            ]
 
     # NORMAL MODE: 3 components (2 models + TTA ensemble)
     return [

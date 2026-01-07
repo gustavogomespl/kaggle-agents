@@ -395,6 +395,41 @@ DO NOT USE:
                                 "⚠️ Column order mismatch fixed: reordered columns to match sample_submission"
                             )
                         else:
+                            # CRITICAL: Check for target column count mismatch (common error)
+                            expected_target_cols = sample_sub.columns[1:].tolist()
+                            actual_target_cols = df.columns[1:].tolist()
+                            n_expected = len(expected_target_cols)
+                            n_actual = len(actual_target_cols)
+
+                            if n_actual != n_expected:
+                                return (
+                                    False,
+                                    f"""
+CRITICAL TARGET COLUMN COUNT MISMATCH!
+
+Expected {n_expected} target columns: {expected_target_cols[:5]}{'...' if n_expected > 5 else ''}
+Got {n_actual} target columns: {actual_target_cols[:5]}{'...' if n_actual > 5 else ''}
+
+This is a CRITICAL error - your model is not predicting all required classes!
+
+REQUIRED FIX in your model code:
+```python
+# FIRST: Count target columns from sample_submission
+sample_sub = pd.read_csv(sample_submission_path)
+target_cols = sample_sub.columns[1:].tolist()
+N_CLASSES = len(target_cols)  # Must be {n_expected}!
+
+# Model MUST output exactly N_CLASSES predictions
+# PyTorch: nn.Linear(..., N_CLASSES)  # N_CLASSES={n_expected}
+# Keras: Dense(N_CLASSES, activation=...)
+```
+
+Common causes:
+1. Hard-coded number of classes instead of reading from sample_submission
+2. Using wrong target columns from train.csv
+3. LabelEncoder dropping infrequent classes
+""",
+                                )
                             return (
                                 False,
                                 f"Column mismatch vs sample_submission: {df.columns.tolist()} != {sample_sub.columns.tolist()}",
