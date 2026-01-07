@@ -79,8 +79,8 @@ class MLEBenchMixin:
         if not grading.get("valid_submission"):
             return False
 
-        # Medal achieved -> always stop.
-        if any(grading.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
+        # Only stop on GOLD medal - continue refining for silver/bronze
+        if grading.get("gold_medal"):
             return True
 
         score = grading.get("score")

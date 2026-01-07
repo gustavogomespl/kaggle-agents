@@ -244,10 +244,8 @@ class DeveloperAgent(
         run_mode = str(state.get("run_mode", "")).lower()
         mlebench_grade = state.get("mlebench_grade")
         if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
-            if mlebench_grade.get("valid_submission") and any(
-                mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]
-            ):
-                print("Skipping remaining components (medal already achieved)")
+            if mlebench_grade.get("valid_submission") and mlebench_grade.get("gold_medal"):
+                print("Skipping remaining components (GOLD medal achieved)")
                 return {
                     "skip_remaining_components": True,
                     "current_component_index": len(ablation_plan),
