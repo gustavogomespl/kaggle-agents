@@ -36,6 +36,11 @@ from .tools.data_format_discovery import (
     DataFormatDiscoverer,
     detect_traditional_format,
 )
+from .utils.data_audit import (
+    audit_audio_competition,
+    AuditFailedError,
+    print_audit_report,
+)
 
 
 # ==================== Agent Nodes ====================
@@ -478,6 +483,79 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
         "submission_format": {"type": submission_format_type, **submission_format_metadata}
         if submission_format_type
         else {},
+        "last_updated": datetime.now(),
+    }
+
+
+def data_audit_node(state: KaggleState) -> dict[str, Any]:
+    """
+    Audit competition data before expensive processing begins.
+
+    For audio competitions, validates that audio files exist and labels are parseable.
+    FAIL-FAST: Raises AuditFailedError if critical data is missing.
+
+    Args:
+        state: Current state
+
+    Returns:
+        State updates with audit results
+    """
+    print("\n" + "=" * 60)
+    print("= DATA AUDIT")
+    print("=" * 60)
+
+    domain = state.get("domain_detected", "")
+    data_files = state.get("data_files", {})
+    working_dir = Path(state.get("working_directory", "."))
+
+    # Only run domain-specific audits for supported domains
+    if domain and "audio" in domain.lower():
+        print("   Running audio competition audit...")
+
+        audio_source = data_files.get("audio_source")
+        audio_source_dir = Path(audio_source) if audio_source else None
+
+        train_path = Path(data_files.get("train", "")) if data_files.get("train") else None
+        test_path = Path(data_files.get("test", "")) if data_files.get("test") else None
+
+        label_files = data_files.get("label_files", [])
+        label_paths = [Path(lf) for lf in label_files] if label_files else []
+
+        try:
+            result = audit_audio_competition(
+                working_dir=working_dir,
+                audio_source_dir=audio_source_dir,
+                label_files=label_paths,
+                train_path=train_path,
+                test_path=test_path,
+                min_audio_files=10,
+                strict=True,  # Fail-fast by default
+            )
+            print_audit_report(result)
+
+            return {
+                "data_audit_result": {
+                    "is_valid": result.is_valid,
+                    "audio_files_found": result.audio_files_found,
+                    "audio_source_dir": str(result.audio_source_dir) if result.audio_source_dir else None,
+                    "label_files_found": [str(lf) for lf in result.label_files_found],
+                    "warnings": result.warnings,
+                },
+                "last_updated": datetime.now(),
+            }
+
+        except AuditFailedError as e:
+            print(f"\n   AUDIT FAILED: {e}")
+            print("   Stopping execution to prevent wasted compute.")
+            # Re-raise to halt the workflow
+            raise
+
+    else:
+        print(f"   Skipping domain-specific audit for domain: {domain}")
+        print("   (Audio audit only runs for audio_* domains)")
+
+    return {
+        "data_audit_result": {"is_valid": True, "skipped": True},
         "last_updated": datetime.now(),
     }
 
@@ -1009,6 +1087,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("data_format_discovery", data_format_discovery_node)  # Fallback for non-standard formats
     workflow.add_node("data_validation", data_validation_node)
     workflow.add_node("domain_detection", domain_detection_node)
+    workflow.add_node("data_audit", data_audit_node)  # Fail-fast audit for audio competitions
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
@@ -1027,13 +1106,14 @@ def create_workflow() -> StateGraph:
     # Start → Data Download
     workflow.set_entry_point("data_download")
 
-    # Data Download → Data Format Discovery → Data Validation → Domain Detection
+    # Data Download → Data Format Discovery → Data Validation → Domain Detection → Data Audit
     workflow.add_edge("data_download", "data_format_discovery")
     workflow.add_edge("data_format_discovery", "data_validation")
     workflow.add_edge("data_validation", "domain_detection")
+    workflow.add_edge("domain_detection", "data_audit")
 
-    # Domain Detection → Search
-    workflow.add_edge("domain_detection", "search")
+    # Data Audit → Search
+    workflow.add_edge("data_audit", "search")
 
     # Search → Planner
     workflow.add_edge("search", "planner")
@@ -1251,6 +1331,7 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("data_format_discovery", data_format_discovery_node)  # Fallback for non-standard formats
     workflow.add_node("data_validation", data_validation_node)
     workflow.add_node("domain_detection", domain_detection_node)
+    workflow.add_node("data_audit", data_audit_node)  # Fail-fast audit for audio competitions
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
@@ -1268,10 +1349,11 @@ def create_mlebench_workflow() -> StateGraph:
     # Entry point: data_format_discovery (data already loaded but may need format discovery)
     workflow.set_entry_point("data_format_discovery")
 
-    # Data Format Discovery → Data Validation → Domain Detection → Search
+    # Data Format Discovery → Data Validation → Domain Detection → Data Audit → Search
     workflow.add_edge("data_format_discovery", "data_validation")
     workflow.add_edge("data_validation", "domain_detection")
-    workflow.add_edge("domain_detection", "search")
+    workflow.add_edge("domain_detection", "data_audit")
+    workflow.add_edge("data_audit", "search")
 
     # Search → Planner
     workflow.add_edge("search", "planner")
@@ -1349,6 +1431,7 @@ def create_simple_workflow() -> StateGraph:
     workflow.add_node("data_format_discovery", data_format_discovery_node)  # Fallback for non-standard formats
     workflow.add_node("data_validation", data_validation_node)
     workflow.add_node("domain_detection", domain_detection_node)
+    workflow.add_node("data_audit", data_audit_node)  # Fail-fast audit for audio competitions
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
@@ -1358,7 +1441,8 @@ def create_simple_workflow() -> StateGraph:
     workflow.add_edge("data_download", "data_format_discovery")
     workflow.add_edge("data_format_discovery", "data_validation")
     workflow.add_edge("data_validation", "domain_detection")
-    workflow.add_edge("domain_detection", "search")
+    workflow.add_edge("domain_detection", "data_audit")
+    workflow.add_edge("data_audit", "search")
     workflow.add_edge("search", "planner")
     workflow.add_edge("planner", "developer")
     workflow.add_edge("developer", END)

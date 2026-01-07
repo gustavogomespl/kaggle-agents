@@ -10,6 +10,7 @@ Handles:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -23,6 +24,18 @@ from ...prompts.templates.developer_prompts import (
     format_component_details,
 )
 from ...utils.llm_utils import get_text_content
+
+
+# Path constants that should never be redefined by LLM-generated code
+IMMUTABLE_PATH_VARS = [
+    "TRAIN_PATH",
+    "TEST_PATH",
+    "MODELS_DIR",
+    "OUTPUT_DIR",
+    "SAMPLE_SUBMISSION_PATH",
+    "AUDIO_SOURCE_DIR",
+    "LABEL_FILES",
+]
 
 
 if TYPE_CHECKING:
@@ -179,6 +192,46 @@ class CodeGeneratorMixin:
                 print(f"   ℹ️ Using train directory for test data (shared)")
 
         return resolved_train, resolved_test
+
+    def _validate_no_path_redefinition(
+        self: DeveloperAgent,
+        code: str,
+        path_header_end_marker: str = "# === END PATH CONSTANTS ===",
+    ) -> tuple[bool, list[str]]:
+        """
+        Detect if LLM-generated code redefines any injected path constants.
+
+        Searches for reassignments of TRAIN_PATH, MODELS_DIR, etc. after the
+        injected path constants header.
+
+        Args:
+            code: The full generated code (with path header prepended)
+            path_header_end_marker: Marker indicating end of injected paths
+
+        Returns:
+            Tuple of (is_valid, list_of_violations)
+        """
+        violations = []
+
+        # Find where the injected header ends
+        marker_idx = code.find(path_header_end_marker)
+        if marker_idx == -1:
+            # No marker found, can't validate
+            return True, []
+
+        # Get the code after the injected header
+        code_after_header = code[marker_idx + len(path_header_end_marker) :]
+
+        # Check for redefinitions of each immutable path variable
+        for var in IMMUTABLE_PATH_VARS:
+            # Pattern matches: VAR = ... (assignment)
+            # But not: VAR.something (attribute access) or VAR[...] (subscript)
+            pattern = rf"^\s*{var}\s*=\s*(?!MODELS_DIR|TRAIN_PATH|TEST_PATH|OUTPUT_DIR)"
+            matches = re.findall(pattern, code_after_header, re.MULTILINE)
+            if matches:
+                violations.append(f"Path redefinition detected: {var}")
+
+        return len(violations) == 0, violations
 
     def _generate_code(
         self: DeveloperAgent,
@@ -386,4 +439,14 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
             code = _generate_with_llm()
 
         # Prepend path constants header to ensure LLM-generated code uses correct paths
-        return path_header + "\n" + code
+        full_code = path_header + "\n" + code
+
+        # Validate that LLM did not redefine injected path constants
+        is_valid, violations = self._validate_no_path_redefinition(full_code)
+        if not is_valid:
+            print(f"⚠️  PATH REDEFINITION WARNING: {violations}")
+            print("   LLM generated code that redefines injected path constants.")
+            print("   This may cause artifacts to be saved in wrong locations.")
+            # Log but don't block - the validation serves as a warning
+
+        return full_code

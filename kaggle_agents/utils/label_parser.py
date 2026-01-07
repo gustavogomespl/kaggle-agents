@@ -1,0 +1,350 @@
+"""
+Robust label file parser for non-standard competition formats.
+
+Handles various delimiters, encodings, and multi-label formats like MLSP 2013 Birds.
+"""
+
+from __future__ import annotations
+
+import csv
+import re
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import pandas as pd
+
+
+@dataclass
+class LabelFormatInfo:
+    """Detected format information for a label file."""
+
+    delimiter: str
+    has_header: bool
+    num_columns: int
+    format_type: str  # 'csv', 'txt_space', 'txt_tab', 'txt_comma', etc.
+    encoding: str
+    column_names: list[str] | None = None
+    error: str | None = None
+
+
+class RobustLabelParser:
+    """
+    Robust parser for non-standard label files.
+
+    Handles:
+    - csv.Sniffer for automatic delimiter detection
+    - Multiple fallback patterns (space, tab, comma, semicolon)
+    - Header detection
+    - Multi-label formats (MLSP 2013 Birds style: rec_id, label pairs)
+    - Various encodings (utf-8, latin-1, cp1252)
+    """
+
+    DELIMITER_PRIORITY = [",", "\t", " ", ";", "|"]
+    ENCODINGS = ["utf-8", "latin-1", "cp1252", "utf-16"]
+
+    def __init__(self, verbose: bool = False):
+        self.verbose = verbose
+
+    def _log(self, msg: str) -> None:
+        if self.verbose:
+            print(f"[LabelParser] {msg}")
+
+    def detect_encoding(self, file_path: Path) -> str:
+        """Detect file encoding by trying multiple options."""
+        for encoding in self.ENCODINGS:
+            try:
+                file_path.read_text(encoding=encoding, errors="strict")
+                return encoding
+            except (UnicodeDecodeError, LookupError):
+                continue
+        return "utf-8"  # Fallback with error handling
+
+    def detect_format(self, file_path: Path, sample_lines: int = 50) -> LabelFormatInfo:
+        """
+        Auto-detect label file format.
+
+        Args:
+            file_path: Path to the label file
+            sample_lines: Number of lines to sample for detection
+
+        Returns:
+            LabelFormatInfo with detected format details
+        """
+        encoding = self.detect_encoding(file_path)
+
+        try:
+            content = file_path.read_text(encoding=encoding, errors="ignore")
+            lines = content.strip().split("\n")[:sample_lines]
+
+            if not lines:
+                return LabelFormatInfo(
+                    delimiter=",",
+                    has_header=False,
+                    num_columns=0,
+                    format_type="empty",
+                    encoding=encoding,
+                    error="Empty file",
+                )
+
+            sample = "\n".join(lines)
+
+            # Try csv.Sniffer first
+            delimiter = ","
+            has_header = False
+
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",\t ;|")
+                delimiter = dialect.delimiter
+                has_header = csv.Sniffer().has_header(sample)
+                self._log(f"Sniffer detected delimiter={repr(delimiter)}, header={has_header}")
+            except csv.Error:
+                # Fallback: count delimiter occurrences in first line
+                self._log("csv.Sniffer failed, using fallback detection")
+                max_count = 0
+                for delim in self.DELIMITER_PRIORITY:
+                    count = lines[0].count(delim)
+                    if count > max_count:
+                        max_count = count
+                        delimiter = delim
+
+            # Determine format type
+            if delimiter == ",":
+                format_type = "csv"
+            elif delimiter == "\t":
+                format_type = "txt_tab"
+            elif delimiter == " ":
+                format_type = "txt_space"
+            elif delimiter == ";":
+                format_type = "csv_semicolon"
+            else:
+                format_type = f"delimited_{repr(delimiter)}"
+
+            # Count columns and detect header
+            first_fields = self._split_line(lines[0], delimiter)
+            num_columns = len(first_fields)
+
+            # Better header detection
+            if len(lines) > 1:
+                second_fields = self._split_line(lines[1], delimiter)
+
+                # Check if first line looks like header
+                first_all_text = all(not self._is_numeric(f) for f in first_fields if f)
+                second_has_numeric = any(self._is_numeric(f) for f in second_fields if f)
+
+                if first_all_text and second_has_numeric:
+                    has_header = True
+                    self._log("Detected header based on text vs numeric analysis")
+
+            column_names = first_fields if has_header else None
+
+            return LabelFormatInfo(
+                delimiter=delimiter,
+                has_header=has_header,
+                num_columns=num_columns,
+                format_type=format_type,
+                encoding=encoding,
+                column_names=column_names,
+            )
+
+        except Exception as e:
+            return LabelFormatInfo(
+                delimiter=",",
+                has_header=False,
+                num_columns=0,
+                format_type="error",
+                encoding=encoding,
+                error=str(e),
+            )
+
+    def _split_line(self, line: str, delimiter: str) -> list[str]:
+        """Split a line by delimiter, handling quoted fields."""
+        if delimiter == " ":
+            # For space delimiter, split by any whitespace
+            return [f.strip() for f in re.split(r"\s+", line.strip()) if f.strip()]
+        else:
+            return [f.strip() for f in line.split(delimiter)]
+
+    def _is_numeric(self, s: str) -> bool:
+        """Check if string is numeric (int or float)."""
+        s = s.strip()
+        if not s:
+            return False
+        try:
+            float(s)
+            return True
+        except (ValueError, TypeError):
+            return False
+
+    def parse(
+        self,
+        file_path: Path,
+        format_hint: LabelFormatInfo | None = None,
+        column_names: list[str] | None = None,
+    ) -> pd.DataFrame:
+        """
+        Parse label file with automatic format detection + fallbacks.
+
+        Args:
+            file_path: Path to the label file
+            format_hint: Optional pre-detected format info
+            column_names: Optional column names to use
+
+        Returns:
+            Parsed DataFrame
+        """
+        if format_hint is None:
+            format_hint = self.detect_format(file_path)
+
+        self._log(f"Parsing {file_path.name} with format: {format_hint.format_type}")
+
+        # Build pandas read_csv arguments
+        kwargs: dict[str, Any] = {
+            "filepath_or_buffer": file_path,
+            "encoding": format_hint.encoding,
+            "engine": "python",  # More flexible parser
+        }
+
+        # Handle delimiter
+        if format_hint.format_type == "txt_space":
+            kwargs["sep"] = r"\s+"
+            kwargs["skipinitialspace"] = True
+        else:
+            kwargs["sep"] = format_hint.delimiter
+
+        # Handle header
+        if format_hint.has_header:
+            kwargs["header"] = 0
+        else:
+            kwargs["header"] = None
+
+        # Apply column names if provided
+        if column_names:
+            kwargs["names"] = column_names
+            kwargs["header"] = 0 if format_hint.has_header else None
+
+        # Try parsing with detected format
+        try:
+            df = pd.read_csv(**kwargs)
+            self._log(f"Parsed successfully: {df.shape}")
+            return df
+        except Exception as e:
+            self._log(f"Primary parse failed: {e}, trying fallbacks")
+
+        # Fallback 1: Try with error_bad_lines=False (for inconsistent row lengths)
+        try:
+            kwargs["on_bad_lines"] = "warn"
+            df = pd.read_csv(**kwargs)
+            self._log(f"Parsed with bad_lines handling: {df.shape}")
+            return df
+        except Exception:
+            pass
+
+        # Fallback 2: Read raw and split manually
+        try:
+            content = file_path.read_text(encoding=format_hint.encoding, errors="ignore")
+            lines = content.strip().split("\n")
+
+            # Skip header if present
+            start_idx = 1 if format_hint.has_header else 0
+            header_line = lines[0] if format_hint.has_header else None
+
+            data = []
+            for line in lines[start_idx:]:
+                fields = self._split_line(line, format_hint.delimiter)
+                if fields:
+                    data.append(fields)
+
+            # Create DataFrame
+            if header_line:
+                cols = self._split_line(header_line, format_hint.delimiter)
+                df = pd.DataFrame(data, columns=cols[: len(data[0])] if data else cols)
+            else:
+                df = pd.DataFrame(data)
+
+            self._log(f"Parsed with manual fallback: {df.shape}")
+            return df
+
+        except Exception as e:
+            raise ValueError(f"Failed to parse {file_path}: {e}") from e
+
+    def parse_multi_label(
+        self,
+        file_path: Path,
+        id_column: str = "rec_id",
+        label_column: str = "label",
+    ) -> pd.DataFrame:
+        """
+        Parse multi-label format (e.g., MLSP 2013 Birds style).
+
+        Handles format where each row is (id, label) and same id can have multiple labels.
+
+        Args:
+            file_path: Path to label file
+            id_column: Name of the ID column
+            label_column: Name of the label column
+
+        Returns:
+            DataFrame pivoted to (id, label1, label2, ...) format with 0/1 values
+        """
+        df = self.parse(file_path)
+
+        # Ensure we have at least 2 columns
+        if len(df.columns) < 2:
+            raise ValueError(f"Expected at least 2 columns, got {len(df.columns)}")
+
+        # Rename columns if numeric
+        if df.columns[0] != id_column:
+            df.columns = [id_column, label_column] + list(df.columns[2:])
+
+        # Create pivot table
+        df["value"] = 1
+        pivot = df.pivot_table(
+            index=id_column,
+            columns=label_column,
+            values="value",
+            fill_value=0,
+            aggfunc="max",
+        ).reset_index()
+
+        return pivot
+
+
+def sniff_and_read(file_path: Path) -> pd.DataFrame:
+    """
+    Convenience function to parse any label file with automatic format detection.
+
+    Args:
+        file_path: Path to label file
+
+    Returns:
+        Parsed DataFrame
+    """
+    parser = RobustLabelParser()
+    return parser.parse(file_path)
+
+
+def read_id_mapping(file_path: Path, id_col: str = "rec_id", filename_col: str = "filename") -> pd.DataFrame:
+    """
+    Read an ID-to-filename mapping file (common in audio competitions).
+
+    Args:
+        file_path: Path to mapping file
+        id_col: Name for ID column
+        filename_col: Name for filename column
+
+    Returns:
+        DataFrame with id and filename columns
+    """
+    parser = RobustLabelParser()
+    df = parser.parse(file_path)
+
+    # Ensure proper column names
+    if len(df.columns) >= 2:
+        if df.columns[0] != id_col:
+            new_cols = list(df.columns)
+            new_cols[0] = id_col
+            new_cols[1] = filename_col
+            df.columns = new_cols
+
+    return df

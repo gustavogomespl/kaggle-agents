@@ -19,6 +19,8 @@ DOMAIN_CATEGORIES = {
     ],
     # Text domains
     "nlp": ["nlp", "text", "text_classification", "sentiment", "translation"],
+    # Audio domains
+    "audio": ["audio", "audio_classification", "audio_regression", "speech", "sound"],
     # Tabular domains
     "tabular": ["tabular", "structured", "time_series"],
 }
@@ -73,6 +75,11 @@ def get_constraints_for_domain(domain: str) -> str:
         from .nlp import NLP_CONSTRAINTS
 
         parts.append(NLP_CONSTRAINTS)
+
+    elif category == "audio":
+        from .audio import AUDIO_CONSTRAINTS
+
+        parts.append(AUDIO_CONSTRAINTS)
 
     elif category == "tabular":
         from .tabular import TABULAR_CONSTRAINTS
