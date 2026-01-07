@@ -754,6 +754,34 @@ def compose_generate_prompt(
         _format_task(component, competition_info, paths),
     ]
 
+    # Non-standard label files instruction (e.g., MLSP 2013 Birds .txt files)
+    label_files = paths.get("label_files", [])
+    if label_files:
+        label_section = """
+## NON-STANDARD LABEL FILES (MANDATORY PARSING)
+
+Label files detected: """ + ", ".join(str(lf) for lf in label_files) + """
+
+YOU MUST parse these files - NEVER use dummy labels (np.zeros)!
+
+Steps:
+1. Use parse_label_file() helper (injected in code header)
+2. Create ID → label mapping
+3. For multi-label: pivot to binary matrix
+4. Match with training data BEFORE training
+
+Example for MLSP 2013 Birds:
+```python
+label_df = parse_label_file(LABEL_FILES[0])
+label_df.columns = ['rec_id', 'label']
+y_train = label_df.pivot_table(index='rec_id', columns='label', aggfunc=len, fill_value=0)
+```
+
+WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
+"""
+        parts.append("")
+        parts.append(label_section)
+
     # Runtime/objective hints (important for timeout-sensitive runs like MLE-bench).
     if context.run_mode or context.objective or context.timeout_per_component is not None:
         parts.append("")

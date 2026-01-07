@@ -383,6 +383,23 @@ MODELS_DIR.mkdir(parents=True, exist_ok=True)
                 label_paths_code += f'    Path("{lf}"),\n'
             label_paths_code += "]\n"
             path_header += label_paths_code
+            # Add helper function for parsing label files
+            path_header += """
+# MANDATORY: Parse label files - DO NOT use dummy labels (np.zeros)
+def parse_label_file(label_path):
+    '''Parse label file with automatic delimiter detection.'''
+    import csv
+    content = Path(label_path).read_text(encoding='utf-8', errors='ignore')
+    sample = '\\n'.join(content.strip().split('\\n')[:20])
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=',\\t ;|')
+        delimiter = dialect.delimiter
+    except csv.Error:
+        delimiter = ',' if ',' in sample else '\\t' if '\\t' in sample else ' '
+    if delimiter == ' ':
+        return pd.read_csv(label_path, sep=r'\\s+', engine='python', header=None)
+    return pd.read_csv(label_path, sep=delimiter, engine='python', header=None)
+"""
 
         # Add audio source path if available
         if audio_source_path:
