@@ -164,7 +164,7 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
 
     # Loading - use version-aware helper to handle PyTorch 2.4+ compatibility:
     def load_model(path, device='cpu'):
-        """Load full model checkpoint (compatible with PyTorch <2.4 and 2.4+)."""
+        # Load full model checkpoint (compatible with PyTorch <2.4 and 2.4+).
         import re
         import torch
         # PyTorch 2.4+ requires weights_only=False for full model objects
