@@ -405,11 +405,78 @@ class DeveloperAgent(
             self._last_self_evaluation = None  # Reset for next component
 
         if result.success and component.component_type == "model":
+            # === STRICT VALIDATION OF MODEL ARTIFACTS ===
+            # This replaces the old warning-only approach with comprehensive validation
+            from kaggle_agents.utils.strict_validation import (
+                validate_model_artifacts,
+                validate_prediction_quality,
+                StrictValidationConfig,
+            )
+
+            validation_config = StrictValidationConfig.from_env()
+
+            # Get expected values from state
+            expected_n_train = state.get("n_train_samples")
+            expected_n_test = state.get("n_test_samples")
+            expected_class_order = state.get("class_order")
+            problem_type = state.get("problem_type", "classification")
+
+            # Run comprehensive validation
+            validation_result = validate_model_artifacts(
+                working_dir=working_dir,
+                component_name=component.name,
+                expected_n_train=expected_n_train,
+                expected_n_test=expected_n_test,
+                expected_class_order=expected_class_order,
+                problem_type=problem_type,
+                config=validation_config,
+            )
+
+            # Report validation results
+            if validation_result.is_valid:
+                print(f"   Validated artifacts: {', '.join(validation_result.files_verified)}")
+                # Log any warnings even if valid
+                for warning in validation_result.warnings:
+                    print(f"   Warning: {warning}")
+            else:
+                # Report all errors
+                print(f"   Model {component.name} failed artifact validation:")
+                for error in validation_result.errors:
+                    print(f"      ERROR: {error}")
+                for warning in validation_result.warnings:
+                    print(f"      Warning: {warning}")
+
+                # In strict mode, mark component as failed
+                if validation_config.strict_mode:
+                    print("   STRICT MODE: Marking component as FAILED due to validation errors")
+                    result.success = False
+                    if not hasattr(result, 'errors') or result.errors is None:
+                        result.errors = []
+                    result.errors.extend(validation_result.errors)
+                else:
+                    print("   Lenient mode: Continuing despite validation errors (enable KAGGLE_AGENTS_STRICT_MODE=1 for hard failures)")
+
+            # Additionally, check for random/broken predictions if OOF exists
             oof_file = working_dir / "models" / f"oof_{component.name}.npy"
-            if not oof_file.exists():
-                print(f"WARNING: Model {component.name} did NOT save OOF file!")
-                print(f"Expected: {oof_file.name}")
-                print("Stacking will fail for this model.")
+            if oof_file.exists():
+                try:
+                    import numpy as np
+                    oof_preds = np.load(oof_file)
+                    is_quality_ok, quality_issues = validate_prediction_quality(
+                        oof_preds, problem_type=problem_type
+                    )
+                    if not is_quality_ok:
+                        print(f"   Prediction quality issues for {component.name}:")
+                        for issue in quality_issues:
+                            print(f"      - {issue}")
+                        if validation_config.strict_mode:
+                            result.success = False
+                            if not hasattr(result, 'errors') or result.errors is None:
+                                result.errors = []
+                            result.errors.extend(quality_issues)
+                except Exception as e:
+                    print(f"   Warning: Could not check prediction quality: {e}")
+            # === END STRICT VALIDATION ===
 
             submission_candidates = [
                 Path(state.get("sample_submission_path"))

@@ -343,3 +343,203 @@ def print_oof_summary(results: list[OOFSanityResult]) -> None:
         for r in results:
             if not r.is_valid:
                 print(f"      - {r.model_name}: {', '.join(r.errors)}")
+
+
+def detect_random_predictions(
+    preds: np.ndarray,
+    y_true: np.ndarray | None = None,
+    n_classes: int | None = None,
+) -> tuple[bool, list[str]]:
+    """Detect if predictions appear to be random/broken (AUC ~0.5).
+
+    This helps catch models that failed silently and produce meaningless predictions.
+
+    Args:
+        preds: Prediction array (n_samples, n_classes) or (n_samples,)
+        y_true: Ground truth labels (optional, enables AUC check)
+        n_classes: Number of classes (auto-detected if None)
+
+    Returns:
+        Tuple of (is_random, list of warning messages)
+    """
+    warnings: list[str] = []
+    is_random = False
+
+    if preds is None or preds.size == 0:
+        return True, ["Predictions are empty or None"]
+
+    # Auto-detect n_classes
+    if n_classes is None:
+        n_classes = preds.shape[1] if preds.ndim > 1 else 2
+
+    # 1. Check for constant predictions (all same value)
+    if preds.ndim == 1:
+        unique_vals = len(np.unique(np.round(preds, 4)))
+        if unique_vals <= 3:
+            warnings.append(f"Near-constant predictions: only {unique_vals} unique values")
+            is_random = True
+    else:
+        # For multiclass, check variance across rows
+        row_variance = np.var(preds, axis=0)
+        if np.max(row_variance) < 0.001:
+            warnings.append("All prediction rows are nearly identical (variance < 0.001)")
+            is_random = True
+
+    # 2. Check for uniform predictions (1/n_classes for all)
+    if preds.ndim > 1 and preds.shape[1] > 1:
+        expected_uniform = 1.0 / preds.shape[1]
+        mean_preds = preds.mean(axis=0)
+        max_deviation = np.max(np.abs(mean_preds - expected_uniform))
+        if max_deviation < 0.03:  # Very close to uniform
+            warnings.append(
+                f"Predictions suspiciously uniform (mean deviation from {expected_uniform:.3f} = {max_deviation:.4f})"
+            )
+            is_random = True
+
+    # 3. Check AUC if ground truth available
+    if y_true is not None:
+        try:
+            from sklearn.metrics import roc_auc_score
+
+            if preds.ndim > 1 and preds.shape[1] == 2:
+                auc = roc_auc_score(y_true, preds[:, 1])
+            elif preds.ndim == 1:
+                auc = roc_auc_score(y_true, preds)
+            elif preds.ndim > 1 and preds.shape[1] > 2:
+                auc = roc_auc_score(y_true, preds, multi_class="ovr", average="weighted")
+            else:
+                auc = None
+
+            if auc is not None:
+                if 0.48 < auc < 0.52:
+                    warnings.append(f"AUC = {auc:.4f} (suspiciously close to random 0.5)")
+                    is_random = True
+                elif auc < 0.45:
+                    warnings.append(f"AUC = {auc:.4f} (worse than random - check label alignment)")
+                    is_random = True
+
+        except Exception:
+            pass  # Skip AUC check if it fails
+
+    # 4. Check for empty/zero rows (unfilled OOF)
+    if preds.ndim > 1:
+        empty_rows = np.sum(preds.sum(axis=1) < 1e-10)
+    else:
+        empty_rows = np.sum(np.abs(preds) < 1e-10)
+
+    if empty_rows > 0:
+        empty_pct = 100 * empty_rows / preds.shape[0]
+        warnings.append(f"{empty_rows} empty rows ({empty_pct:.1f}% - unfilled OOF predictions)")
+        if empty_pct > 10:
+            is_random = True
+
+    return is_random, warnings
+
+
+def check_probability_sanity(
+    preds: np.ndarray,
+    problem_type: str = "classification",
+) -> tuple[bool, list[str]]:
+    """Check that predictions are valid probabilities.
+
+    Args:
+        preds: Prediction array
+        problem_type: "classification" (must be in [0,1]), "regression" (any float)
+
+    Returns:
+        Tuple of (is_valid, list of error messages)
+    """
+    errors: list[str] = []
+    is_valid = True
+
+    if problem_type == "regression":
+        # For regression, only check for NaN/Inf
+        if np.any(~np.isfinite(preds)):
+            nan_count = np.sum(np.isnan(preds))
+            inf_count = np.sum(np.isinf(preds))
+            errors.append(f"Contains {nan_count} NaN and {inf_count} Inf values")
+            is_valid = False
+        return is_valid, errors
+
+    # Classification checks
+    # 1. NaN/Inf check
+    if np.any(~np.isfinite(preds)):
+        nan_count = np.sum(np.isnan(preds))
+        inf_count = np.sum(np.isinf(preds))
+        errors.append(f"Contains {nan_count} NaN and {inf_count} Inf values")
+        is_valid = False
+
+    # 2. Range check [0, 1]
+    pred_min, pred_max = preds.min(), preds.max()
+    if pred_min < -0.001:
+        errors.append(f"Predictions below 0: min = {pred_min:.6f}")
+        is_valid = False
+    if pred_max > 1.001:
+        errors.append(f"Predictions above 1: max = {pred_max:.6f}")
+        is_valid = False
+
+    # 3. For multiclass, check row sums
+    if preds.ndim > 1 and preds.shape[1] > 2:
+        row_sums = preds.sum(axis=1)
+        bad_rows = np.sum(np.abs(row_sums - 1.0) > 0.05)
+        if bad_rows > 0:
+            bad_pct = 100 * bad_rows / preds.shape[0]
+            errors.append(
+                f"{bad_rows} rows ({bad_pct:.1f}%) do not sum to 1.0 (not normalized)"
+            )
+            # This is a warning, not an error (can be fixed by normalization)
+
+    return is_valid, errors
+
+
+def validate_oof_quality(
+    oof_path: Path,
+    test_path: Path,
+    y_true: np.ndarray | None = None,
+    problem_type: str = "classification",
+) -> tuple[bool, list[str]]:
+    """Comprehensive OOF quality validation.
+
+    Combines probability sanity checks with random prediction detection.
+
+    Args:
+        oof_path: Path to OOF predictions file
+        test_path: Path to test predictions file
+        y_true: Ground truth labels (optional)
+        problem_type: "classification" or "regression"
+
+    Returns:
+        Tuple of (is_valid, list of all issues found)
+    """
+    all_issues: list[str] = []
+    is_valid = True
+
+    # Load predictions
+    try:
+        oof = np.load(oof_path)
+        test = np.load(test_path)
+    except Exception as e:
+        return False, [f"Failed to load predictions: {e}"]
+
+    # Check OOF probability sanity
+    oof_valid, oof_errors = check_probability_sanity(oof, problem_type)
+    if not oof_valid:
+        all_issues.extend([f"OOF: {e}" for e in oof_errors])
+        is_valid = False
+
+    # Check test probability sanity
+    test_valid, test_errors = check_probability_sanity(test, problem_type)
+    if not test_valid:
+        all_issues.extend([f"Test: {e}" for e in test_errors])
+        is_valid = False
+
+    # Check for random predictions (OOF only, since we have labels)
+    if problem_type == "classification":
+        is_random, random_warnings = detect_random_predictions(
+            oof, y_true=y_true, n_classes=oof.shape[1] if oof.ndim > 1 else 2
+        )
+        if is_random:
+            all_issues.extend([f"OOF quality: {w}" for w in random_warnings])
+            # Don't set is_valid=False for warnings, but log them
+
+    return is_valid, all_issues

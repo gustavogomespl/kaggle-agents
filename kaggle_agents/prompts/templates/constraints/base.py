@@ -16,6 +16,48 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 - Clamp predictions: `np.clip(predictions, 0, 1)` before saving
 - Match sample_submission.csv exactly: columns, IDs, shape
 
+### 2a. PROBABILITY OUTPUT VALIDATION (CRITICAL - PREVENTS AUC ~0.5)
+For classification, ALWAYS validate predictions BEFORE saving OOF and test files:
+
+```python
+def validate_and_fix_probabilities(preds, is_multiclass=True, name="predictions"):
+    '''Validate and fix probability predictions. Call for BOTH OOF and test.'''
+    import numpy as np
+
+    # 1. Check for NaN/Inf FIRST (must fix before other checks)
+    if np.any(~np.isfinite(preds)):
+        nan_count = np.sum(~np.isfinite(preds))
+        print(f'WARNING: {name} contains {nan_count} NaN/Inf values, replacing with 0.5')
+        preds = np.nan_to_num(preds, nan=0.5, posinf=1.0, neginf=0.0)
+
+    # 2. Range check and clipping
+    if np.any(preds < 0) or np.any(preds > 1):
+        print(f'WARNING: {name} outside [0,1]: min={preds.min():.4f}, max={preds.max():.4f}, clipping')
+        preds = np.clip(preds, 1e-15, 1 - 1e-15)
+
+    # 3. Multiclass: normalize rows to sum=1 (CRITICAL for log_loss)
+    if is_multiclass and preds.ndim > 1 and preds.shape[1] > 1:
+        row_sums = preds.sum(axis=1, keepdims=True)
+        bad_rows = np.sum(np.abs(row_sums.flatten() - 1.0) > 0.01)
+        if bad_rows > 0:
+            print(f'WARNING: {name} has {bad_rows} rows not summing to 1.0, renormalizing')
+            preds = preds / np.maximum(row_sums, 1e-10)
+
+    # 4. Check for empty rows (indicates unfilled OOF - CRITICAL BUG)
+    if preds.ndim > 1:
+        empty = np.sum(preds.sum(axis=1) < 1e-10)
+    else:
+        empty = np.sum(np.abs(preds) < 1e-10)
+    if empty > 0:
+        print(f'CRITICAL WARNING: {name} has {empty} empty/zero rows (unfilled predictions!)')
+
+    return preds
+
+# MANDATORY: Call BEFORE saving OOF and test predictions
+oof_preds = validate_and_fix_probabilities(oof_preds, is_multiclass=(n_classes > 2), name="OOF")
+test_preds = validate_and_fix_probabilities(test_preds, is_multiclass=(n_classes > 2), name="Test")
+```
+
 ### 2b. Multi-Modal Hybrid Best Practice
 If a competition has BOTH raw image directories (train/, test/, images/) AND a train.csv
 with many numeric feature columns, prioritize a HYBRID model:

@@ -45,6 +45,9 @@ class EnsembleAgent:
     ) -> dict[str, tuple[Path, Path]]:
         """Validate and filter OOFs by row and class alignment.
 
+        This method now tracks and reports all skip reasons for better debugging
+        of ensemble validation failures.
+
         Args:
             models_dir: Directory containing model artifacts
             train_ids: IDs from original train.csv (expected row order)
@@ -53,43 +56,94 @@ class EnsembleAgent:
         Returns:
             Dictionary of valid prediction pairs (name -> (oof_path, test_path))
         """
+        import os
         valid_pairs: dict[str, tuple[Path, Path]] = {}
+        skip_reasons: list[str] = []  # Track WHY each model was skipped
+
+        strict_mode = os.getenv("KAGGLE_AGENTS_STRICT_MODE", "0").lower() in {"1", "true", "yes"}
 
         for oof_path in models_dir.glob("oof_*.npy"):
             name = oof_path.stem.replace("oof_", "", 1)
             test_path = models_dir / f"test_{name}.npy"
 
+            # Check test file exists
             if not test_path.exists():
+                skip_reasons.append(f"{name}: Missing test_{name}.npy")
                 continue
 
             # 1. Verify class_order
             class_order_path = models_dir / f"class_order_{name}.npy"
+            class_order_validated = False
+
             if class_order_path.exists():
-                saved_order = np.load(class_order_path, allow_pickle=True).tolist()
-                if saved_order != expected_class_order:
-                    print(f"   ⚠️ {name}: class order mismatch, skipping")
+                try:
+                    saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+                    if saved_order != expected_class_order:
+                        skip_reasons.append(
+                            f"{name}: Class order mismatch - "
+                            f"model has {saved_order[:2]}..., expected {expected_class_order[:2]}..."
+                        )
+                        continue
+                    class_order_validated = True
+                except Exception as e:
+                    skip_reasons.append(f"{name}: Failed to load class_order: {e}")
                     continue
-            # If class_order file doesn't exist, try global class_order.npy
             else:
+                # Try global class_order.npy as fallback
                 global_class_order = models_dir / "class_order.npy"
                 if global_class_order.exists():
-                    saved_order = np.load(global_class_order, allow_pickle=True).tolist()
-                    if saved_order != expected_class_order:
-                        print(f"   ⚠️ {name}: global class order mismatch, skipping")
+                    try:
+                        saved_order = np.load(global_class_order, allow_pickle=True).tolist()
+                        if saved_order != expected_class_order:
+                            skip_reasons.append(
+                                f"{name}: Global class order mismatch - "
+                                f"has {saved_order[:2]}..., expected {expected_class_order[:2]}..."
+                            )
+                            continue
+                        class_order_validated = True
+                    except Exception as e:
+                        skip_reasons.append(f"{name}: Failed to load global class_order: {e}")
                         continue
+
+            # Warn about missing class order (but don't skip in lenient mode)
+            if not class_order_validated:
+                msg = f"{name}: Missing class_order file (alignment cannot be verified)"
+                if strict_mode:
+                    skip_reasons.append(msg)
+                    continue
+                else:
+                    print(f"   ⚠️ {msg} - including with caution")
 
             # 2. Verify train_ids (row order)
             train_ids_path = models_dir / f"train_ids_{name}.npy"
             if train_ids_path.exists():
-                saved_ids = np.load(train_ids_path, allow_pickle=True)
-                if not np.array_equal(saved_ids, train_ids):
-                    print(f"   ⚠️ {name}: train IDs mismatch, skipping")
+                try:
+                    saved_ids = np.load(train_ids_path, allow_pickle=True)
+                    if not np.array_equal(saved_ids, train_ids):
+                        skip_reasons.append(f"{name}: Train IDs mismatch (row order differs)")
+                        continue
+                except Exception as e:
+                    skip_reasons.append(f"{name}: Failed to load train_ids: {e}")
                     continue
             else:
-                # Metadata missing: enter with caution
-                print(f"   ⚠️ {name}: alignment metadata missing, entering with caution")
+                # Metadata missing: warn but include in lenient mode
+                if strict_mode:
+                    skip_reasons.append(f"{name}: Missing train_ids file (strict mode)")
+                    continue
+                else:
+                    print(f"   ⚠️ {name}: Missing train_ids file - including with caution")
 
             valid_pairs[name] = (oof_path, test_path)
+
+        # === PRINT SKIP REASON SUMMARY ===
+        if skip_reasons:
+            print("\n   ENSEMBLE ALIGNMENT VALIDATION - SKIPPED MODELS:")
+            print(f"   Total skipped: {len(skip_reasons)}")
+            for reason in skip_reasons[:10]:  # Show first 10
+                print(f"      - {reason}")
+            if len(skip_reasons) > 10:
+                print(f"      ... and {len(skip_reasons) - 10} more")
+            print()
 
         return valid_pairs
 
