@@ -402,7 +402,22 @@ def detect_traditional_format(working_dir: Path) -> dict[str, str] | None:
             extensions = {f.suffix.lower() for f in train_files[:100]}
             media_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".wav", ".mp3", ".flac"}
             if extensions & media_extensions:
-                return {"train": str(train_dir), "test": str(test_dir)}
+                # For image/audio competitions, we also need a label CSV
+                # Otherwise we can't know the labels for training
+                label_csv_patterns = [
+                    "train.csv", "train_labels.csv", "labels.csv",
+                    "metadata.csv", "train_metadata.csv",
+                ]
+                has_label_csv = any(
+                    (working_dir / pattern).exists() for pattern in label_csv_patterns
+                )
+
+                if has_label_csv:
+                    return {"train": str(train_dir), "test": str(test_dir)}
+                else:
+                    # Media files exist but no label CSV - this is a non-standard format
+                    # Return None to trigger LLM-based discovery
+                    return None
 
     return None
 

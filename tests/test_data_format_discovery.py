@@ -42,8 +42,8 @@ class TestDetectTraditionalFormat:
         assert result is not None
         assert "train" in result
 
-    def test_detects_image_directories(self, tmp_path: Path) -> None:
-        """Should detect train/test directories with images."""
+    def test_detects_image_directories_with_label_csv(self, tmp_path: Path) -> None:
+        """Should detect train/test directories with images when label CSV exists."""
         train_dir = tmp_path / "train"
         test_dir = tmp_path / "test"
         train_dir.mkdir()
@@ -54,11 +54,38 @@ class TestDetectTraditionalFormat:
         (train_dir / "img2.jpg").write_bytes(b"fake image data")
         (test_dir / "img3.jpg").write_bytes(b"fake image data")
 
+        # Create label CSV - required for image competitions
+        (tmp_path / "train.csv").write_text("id,label\nimg1,0\nimg2,1")
+
         result = detect_traditional_format(tmp_path)
 
         assert result is not None
         assert "train" in result
         assert "test" in result
+
+    def test_returns_none_for_image_dirs_without_label_csv(self, tmp_path: Path) -> None:
+        """Should return None when image dirs exist but no label CSV.
+
+        This is the MLSP-2013-Birds scenario: train/test dirs have audio/images
+        but labels are in non-standard .txt files.
+        """
+        train_dir = tmp_path / "train"
+        test_dir = tmp_path / "test"
+        train_dir.mkdir()
+        test_dir.mkdir()
+
+        # Create sample audio files (like MLSP-2013-Birds)
+        (train_dir / "audio1.wav").write_bytes(b"fake audio data")
+        (train_dir / "audio2.wav").write_bytes(b"fake audio data")
+        (test_dir / "audio3.wav").write_bytes(b"fake audio data")
+
+        # No label CSV - labels are in non-standard format
+        # (e.g., essential_data/rec_labels_test_hidden.txt)
+
+        result = detect_traditional_format(tmp_path)
+
+        # Should return None to trigger LLM-based discovery
+        assert result is None
 
     def test_returns_none_for_nonstandard_format(self, tmp_path: Path) -> None:
         """Should return None when no standard format is found."""
@@ -263,3 +290,136 @@ class TestDataFormatDiscoveryIntegration:
         file_names = [f["name"] for f in files]
         assert any("rec_id2filename" in n for n in file_names)
         assert any("rec_labels" in n for n in file_names)
+
+
+class TestAudioDomainDetection:
+    """Tests for audio domain detection in DomainDetector.
+
+    These tests verify that audio competitions are correctly detected even when
+    images (spectrograms) exist in train/test directories.
+    """
+
+    def test_detects_audio_when_spectrograms_in_train_dir(self, tmp_path: Path) -> None:
+        """Should detect audio_classification when audio files exist in nested dirs.
+
+        This is the MLSP-2013-Birds scenario:
+        - train/test dirs have spectrogram images (.bmp)
+        - Audio files (.wav) are in essential_data/src_wavs/
+        """
+        from kaggle_agents.domain.detector import DomainDetector
+        from kaggle_agents.core.state import CompetitionInfo
+
+        # Create train/test with spectrograms (images)
+        train_dir = tmp_path / "train"
+        test_dir = tmp_path / "test"
+        train_dir.mkdir()
+        test_dir.mkdir()
+
+        for i in range(20):
+            (train_dir / f"spectrogram_{i}.bmp").write_bytes(b"fake image")
+            (test_dir / f"spectrogram_{i}.bmp").write_bytes(b"fake image")
+
+        # Create audio files in nested directory (like essential_data/src_wavs)
+        essential = tmp_path / "essential_data"
+        src_wavs = essential / "src_wavs"
+        src_wavs.mkdir(parents=True)
+
+        for i in range(50):
+            (src_wavs / f"audio_{i}.wav").write_bytes(b"fake audio data")
+
+        # Create label files (non-standard format)
+        (essential / "rec_labels.txt").write_text("0,1,2\n1,3,4")
+        (essential / "CVfolds.txt").write_text("0,0\n1,1")
+
+        # Detect domain
+        detector = DomainDetector(llm=None)
+        competition_info = CompetitionInfo(
+            name="mlsp-2013-birds",
+            description="Bird species identification from audio recordings",
+            evaluation_metric="auc",
+            problem_type="classification",
+        )
+
+        domain, confidence = detector.detect(competition_info, tmp_path)
+
+        # Should detect audio, NOT image
+        assert domain == "audio_classification", f"Expected audio_classification, got {domain}"
+        assert confidence >= 0.85
+
+    def test_detects_audio_when_only_audio_files_exist(self, tmp_path: Path) -> None:
+        """Should detect audio_classification when only audio files exist."""
+        from kaggle_agents.domain.detector import DomainDetector
+        from kaggle_agents.core.state import CompetitionInfo
+
+        # Create audio files directory
+        audio_dir = tmp_path / "audio"
+        audio_dir.mkdir()
+
+        for i in range(30):
+            (audio_dir / f"sample_{i}.wav").write_bytes(b"fake audio data")
+
+        detector = DomainDetector(llm=None)
+        competition_info = CompetitionInfo(
+            name="audio-competition",
+            description="Audio classification task",
+            evaluation_metric="accuracy",
+            problem_type="classification",
+        )
+
+        domain, confidence = detector.detect(competition_info, tmp_path)
+
+        assert domain == "audio_classification"
+        assert confidence >= 0.85
+
+    def test_audio_in_nested_directory_detected(self, tmp_path: Path) -> None:
+        """Should detect audio files in deeply nested directories."""
+        from kaggle_agents.domain.detector import DomainDetector
+        from kaggle_agents.core.state import CompetitionInfo
+
+        # Create deeply nested audio directory (like essential_data/src_wavs/)
+        nested = tmp_path / "data" / "raw" / "audio"
+        nested.mkdir(parents=True)
+
+        for i in range(15):
+            (nested / f"recording_{i}.mp3").write_bytes(b"fake audio data")
+
+        detector = DomainDetector(llm=None)
+        competition_info = CompetitionInfo(
+            name="test-comp",
+            description="Audio task",
+            evaluation_metric="",
+            problem_type="",
+        )
+
+        domain, confidence = detector.detect(competition_info, tmp_path)
+
+        assert domain == "audio_classification"
+
+    def test_pure_image_competition_still_detected(self, tmp_path: Path) -> None:
+        """Should still correctly detect image_classification when no audio exists."""
+        from kaggle_agents.domain.detector import DomainDetector
+        from kaggle_agents.core.state import CompetitionInfo
+
+        # Create image directories (no audio)
+        train_dir = tmp_path / "train"
+        test_dir = tmp_path / "test"
+        train_dir.mkdir()
+        test_dir.mkdir()
+
+        for i in range(30):
+            (train_dir / f"image_{i}.jpg").write_bytes(b"fake image")
+            (test_dir / f"image_{i}.jpg").write_bytes(b"fake image")
+
+        detector = DomainDetector(llm=None)
+        competition_info = CompetitionInfo(
+            name="image-comp",
+            description="Image classification task",
+            evaluation_metric="accuracy",
+            problem_type="classification",
+        )
+
+        domain, confidence = detector.detect(competition_info, tmp_path)
+
+        # Should still detect image when no audio exists
+        assert domain == "image_classification"
+        assert confidence >= 0.85
