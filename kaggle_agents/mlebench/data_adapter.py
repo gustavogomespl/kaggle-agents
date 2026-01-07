@@ -742,14 +742,16 @@ class MLEBenchDataAdapter:
                             rel_path = lf.relative_to(public_dir)
                             print(f"   Label file found: {rel_path}")
 
-                    # Search for audio source directory
-                    if data_type == "audio" and info.audio_source_path is None:
+                    # Search for audio source directory (always search, as audio may coexist
+                    # with spectrograms like in MLSP 2013 Birds competition)
+                    if info.audio_source_path is None:
                         audio_src = self._find_audio_source_dir(subdir_path)
                         if audio_src:
                             info.audio_source_path = audio_src
                             rel_path = audio_src.relative_to(public_dir)
                             print(f"   Audio source dir: {rel_path}/")
-                            # Also set train_path to audio source if not already set
+                            # Fallback: set train_path to audio source if not already set
+                            # This handles audio-only competitions where training data is nested
                             if info.train_path is None:
                                 info.train_path = audio_src
                                 print(f"   Train dir (from audio source): {rel_path}/")
