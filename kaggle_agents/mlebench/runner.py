@@ -142,6 +142,17 @@ class MLEBenchRunner:
 
             output = result.stdout + result.stderr
 
+            # Check for common MLE-bench infrastructure errors
+            if "Private directory is empty" in output:
+                return {
+                    "valid_submission": False,
+                    "error": (
+                        "MLE-bench private directory is empty - ground truth data not available for grading. "
+                        "Run 'mlebench prepare {competition}' to download full dataset."
+                    ).format(competition=competition_id),
+                    "grading_unavailable": True,
+                }
+
             # Parse JSON from output
             try:
                 json_start = output.find("{")
@@ -154,7 +165,7 @@ class MLEBenchRunner:
 
             return {
                 "valid_submission": False,
-                "error": f"Could not parse grading output: {output[:500]}",
+                "error": f"Could not parse mlebench output (exit={result.returncode}): {output[:500]}",
             }
 
         except subprocess.TimeoutExpired:
@@ -391,12 +402,23 @@ class MLEBenchRunner:
         """Display evaluation results."""
         table = Table(title="MLE-bench Results", show_header=True, header_style="bold magenta")
         table.add_column("Metric", style="cyan", width=25)
-        table.add_column("Value", style="green")
+        table.add_column("Value", style="green", max_width=50)
 
         table.add_row("Competition", result.competition_id)
         table.add_row("Success", "Yes" if result.success else "No")
-        table.add_row("Valid Submission", "Yes" if result.valid_submission else "No")
-        table.add_row("Score", f"{result.score:.4f}" if result.score else "N/A")
+
+        # Check if grading was unavailable (e.g., private directory empty)
+        grading_unavailable = (
+            result.grading_output
+            and result.grading_output.get("grading_unavailable", False)
+        )
+        if grading_unavailable:
+            table.add_row("Grading", "Unavailable (no ground truth)")
+            table.add_row("Valid Submission", "Unknown")
+            table.add_row("Score", "N/A (grading unavailable)")
+        else:
+            table.add_row("Valid Submission", "Yes" if result.valid_submission else "No")
+            table.add_row("Score", f"{result.score:.4f}" if result.score else "N/A")
 
         medals = []
         if result.gold_medal:
@@ -412,7 +434,9 @@ class MLEBenchRunner:
         table.add_row("Components", str(result.components_implemented))
 
         if result.error:
-            table.add_row("Error", result.error[:100])
+            # Show more of the error, wrapped properly
+            error_display = result.error[:200] if len(result.error) > 200 else result.error
+            table.add_row("Error", error_display)
 
         console.print("\n")
         console.print(table)
