@@ -528,10 +528,12 @@ def iteration_control_node(state: KaggleState) -> dict[str, Any]:
         "last_updated": datetime.now(),
     }
 
-    # If this is a refinement iteration (> 1), reset component index
+    # If this is a refinement iteration (> 1), reset component index and skip flag
     if new_iteration > 1:
         print("   🔄 Starting refinement iteration - resetting component index")
         updates["current_component_index"] = 0
+        # Reset skip_remaining_components so new iteration can run all components
+        updates["skip_remaining_components"] = False
 
     return updates
 
@@ -861,16 +863,34 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     print(f"   Needs refinement: {needs_refinement}")
     print(f"   Run mode: {run_mode}")
 
-    # Explicit skip flag
-    if state.get("skip_remaining_components"):
-        print("   ⏩ skip_remaining_components=True - Ending")
-        return "end"
-
-    # Check for medal achievement (success - stop)
+    # Check medal status
+    has_gold = False
+    has_any_medal = False
     if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
-        if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
-            print("   🏅 MEDAL ACHIEVED - Success!")
+        has_gold = mlebench_grade.get("gold_medal", False)
+        has_any_medal = any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"])
+
+    # Handle skip flag - in MLE-bench mode, only end if gold or max iterations reached
+    if state.get("skip_remaining_components"):
+        if run_mode == "mlebench":
+            if has_gold:
+                print("   🥇 GOLD MEDAL ACHIEVED - Ending")
+                return "end"
+            elif current_iteration >= max_iterations:
+                print(f"   ⏱️  Max iterations reached with medal ({current_iteration}/{max_iterations})")
+                return "end"
+            else:
+                # Reset skip flag and continue refining for better medal
+                print(f"   🔄 Medal achieved but continuing for gold (iteration {current_iteration + 1}/{max_iterations})")
+                # Note: State update happens in iteration_control_node, not here
+        else:
+            print("   ⏩ skip_remaining_components=True - Ending")
             return "end"
+
+    # Check for gold medal achievement (always stop on gold)
+    if has_gold:
+        print("   🥇 GOLD MEDAL ACHIEVED - Success!")
+        return "end"
 
     # Max iterations reached
     if current_iteration >= max_iterations:
