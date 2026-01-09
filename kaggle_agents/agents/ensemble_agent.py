@@ -19,6 +19,28 @@ from ..utils.llm_utils import get_text_content
 from ..utils.oof_validation import print_oof_summary, validate_class_order, validate_oof_stack
 
 
+def _normalize_class_order(order: list) -> list[str]:
+    """Normalize class order for comparison.
+
+    Handles whitespace and encoding differences that cause false mismatches.
+    Example: 'NGT - Incomplete' vs 'NGT - Incompletely Imaged' would still differ,
+    but 'ETT - Abnormal ' (trailing space) would match 'ETT - Abnormal'.
+    """
+    if not order:
+        return []
+    return [str(c).strip() for c in order]
+
+
+def _class_orders_match(order1: list, order2: list) -> bool:
+    """Compare two class orders with normalization.
+
+    Returns True if orders are equivalent after normalization.
+    """
+    norm1 = _normalize_class_order(order1)
+    norm2 = _normalize_class_order(order2)
+    return norm1 == norm2
+
+
 class EnsembleAgent:
     """Agent responsible for creating model ensembles."""
 
@@ -78,10 +100,11 @@ class EnsembleAgent:
             if class_order_path.exists():
                 try:
                     saved_order = np.load(class_order_path, allow_pickle=True).tolist()
-                    if saved_order != expected_class_order:
+                    if not _class_orders_match(saved_order, expected_class_order):
                         skip_reasons.append(
                             f"{name}: Class order mismatch - "
-                            f"model has {saved_order[:2]}..., expected {expected_class_order[:2]}..."
+                            f"model has {_normalize_class_order(saved_order)[:2]}..., "
+                            f"expected {_normalize_class_order(expected_class_order)[:2]}..."
                         )
                         continue
                     class_order_validated = True
@@ -94,10 +117,11 @@ class EnsembleAgent:
                 if global_class_order.exists():
                     try:
                         saved_order = np.load(global_class_order, allow_pickle=True).tolist()
-                        if saved_order != expected_class_order:
+                        if not _class_orders_match(saved_order, expected_class_order):
                             skip_reasons.append(
                                 f"{name}: Global class order mismatch - "
-                                f"has {saved_order[:2]}..., expected {expected_class_order[:2]}..."
+                                f"has {_normalize_class_order(saved_order)[:2]}..., "
+                                f"expected {_normalize_class_order(expected_class_order)[:2]}..."
                             )
                             continue
                         class_order_validated = True
@@ -929,11 +953,11 @@ class EnsembleAgent:
             sample_sub = pd.read_csv(sample_submission_path)
             expected_order = sample_sub.columns[1:].tolist()
 
-            if saved_order != expected_order:
+            if not _class_orders_match(saved_order, expected_order):
                 return False, (
                     f"Class order mismatch! "
-                    f"Saved: {saved_order[:5]}... "
-                    f"Expected: {expected_order[:5]}..."
+                    f"Saved: {_normalize_class_order(saved_order)[:5]}... "
+                    f"Expected: {_normalize_class_order(expected_order)[:5]}..."
                 )
 
             return True, f"Class order validated ({len(saved_order)} classes)"
@@ -985,11 +1009,12 @@ class EnsembleAgent:
                 saved_order = np.load(class_file, allow_pickle=True).tolist()
                 model_name = class_file.stem.replace("class_order_", "").replace("classes_", "")
 
-                if saved_order == expected_order:
+                if _class_orders_match(saved_order, expected_order):
                     valid_models.append(model_name)
                 else:
                     invalid_models.append(
-                        f"{model_name}: expected {expected_order[:3]}..., got {saved_order[:3]}..."
+                        f"{model_name}: expected {_normalize_class_order(expected_order)[:3]}..., "
+                        f"got {_normalize_class_order(saved_order)[:3]}..."
                     )
             except Exception as e:
                 invalid_models.append(f"{class_file.name}: load error - {e}")

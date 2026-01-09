@@ -2290,23 +2290,129 @@ Ensemble: {sol.ensemble_approach or "N/A"}
         """
         print(f"\n   Eureka: Generating {n_candidates} candidate plans...")
 
-        strategies = [
-            {
-                "name": "conservative",
-                "prompt_modifier": "Focus on proven, reliable approaches. Use well-established models like XGBoost, LightGBM. Prioritize stability over novelty.",
-                "model_preference": ["xgboost", "lightgbm", "random_forest"],
-            },
-            {
-                "name": "aggressive",
-                "prompt_modifier": "Focus on innovative approaches. Prioritize novel feature engineering, creative ensembles, and cutting-edge techniques.",
-                "model_preference": ["catboost", "neural_network", "stacking"],
-            },
-            {
-                "name": "balanced",
-                "prompt_modifier": "Mix proven models with creative features. Balance stability with innovation.",
-                "model_preference": ["xgboost", "lightgbm", "catboost"],
-            },
-        ]
+        # Domain-aware strategy selection
+        domain = state.get("domain_detected", "tabular")
+
+        # Define domain groups for cleaner matching
+        IMAGE_CLASSIFICATION_DOMAINS = {
+            "image_classification",
+            "image_regression",
+            "computer_vision",
+            "image",  # legacy
+        }
+        IMAGE_SEGMENTATION_DOMAINS = {
+            "image_segmentation",
+            "image_to_image",
+            "object_detection",
+        }
+        NLP_DOMAINS = {
+            "nlp",
+            "text_classification",
+            "text_regression",
+            "seq_to_seq",
+        }
+        AUDIO_DOMAINS = {
+            "audio_classification",
+            "audio_regression",
+        }
+
+        if domain in IMAGE_CLASSIFICATION_DOMAINS:
+            # IMAGE CLASSIFICATION strategies - use CNN backbones
+            strategies = [
+                {
+                    "name": "conservative",
+                    "prompt_modifier": "Use proven CNN architectures: EfficientNet-B0/B3, ResNet50. Focus on stable training with pretrained ImageNet weights.",
+                    "model_preference": ["efficientnet_b0", "resnet50", "efficientnet_b3"],
+                },
+                {
+                    "name": "aggressive",
+                    "prompt_modifier": "Use SOTA architectures: ResNet200d, EfficientNet-B5/B7, ConvNeXt. Apply heavy augmentation (Cutmix, Mixup). Full fine-tuning.",
+                    "model_preference": ["resnet200d", "efficientnet_b5", "convnext", "swin"],
+                },
+                {
+                    "name": "balanced",
+                    "prompt_modifier": "Use mid-size models: EfficientNet-B3/B4, ResNet101. Balance speed with accuracy. Use TTA for inference.",
+                    "model_preference": ["efficientnet_b3", "efficientnet_b4", "resnet101"],
+                },
+            ]
+        elif domain in IMAGE_SEGMENTATION_DOMAINS:
+            # IMAGE SEGMENTATION / OBJECT DETECTION strategies - use encoder-decoder architectures
+            strategies = [
+                {
+                    "name": "conservative",
+                    "prompt_modifier": "Use proven segmentation architectures: U-Net with ResNet34 encoder, FPN. Focus on stable training with pretrained encoders.",
+                    "model_preference": ["unet_resnet34", "fpn", "deeplabv3"],
+                },
+                {
+                    "name": "aggressive",
+                    "prompt_modifier": "Use SOTA segmentation: U-Net++ with EfficientNet-B5 encoder, HRNet, Mask R-CNN. Apply heavy augmentation.",
+                    "model_preference": ["unet_plusplus", "hrnet", "mask_rcnn", "segformer"],
+                },
+                {
+                    "name": "balanced",
+                    "prompt_modifier": "Use mid-size segmentation models: U-Net with EfficientNet-B3 encoder. Balance speed with accuracy.",
+                    "model_preference": ["unet_effb3", "deeplabv3_plus", "pan"],
+                },
+            ]
+        elif domain in NLP_DOMAINS:
+            # NLP domain strategies
+            strategies = [
+                {
+                    "name": "conservative",
+                    "prompt_modifier": "Use proven NLP models: DistilBERT, RoBERTa-base. Focus on stable training.",
+                    "model_preference": ["distilbert", "roberta_base", "bert_base"],
+                },
+                {
+                    "name": "aggressive",
+                    "prompt_modifier": "Use large models: DeBERTa-v3, RoBERTa-large. Apply advanced techniques like MLM pretraining.",
+                    "model_preference": ["deberta_v3", "roberta_large", "longformer"],
+                },
+                {
+                    "name": "balanced",
+                    "prompt_modifier": "Mix efficient models with strong performance. Use ensemble of BERT variants.",
+                    "model_preference": ["roberta_base", "deberta", "albert"],
+                },
+            ]
+        elif domain in AUDIO_DOMAINS:
+            # AUDIO domain strategies
+            strategies = [
+                {
+                    "name": "conservative",
+                    "prompt_modifier": "Use proven audio models: mel-spectrogram + EfficientNet, simple CNN. Focus on stable preprocessing.",
+                    "model_preference": ["efficientnet_audio", "resnet_audio", "simple_cnn"],
+                },
+                {
+                    "name": "aggressive",
+                    "prompt_modifier": "Use SOTA audio: AST (Audio Spectrogram Transformer), wav2vec2, PANN. Heavy augmentation (SpecAugment, mixup).",
+                    "model_preference": ["ast", "wav2vec2", "pann", "whisper"],
+                },
+                {
+                    "name": "balanced",
+                    "prompt_modifier": "Use mid-size audio models: EfficientNet-B2 on mel-specs. Balance preprocessing with model complexity.",
+                    "model_preference": ["efficientnet_b2_audio", "sed_model", "cnn_transformer"],
+                },
+            ]
+        else:
+            # TABULAR domain strategies (default for tabular, time_series, multi_modal, unknown)
+            strategies = [
+                {
+                    "name": "conservative",
+                    "prompt_modifier": "Focus on proven, reliable approaches. Use well-established models like XGBoost, LightGBM. Prioritize stability over novelty.",
+                    "model_preference": ["xgboost", "lightgbm", "random_forest"],
+                },
+                {
+                    "name": "aggressive",
+                    "prompt_modifier": "Focus on innovative approaches. Prioritize novel feature engineering, creative ensembles, and cutting-edge techniques.",
+                    "model_preference": ["catboost", "neural_network", "stacking"],
+                },
+                {
+                    "name": "balanced",
+                    "prompt_modifier": "Mix proven models with creative features. Balance stability with innovation.",
+                    "model_preference": ["xgboost", "lightgbm", "catboost"],
+                },
+            ]
+
+        print(f"   📊 Domain: {domain}, using domain-specific strategies")
 
         candidate_plans = []
 

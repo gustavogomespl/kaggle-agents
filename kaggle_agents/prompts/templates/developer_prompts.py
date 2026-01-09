@@ -155,53 +155,73 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
    print(f"Final Validation Performance: {best_val_loss:.6f}")
    ```
 
-11. MODEL CHECKPOINTING - FULL MODEL SAVE (CRITICAL):
-    Due to disjointed train/inference environments, ALWAYS save the FULL MODEL object.
+11. MODEL CHECKPOINTING - STATE_DICT WITH ARCHITECTURE METADATA (CRITICAL):
+    PyTorch 2.4+ defaults to `weights_only=True` which BREAKS full model pickle.
+    ALWAYS save state_dict + architecture metadata for cross-environment compatibility.
 
     ```python
-    # ✅ CORRECT (MANDATORY): Full model save - preserves architecture + weights
-    torch.save(model, 'model.pth')
+    # ✅ CORRECT (MANDATORY): State dict with architecture metadata
+    import json
 
-    # Loading - use version-aware helper to handle PyTorch 2.4+ compatibility:
-    def load_model(path, device='cpu'):
-        # Load full model checkpoint (compatible with PyTorch <2.4 and 2.4+).
-        import re
-        import torch
-        # PyTorch 2.4+ requires weights_only=False for full model objects
-        # Earlier versions don't have this parameter
-        # Parse version safely (handles suffixes like +cu121, a0, .dev, etc.)
-        match = re.match(r'^(\d+)\.(\d+)', torch.__version__)
-        if match:
-            major, minor = int(match.group(1)), int(match.group(2))
-            if (major, minor) >= (2, 4):
-                return torch.load(path, map_location=device, weights_only=False)
-        return torch.load(path, map_location=device)
+    # Define architecture config (save with checkpoint)
+    arch_config = {
+        "model_name": "resnet200d",  # timm model name or custom class
+        "num_classes": 11,
+        "pretrained": False,  # Don't reload pretrained during inference
+    }
 
-    model = load_model('model.pth', device=device)
+    # Save checkpoint with metadata
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "arch_config": arch_config,
+    }
+    torch.save(checkpoint, 'models/best_model.pth')
+
+    # Also save config as JSON for easy inspection
+    with open('models/model_config.json', 'w') as f:
+        json.dump(arch_config, f)
+    ```
+
+    ### LOADING (INFERENCE COMPONENT):
+    ```python
+    import json
+    import timm
+
+    # Load checkpoint
+    checkpoint = torch.load('models/best_model.pth', map_location=device)
+
+    # Reconstruct model from config
+    if 'arch_config' in checkpoint:
+        cfg = checkpoint['arch_config']
+        model = timm.create_model(
+            cfg['model_name'],
+            pretrained=cfg.get('pretrained', False),
+            num_classes=cfg.get('num_classes', 11),
+        )
+        model.load_state_dict(checkpoint['model_state_dict'])
+    else:
+        # Legacy: try loading as state_dict directly
+        model = timm.create_model('resnet200d', pretrained=False, num_classes=11)
+        model.load_state_dict(checkpoint)
+
+    model.to(device)
     model.eval()
     ```
 
-    NEVER use state_dict alone:
+    ### WHY STATE_DICT IS BETTER:
+    - Full model pickle (`torch.save(model, ...)`) fails on PyTorch 2.4+
+    - Error: "WeightsUnpickler error: Unsupported global: GLOBAL __main__.ResNet200D"
+    - State dict is portable across environments and PyTorch versions
+    - Architecture config ensures correct model reconstruction
+
+    ### NEVER DO THIS:
     ```python
-    # ❌ WRONG - causes "size mismatch" or "missing keys" errors:
-    torch.save(model.state_dict(), 'model.pth')
+    # ❌ WRONG - Fails on PyTorch 2.4+ with security error:
+    torch.save(model, 'model.pth')  # DO NOT USE!
+
+    # ❌ WRONG - State dict without architecture info:
+    torch.save(model.state_dict(), 'model.pth')  # Missing arch config!
     ```
-
-    PYTORCH VERSION NOTES:
-    - PyTorch 2.4+ changed `torch.load()` to default to `weights_only=True` for security
-    - This BREAKS loading of full model objects (UnpicklingError)
-    - The `load_model()` helper above handles both old and new PyTorch versions
-    - Error on PyTorch 2.4+ without fix: "WeightsUnpickler error: Unsupported global"
-    - Error on PyTorch <2.4 with weights_only: "unexpected keyword argument 'weights_only'"
-
-    WHY FULL MODEL SAVE MATTERS:
-    - Training agent defines: `self.net = nn.Sequential(...)`
-    - Inference agent defines: `self.layers = nn.Sequential(...)`
-    - state_dict keys are "net.0.weight" vs "layers.0.weight" = MISMATCH!
-    - Full model save avoids this entirely.
-
-    NOTE: TorchScript (`torch.jit.script`) is an alternative but fails with dynamic control flow.
-    Prefer `torch.save(model, ...)` for simplicity and reliability.
 
 12. INCREMENTAL OOF CHECKPOINT (CRITICAL FOR TIMEOUT RESILIENCE):
     Save OOF/test predictions after EACH fold completes, not just at the end.

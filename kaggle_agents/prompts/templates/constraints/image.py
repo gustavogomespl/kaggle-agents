@@ -138,4 +138,83 @@ sample_sub[target_col] = np.round(predictions)  # Still destroys AUC!
 
 WHY: AUC measures ranking ability. Hard labels (0/1) lose all ranking information.
 A model with 0.51 confidence and 0.99 confidence both become "1", destroying the metric.
+
+### 9. MULTI-LABEL CLASSIFICATION (CRITICAL - PREVENTS NaN LOSS)
+Multi-label tasks (e.g., RANZCR, ChestX-ray14) require DIFFERENT setup than multi-class:
+
+**TRAINING SETUP:**
+```python
+# ✅ CORRECT for multi-label:
+criterion = nn.BCEWithLogitsLoss()  # NOT CrossEntropyLoss!
+optimizer = optim.AdamW(model.parameters(), lr=1e-4)  # LOWER LR for stability
+
+# Model output: raw logits, NO activation layer
+class MultiLabelModel(nn.Module):
+    def __init__(self, backbone, num_classes):
+        super().__init__()
+        self.backbone = timm.create_model(backbone, pretrained=True, num_classes=0)
+        self.head = nn.Linear(self.backbone.num_features, num_classes)
+
+    def forward(self, x):
+        features = self.backbone(x)
+        return self.head(features)  # RAW logits, no sigmoid!
+```
+
+**LABELS MUST BE FLOAT:**
+```python
+# ❌ WRONG - causes NaN loss:
+labels = torch.tensor([0, 1, 0, 1, 1])  # int tensor
+loss = criterion(logits, labels)  # NaN!
+
+# ✅ CORRECT - float tensor:
+labels = torch.tensor([0., 1., 0., 1., 1.])  # float tensor
+# OR convert explicitly:
+labels = labels.float()
+loss = criterion(logits, labels)  # Works!
+```
+
+**LEARNING RATE MATTERS:**
+- Multi-label with pretrained backbone: use `lr=1e-4` or lower
+- `lr=1e-3` often causes NaN loss or training instability
+- Use warmup: 5% of total epochs with linear warmup
+
+**INFERENCE:**
+```python
+# Apply sigmoid ONLY during inference, not in model
+with torch.no_grad():
+    logits = model(images)
+    probabilities = torch.sigmoid(logits)  # Now in [0, 1]
+    predictions = probabilities.cpu().numpy()
+```
+
+**COLUMN ORDER (CRITICAL):**
+ALWAYS read target columns from sample_submission.csv, NEVER hardcode:
+```python
+# ✅ CORRECT - dynamic column reading:
+sample_sub = pd.read_csv(sample_submission_path)
+TARGET_COLS = sample_sub.columns[1:].tolist()  # Skip ID column
+print(f"Target columns from sample_sub: {TARGET_COLS}")
+
+# ❌ WRONG - hardcoded column names may have typos:
+TARGET_COLS = ['ETT - Abnormal', 'NGT - Incomplete', ...]  # May not match!
+```
+
+### 10. FORBIDDEN: HARDCODED PLACEHOLDER METRICS
+NEVER print fake/placeholder performance metrics:
+
+```python
+# ❌ ABSOLUTELY FORBIDDEN - will be flagged as failure:
+print("Final Validation Performance: 0.9736")  # Hardcoded value!
+print(f"Final Validation Performance: {target_score}")  # Using target as score!
+
+# ✅ CORRECT - compute actual metric:
+from sklearn.metrics import roc_auc_score
+oof_score = roc_auc_score(y_true, oof_preds, average='macro')
+print(f"Final Validation Performance: {oof_score:.6f}")  # Actual computed value
+```
+
+If you cannot compute the metric (e.g., inference-only component), state it clearly:
+```python
+print("Final Validation Performance: N/A (inference-only, no ground truth)")
+```
 """
