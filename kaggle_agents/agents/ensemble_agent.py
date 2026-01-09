@@ -235,16 +235,59 @@ class EnsembleAgent:
         if not metric:
             metric = "log_loss" if problem_type == "classification" else "rmse"
 
+        # Input validation
+        if preds is None or y_true is None:
+            raise ValueError("preds and y_true cannot be None")
+
+        # Ensure consistent lengths
+        if len(preds) != len(y_true):
+            raise ValueError(f"Length mismatch: preds has {len(preds)} samples, y_true has {len(y_true)}")
+
+        # Ensure y_true is integer labels for classification
         if problem_type == "classification":
+            # Convert y_true to integer labels if needed
+            if y_true.dtype.kind == 'f':  # float type
+                # Check if y_true looks like probabilities (values between 0 and 1)
+                if np.all((y_true >= 0) & (y_true <= 1)):
+                    if y_true.ndim > 1 and y_true.shape[1] > 1:
+                        # 2D probability array - convert to class labels
+                        y_true = np.argmax(y_true, axis=1)
+                    else:
+                        # 1D - might be probabilities or actual numeric labels
+                        # If values are close to integers 0,1,2..., treat as labels
+                        if np.allclose(y_true, y_true.astype(int)):
+                            y_true = y_true.astype(int)
+                        else:
+                            raise ValueError(
+                                f"y_true appears to be probabilities, not class labels. "
+                                f"Values: {y_true[:5]}"
+                            )
+                else:
+                    # Float values outside [0,1] - likely actual labels, convert to int
+                    y_true = y_true.astype(int)
+
             preds = np.clip(preds, 1e-15, 1 - 1e-15)
             if preds.ndim > 1 and preds.shape[1] > 1:
                 preds = preds / preds.sum(axis=1, keepdims=True)
+
+            # Determine number of classes for multiclass log_loss
+            if preds.ndim > 1 and preds.shape[1] > 1:
+                n_classes = preds.shape[1]
+                labels = list(range(n_classes))
+            else:
+                labels = None
 
             if "auc" in metric:
                 from sklearn.metrics import roc_auc_score
 
                 if preds.ndim > 1 and preds.shape[1] > 1:
-                    score = roc_auc_score(y_true, preds, multi_class="ovr", average="weighted")
+                    # Ensure y_true has all classes represented for multiclass AUC
+                    unique_classes = np.unique(y_true)
+                    if len(unique_classes) < 2:
+                        # Can't compute AUC with single class - fall back to log_loss
+                        score = log_loss(y_true, preds, labels=labels)
+                    else:
+                        score = roc_auc_score(y_true, preds, multi_class="ovr", average="weighted")
                 else:
                     score = roc_auc_score(y_true, preds)
             elif "acc" in metric:
@@ -254,7 +297,8 @@ class EnsembleAgent:
                     pred_labels = (preds >= 0.5).astype(int)
                 score = accuracy_score(y_true, pred_labels)
             else:
-                score = log_loss(y_true, preds)
+                # log_loss for classification
+                score = log_loss(y_true, preds, labels=labels)
         else:
             if preds.ndim > 1:
                 preds = preds.ravel()

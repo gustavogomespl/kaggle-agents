@@ -889,32 +889,124 @@ Return a JSON array with up to {max_components} components. Each component must 
                 }
             )
 
-        # Ensure at least two model components
-        model_count = sum(1 for p in plan if p["component_type"] == "model")
-        if model_count < 2:
-            plan.append(
-                {
-                    "name": "lightgbm_fast_cv",
-                    "component_type": "model",
-                    "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
-                    "estimated_impact": 0.20,
-                    "rationale": "High-ROI baseline model",
-                    "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
-                }
-            )
-            model_count += 1
+        # Ensure at least two model components - DOMAIN AWARE
+        domain = str(state.get("domain_detected", "tabular")).lower()
 
-        if model_count < 2:
-            plan.append(
-                {
-                    "name": "xgboost_fast_cv",
-                    "component_type": "model",
-                    "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
-                    "estimated_impact": 0.18,
-                    "rationale": "Adds diversity for ensemble",
-                    "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
-                }
-            )
+        # Define domain groups for fallback model selection
+        NLP_DOMAINS = {"text_classification", "text_regression", "seq_to_seq", "nlp"}
+        IMAGE_DOMAINS = {"image_classification", "image_regression", "image_segmentation",
+                         "object_detection", "computer_vision", "image"}
+        AUDIO_DOMAINS = {"audio_classification", "audio_regression"}
+
+        model_count = sum(1 for p in plan if p["component_type"] == "model")
+
+        if domain in NLP_DOMAINS:
+            # NLP-specific fallback models
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "tfidf_logreg_baseline",
+                        "component_type": "model",
+                        "description": "TF-IDF (1-3 ngrams) + LogisticRegression, 5-fold StratifiedKFold",
+                        "estimated_impact": 0.22,
+                        "rationale": "Strong NLP baseline - fast and interpretable",
+                        "code_outline": "TfidfVectorizer(ngram_range=(1,3), max_features=50000) + LogisticRegression(C=1.0, solver='saga')",
+                    }
+                )
+                model_count += 1
+
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "tfidf_svm_classifier",
+                        "component_type": "model",
+                        "description": "TF-IDF + LinearSVC with calibration for probability outputs",
+                        "estimated_impact": 0.18,
+                        "rationale": "Adds diversity for text ensemble",
+                        "code_outline": "TfidfVectorizer + CalibratedClassifierCV(LinearSVC(), cv=3)",
+                    }
+                )
+
+        elif domain in IMAGE_DOMAINS:
+            # Image-specific fallback models
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "efficientnet_b0_baseline",
+                        "component_type": "model",
+                        "description": "EfficientNet-B0 pretrained, fine-tune all layers, 5-fold CV",
+                        "estimated_impact": 0.22,
+                        "rationale": "Strong pretrained CNN baseline",
+                        "code_outline": "timm.create_model('efficientnet_b0', pretrained=True, num_classes=N)",
+                    }
+                )
+                model_count += 1
+
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "resnet34_classifier",
+                        "component_type": "model",
+                        "description": "ResNet34 pretrained with custom head",
+                        "estimated_impact": 0.18,
+                        "rationale": "Adds diversity for image ensemble",
+                        "code_outline": "timm.create_model('resnet34', pretrained=True, num_classes=N)",
+                    }
+                )
+
+        elif domain in AUDIO_DOMAINS:
+            # Audio-specific fallback models
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "melspec_cnn_baseline",
+                        "component_type": "model",
+                        "description": "Mel-spectrogram + EfficientNet-B0 for audio classification",
+                        "estimated_impact": 0.22,
+                        "rationale": "Standard audio classification approach",
+                        "code_outline": "librosa.feature.melspectrogram + timm.create_model('efficientnet_b0')",
+                    }
+                )
+                model_count += 1
+
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "audio_feature_lgbm",
+                        "component_type": "model",
+                        "description": "Handcrafted audio features (MFCC, spectral) + LightGBM",
+                        "estimated_impact": 0.16,
+                        "rationale": "Fast baseline with interpretable features",
+                        "code_outline": "librosa MFCC/chroma/spectral + LGBMClassifier",
+                    }
+                )
+
+        else:
+            # Default tabular fallback models
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "lightgbm_fast_cv",
+                        "component_type": "model",
+                        "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
+                        "estimated_impact": 0.20,
+                        "rationale": "High-ROI baseline model",
+                        "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
+                    }
+                )
+                model_count += 1
+
+            if model_count < 2:
+                plan.append(
+                    {
+                        "name": "xgboost_fast_cv",
+                        "component_type": "model",
+                        "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
+                        "estimated_impact": 0.18,
+                        "rationale": "Adds diversity for ensemble",
+                        "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
+                    }
+                )
 
         # Exploration arm if capacity allows
         if len(plan) < 4:

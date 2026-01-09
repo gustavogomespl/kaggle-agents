@@ -60,6 +60,7 @@ class RetryMixin:
         - Skip if this is a refinement iteration and component worked before
         - NEW: Validate data volume before reusing feature engineering cache
         - NEW: Validate regression predictions before reusing model cache
+        - NEW: Invalidate cache if refinement guidance mentions this component
 
         Args:
             component: Component to check
@@ -68,6 +69,36 @@ class RetryMixin:
         Returns:
             DevelopmentResult if should skip (reuse previous result), None otherwise
         """
+        # ITERATION-AWARE CACHE INVALIDATION: Check if refinement guidance targets this component
+        current_iteration = state.get("current_iteration", 0)
+        refinement_guidance = state.get("refinement_guidance", {})
+
+        if current_iteration > 1 and refinement_guidance:
+            developer_guidance = refinement_guidance.get("developer_guidance", "")
+            planner_guidance = refinement_guidance.get("planner_guidance", "")
+            combined_guidance = f"{developer_guidance} {planner_guidance}".lower()
+
+            # Check if component name or type is mentioned in guidance
+            component_name_lower = component.name.lower()
+            component_type_lower = component.component_type.lower()
+
+            # Also check for common model names like "lightgbm", "xgboost" in component name
+            model_keywords = ["lightgbm", "xgboost", "catboost", "lgbm", "logreg", "bert", "tfidf"]
+            component_keywords = [kw for kw in model_keywords if kw in component_name_lower]
+
+            guidance_mentions_component = (
+                component_name_lower in combined_guidance
+                or component_type_lower in combined_guidance
+                or any(kw in combined_guidance for kw in component_keywords)
+            )
+
+            if guidance_mentions_component:
+                print(
+                    f"   🔄 Cache INVALIDATED for {component.name} - "
+                    f"refinement guidance targets this component (iteration {current_iteration})"
+                )
+                return None  # Force re-execution
+
         working_dir = Path(state.get("working_directory", "."))
 
         dev_results = state.get("development_results", [])
