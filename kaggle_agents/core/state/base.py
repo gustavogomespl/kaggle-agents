@@ -52,6 +52,10 @@ class KaggleState(TypedDict):
     target_col: str
     data_files: dict[str, Any]
 
+    # Expected row counts (for OOF alignment across models)
+    expected_train_rows: int | None  # Expected rows in train set
+    expected_test_rows: int | None   # Expected rows in test set
+
     # Data Format Discovery (for non-standard formats)
     data_format_type: str | None  # "traditional", "generated", "custom", or "unknown"
     parsing_info: dict[str, Any] | None  # LLM-generated parsing instructions
@@ -117,7 +121,7 @@ class KaggleState(TypedDict):
     top_features: list[str]
     successful_strategies: list[str]
     failed_strategies: list[str]
-    failed_component_names: list[str]  # Component names that failed (for planner to avoid)
+    failed_component_names: Annotated[list[str], add]  # Component names that failed (for planner to avoid)
     strategy_effectiveness: dict[str, Any]
 
     # Prompt Optimization (DSPy)
@@ -200,6 +204,9 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         sample_submission_path="",
         target_col="",
         data_files={},
+        # Expected row counts
+        expected_train_rows=None,
+        expected_test_rows=None,
         # Data Format Discovery
         data_format_type=None,
         parsing_info=None,

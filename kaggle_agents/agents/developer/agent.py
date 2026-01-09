@@ -255,6 +255,23 @@ class DeveloperAgent(
         print(f"\n= Implementing: {component.name} ({component.component_type})")
         print(f"Estimated Impact: {component.estimated_impact:.1%}")
 
+        # Track original data size for data loss detection in feature engineering
+        n_train_original_to_save: int | None = None
+        if component.component_type == "feature_engineering":
+            if "n_train_original" not in state:
+                train_path = state.get("train_path")
+                if train_path:
+                    train_path = Path(train_path)
+                else:
+                    train_path = working_dir / "train.csv"
+                if train_path.exists():
+                    try:
+                        with open(train_path) as f:
+                            n_train_original_to_save = sum(1 for _ in f) - 1  # Subtract header
+                        print(f"   Tracking original train size: {n_train_original_to_save:,} rows")
+                    except Exception as e:
+                        print(f"   ⚠️  Could not count train rows: {e}")
+
         def _coerce_int(value: Any, default: int) -> int:
             try:
                 return int(value)
@@ -363,10 +380,10 @@ class DeveloperAgent(
                     f"for {component.name}. Skipping."
                 )
                 # Track failed component for planner to avoid in future iterations
-                failed_names = list(state.get("failed_component_names", []))
-                if component.name not in failed_names:
-                    failed_names.append(component.name)
-                    state["failed_component_names"] = failed_names
+                # Note: state uses Annotated[list, add] reducer, so we only return the new component
+                existing_failed = set(state.get("failed_component_names", []))
+                if component.name not in existing_failed:
+                    state["_new_failed_component"] = component.name  # Track for state_updates
                     print(f"   📝 Recorded {component.name} as failed component")
 
         data_not_found = not result.success and "Data files not found" in (result.stderr or "")
@@ -380,9 +397,14 @@ class DeveloperAgent(
             "code_attempts": attempt_records,
         }
 
-        # Persist failed component names if any were recorded
-        if state.get("failed_component_names"):
-            state_updates["failed_component_names"] = state["failed_component_names"]
+        # Save original train row count for data loss detection
+        if n_train_original_to_save is not None:
+            state_updates["n_train_original"] = n_train_original_to_save
+
+        # Persist new failed component name (add reducer will accumulate)
+        if state.get("_new_failed_component"):
+            state_updates["failed_component_names"] = [state["_new_failed_component"]]
+            del state["_new_failed_component"]  # Clean up temp key
 
         # GRPO: Persist reasoning trace in state
         if self._last_reasoning_trace is not None:
@@ -417,7 +439,12 @@ class DeveloperAgent(
             expected_n_train = state.get("n_train_samples")
             expected_n_test = state.get("n_test_samples")
             expected_class_order = state.get("class_order")
-            problem_type = state.get("problem_type", "classification")
+            # Get problem_type from competition_info first, then fallback to state
+            competition_info = state.get("competition_info")
+            if competition_info and hasattr(competition_info, "problem_type") and competition_info.problem_type:
+                problem_type = competition_info.problem_type
+            else:
+                problem_type = state.get("problem_type", "classification")
 
             # Run comprehensive validation
             validation_result = validate_model_artifacts(

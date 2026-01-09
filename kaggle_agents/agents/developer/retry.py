@@ -58,6 +58,8 @@ class RetryMixin:
         This implements callback-based skip logic to avoid redundant work:
         - Skip if code already generated and successfully executed
         - Skip if this is a refinement iteration and component worked before
+        - NEW: Validate data volume before reusing feature engineering cache
+        - NEW: Validate regression predictions before reusing model cache
 
         Args:
             component: Component to check
@@ -66,10 +68,16 @@ class RetryMixin:
         Returns:
             DevelopmentResult if should skip (reuse previous result), None otherwise
         """
+        working_dir = Path(state.get("working_directory", "."))
+
         dev_results = state.get("development_results", [])
 
         for result in dev_results:
             if result.success and component.name in result.code:
+                # Validate before reusing cached result
+                if not self._validate_cached_result(component, state, working_dir):
+                    print(f"Cache INVALIDATED for {component.name} - forcing re-execution")
+                    return None
                 print(f"Skipping {component.name} - already implemented successfully")
                 print(f"Reusing previous execution ({result.execution_time:.2f}s)")
                 return result
@@ -78,11 +86,139 @@ class RetryMixin:
         if cached_result_key in state:
             cached_result = state[cached_result_key]
             if cached_result.success:
+                # Validate before reusing cached result
+                if not self._validate_cached_result(component, state, working_dir):
+                    print(f"Cache INVALIDATED for {component.name} - forcing re-execution")
+                    return None
                 print(f"Skipping {component.name} - found in cache")
                 print(f"Reusing cached execution ({cached_result.execution_time:.2f}s)")
                 return cached_result
 
         return None
+
+    def _validate_cached_result(
+        self,
+        component: AblationComponent,
+        state: KaggleState,
+        working_dir: Path,
+    ) -> bool:
+        """
+        Validate cached result before reusing.
+
+        Checks:
+        - Feature engineering: data volume preserved (>90% of original)
+        - Model (regression): predictions in reasonable range
+
+        Args:
+            component: Component being validated
+            state: Current workflow state
+            working_dir: Working directory path
+
+        Returns:
+            True if cache is valid, False to invalidate
+        """
+        if component.component_type == "feature_engineering":
+            return self._validate_data_volume(working_dir, state)
+
+        if component.component_type == "model":
+            problem_type = state.get("problem_type", "classification")
+            if problem_type == "regression":
+                return self._validate_regression_predictions(component.name, working_dir)
+
+        return True
+
+    def _validate_data_volume(self, working_dir: Path, state: KaggleState) -> bool:
+        """
+        Check if engineered data preserves original row count.
+
+        Invalidates cache if more than 10% of data was lost during
+        feature engineering (e.g., from drop_duplicates or sampling).
+
+        Args:
+            working_dir: Working directory path
+            state: Current workflow state
+
+        Returns:
+            True if data volume is acceptable, False to invalidate cache
+        """
+        train_orig = working_dir / "train.csv"
+        train_eng = working_dir / "train_engineered.csv"
+
+        if not (train_orig.exists() and train_eng.exists()):
+            return True  # Can't validate, allow cache
+
+        try:
+            # Use cached original count if available, otherwise count lines
+            n_orig = state.get("n_train_original")
+            if n_orig is None:
+                with open(train_orig) as f:
+                    n_orig = sum(1 for _ in f) - 1  # Subtract header
+
+            with open(train_eng) as f:
+                n_eng = sum(1 for _ in f) - 1  # Subtract header
+
+            if n_eng < n_orig * 0.9:  # Allow max 10% data loss
+                loss_pct = (1 - n_eng / n_orig) * 100
+                print(f"   ⚠️  Data loss detected: {n_orig:,} → {n_eng:,} ({loss_pct:.1f}% lost)")
+                return False
+
+            return True
+
+        except Exception as e:
+            print(f"   ⚠️  Data volume validation failed: {e}")
+            return True  # On error, allow cache to avoid blocking
+
+    def _validate_regression_predictions(
+        self,
+        component_name: str,
+        working_dir: Path,
+    ) -> bool:
+        """
+        Validate regression model predictions are in reasonable range.
+
+        Checks for:
+        - NaN/Inf values
+        - Extreme prediction ranges (may indicate undertrained model)
+
+        Args:
+            component_name: Name of the model component
+            working_dir: Working directory path
+
+        Returns:
+            True if predictions are valid, False to invalidate cache
+        """
+        import numpy as np
+
+        oof_path = working_dir / "models" / f"oof_{component_name}.npy"
+        test_path = working_dir / "models" / f"test_{component_name}.npy"
+
+        if not oof_path.exists():
+            return True  # Can't validate, allow cache
+
+        try:
+            oof_preds = np.load(oof_path)
+
+            # Check for NaN/Inf
+            if np.any(~np.isfinite(oof_preds)):
+                print(f"   ⚠️  Invalid predictions: NaN/Inf detected in {component_name}")
+                return False
+
+            # Check for extreme ranges (may indicate bad training)
+            oof_min, oof_max = oof_preds.min(), oof_preds.max()
+            pred_range = oof_max - oof_min
+
+            # If test predictions exist, check them too
+            if test_path.exists():
+                test_preds = np.load(test_path)
+                if np.any(~np.isfinite(test_preds)):
+                    print(f"   ⚠️  Invalid test predictions: NaN/Inf in {component_name}")
+                    return False
+
+            return True
+
+        except Exception as e:
+            print(f"   ⚠️  Prediction validation failed: {e}")
+            return True  # On error, allow cache
 
     def _create_simplified_component(
         self,

@@ -514,6 +514,20 @@ class EnsembleAgent:
         if len(valid_pairs) < 2:
             return None, None
 
+        # Filter out weak models (more than 50% worse than best)
+        # This prevents bad models from degrading ensemble performance
+        print("   Filtering weak models by OOF score...")
+        y_true_np = np.asarray(y)
+        valid_pairs, computed_scores = self._filter_by_score_threshold(
+            valid_pairs,
+            y_true_np,
+            metric_name,
+            threshold_pct=0.50,  # Allow models up to 50% worse than best
+        )
+        if len(valid_pairs) < 2:
+            print("   ⚠️ Not enough models after filtering weak performers")
+            return None, None
+
         model_names = list(valid_pairs.keys())
 
         if problem_type == "classification":

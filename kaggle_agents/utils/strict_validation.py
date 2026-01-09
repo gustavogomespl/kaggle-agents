@@ -150,6 +150,9 @@ def validate_model_artifacts(
             )
 
     # 7. For classification, validate probabilities
+    # Debug: Log the problem_type being used for validation
+    print(f"   [VALIDATION] problem_type={problem_type}, validating {component_name}")
+
     if problem_type in ("classification", "multilabel"):
         # Check range [0, 1]
         oof_min, oof_max = oof_preds.min(), oof_preds.max()
@@ -173,10 +176,13 @@ def validate_model_artifacts(
             result.add_error("Test predictions contain NaN or Inf values")
 
         # Check for empty rows (all zeros - indicates unfilled OOF)
+        # For classification: a row of all zeros means no prediction was made
         if oof_preds.ndim > 1:
             empty_oof_rows = np.sum(oof_preds.sum(axis=1) == 0)
         else:
-            empty_oof_rows = np.sum(np.abs(oof_preds) < 1e-10)
+            # For 1D predictions (binary classification), 0 is a valid probability
+            # Only flag if prediction is EXACTLY 0.0 AND this is truly empty
+            empty_oof_rows = 0  # 1D classification predictions of 0 are valid
 
         if empty_oof_rows > 0:
             empty_fraction = empty_oof_rows / oof_preds.shape[0]
@@ -208,6 +214,48 @@ def validate_model_artifacts(
                 result.add_warning(
                     f"{bad_test_rows} test rows do not sum to 1.0 (not normalized)"
                 )
+
+    # 7b. For regression, validate prediction sanity
+    elif problem_type == "regression":
+        oof_min, oof_max = oof_preds.min(), oof_preds.max()
+        test_min, test_max = test_preds.min(), test_preds.max()
+
+        # Check for NaN/Inf values
+        if np.any(~np.isfinite(oof_preds)):
+            result.add_error("OOF predictions contain NaN or Inf values")
+
+        if np.any(~np.isfinite(test_preds)):
+            result.add_error("Test predictions contain NaN or Inf values")
+
+        # Warn about extreme prediction ranges (may indicate undertrained model)
+        pred_range = oof_max - oof_min
+        if pred_range > 1000:
+            result.add_warning(
+                f"Large OOF prediction range: {oof_min:.2f} to {oof_max:.2f} (range={pred_range:.2f})"
+            )
+
+        test_range = test_max - test_min
+        if test_range > 1000:
+            result.add_warning(
+                f"Large test prediction range: {test_min:.2f} to {test_max:.2f} (range={test_range:.2f})"
+            )
+
+        # Warn about negative predictions (invalid for many regression targets)
+        # Common cases: prices, fares, counts, durations - all should be >= 0
+        if oof_min < 0:
+            result.add_warning(
+                f"Negative OOF predictions detected: min={oof_min:.4f}"
+            )
+        if test_min < 0:
+            result.add_warning(
+                f"Negative test predictions detected: min={test_min:.4f}"
+            )
+
+        # Check for constant predictions (model not learning)
+        if np.std(oof_preds) < 1e-6:
+            result.add_error(
+                f"OOF predictions are constant (std={np.std(oof_preds):.2e})"
+            )
 
     # 8. Check class order file (for multiclass)
     if expected_class_order is not None and len(expected_class_order) > 2:
