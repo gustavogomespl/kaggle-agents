@@ -23,6 +23,7 @@ from ..core.contracts import (
     PredictionArtifact,
     validate_prediction_artifacts,
 )
+from ..utils.csv_utils import read_csv_auto
 from ..utils.fold_checkpoint import FoldCheckpointManager
 from ..utils.llm_utils import get_text_content
 from ..utils.oof_validation import print_oof_summary, validate_class_order, validate_oof_stack
@@ -1416,7 +1417,7 @@ class EnsembleAgent:
             saved_order = np.load(class_order_path, allow_pickle=True).tolist()
 
             # Load expected class order from sample submission
-            sample_sub = pd.read_csv(sample_submission_path)
+            sample_sub = read_csv_auto(sample_submission_path)
             expected_order = sample_sub.columns[1:].tolist()
 
             if not _class_orders_match(saved_order, expected_order):
@@ -1452,7 +1453,7 @@ class EnsembleAgent:
             return False, [], ["sample_submission.csv not found"]
 
         try:
-            sample_sub = pd.read_csv(sample_submission_path)
+            sample_sub = read_csv_auto(sample_submission_path)
             expected_order = sample_sub.columns[1:].tolist()
         except Exception as e:
             return False, [], [f"Failed to read sample_submission: {e}"]
@@ -1618,7 +1619,7 @@ class EnsembleAgent:
                 print(f"   ⚠️  Class order warning: {msg}")
                 # Continue but warn - older models may not have class_order.npy
 
-        sample_sub = pd.read_csv(sample_submission_path)
+        sample_sub = read_csv_auto(sample_submission_path)
         preds_list = []
         names = []
 
@@ -1791,7 +1792,7 @@ class EnsembleAgent:
         ).lower()
         if n_targets is None and sample_submission_path and sample_submission_path.exists():
             try:
-                sample_head = pd.read_csv(sample_submission_path, nrows=1)
+                sample_head = read_csv_auto(sample_submission_path, nrows=1)
                 n_targets = sample_head.shape[1] - 1
                 if expected_class_order is None and sample_head.shape[1] > 2:
                     expected_class_order = sample_head.columns[1:].tolist()

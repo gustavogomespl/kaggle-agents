@@ -5,7 +5,64 @@ Provides reusable patterns for audio classification/detection tasks.
 Based on best practices from librosa and common Kaggle audio competition patterns.
 """
 
-# Audio preprocessing configuration constants
+# Domain-specific audio configurations
+# Bird vocalization parameters (500-12500 Hz range, higher sample rate)
+BIRD_AUDIO_CONFIG = {
+    "sample_rate": 32000,    # Higher SR for bird calls (up to 16 kHz Nyquist)
+    "n_mels": 128,           # Good resolution for bird vocalizations
+    "n_fft": 2048,           # Good frequency resolution
+    "hop_length": 512,       # ~16ms hop at 32kHz
+    "fmin": 500,             # Bird calls typically start around 500 Hz
+    "fmax": 12500,           # Upper range of most bird vocalizations
+    "duration": 5.0,         # Standard clip duration
+    "power": 2.0,            # Power spectrogram
+}
+
+# General audio parameters (human speech, music, environmental sounds)
+GENERAL_AUDIO_CONFIG = {
+    "sample_rate": 22050,    # Standard for general audio
+    "n_mels": 128,
+    "n_fft": 2048,
+    "hop_length": 512,
+    "fmin": 20,              # Include low frequencies
+    "fmax": 8000,            # Most important frequency content
+    "duration": 5.0,
+    "power": 2.0,
+}
+
+# Music parameters (wider frequency range, higher sample rate)
+MUSIC_AUDIO_CONFIG = {
+    "sample_rate": 44100,    # CD quality
+    "n_mels": 128,
+    "n_fft": 2048,
+    "hop_length": 512,
+    "fmin": 20,
+    "fmax": 16000,           # Full audible range
+    "duration": 10.0,        # Longer clips for music
+    "power": 2.0,
+}
+
+
+def get_audio_config(domain: str = "general") -> dict:
+    """Get audio configuration for a specific domain.
+
+    Args:
+        domain: One of "bird", "birds", "avian", "general", "speech", "music"
+
+    Returns:
+        Dictionary with audio processing parameters
+    """
+    domain_lower = domain.lower() if domain else "general"
+
+    if domain_lower in ("bird", "birds", "avian", "bird_classification", "wildlife"):
+        return BIRD_AUDIO_CONFIG
+    elif domain_lower in ("music", "song", "musical"):
+        return MUSIC_AUDIO_CONFIG
+    else:
+        return GENERAL_AUDIO_CONFIG
+
+
+# Audio preprocessing configuration constants (default to general)
 AUDIO_CONFIG_TEMPLATE = '''
 # === AUDIO CONFIGURATION ===
 # Sample rate: 32000 Hz recommended for bird vocalizations (captures up to 16 kHz)
@@ -15,8 +72,8 @@ DURATION = 5  # Clip duration in seconds
 N_MELS = 128  # Number of mel frequency bins
 N_FFT = 2048  # FFT window size
 HOP_LENGTH = 512  # Hop length between frames
-FMIN = 20  # Minimum frequency for mel filterbank
-FMAX = 16000  # Maximum frequency for mel filterbank (adjust based on SR)
+FMIN = 500  # Minimum frequency for mel filterbank (500 Hz for bird vocalizations)
+FMAX = 12500  # Maximum frequency for mel filterbank (12.5 kHz for bird vocalizations)
 '''
 
 # Core audio loading function

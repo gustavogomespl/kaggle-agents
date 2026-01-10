@@ -24,6 +24,7 @@ from ..core.state import IterationMemory, KaggleState, get_memory_summary_for_pl
 from ..optimization import create_training_collector
 from ..prompts.templates.developer_prompts import format_component_details
 from ..prompts.templates.planner_prompts import get_domain_guidance
+from ..utils.csv_utils import read_csv_auto
 from ..utils.llm_utils import get_text_content
 
 
@@ -751,8 +752,7 @@ class MetaEvaluatorAgent:
         sample_submission_path = state.get("sample_submission_path")
         if sample_submission_path:
             try:
-                import pandas as pd
-                sample_sub = pd.read_csv(sample_submission_path)
+                sample_sub = read_csv_auto(sample_submission_path)
                 n_cols = sample_sub.shape[1]
                 if n_cols > 2:
                     n_classes = n_cols - 1  # Subtract ID column

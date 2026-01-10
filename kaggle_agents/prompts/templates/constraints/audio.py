@@ -197,6 +197,77 @@ criterion = nn.BCEWithLogitsLoss()  # Input: logits, Target: 0/1 for each class
 criterion = nn.CrossEntropyLoss()  # Target: class index
 ```
 
+### 8b. MLSP-STYLE MULTI-LABEL AUDIO CLASSIFICATION (CRITICAL)
+
+For competitions with multiple species per recording (e.g., MLSP 2013 Birds), the label
+format uses TWO-LEVEL DELIMITERS that standard CSV parsers cannot handle:
+
+**Label file format:**
+```
+rec_id;label1,label2,label3   (semicolon separates ID from labels, comma separates labels)
+0,3,7,12                      (OR comma-only: first is ID, rest are labels)
+42,?                          (? marks hidden test labels)
+```
+
+**CORRECT parsing approach:**
+```python
+from kaggle_agents.utils.label_parser import parse_mlsp_multilabel
+
+# Parse multi-label format (rec_id;label1,label2,label3 OR rec_id,label1,label2,label3)
+rec_ids, y = parse_mlsp_multilabel(
+    label_path,
+    outer_delimiter=";",   # Separates rec_id from labels
+    inner_delimiter=",",   # Separates individual label indices
+    num_classes=19,        # MLSP has 19 species (auto-detected if not set)
+    hidden_marker="?",     # Marker for hidden test labels
+)
+print(f"Detected {y.shape[1]} target columns")  # Should be 19, NOT 1
+
+# Result:
+# rec_ids: np.array of record IDs (int)
+# y: np.array shape (n_samples, num_classes) with binary indicators (0 or 1)
+```
+
+**Loss function (MANDATORY for multi-label):**
+```python
+import torch.nn as nn
+
+# ALWAYS use BCEWithLogitsLoss for multi-label classification
+criterion = nn.BCEWithLogitsLoss()
+
+# NEVER use CrossEntropyLoss - that's for single-label ONLY!
+# CrossEntropyLoss expects exactly one class per sample
+```
+
+**Evaluation metric (micro-AUC for MLSP):**
+```python
+from sklearn.metrics import roc_auc_score
+
+# Micro-AUC: evaluate all predictions as a single flattened array
+# This is the official metric for MLSP 2013 Birds
+micro_auc = roc_auc_score(y_true, y_pred, average='micro')
+
+# DO NOT use average='macro' - that weights each species equally
+# which is NOT how MLSP 2013 Birds is evaluated
+print(f"Micro-AUC: {micro_auc:.4f}")
+```
+
+**Output layer (CRITICAL):**
+```python
+# Multi-label: output N logits (one per species), NO softmax in the model
+self.fc = nn.Linear(hidden_dim, 19)  # 19 species for MLSP
+
+# At inference: apply sigmoid to get independent probabilities
+predictions = torch.sigmoid(logits)  # Shape: (batch, 19), values 0-1
+
+# DO NOT use softmax - that forces predictions to sum to 1 (single-label)
+```
+
+**Common errors and fixes:**
+- "1 target column detected" → Label file parsed incorrectly, use parse_mlsp_multilabel()
+- "AUC = 0.5" (random baseline) → Wrong loss function or label alignment issue
+- "Predictions sum to 1" → Using softmax instead of sigmoid for multi-label
+
 ### 9. Print Data Summary at Start
 Always verify data loading worked correctly.
 

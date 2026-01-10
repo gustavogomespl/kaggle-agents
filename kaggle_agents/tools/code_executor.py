@@ -500,9 +500,10 @@ class CodeExecutor:
             'multiclass', 'multilabel', 'binary', or 'regression'
         """
         import numpy as np
-        import pandas as pd
 
-        sample_df = pd.read_csv(sample_submission_path)
+        from kaggle_agents.utils.csv_utils import read_csv_auto
+
+        sample_df = read_csv_auto(sample_submission_path)
         pred_cols = sample_df.columns[1:].tolist()
 
         if len(pred_cols) == 1:
@@ -544,14 +545,16 @@ class CodeExecutor:
         import numpy as np
         import pandas as pd
 
+        from kaggle_agents.utils.csv_utils import read_csv_auto
+
         # Gating check
         if not self._should_validate_submission(component_type, sample_submission_path):
             return True, "Validation skipped (gated)"
 
-        # Read files
+        # Read files with auto-delimiter detection
         try:
-            sub_df = pd.read_csv(submission_path)
-            sample_df = pd.read_csv(sample_submission_path)
+            sub_df = pd.read_csv(submission_path)  # Submission always uses comma
+            sample_df = read_csv_auto(sample_submission_path)  # Sample may use non-standard delimiter
         except Exception as e:
             return False, f"Failed to read files: {e}"
 

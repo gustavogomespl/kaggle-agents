@@ -22,6 +22,7 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 
 from ..core.config import compare_scores, get_config
 from ..core.state import KaggleState, SubmissionResult
+from ..utils.csv_utils import read_csv_auto
 
 
 class SubmissionAgent:
@@ -327,7 +328,7 @@ class SubmissionAgent:
             # Validate against sample_submission if available
             if sample_submission_path and Path(sample_submission_path).exists():
                 try:
-                    sample_sub = pd.read_csv(sample_submission_path)
+                    sample_sub = read_csv_auto(sample_submission_path)
 
                     # Enhanced shape mismatch detection for pixel-level format
                     if df.shape[0] != sample_sub.shape[0]:
@@ -545,7 +546,7 @@ Common causes:
                 sample_suggests_label = False
                 if sample_submission_path and Path(sample_submission_path).exists():
                     try:
-                        sample_sub = pd.read_csv(sample_submission_path)
+                        sample_sub = read_csv_auto(sample_submission_path)
                         if sample_sub.shape[1] > 2:
                             sample_suggests_prob = True
                         elif sample_sub.shape[1] >= 2:

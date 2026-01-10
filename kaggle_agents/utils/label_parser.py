@@ -348,3 +348,121 @@ def read_id_mapping(file_path: Path, id_col: str = "rec_id", filename_col: str =
             df.columns = new_cols
 
     return df
+
+
+def parse_mlsp_multilabel(
+    file_path: Path | str,
+    outer_delimiter: str = ";",
+    inner_delimiter: str = ",",
+    num_classes: int | None = None,
+    hidden_marker: str = "?",
+) -> tuple:
+    """Parse MLSP 2013 Birds style multi-label format.
+
+    This function handles the two-level delimiter format used by MLSP 2013 Birds
+    and similar competitions:
+    - Outer delimiter (semicolon) separates rec_id from labels
+    - Inner delimiter (comma) separates individual label indices
+
+    Format examples:
+        rec_id;label1,label2,label3   (semicolon outer)
+        0,3,7,12                      (comma-only: first is ID, rest are labels)
+        42,?                          (hidden test labels marked with ?)
+
+    Args:
+        file_path: Path to the label file
+        outer_delimiter: Delimiter between rec_id and label section (default: ";")
+        inner_delimiter: Delimiter between individual labels (default: ",")
+        num_classes: Number of classes (auto-detected if None)
+        hidden_marker: Marker for hidden test labels (default: "?")
+
+    Returns:
+        Tuple of (rec_ids, labels):
+            - rec_ids: numpy array of record IDs (int)
+            - labels: numpy array of shape (n_samples, num_classes) with binary indicators
+
+    Example:
+        >>> import numpy as np
+        >>> rec_ids, labels = parse_mlsp_multilabel(
+        ...     "rec_labels_test_hidden.txt",
+        ...     num_classes=19,
+        ... )
+        >>> print(labels.shape)  # (645, 19)
+        >>> print(f"Detected {labels.shape[1]} target columns")  # 19
+
+    Note:
+        This function automatically handles the case where the file uses comma-only
+        format (e.g., "0,3,7,12" where first element is rec_id and rest are labels).
+    """
+    import numpy as np
+
+    file_path = Path(file_path)
+
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        lines = f.readlines()
+
+    # Skip header if present (first char is not a digit)
+    if lines and lines[0].strip() and not lines[0].strip()[0].isdigit():
+        lines = lines[1:]
+
+    rec_ids = []
+    all_labels = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Split by outer delimiter first
+        parts = line.split(outer_delimiter)
+        if len(parts) == 1:
+            # Fallback: might be comma-only format (e.g., "0,3,7,12")
+            parts = line.split(inner_delimiter)
+
+        # First element is rec_id
+        rec_id_str = parts[0].strip()
+        if not rec_id_str or rec_id_str == hidden_marker:
+            continue
+
+        try:
+            rec_id = int(rec_id_str)
+        except ValueError:
+            continue
+
+        rec_ids.append(rec_id)
+
+        # Remaining elements are labels
+        row_labels = []
+        for label_str in parts[1:]:
+            # Handle inner delimiter (e.g., "3,7,12" when outer delimiter is semicolon)
+            if inner_delimiter in label_str:
+                sub_labels = label_str.split(inner_delimiter)
+            else:
+                sub_labels = [label_str]
+
+            for sub in sub_labels:
+                sub = sub.strip()
+                if sub and sub != hidden_marker:
+                    try:
+                        row_labels.append(int(sub))
+                    except ValueError:
+                        continue
+
+        all_labels.append(row_labels)
+
+    # Auto-detect num_classes if not provided
+    if num_classes is None:
+        max_label = 0
+        for labels in all_labels:
+            if labels:
+                max_label = max(max_label, max(labels))
+        num_classes = max_label + 1
+
+    # Create binary indicator matrix
+    label_matrix = np.zeros((len(rec_ids), num_classes), dtype=np.float32)
+    for i, row_labels in enumerate(all_labels):
+        for label in row_labels:
+            if 0 <= label < num_classes:
+                label_matrix[i, label] = 1.0
+
+    return np.array(rec_ids), label_matrix
