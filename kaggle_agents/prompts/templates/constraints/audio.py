@@ -302,4 +302,82 @@ for epoch in range(EPOCHS):
         break
     # ... training code ...
 ```
+
+### 11. SUBMISSION FORMAT (CRITICAL)
+
+Audio competitions use two main submission formats. **ALWAYS check sample_submission.csv first!**
+
+**WIDE FORMAT (BirdCLEF style) - One row per sample, one column per class:**
+```csv
+row_id,species_0,species_1,species_2,...,species_N
+audio_0001,0.5,0.5,0.5,...,0.5
+audio_0002,0.5,0.5,0.5,...,0.5
+```
+
+Code for WIDE format:
+```python
+# predictions shape: (num_samples, num_classes)
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+target_cols = [c for c in submission.columns if c != submission.columns[0]]
+for i, col in enumerate(target_cols):
+    submission[col] = predictions[:, i]
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
+```
+
+**LONG FORMAT (MLSP 2013 style) - One row per (sample, class) pair:**
+```csv
+Id,Probability
+100,0.5    # rec_id=1, species_id=0 → Id=1*100+0=100
+101,0.5    # rec_id=1, species_id=1 → Id=1*100+1=101
+...
+118,0.5    # rec_id=1, species_id=18 → Id=1*100+18=118
+200,0.5    # rec_id=2, species_id=0 → Id=2*100+0=200
+```
+
+Code for LONG format (MLSP pattern: Id = rec_id * 100 + species_id):
+```python
+# predictions shape: (num_samples, num_classes)
+# test_rec_ids: list of test record IDs
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+
+# Create mapping from submission ID to prediction
+pred_map = {}
+for i, rec_id in enumerate(test_rec_ids):
+    for species_id in range(NUM_CLASSES):
+        submission_id = rec_id * 100 + species_id  # MLSP ID pattern
+        pred_map[submission_id] = predictions[i, species_id]
+
+# Apply mapping to submission
+submission['Probability'] = submission['Id'].map(pred_map)
+
+# Fill any missing with default (0.05 = safe default)
+submission['Probability'] = submission['Probability'].fillna(0.05)
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
+```
+
+**HOW TO DETECT FORMAT:**
+1. Count columns: >2 columns = WIDE, exactly 2 columns = LONG
+2. For LONG, check ID pattern:
+   - If IDs are like 100, 101, ..., 118, 200, 201, ... → MLSP pattern (Id = rec_id * 100 + class_id)
+   - If IDs have underscore (e.g., "1_0", "1_1") → underscore pattern
+3. Use submission_format_info from state if available
+
+### 12. PRECOMPUTED FEATURES (OPTIMIZATION)
+
+Some audio competitions provide precomputed features. Check for these files:
+- `histogram_features.txt` - Bag-of-words audio features
+- `histogram_background.txt` - Background noise features
+- `location_features.txt` - Recording location metadata
+- `segment_features.txt` - Audio segment information
+
+If precomputed features are available (check precomputed_features_info in state):
+```python
+# Load precomputed features instead of extracting from audio
+if PRECOMPUTED_FEATURES_PATH.exists():
+    features_df = pd.read_csv(PRECOMPUTED_FEATURES_PATH)
+    print(f"Loaded precomputed features: {features_df.shape}")
+    # Use these features for training instead of extracting MFCC/spectrograms
+```
+
+This can save significant time on feature extraction.
 """

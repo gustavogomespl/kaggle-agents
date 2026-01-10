@@ -324,18 +324,49 @@ def sniff_and_read(file_path: Path) -> pd.DataFrame:
     return parser.parse(file_path)
 
 
-def read_id_mapping(file_path: Path, id_col: str = "rec_id", filename_col: str = "filename") -> pd.DataFrame:
+def read_id_mapping(
+    file_path: Path,
+    id_col: str = "rec_id",
+    filename_col: str = "filename",
+    audio_dir: Path | None = None,
+    extensions: list[str] | None = None,
+    resolve_extensions: bool = True,
+) -> pd.DataFrame:
     """
     Read an ID-to-filename mapping file (common in audio competitions).
+
+    Supports automatic extension resolution: if filenames don't include extensions,
+    tries to find matching audio files with common extensions (.wav, .mp3, .flac).
 
     Args:
         file_path: Path to mapping file
         id_col: Name for ID column
         filename_col: Name for filename column
+        audio_dir: Directory containing audio files (for extension resolution)
+        extensions: List of extensions to try (default: ['.wav', '.mp3', '.flac', '.ogg'])
+        resolve_extensions: Whether to automatically resolve missing extensions
 
     Returns:
-        DataFrame with id and filename columns
+        DataFrame with id and filename columns (with resolved extensions if applicable)
+
+    Example:
+        Mapping file without extensions:
+        ```
+        rec_id,filename
+        0,PC1_20100705_050000_0010
+        1,PC1_20100705_050000_0020
+        ```
+
+        After resolution (if audio_dir contains .wav files):
+        ```
+        rec_id,filename
+        0,PC1_20100705_050000_0010.wav
+        1,PC1_20100705_050000_0020.wav
+        ```
     """
+    if extensions is None:
+        extensions = [".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"]
+
     parser = RobustLabelParser()
     df = parser.parse(file_path)
 
@@ -346,6 +377,68 @@ def read_id_mapping(file_path: Path, id_col: str = "rec_id", filename_col: str =
             new_cols[0] = id_col
             new_cols[1] = filename_col
             df.columns = new_cols
+
+    # Resolve missing extensions if audio_dir is provided
+    if resolve_extensions and audio_dir and filename_col in df.columns:
+        audio_dir = Path(audio_dir)
+        if audio_dir.exists() and audio_dir.is_dir():
+            df = _resolve_filename_extensions(df, filename_col, audio_dir, extensions)
+
+    return df
+
+
+def _resolve_filename_extensions(
+    df: pd.DataFrame,
+    filename_col: str,
+    audio_dir: Path,
+    extensions: list[str],
+) -> pd.DataFrame:
+    """
+    Resolve missing file extensions by checking which files exist.
+
+    Args:
+        df: DataFrame with filename column
+        filename_col: Name of the filename column
+        audio_dir: Directory containing audio files
+        extensions: List of extensions to try
+
+    Returns:
+        DataFrame with resolved extensions
+    """
+    resolved_count = 0
+    missing_count = 0
+
+    for idx, row in df.iterrows():
+        filename = str(row[filename_col])
+
+        # Skip if filename already has an extension
+        if any(filename.lower().endswith(ext.lower()) for ext in extensions):
+            continue
+
+        # Try each extension
+        found = False
+        for ext in extensions:
+            # Try exact case
+            candidate = audio_dir / f"{filename}{ext}"
+            if candidate.exists():
+                df.at[idx, filename_col] = f"{filename}{ext}"
+                resolved_count += 1
+                found = True
+                break
+
+            # Try uppercase extension
+            candidate_upper = audio_dir / f"{filename}{ext.upper()}"
+            if candidate_upper.exists():
+                df.at[idx, filename_col] = f"{filename}{ext.upper()}"
+                resolved_count += 1
+                found = True
+                break
+
+        if not found:
+            missing_count += 1
+
+    if resolved_count > 0 or missing_count > 0:
+        print(f"[LabelParser] Extension resolution: {resolved_count} resolved, {missing_count} not found")
 
     return df
 

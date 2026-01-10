@@ -43,6 +43,14 @@ from .utils.data_audit import (
     print_audit_report,
 )
 from .utils.data_contract import prepare_canonical_data
+from .utils.submission_format import (
+    detect_audio_submission_format,
+    print_format_info,
+)
+from .utils.precomputed_features import (
+    detect_precomputed_features,
+    print_features_info,
+)
 
 
 # ==================== Agent Nodes ====================
@@ -384,6 +392,54 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
         data_files["test"] = str(test_dir)
         updates["current_test_path"] = str(test_dir)
         updates["test_data_path"] = str(test_dir)
+
+    # Audio-specific detection: submission format and precomputed features
+    audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
+    is_audio = detected_type == "audio" or forced_type == "audio"
+
+    # Check for audio files if not already detected
+    if not is_audio and not train_dir:
+        if _dir_has_ext(working_dir, audio_exts, limit=50):
+            is_audio = True
+            detected_type = "audio"
+            data_files["data_type"] = "audio"
+            print("   Data type detected: audio (based on file extensions)")
+
+    if is_audio:
+        print("\n   --- Audio Competition Detection ---")
+
+        # Detect submission format (wide vs long)
+        sample_sub_path = data_files.get("sample_submission") or working_dir / "sample_submission.csv"
+        sample_sub_path = Path(sample_sub_path)
+        if sample_sub_path.exists():
+            submission_format_info = detect_audio_submission_format(sample_sub_path)
+            updates["submission_format_info"] = submission_format_info.to_dict()
+            print(f"   Submission format: {submission_format_info.format_type}")
+            if submission_format_info.id_pattern:
+                print(f"   ID pattern: {submission_format_info.id_pattern}")
+            if submission_format_info.num_classes:
+                print(f"   Num classes: {submission_format_info.num_classes}")
+
+        # Detect precomputed features
+        data_dir = working_dir
+        # Check common data subdirectories
+        for subdir in ["essential_data", "data", "features", "prepared"]:
+            candidate = working_dir / subdir
+            if candidate.exists():
+                data_dir = candidate
+                break
+
+        precomputed_features_info = detect_precomputed_features(data_dir)
+        if precomputed_features_info.has_features():
+            updates["precomputed_features_info"] = precomputed_features_info.to_dict()
+            print(f"   Precomputed features found: {len(precomputed_features_info.features_found)}")
+            for ft, path in precomputed_features_info.features_found.items():
+                shape_str = ""
+                if ft in precomputed_features_info.feature_shapes:
+                    shape_str = f" {precomputed_features_info.feature_shapes[ft]}"
+                print(f"     - {ft}: {path.name}{shape_str}")
+
+        print("   ---------------------------------")
 
     updates["data_files"] = data_files
     return updates
