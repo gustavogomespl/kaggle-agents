@@ -17,6 +17,12 @@ from ..utils.artifact_manager import ArtifactManager
 from ..utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
 from ..utils.data_contract import load_canonical_data
 from ..utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
+from ..core.contracts import (
+    EnsembleInput,
+    EnsembleResult,
+    PredictionArtifact,
+    validate_prediction_artifacts,
+)
 from ..utils.fold_checkpoint import FoldCheckpointManager
 from ..utils.llm_utils import get_text_content
 from ..utils.oof_validation import print_oof_summary, validate_class_order, validate_oof_stack
@@ -61,6 +67,25 @@ class EnsembleAgent:
             if test_path.exists():
                 pairs[name] = (oof_path, test_path)
         return pairs
+
+    def _validate_prediction_artifacts_contract(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+    ) -> list[PredictionArtifact]:
+        """Validate discovered prediction pairs against Pydantic contract.
+
+        Uses the PredictionArtifact contract to ensure OOF and test predictions
+        have compatible shapes and valid data.
+
+        Args:
+            prediction_pairs: Dict mapping name to (oof_path, test_path)
+
+        Returns:
+            List of validated PredictionArtifact objects
+        """
+        validated = validate_prediction_artifacts(prediction_pairs)
+        print(f"      Contract validation: {len(validated)}/{len(prediction_pairs)} artifacts valid")
+        return validated
 
     def _validate_oof_alignment(
         self,
@@ -2330,6 +2355,106 @@ class EnsembleAgent:
         # Weighted average
         return np.average(predictions, axis=0, weights=weights)
 
+    def create_rank_average_ensemble(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        weights: np.ndarray | None = None,
+    ) -> tuple[np.ndarray | None, list[str], bool]:
+        """Create ensemble by averaging prediction ranks.
+
+        Robust to OOF misalignment since it uses ranks instead of raw values.
+        Works well for AUC, ranking metrics, and threshold-based classification.
+
+        Args:
+            prediction_pairs: Dict mapping model name to (oof_path, test_path)
+            weights: Optional weights for each model
+
+        Returns:
+            Tuple of (final_predictions, model_names, success)
+        """
+        from scipy.stats import rankdata
+
+        # Load test predictions
+        test_preds: dict[str, np.ndarray] = {}
+        for name, (_, test_path) in prediction_pairs.items():
+            if test_path.exists():
+                try:
+                    preds = np.load(test_path)
+                    if np.isfinite(preds).all():
+                        test_preds[name] = preds
+                    else:
+                        print(f"      [SKIP] {name}: contains NaN/Inf")
+                except Exception as e:
+                    print(f"      [SKIP] {name}: load error - {e}")
+
+        if len(test_preds) < 2:
+            print(f"      [WARN] Only {len(test_preds)} valid models for rank averaging")
+            return None, [], False
+
+        model_names = list(test_preds.keys())
+        print(f"      Creating rank average ensemble from {len(model_names)} models: {model_names}")
+
+        # Convert to ranks (normalized 0-1)
+        ranked_preds: list[np.ndarray] = []
+        for name, preds in test_preds.items():
+            if preds.ndim == 1:
+                # Binary classification or regression
+                ranks = rankdata(preds) / len(preds)
+            else:
+                # Multi-class: rank each column separately
+                ranks = np.apply_along_axis(
+                    lambda x: rankdata(x) / len(x),
+                    axis=0,
+                    arr=preds,
+                )
+            ranked_preds.append(ranks)
+
+        # Weighted average of ranks
+        if weights is None:
+            weights = np.ones(len(ranked_preds)) / len(ranked_preds)
+        else:
+            weights = np.array(weights)
+            weights = weights / weights.sum()
+
+        stacked = np.stack(ranked_preds, axis=0)
+        final_ranks = np.average(stacked, axis=0, weights=weights)
+
+        print(f"      Rank average shape: {final_ranks.shape}")
+        return final_ranks, model_names, True
+
+    def select_ensemble_strategy(
+        self,
+        oof_coverage: float,
+        problem_type: str,
+        metric_name: str,
+    ) -> str:
+        """Select ensemble strategy based on OOF coverage and problem type.
+
+        Args:
+            oof_coverage: Fraction of samples with valid OOF predictions (0-1)
+            problem_type: 'classification' or 'regression'
+            metric_name: Name of evaluation metric
+
+        Returns:
+            Strategy name: 'stacking', 'intersection_stacking', 'rank_averaging', or 'weighted_averaging'
+        """
+        # Ranking metrics benefit from rank averaging
+        ranking_metrics = {'auc', 'roc_auc', 'map', 'ndcg', 'mrr', 'log_loss', 'logloss'}
+        is_ranking_metric = any(m in metric_name.lower() for m in ranking_metrics)
+
+        if oof_coverage >= 0.95:
+            strategy = "stacking"
+        elif oof_coverage >= 0.70:
+            strategy = "intersection_stacking"
+        elif is_ranking_metric or problem_type == "classification":
+            strategy = "rank_averaging"
+        else:
+            strategy = "weighted_averaging"
+
+        print(f"      Strategy selection: coverage={oof_coverage:.1%}, metric={metric_name}")
+        print(f"      Selected: {strategy}")
+        return strategy
+
     def plan_ensemble_strategy(
         self, models: list[Any], problem_type: str, eda_summary: dict[str, Any]
     ) -> dict[str, Any]:
@@ -2359,11 +2484,12 @@ class EnsembleAgent:
             1. "caruana_ensemble": Hill Climbing / Forward Selection (State of the Art).
             2. "stacking": Train a meta-model (LogisticRegression) on OOF predictions.
             3. "weighted_blending": Simple optimized weights.
+            4. "rank_averaging": Average prediction ranks (robust for AUC/ranking metrics).
 
 # Response format
 Return a JSON object:
 {{
-    "strategy_name": "caruana_ensemble" or "stacking_xgboost_meta" or "weighted_blending",
+    "strategy_name": "caruana_ensemble" or "stacking" or "weighted_blending" or "rank_averaging",
     "description": "Brief description of strategy",
     "meta_learner_config": {{ ... }} (if applicable)
 }}
@@ -3150,6 +3276,46 @@ Return a JSON object:
                     print(
                         "  ❌ No test predictions available for Caruana ensemble, skipping submission."
                     )
+
+            elif "rank" in ensemble_strategy.lower():
+                # Rank averaging ensemble - robust to OOF misalignment
+                print("  Creating rank averaging ensemble...")
+                prediction_pairs = self._find_prediction_pairs(models_dir)
+
+                if len(prediction_pairs) < 2:
+                    print(f"  ⚠️ Only {len(prediction_pairs)} prediction pairs, need 2+ for rank averaging")
+                    ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
+                else:
+                    final_preds, model_names, success = self.create_rank_average_ensemble(
+                        prediction_pairs, weights=None
+                    )
+
+                    if success and final_preds is not None:
+                        # Save submission
+                        if sample_sub_path.exists():
+                            sub_df = pd.read_csv(sample_sub_path)
+                            if final_preds.ndim == 1:
+                                sub_df.iloc[:, 1] = final_preds
+                            else:
+                                sub_df.iloc[:, 1:] = final_preds
+
+                            submission_path = working_dir / "submission.csv"
+                            sub_df.to_csv(submission_path, index=False)
+                            print(f"  ✅ Saved rank average submission to {submission_path}")
+
+                            # Create ensemble dict for compatibility
+                            ensemble = {
+                                "strategy": "rank_averaging",
+                                "base_model_names": model_names,
+                                "weights": [1.0 / len(model_names)] * len(model_names),
+                                "n_models": len(model_names),
+                            }
+                        else:
+                            print(f"  ⚠️ Sample submission not found at {sample_sub_path}")
+                            ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
+                    else:
+                        print("  ⚠️ Rank averaging failed, falling back to blending")
+                        ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)
 
             else:
                 ensemble = self.create_blending_ensemble(top_models, X, y, problem_type)

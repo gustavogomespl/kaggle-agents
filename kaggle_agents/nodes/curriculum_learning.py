@@ -48,6 +48,188 @@ class SubTask:
         }
 
 
+# ==================== Error Root Cause Classification ====================
+# Maps error patterns to their ROOT CAUSE, not symptoms.
+# This prevents misclassifying data alignment errors as timeouts.
+
+ERROR_ROOT_CAUSE_MAP = {
+    # ===== DATA ALIGNMENT ERRORS (Priority 1 - Most Critical) =====
+    # These are often misclassified as other errors but have data alignment as root cause
+    "shape mismatch": {
+        "root_cause": "data_alignment",
+        "not_cause": ["timeout", "memory"],  # Explicitly NOT these
+        "category": "data",
+        "priority": 1,
+        "is_data_error": True,
+        "suggestion": "All models must use CANONICAL_TRAIN_IDS. Load canonical/folds.npy for consistent CV.",
+    },
+    "dimension mismatch": {
+        "root_cause": "data_alignment",
+        "not_cause": ["timeout"],
+        "category": "data",
+        "priority": 1,
+        "is_data_error": True,
+        "suggestion": "OOF predictions must align with canonical/train_ids.npy. Use align_oof_by_id().",
+    },
+    "broadcast": {
+        "root_cause": "data_alignment",
+        "category": "data",
+        "priority": 1,
+        "is_data_error": True,
+        "suggestion": "Array broadcasting failed - check array shapes match canonical data dimensions.",
+    },
+    "ValueError: shapes": {
+        "root_cause": "data_alignment",
+        "category": "data",
+        "priority": 1,
+        "is_data_error": True,
+        "suggestion": "Shape validation failed. Load canonical data and verify all arrays align.",
+    },
+    "index out of bounds": {
+        "root_cause": "data_alignment",
+        "category": "data",
+        "priority": 1,
+        "is_data_error": True,
+        "suggestion": "Index error likely due to mismatched data sizes between components.",
+    },
+
+    # ===== MODEL TRAINING ERRORS (Priority 2) =====
+    "undertrained": {
+        "root_cause": "insufficient_training",
+        "category": "model",
+        "priority": 2,
+        "is_data_error": False,
+        "suggestion": "Increase n_estimators, epochs, or training data size.",
+    },
+    "overfitting": {
+        "root_cause": "model_complexity",
+        "category": "model",
+        "priority": 2,
+        "is_data_error": False,
+        "suggestion": "Add regularization, reduce model complexity, or use more data.",
+    },
+    "nan loss": {
+        "root_cause": "training_instability",
+        "category": "model",
+        "priority": 1,
+        "is_data_error": False,
+        "suggestion": "Check for NaN in input data, reduce learning rate, or clip gradients.",
+    },
+
+    # ===== RESOURCE ERRORS (Priority 2-3) =====
+    "MemoryError": {
+        "root_cause": "resource_limit",
+        "category": "resource",
+        "priority": 2,
+        "is_data_error": False,
+        "suggestion": "Reduce batch size, sample data, or process in chunks.",
+    },
+    "timeout": {
+        "root_cause": "resource_limit",
+        "category": "resource",
+        "priority": 3,  # Lower priority than data errors
+        "is_data_error": False,
+        "suggestion": "Add early stopping, reduce iterations, or simplify model.",
+    },
+    "CUDA out of memory": {
+        "root_cause": "gpu_memory",
+        "category": "resource",
+        "priority": 2,
+        "is_data_error": False,
+        "suggestion": "Reduce batch size, use gradient checkpointing, or mixed precision.",
+    },
+
+    # ===== CODE ERRORS (Priority 2) =====
+    "syntax_error": {
+        "root_cause": "code_syntax",
+        "category": "code",
+        "priority": 2,
+        "is_data_error": False,
+        "suggestion": "Fix Python syntax errors in generated code.",
+    },
+    "import_error": {
+        "root_cause": "missing_dependency",
+        "category": "code",
+        "priority": 2,
+        "is_data_error": False,
+        "suggestion": "Add fallback imports or install missing packages.",
+    },
+}
+
+
+def classify_error_root_cause(error_message: str, component_type: str = "model") -> dict:
+    """
+    Classify an error by its ROOT CAUSE, not just the symptom.
+
+    This prevents misclassifying data alignment errors as timeouts or other issues.
+
+    Args:
+        error_message: The error message to classify
+        component_type: Type of component (model, ensemble, etc.)
+
+    Returns:
+        Dict with root_cause, category, priority, and suggested_fix
+    """
+    if not error_message:
+        return {
+            "root_cause": "unknown",
+            "category": "unknown",
+            "priority": 3,
+            "is_data_error": False,
+            "suggested_fix": "Debug the error and implement a fix.",
+        }
+
+    error_lower = error_message.lower()
+
+    # Check each pattern in order of priority
+    for pattern, info in ERROR_ROOT_CAUSE_MAP.items():
+        if pattern.lower() in error_lower:
+            return {
+                "root_cause": info["root_cause"],
+                "category": info["category"],
+                "priority": info["priority"],
+                "is_data_error": info.get("is_data_error", False),
+                "suggested_fix": info["suggestion"],
+                "pattern_matched": pattern,
+            }
+
+    # Fallback classification based on error type keywords
+    if any(kw in error_lower for kw in ["shape", "dimension", "broadcast", "mismatch"]):
+        return {
+            "root_cause": "data_alignment",
+            "category": "data",
+            "priority": 1,
+            "is_data_error": True,
+            "suggested_fix": "Check data alignment with canonical train_ids.",
+        }
+
+    if "memory" in error_lower:
+        return {
+            "root_cause": "resource_limit",
+            "category": "resource",
+            "priority": 2,
+            "is_data_error": False,
+            "suggested_fix": "Reduce memory usage.",
+        }
+
+    if "timeout" in error_lower or "deadline" in error_lower:
+        return {
+            "root_cause": "resource_limit",
+            "category": "resource",
+            "priority": 3,
+            "is_data_error": False,
+            "suggested_fix": "Optimize for speed or increase timeout.",
+        }
+
+    return {
+        "root_cause": "unknown",
+        "category": "unknown",
+        "priority": 3,
+        "is_data_error": False,
+        "suggested_fix": "Debug and fix the error.",
+    }
+
+
 # ==================== Error to SubTask Mapping ====================
 
 ERROR_TO_SUBTASK_TEMPLATE = {
@@ -204,7 +386,10 @@ def generate_subtask_from_error(
     state: KaggleState | None = None,
 ) -> SubTask:
     """
-    Generate a SubTask from an error type with context-aware guidance.
+    Generate a SubTask from an error type with ROOT CAUSE analysis.
+
+    Uses classify_error_root_cause to identify the true cause of the error,
+    preventing misclassification of data alignment errors as timeouts.
 
     Args:
         error_type: Type of error (e.g., "memory_error", "timeout_error")
@@ -213,14 +398,55 @@ def generate_subtask_from_error(
         state: Current workflow state for additional context
 
     Returns:
-        SubTask with resolution guidance
+        SubTask with resolution guidance based on root cause
     """
+    # First, classify the root cause from the error message
+    root_cause_info = classify_error_root_cause(error_message, parent_component)
+
+    # If root cause differs from error_type, use root cause
+    if root_cause_info["is_data_error"] and error_type in ["timeout_error", "memory_error"]:
+        print(f"   Root cause analysis: {error_type} -> {root_cause_info['root_cause']} (data alignment issue)")
+        # Generate data alignment subtask instead
+        return SubTask(
+            parent_component=parent_component,
+            failure_type="data_alignment",  # Corrected failure type
+            task_description="Fix data alignment using canonical data contract",
+            priority=1,  # Highest priority for data issues
+            resolution_guidance=f"""
+CAUSA RAIZ IDENTIFICADA: {root_cause_info['root_cause']} (NÃO é {error_type})
+
+Este erro parece ser {error_type} mas a causa raiz é desalinhamento de dados.
+
+SOLUÇÃO:
+1. Carregar dados canônicos: load_canonical_data(working_dir)
+2. Usar train_ids para garantir ordem consistente
+3. Validar shape antes de ensemble: validate_oof_alignment()
+4. Usar folds canônicos para CV: folds = np.load('canonical/folds.npy')
+
+CÓDIGO DE CORREÇÃO:
+```python
+from kaggle_agents.utils.data_contract import load_canonical_data, align_oof_by_id
+
+canonical = load_canonical_data(working_dir)
+train_ids = canonical["train_ids"]
+folds = canonical["folds"]
+y = canonical["y"]
+
+# Alinhar OOF se necessário
+aligned_oof = align_oof_by_id(oof_predictions, model_ids, train_ids)
+```
+
+{root_cause_info['suggested_fix']}
+""",
+        )
+
+    # Use template for known error types
     template = ERROR_TO_SUBTASK_TEMPLATE.get(
         error_type,
         {
             "task_description": f"Fix {error_type} in code generation",
-            "priority": 3,
-            "guidance": "Debug the error and implement a fix.",
+            "priority": root_cause_info.get("priority", 3),
+            "guidance": root_cause_info.get("suggested_fix", "Debug the error and implement a fix."),
         },
     )
 

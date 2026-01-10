@@ -335,8 +335,15 @@ class MLEBenchRunner:
 
             _log("  Creating workflow graph...")
             workflow = create_mlebench_workflow()
+            # Use centralized recursion_limit from config (default 300)
+            agent_cfg = get_config()
+            recursion_limit = getattr(
+                getattr(agent_cfg, "iteration", None),
+                "langgraph_recursion_limit",
+                300
+            )
             config = {
-                "recursion_limit": 150,
+                "recursion_limit": recursion_limit,
                 "metadata": {
                     "competition": competition_id,
                     "mode": "mlebench",

@@ -96,6 +96,104 @@ class AblationConfig:
 
 
 @dataclass
+class ComponentTimeoutConfig:
+    """Component-specific timeout configuration.
+
+    Different component types have different computational requirements:
+    - Preprocessing: Usually fast, 10 minutes max
+    - Feature engineering: Can be slow with complex operations, 15 minutes
+    - Light models (GBM): Moderate, 30 minutes
+    - Heavy models (Neural): Long training, 60 minutes
+    - Ensemble: Usually fast if models are pre-trained, 10 minutes
+    """
+
+    preprocessing: int = field(
+        default_factory=lambda: int(os.getenv("TIMEOUT_PREPROCESSING", "600"))
+    )  # 10 min
+    feature_engineering: int = field(
+        default_factory=lambda: int(os.getenv("TIMEOUT_FEATURE_ENGINEERING", "900"))
+    )  # 15 min
+    model_light: int = field(
+        default_factory=lambda: int(os.getenv("TIMEOUT_MODEL_LIGHT", "1800"))
+    )  # 30 min (LightGBM, XGBoost, CatBoost)
+    model_heavy: int = field(
+        default_factory=lambda: int(os.getenv("TIMEOUT_MODEL_HEAVY", "3600"))
+    )  # 60 min (Neural networks, deep models)
+    ensemble: int = field(
+        default_factory=lambda: int(os.getenv("TIMEOUT_ENSEMBLE", "600"))
+    )  # 10 min
+
+    # Models considered "heavy" (longer timeout)
+    heavy_model_patterns: tuple[str, ...] = (
+        "neural",
+        "tabnet",
+        "deep",
+        "transformer",
+        "vit",
+        "swin",
+        "bert",
+        "roberta",
+        "deberta",
+        "mlp",
+        "cnn",
+        "resnet",
+        "efficientnet",
+    )
+
+    def get_timeout(self, component_type: str, model_name: str = "") -> int:
+        """
+        Get appropriate timeout for a component.
+
+        Args:
+            component_type: Type of component (preprocessing, model, ensemble, etc.)
+            model_name: Name of the model (used to detect heavy models)
+
+        Returns:
+            Timeout in seconds
+        """
+        component_type_lower = component_type.lower()
+        model_name_lower = model_name.lower()
+
+        if component_type_lower == "preprocessing":
+            return self.preprocessing
+        elif component_type_lower == "feature_engineering":
+            return self.feature_engineering
+        elif component_type_lower == "model":
+            # Check if it's a heavy model
+            if any(pattern in model_name_lower for pattern in self.heavy_model_patterns):
+                return self.model_heavy
+            return self.model_light
+        elif component_type_lower == "ensemble":
+            return self.ensemble
+        else:
+            # Default to light model timeout
+            return self.model_light
+
+
+@dataclass
+class ParallelismConfig:
+    """Configuration for parallelism across different operations."""
+
+    # CV fold parallelism (use all cores for cross-validation)
+    cv_parallel: bool = field(
+        default_factory=lambda: os.getenv("CV_PARALLEL", "true").lower() == "true"
+    )
+    cv_n_jobs: int = field(
+        default_factory=lambda: int(os.getenv("CV_N_JOBS", "-1"))
+    )  # -1 = all cores
+
+    # Individual models should be single-threaded to avoid contention
+    model_n_jobs: int = field(
+        default_factory=lambda: int(os.getenv("MODEL_N_JOBS", "1"))
+    )
+
+    # Ensemble operations can parallelize calibration
+    ensemble_parallel: bool = field(
+        default_factory=lambda: os.getenv("ENSEMBLE_PARALLEL", "true").lower() == "true"
+    )
+
+
+@dataclass
 class ValidationConfig:
     """Configuration for robustness validation."""
 
@@ -126,6 +224,35 @@ class IterationConfig:
     early_stopping: bool = True
     patience: int = 3  # iterations without improvement
     min_score_improvement: float = 0.001  # 0.1% minimum improvement
+
+    # Adaptive iteration settings for aggressive optimization
+    adaptive_iterations: bool = field(
+        default_factory=lambda: os.getenv("ADAPTIVE_ITERATIONS", "true").lower() == "true"
+    )
+    min_iterations: int = field(
+        default_factory=lambda: int(os.getenv("MIN_ITERATIONS", "3"))
+    )  # Minimum iterations before considering early stop
+    extended_max_iterations: int = field(
+        default_factory=lambda: int(os.getenv("EXTENDED_MAX_ITERATIONS", "15"))
+    )  # Max iterations when gap is large
+    score_gap_threshold: float = field(
+        default_factory=lambda: float(os.getenv("SCORE_GAP_THRESHOLD", "0.3"))
+    )  # If gap > 30% of target, extend iterations
+
+    # Stagnation detection for SOTA search trigger
+    stagnation_window: int = field(
+        default_factory=lambda: int(os.getenv("STAGNATION_WINDOW", "3"))
+    )  # Number of iterations to check for stagnation
+    stagnation_threshold: float = field(
+        default_factory=lambda: float(os.getenv("STAGNATION_THRESHOLD", "0.01"))
+    )  # Avg improvement < 1% = stagnation
+
+    # LangGraph recursion limit - controls max node traversals before error
+    # Formula: ~20 nodes per iteration * max_iterations * 1.5 safety margin
+    # Default 300 supports up to ~10 iterations safely
+    langgraph_recursion_limit: int = field(
+        default_factory=lambda: int(os.getenv("LANGGRAPH_RECURSION_LIMIT", "300"))
+    )
 
 
 @dataclass
@@ -254,6 +381,8 @@ class AgentConfig:
     paths: PathConfig = field(default_factory=PathConfig)
     kaggle: KaggleConfig = field(default_factory=KaggleConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
+    component_timeout: ComponentTimeoutConfig = field(default_factory=ComponentTimeoutConfig)
+    parallelism: ParallelismConfig = field(default_factory=ParallelismConfig)
 
     # Global settings
     debug_mode: bool = field(default_factory=lambda: os.getenv("DEBUG", "false").lower() == "true")

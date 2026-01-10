@@ -450,3 +450,191 @@ def align_oof_by_id(
             aligned_oof[canonical_idx] = oof[model_idx]
 
     return aligned_oof
+
+
+# ==================== Code Validation ====================
+
+
+def validate_canonical_data_usage(
+    generated_code: str,
+    working_dir: str | Path,
+    component_type: str = "model",
+) -> tuple[bool, str, list[str]]:
+    """
+    Validate that generated code uses canonical data correctly.
+
+    Checks for:
+    1. Use of canonical data loading (load_canonical_data or npy files)
+    2. Proper fold usage for CV
+    3. No independent sampling or fold creation
+
+    Args:
+        generated_code: The code to validate
+        working_dir: Working directory path
+        component_type: Type of component (model, feature_engineering, etc.)
+
+    Returns:
+        Tuple of (is_valid, error_message, warnings)
+    """
+    import re
+
+    warnings = []
+    code_lower = generated_code.lower()
+
+    # Check if canonical directory exists
+    canonical_dir = Path(working_dir) / "canonical"
+    canonical_exists = canonical_dir.exists()
+
+    if not canonical_exists:
+        # Canonical data not yet prepared - this is OK for early components
+        return True, "", ["Canonical data not yet prepared - will be created"]
+
+    # Patterns indicating proper canonical data usage
+    canonical_patterns = [
+        r"load_canonical_data\s*\(",
+        r"canonical/train_ids\.npy",
+        r"canonical/folds\.npy",
+        r"canonical/y\.npy",
+        r"np\.load\s*\([^)]*canonical[^)]*\)",
+    ]
+
+    # Check if any canonical pattern is present
+    uses_canonical = any(re.search(p, generated_code) for p in canonical_patterns)
+
+    # Anti-patterns: things that suggest independent data handling
+    anti_patterns = [
+        (r"train_test_split\s*\(", "Using train_test_split - should use canonical folds"),
+        (r"StratifiedKFold\s*\(", "Creating new folds - should use canonical folds"),
+        (r"KFold\s*\(", "Creating new folds - should use canonical folds"),
+        (r"GroupKFold\s*\(", "Creating new folds - should use canonical folds"),
+        (r"\.sample\s*\(", "Sampling data - may cause alignment issues with canonical"),
+        (r"shuffle\s*=\s*True", "Shuffling data - may cause alignment issues"),
+    ]
+
+    violations = []
+    for pattern, message in anti_patterns:
+        if re.search(pattern, generated_code):
+            # Exception: If it's used to create canonical data, that's OK
+            if "prepare_canonical_data" in generated_code:
+                continue
+            violations.append(message)
+
+    # Model components MUST use canonical data
+    if component_type == "model":
+        if not uses_canonical and violations:
+            error_msg = (
+                "Model code does not use canonical data contract. "
+                f"Violations: {'; '.join(violations)}. "
+                "Use load_canonical_data() or load canonical/*.npy files."
+            )
+            return False, error_msg, warnings
+
+        if violations:
+            # Has violations but also uses canonical - warn but allow
+            warnings.extend(violations)
+
+    # Feature engineering components should be more flexible
+    elif component_type == "feature_engineering":
+        if violations:
+            warnings.append(
+                "Feature engineering code may modify data alignment. "
+                "Ensure train_ids are preserved."
+            )
+
+    # Ensemble MUST use aligned predictions
+    elif component_type == "ensemble":
+        if not uses_canonical and not re.search(r"oof_.*\.npy|test_.*\.npy", generated_code):
+            warnings.append(
+                "Ensemble should verify OOF alignment with canonical train_ids"
+            )
+
+    return True, "", warnings
+
+
+def get_canonical_data_instructions(working_dir: str | Path) -> str:
+    """
+    Generate instructions for using canonical data in generated code.
+
+    Args:
+        working_dir: Working directory path
+
+    Returns:
+        Instruction string to inject into developer prompt
+    """
+    canonical_dir = Path(working_dir) / "canonical"
+
+    if canonical_dir.exists():
+        # Load metadata for context
+        try:
+            with open(canonical_dir / "metadata.json") as f:
+                metadata = json.load(f)
+            n_rows = metadata.get("canonical_rows", "unknown")
+            n_folds = metadata.get("n_folds", 5)
+            id_col = metadata.get("id_col", "id")
+        except Exception:
+            n_rows = "unknown"
+            n_folds = 5
+            id_col = "id"
+
+        return f'''
+## MANDATORY: Canonical Data Contract
+
+The canonical data has been prepared with {n_rows} rows and {n_folds} folds.
+You MUST use the canonical data to ensure consistency across all models.
+
+### How to Load Canonical Data:
+
+```python
+import numpy as np
+import json
+from pathlib import Path
+
+# Load canonical data
+canonical_dir = Path("{working_dir}/canonical")
+train_ids = np.load(canonical_dir / "train_ids.npy", allow_pickle=True)
+y = np.load(canonical_dir / "y.npy", allow_pickle=True)
+folds = np.load(canonical_dir / "folds.npy")
+
+with open(canonical_dir / "feature_cols.json") as f:
+    feature_cols = json.load(f)
+
+# Use folds for CV (DO NOT create your own folds!)
+n_folds = {n_folds}
+for fold_idx in range(n_folds):
+    train_mask = folds != fold_idx
+    val_mask = folds == fold_idx
+
+    X_train, X_val = X[train_mask], X[val_mask]
+    y_train, y_val = y[train_mask], y[val_mask]
+
+    # Train model...
+    model.fit(X_train, y_train)
+
+    # Store OOF predictions in order
+    oof[val_mask] = model.predict_proba(X_val)
+```
+
+### CRITICAL RULES:
+1. NEVER use train_test_split() - use canonical folds
+2. NEVER create your own KFold/StratifiedKFold - folds are pre-defined
+3. NEVER sample or shuffle the data independently
+4. ALWAYS save OOF predictions in canonical order (aligned with train_ids)
+5. ID column is: "{id_col}"
+
+### Saving Predictions:
+```python
+# Save OOF aligned with canonical train_ids
+np.save("models/oof_{{model_name}}.npy", oof)
+
+# Verify alignment before saving
+assert len(oof) == len(train_ids), "OOF must match canonical row count"
+```
+'''
+    else:
+        return '''
+## Note: Canonical Data Will Be Prepared
+
+The canonical data contract will be prepared before your component runs.
+When it's ready, use load_canonical_data() to get train_ids, folds, and y.
+Do NOT create your own folds or sampling strategy.
+'''

@@ -295,21 +295,22 @@ class DeveloperAgent(
         if base_timeout <= 0:
             base_timeout = self.config.ablation.testing_timeout or 300
 
-        # Per-type caps (never exceed base_timeout)
-        heavy_timeout = base_timeout
-        ensemble_timeout = min(base_timeout, 1200)
-        feature_timeout = min(base_timeout, 900)
-        light_timeout = min(base_timeout, 300)
+        # Use ComponentTimeoutConfig for per-type timeouts
+        component_timeout_config = self.config.component_timeout
         name_lower = component.name.lower()
 
-        if component.component_type == "model" or "optuna" in name_lower:
-            desired_timeout = heavy_timeout
-        elif component.component_type == "ensemble":
-            desired_timeout = ensemble_timeout
-        elif component.component_type == "feature_engineering":
-            desired_timeout = feature_timeout
-        else:
-            desired_timeout = light_timeout if light_timeout > 0 else base_timeout
+        # Get timeout from config based on component type and model name
+        config_timeout = component_timeout_config.get_timeout(
+            component.component_type,
+            component.name
+        )
+
+        # Cap at base_timeout (runner may impose limits)
+        desired_timeout = min(config_timeout, base_timeout)
+
+        # Special handling for Optuna tuning (always use heavy timeout)
+        if "optuna" in name_lower:
+            desired_timeout = min(base_timeout, component_timeout_config.model_heavy)
 
         if self.executor.timeout != desired_timeout:
             self.executor.timeout = desired_timeout
@@ -1297,7 +1298,25 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 code_file.write_text(code)
                 print(f"Code saved to: {code_file.name}")
             except Exception as e:
-                print(f"⚠️ Could not save code: {e}")
+                pass  # Continue even if save fails
+
+        # Pre-execution validation: Check canonical data usage
+        if component.component_type in ("model", "ensemble"):
+            try:
+                from kaggle_agents.utils.data_contract import validate_canonical_data_usage
+
+                is_valid, error_msg, warnings = validate_canonical_data_usage(
+                    code, working_dir, component.component_type
+                )
+                if not is_valid:
+                    print(f"   Canonical data validation failed: {error_msg}")
+                    print("   Code may have data alignment issues - flagging for review")
+                    state["_canonical_data_error"] = error_msg
+                elif warnings:
+                    for warning in warnings:
+                        print(f"   Canonical data warning: {warning}")
+            except Exception as exc:
+                print(f"   Canonical data validation skipped: {exc}")
 
         is_valid, syntax_error = self.executor.validate_syntax(code)
         if not is_valid:

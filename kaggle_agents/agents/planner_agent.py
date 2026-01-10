@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from datetime import datetime
 from typing import Any
 
@@ -33,6 +34,143 @@ from ..prompts.templates.planner_prompts import (
     get_domain_guidance,
 )
 from ..utils.llm_utils import get_text_content
+
+
+# ==================== Extended Strategy Templates ====================
+# These strategies are used after initial iterations to increase diversity
+
+EXTENDED_STRATEGIES_TABULAR = {
+    "feature_engineering_heavy": {
+        "name": "feature_engineering_heavy",
+        "prompt_modifier": """
+Prioritize extensive feature engineering before modeling:
+- Create derived features: interactions, ratios, aggregations
+- Apply target encoding with proper CV to avoid leakage
+- Generate temporal features if applicable (lags, rolling stats)
+- Use clustering-based features (KMeans cluster assignments)
+- Save engineered features for reuse by all models
+""",
+        "model_preference": ["lightgbm", "xgboost"],
+        "component_emphasis": ["feature_engineering"],
+    },
+    "neural_exploration": {
+        "name": "neural_exploration",
+        "prompt_modifier": """
+Explore neural network approaches for tabular data:
+- TabNet for interpretable neural networks
+- MLP with embeddings for categorical features
+- Neural network + gradient boosting ensemble
+- Use proper regularization (dropout, weight decay)
+""",
+        "model_preference": ["tabnet", "mlp", "neural_ensemble"],
+        "component_emphasis": ["model"],
+    },
+    "hyperparameter_variant": {
+        "name": "hyperparameter_variant",
+        "prompt_modifier": """
+Explore hyperparameter variations of successful models:
+- If LightGBM worked, try different learning_rate (0.01, 0.05, 0.1)
+- Vary max_depth (4, 6, 8, 10) and num_leaves
+- Test different regularization (lambda_l1, lambda_l2)
+- Try different n_estimators (500, 1000, 2000)
+""",
+        "model_preference": ["lightgbm", "xgboost", "catboost"],
+        "component_emphasis": ["model"],
+        "inherit_from_best": True,
+    },
+    "stacking_ensemble": {
+        "name": "stacking_ensemble",
+        "prompt_modifier": """
+Focus on advanced stacking ensembles:
+- Create diverse base models (GBM, RF, Linear)
+- Use OOF predictions as meta-features
+- Add second-level meta-learner (Ridge, LightGBM)
+- Ensure proper CV alignment to avoid leakage
+""",
+        "model_preference": ["stacking", "blending"],
+        "component_emphasis": ["ensemble"],
+    },
+}
+
+EXTENDED_STRATEGIES_CV = {
+    "feature_engineering_heavy": {
+        "name": "feature_engineering_heavy",
+        "prompt_modifier": """
+Focus on advanced image augmentation and preprocessing:
+- Heavy augmentation: Cutmix, Mixup, GridMask, RandomErasing
+- Test Time Augmentation (TTA) with multiple crops
+- External data integration if allowed
+- Multi-scale feature extraction
+""",
+        "model_preference": ["efficientnet_b3", "resnet50"],
+        "component_emphasis": ["preprocessing", "augmentation"],
+    },
+    "neural_exploration": {
+        "name": "neural_exploration",
+        "prompt_modifier": """
+Explore SOTA vision architectures:
+- Vision Transformers (ViT, DeiT, Swin)
+- ConvNeXt for modern CNN approach
+- Hybrid CNN-Transformer models
+- Knowledge distillation from larger models
+""",
+        "model_preference": ["vit", "swin", "convnext", "deit"],
+        "component_emphasis": ["model"],
+    },
+    "hyperparameter_variant": {
+        "name": "hyperparameter_variant",
+        "prompt_modifier": """
+Explore training variations:
+- Different learning rate schedules (cosine, warmup)
+- Vary image sizes (224, 384, 512)
+- Different optimizers (AdamW, SAM, LAMB)
+- Label smoothing and loss variants
+""",
+        "model_preference": ["efficientnet", "resnet"],
+        "component_emphasis": ["model"],
+        "inherit_from_best": True,
+    },
+}
+
+EXTENDED_STRATEGIES_NLP = {
+    "feature_engineering_heavy": {
+        "name": "feature_engineering_heavy",
+        "prompt_modifier": """
+Focus on text preprocessing and feature extraction:
+- Advanced tokenization strategies
+- Domain-specific vocabulary expansion
+- Text augmentation (back-translation, synonym replacement)
+- Sentence-level and document-level features
+""",
+        "model_preference": ["roberta_base", "deberta"],
+        "component_emphasis": ["preprocessing"],
+    },
+    "neural_exploration": {
+        "name": "neural_exploration",
+        "prompt_modifier": """
+Explore advanced NLP architectures:
+- DeBERTa-v3 (large and xlarge variants)
+- Longformer for long documents
+- Multi-task learning approaches
+- Ensemble of different model sizes
+""",
+        "model_preference": ["deberta_v3_large", "longformer", "roberta_large"],
+        "component_emphasis": ["model"],
+    },
+    "hyperparameter_variant": {
+        "name": "hyperparameter_variant",
+        "prompt_modifier": """
+Explore training variations:
+- Different learning rates (1e-5, 2e-5, 3e-5)
+- Layer-wise learning rate decay
+- Different pooling strategies (CLS, mean, max)
+- Gradient accumulation for larger batch sizes
+""",
+        "model_preference": ["roberta", "deberta"],
+        "component_emphasis": ["model"],
+        "inherit_from_best": True,
+    },
+}
 
 
 # ==================== DSPy Signatures ====================
@@ -2506,6 +2644,34 @@ Ensemble: {sol.ensemble_approach or "N/A"}
 
         print(f"   📊 Domain: {domain}, using domain-specific strategies")
 
+        # Get current iteration to determine if we should use extended strategies
+        current_iteration = state.get("current_iteration", 0)
+
+        # After iteration 2, add extended strategies for more diversity
+        if current_iteration >= 2:
+            # Select domain-appropriate extended strategies
+            if domain in IMAGE_CLASSIFICATION_DOMAINS or domain in IMAGE_SEGMENTATION_DOMAINS:
+                extended = EXTENDED_STRATEGIES_CV
+            elif domain in NLP_DOMAINS:
+                extended = EXTENDED_STRATEGIES_NLP
+            else:
+                extended = EXTENDED_STRATEGIES_TABULAR
+
+            # Add extended strategies to the base strategies
+            extended_list = [
+                extended.get("feature_engineering_heavy"),
+                extended.get("neural_exploration"),
+                extended.get("hyperparameter_variant"),
+            ]
+            strategies.extend([s for s in extended_list if s is not None])
+            print(f"   🔄 Iteration {current_iteration}: Added extended strategies for diversity")
+
+        # Dynamically adjust n_candidates based on iteration
+        if current_iteration >= 3:
+            n_candidates = min(5, len(strategies))  # More candidates in later iterations
+        else:
+            n_candidates = min(n_candidates, len(strategies))
+
         candidate_plans = []
 
         for i, strategy in enumerate(strategies[:n_candidates]):
@@ -2513,6 +2679,10 @@ Ensemble: {sol.ensemble_approach or "N/A"}
 
             # Generate plan with strategy-specific modifications
             plan = self._generate_plan_with_strategy(state, sota_analysis, strategy)
+
+            # Apply hyperparameter mutation for variant strategies
+            if strategy.get("inherit_from_best") and current_iteration >= 2:
+                plan = self._mutate_plan_hyperparameters(plan, state)
 
             # Evaluate fitness
             fitness = self._evaluate_plan_fitness(plan, state)
@@ -2576,6 +2746,104 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
                     comp.estimated_impact = min(comp.estimated_impact * 1.3, 1.0)
 
         return plan
+
+    def _mutate_plan_hyperparameters(
+        self,
+        plan: list[AblationComponent],
+        state: KaggleState,
+        mutation_rate: float = 0.3,
+    ) -> list[AblationComponent]:
+        """
+        Apply hyperparameter mutations to plan components.
+
+        Eureka-style: Introduce controlled randomness to explore hyperparameter space.
+
+        Args:
+            plan: Original plan components
+            state: Current workflow state (for accessing best hyperparameters)
+            mutation_rate: Probability of mutating each component
+
+        Returns:
+            Plan with mutated hyperparameters
+        """
+        iteration_memory = state.get("iteration_memory", [])
+
+        # Get best hyperparameters from previous iterations
+        best_hyperparams = {}
+        if iteration_memory:
+            for memory in iteration_memory:
+                if hasattr(memory, "best_hyperparameters") and memory.best_hyperparameters:
+                    best_hyperparams.update(memory.best_hyperparameters)
+
+        mutated_plan = []
+        for comp in plan:
+            # Only mutate model components with some probability
+            if comp.component_type == "model" and random.random() < mutation_rate:
+                # Create a mutated version
+                mutated_name = f"{comp.name}_hp_variant"
+
+                # Define mutation suggestions for common hyperparameters
+                mutation_hints = self._get_hyperparameter_mutations(comp.name)
+
+                # Add mutation hint to code description
+                mutation_note = f"\n# HYPERPARAMETER VARIANT: {mutation_hints}"
+
+                mutated_comp = AblationComponent(
+                    name=mutated_name,
+                    component_type=comp.component_type,
+                    description=f"{comp.description} (hyperparameter variant: {mutation_hints})",
+                    code=comp.code,  # Code will be regenerated by Developer
+                    estimated_impact=comp.estimated_impact * 0.95,  # Slight uncertainty penalty
+                    dependencies=comp.dependencies,
+                    ablatable=comp.ablatable,
+                )
+                mutated_plan.append(mutated_comp)
+            else:
+                mutated_plan.append(comp)
+
+        return mutated_plan
+
+    def _get_hyperparameter_mutations(self, model_name: str) -> str:
+        """Get suggested hyperparameter mutations for a model type."""
+        model_lower = model_name.lower()
+
+        if "lightgbm" in model_lower or "lgb" in model_lower:
+            mutations = [
+                "learning_rate: [0.01, 0.03, 0.05]",
+                "num_leaves: [31, 63, 127]",
+                "max_depth: [5, 7, 9]",
+                "reg_alpha: [0, 0.1, 0.5]",
+            ]
+            return random.choice(mutations)
+
+        elif "xgboost" in model_lower or "xgb" in model_lower:
+            mutations = [
+                "learning_rate: [0.01, 0.05, 0.1]",
+                "max_depth: [4, 6, 8]",
+                "subsample: [0.7, 0.8, 0.9]",
+                "colsample_bytree: [0.7, 0.8, 0.9]",
+            ]
+            return random.choice(mutations)
+
+        elif "catboost" in model_lower:
+            mutations = [
+                "learning_rate: [0.01, 0.03, 0.1]",
+                "depth: [4, 6, 8]",
+                "l2_leaf_reg: [1, 3, 5]",
+            ]
+            return random.choice(mutations)
+
+        elif "neural" in model_lower or "mlp" in model_lower or "tabnet" in model_lower:
+            mutations = [
+                "learning_rate: [1e-4, 1e-3, 1e-2]",
+                "dropout: [0.1, 0.2, 0.3]",
+                "hidden_dims: [128, 256, 512]",
+            ]
+            return random.choice(mutations)
+
+        else:
+            # Generic mutations
+            return "try different hyperparameter values"
 
     def _evaluate_plan_fitness(
         self,

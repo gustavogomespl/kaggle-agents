@@ -965,6 +965,51 @@ print(f"[LOG:CV_SUMMARY] mean={np.mean(fold_scores):.6f} std={np.std(fold_scores
 - Timeout mid-CV loses ALL progress without checkpointing
 - Enables ensemble agent to use partial OOF for stacking
 - Allows resume if job is killed/restarted
+
+## SAFE MERGE PATTERN (PREVENTS ROW EXPLOSION):
+
+ALWAYS validate row counts after merge operations to prevent silent data corruption.
+Merge operations creating cartesian products cause 25M vs 55M row misalignment.
+
+```python
+def safe_merge(left_df, right_df, on_col, how='left'):
+    '''Merge with row count validation to prevent cartesian products.'''
+    original_rows = len(left_df)
+
+    # CRITICAL: Check for duplicates that could cause row explosion
+    right_dups = right_df.groupby(on_col).size().max()
+    if right_dups > 1:
+        print(f"[LOG:WARNING] Right DataFrame has {right_dups}x duplicates on {on_col}")
+        # Option 1: Deduplicate
+        right_df = right_df.drop_duplicates(subset=[on_col], keep='first')
+        # Option 2: Aggregate (if values should be combined)
+        # right_df = right_df.groupby(on_col).agg({'value': 'mean'}).reset_index()
+
+    result = left_df.merge(right_df, on=on_col, how=how)
+
+    # MANDATORY: Validate row count after merge
+    if len(result) != original_rows:
+        raise ValueError(
+            f"Merge changed row count: {original_rows:,} → {len(result):,}"
+        )
+
+    return result
+
+# Usage
+train_df = safe_merge(train_df, features_df, on_col='id')
+```
+
+### SAFE MERGE RULES (MANDATORY):
+1. ALWAYS check row count before and after merge
+2. NEVER merge without validating result length for left joins
+3. If row count increases, investigate duplicates in right DataFrame
+4. For expected row increases (outer joins), use `expected_ratio` parameter
+
+### Common Merge Failures (DO NOT REPEAT):
+- **WRONG**: `df.merge(other)` without checking result length
+- **WRONG**: Merging on non-unique keys without aggregating first
+- **WRONG**: Using `how='outer'` when `how='left'` is needed
+- **WRONG**: Assuming merge preserves row count without validation
 """
 
 
@@ -1032,6 +1077,20 @@ def compose_generate_prompt(
         "",
         _format_task(component, competition_info, paths),
     ]
+
+    # Inject dynamic canonical data instructions for model components
+    comp_type = getattr(component, "component_type", "model")
+    if comp_type in ("model", "ensemble"):
+        try:
+            from ...utils.data_contract import get_canonical_data_instructions
+
+            output_dir = paths.get("output_dir", ".")
+            canonical_instructions = get_canonical_data_instructions(output_dir)
+            if canonical_instructions:
+                parts.append("")
+                parts.append(canonical_instructions)
+        except Exception:
+            pass  # Canonical data not available yet
 
     # Non-standard label files instruction (e.g., MLSP 2013 Birds .txt files)
     label_files = paths.get("label_files", [])

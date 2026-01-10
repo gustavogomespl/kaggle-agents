@@ -24,6 +24,7 @@ from .agents import (
 from .agents.meta_evaluator_agent import meta_evaluator_node  # Meta-Evaluator with RL
 from .agents.reporting_agent import reporting_agent_node
 from .agents.submission_agent import submission_agent_node
+from .core.config import get_config
 from .core.state import KaggleState, create_initial_state
 from .domain import detect_competition_domain
 from .nodes.curriculum_learning import (
@@ -1029,9 +1030,10 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     """
     Route after iteration control - decide if we refine or end.
 
-    In MLE-bench mode, aggressively refines until:
-    1. Medal is achieved
-    2. Max iterations reached
+    Uses adaptive iteration logic:
+    1. If score gap > threshold, extend iterations
+    2. In MLE-bench mode, aggressively refines until medal/max
+    3. Respects minimum iterations before early stopping
 
     Args:
         state: Current state
@@ -1039,11 +1041,30 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     Returns:
         "refine" to start refinement iteration, or "end" if done
     """
+    from .core.config import get_config
+
+    config = get_config()
+    iter_config = config.iteration
+
     needs_refinement = state.get("needs_refinement", False)
     current_iteration = state.get("current_iteration", 0)
-    max_iterations = state.get("max_iterations", 10)
+    base_max_iterations = state.get("max_iterations", iter_config.max_iterations)
     run_mode = str(state.get("run_mode", "")).lower()
     mlebench_grade = state.get("mlebench_grade")
+
+    # Calculate effective max_iterations based on score gap (adaptive)
+    max_iterations = base_max_iterations
+    if iter_config.adaptive_iterations:
+        current_score = state.get("current_performance_score", 0.0)
+        target_score = state.get("target_score")
+        if target_score and isinstance(target_score, (int, float)) and target_score > 0:
+            # Calculate gap percentage
+            score_gap = abs(float(target_score) - float(current_score)) / float(target_score)
+            if score_gap > iter_config.score_gap_threshold:
+                # Extend iterations when gap is large
+                max_iterations = min(iter_config.extended_max_iterations, base_max_iterations * 2)
+                print(f"   📈 Score gap {score_gap:.1%} > {iter_config.score_gap_threshold:.0%} threshold")
+                print(f"      Extended max_iterations: {base_max_iterations} → {max_iterations}")
 
     print("\n🔀 Routing decision:")
     print(f"   Current iteration: {current_iteration}")
@@ -1132,12 +1153,19 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
             target_score = 1.0
 
     if isinstance(current_score, (int, float)) and isinstance(target_score, (int, float)):
+        goal_achieved = False
         if is_metric_minimization(metric_name):
-            if float(current_score) <= float(target_score):
-                print(f"   ✅ Goal achieved: {current_score:.4f} <= {target_score:.4f}")
-                return "end"
-        elif float(current_score) >= float(target_score):
-            print(f"   ✅ Goal achieved: {current_score:.4f} >= {target_score:.4f}")
+            goal_achieved = float(current_score) <= float(target_score)
+        else:
+            goal_achieved = float(current_score) >= float(target_score)
+
+        if goal_achieved:
+            # Respect min_iterations before early stopping
+            if iter_config.adaptive_iterations and current_iteration < iter_config.min_iterations:
+                print(f"   🎯 Goal achieved but below min_iterations ({current_iteration}/{iter_config.min_iterations})")
+                print(f"      Continuing to consolidate improvements...")
+                return "refine"
+            print(f"   ✅ Goal achieved: {current_score:.4f} vs target {target_score:.4f}")
             return "end"
 
     # Decide based on refinement flag
@@ -1145,31 +1173,184 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         print(f"   🔄 Starting refinement iteration {current_iteration + 1}")
         return "refine"
 
+    # If below min_iterations, continue even without explicit refinement need
+    if iter_config.adaptive_iterations and current_iteration < iter_config.min_iterations:
+        print(f"   📊 Below min_iterations ({current_iteration}/{iter_config.min_iterations}) - continuing")
+        return "refine"
+
     print("   ✅ No refinement needed")
     return "end"
+
+
+# ==================== SOTA Search Node ====================
+
+
+def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
+    """
+    Automatic SOTA search triggered by stagnation or score gap detection.
+
+    Searches for winning solutions and techniques when progress stalls.
+
+    Args:
+        state: Current workflow state
+
+    Returns:
+        State updates with SOTA search results and guidance
+    """
+    from .agents.search_agent import SearchAgent
+
+    print("\n" + "=" * 60)
+    print("= AUTO SOTA SEARCH: Finding solutions to break stagnation")
+    print("=" * 60)
+
+    stagnation = state.get("stagnation_detection", {})
+    if not stagnation.get("trigger_sota_search"):
+        print("   Skipping - no SOTA search trigger")
+        return {}
+
+    competition_name = state.get("competition_name", "")
+    domain = state.get("domain_detected", "tabular")
+    current_score = state.get("current_performance_score", 0.0)
+    competition_info = state.get("competition_info")
+
+    print(f"\n   🔍 Searching SOTA solutions for: {competition_name}")
+    print(f"   📊 Current score: {current_score}")
+    print(f"   🎯 Trigger reason: {stagnation.get('reason', 'unknown')}")
+
+    try:
+        search_agent = SearchAgent()
+
+        # Focus search on areas that could improve the score
+        focus_areas = ["feature_engineering", "model_architecture", "ensemble_strategy"]
+
+        # If stagnation is the issue, focus on novel approaches
+        if stagnation.get("stagnated"):
+            focus_areas.insert(0, "novel_approaches")
+            focus_areas.insert(1, "hyperparameter_optimization")
+
+        # Search for solutions
+        search_results = search_agent.search_with_focus(
+            competition=competition_name,
+            domain=domain,
+            focus_areas=focus_areas,
+            max_results=5,
+        ) if hasattr(search_agent, 'search_with_focus') else {}
+
+        # Generate guidance from search results
+        sota_guidance = _generate_sota_guidance_from_results(search_results, stagnation)
+
+        print(f"\n   ✅ SOTA search complete - found {len(search_results.get('solutions', []))} relevant solutions")
+
+        return {
+            "sota_search_results": search_results,
+            "sota_search_triggered": True,
+            "refinement_guidance": {
+                **state.get("refinement_guidance", {}),
+                "sota_guidance": sota_guidance,
+                "sota_triggered_by": stagnation.get("reason"),
+            },
+            "last_updated": datetime.now(),
+        }
+
+    except Exception as e:
+        print(f"\n   ⚠️ SOTA search failed: {e}")
+        # Return minimal guidance even if search fails
+        return {
+            "sota_search_triggered": True,
+            "refinement_guidance": {
+                **state.get("refinement_guidance", {}),
+                "sota_guidance": _generate_fallback_sota_guidance(domain, stagnation),
+            },
+        }
+
+
+def _generate_sota_guidance_from_results(search_results: dict, stagnation: dict) -> str:
+    """Generate guidance string from SOTA search results."""
+    solutions = search_results.get("solutions", [])
+
+    guidance_parts = [
+        "## SOTA Search Results (triggered by stagnation detection)",
+        "",
+        f"Trigger reason: {stagnation.get('reason', 'unknown')}",
+        "",
+    ]
+
+    if solutions:
+        guidance_parts.append("### Top Solutions Found:")
+        for i, sol in enumerate(solutions[:3], 1):
+            title = sol.get("title", "Unknown")
+            approach = sol.get("approach", "Not specified")
+            guidance_parts.append(f"{i}. **{title}**")
+            guidance_parts.append(f"   - Approach: {approach}")
+
+        guidance_parts.append("")
+        guidance_parts.append("### Recommended Actions:")
+        guidance_parts.append("1. Try feature engineering techniques from top solutions")
+        guidance_parts.append("2. Consider model architectures used by winners")
+        guidance_parts.append("3. Explore ensemble strategies mentioned")
+    else:
+        guidance_parts.append("### No specific solutions found - general recommendations:")
+        guidance_parts.extend(_get_general_improvement_suggestions())
+
+    return "\n".join(guidance_parts)
+
+
+def _generate_fallback_sota_guidance(domain: str, stagnation: dict) -> str:
+    """Generate fallback guidance when SOTA search fails."""
+    guidance = [
+        "## Stagnation Detected - General Improvement Suggestions",
+        "",
+        f"Domain: {domain}",
+        f"Trigger: {stagnation.get('reason', 'unknown')}",
+        "",
+    ]
+    guidance.extend(_get_general_improvement_suggestions())
+    return "\n".join(guidance)
+
+
+def _get_general_improvement_suggestions() -> list[str]:
+    """Get general suggestions for breaking stagnation."""
+    return [
+        "### General Strategies to Break Stagnation:",
+        "1. **Feature Engineering**: Create interaction features, aggregations, or target encoding",
+        "2. **Model Diversity**: Try different model families (Neural, Gradient Boosting, Linear)",
+        "3. **Hyperparameter Exploration**: Significantly change learning rate, depth, regularization",
+        "4. **Ensemble Methods**: Use stacking with diverse base models",
+        "5. **Data Augmentation**: For image/audio, add more augmentation strategies",
+        "6. **Cross-Validation**: Ensure CV strategy matches competition requirements",
+    ]
 
 
 # ==================== Workflow Construction ====================
 
 
-def route_after_meta_evaluator(state: KaggleState) -> Literal["curriculum", "continue"]:
+def route_after_meta_evaluator(state: KaggleState) -> Literal["sota_search", "curriculum", "continue"]:
     """
-    Route after meta-evaluator - check if curriculum learning is needed.
+    Route after meta-evaluator - check for SOTA search or curriculum learning.
 
-    WEBRL-style: If there are critical failures, generate sub-tasks first.
+    Priority:
+    1. SOTA search if stagnation/score gap detected
+    2. Curriculum learning if critical failures
+    3. Continue otherwise
 
     Args:
         state: Current state
 
     Returns:
-        "curriculum" if subtasks needed, "continue" otherwise
+        "sota_search", "curriculum", or "continue"
     """
+    # Check for SOTA search trigger (stagnation or score gap)
+    stagnation = state.get("stagnation_detection", {})
+    if stagnation.get("trigger_sota_search"):
+        print(f"\n   🔍 SOTA Search triggered: {stagnation.get('reason', 'stagnation detected')}")
+        return "sota_search"
+
     failure_analysis = state.get("failure_analysis", {})
     error_patterns = failure_analysis.get("error_patterns", [])
     failed_components = failure_analysis.get("failed_components", [])
 
     # Check for critical errors that need curriculum learning
-    critical_errors = ["memory_error", "timeout_error", "import_error", "syntax_error"]
+    critical_errors = ["memory_error", "timeout_error", "import_error", "syntax_error", "data_alignment"]
     has_critical = any(e in critical_errors for e in error_patterns)
 
     # Only trigger curriculum if we have failures and this is a refinement iteration
@@ -1207,6 +1388,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("iteration_control", iteration_control_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)  # RL-based meta-evaluation
+    workflow.add_node("auto_sota_search", auto_sota_search_node)  # SOTA search on stagnation
     workflow.add_node("curriculum_learning", curriculum_learning_node)  # WEBRL: sub-tasks from failures
     workflow.add_node("inject_curriculum", inject_subtask_guidance)  # WEBRL: inject guidance
     workflow.add_node("prompt_refinement", prompt_refinement_node)  # RLPrompt/DSPy optimization
@@ -1262,15 +1444,19 @@ def create_workflow() -> StateGraph:
     # Performance Evaluation → Meta-Evaluator (RL analysis)
     workflow.add_edge("performance_evaluation", "meta_evaluator")
 
-    # Meta-Evaluator → Conditional (WEBRL: curriculum or continue?)
+    # Meta-Evaluator → Conditional (SOTA search, curriculum, or continue?)
     workflow.add_conditional_edges(
         "meta_evaluator",
         route_after_meta_evaluator,
         {
+            "sota_search": "auto_sota_search",  # Stagnation detected → SOTA search
             "curriculum": "curriculum_learning",  # WEBRL: Generate sub-tasks
             "continue": "prompt_refinement",  # Standard path
         },
     )
+
+    # SOTA Search → Curriculum Learning (to also process any failures)
+    workflow.add_edge("auto_sota_search", "curriculum_learning")
 
     # Curriculum Learning → Inject Guidance → Prompt Refinement
     workflow.add_edge("curriculum_learning", "inject_curriculum")
@@ -1349,6 +1535,10 @@ def run_workflow(
     state["max_iterations"] = max_iterations
 
     # Create workflow
+    # Get centralized recursion_limit from config (default 300)
+    agent_config = get_config()
+    recursion_limit = agent_config.iteration.langgraph_recursion_limit
+
     if use_checkpointing:
         checkpointer = MemorySaver()
         workflow = compile_workflow(checkpointer=checkpointer)
@@ -1356,7 +1546,7 @@ def run_workflow(
         # Run with config for checkpointing
         config = {
             "configurable": {"thread_id": competition_name},
-            "recursion_limit": 150,
+            "recursion_limit": recursion_limit,
             "metadata": {
                 "competition": competition_name,
                 "project": "default",
@@ -1367,7 +1557,7 @@ def run_workflow(
     else:
         workflow = compile_workflow()
         config = {
-            "recursion_limit": 150,
+            "recursion_limit": recursion_limit,
             "metadata": {
                 "competition": competition_name,
                 "project": "default",
@@ -1453,6 +1643,7 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
     workflow.add_node("meta_evaluator", meta_evaluator_node)
+    workflow.add_node("auto_sota_search", auto_sota_search_node)  # SOTA search on stagnation
     workflow.add_node("curriculum_learning", curriculum_learning_node)  # WEBRL
     workflow.add_node("inject_curriculum", inject_subtask_guidance)  # WEBRL guidance injection
     workflow.add_node("prompt_refinement", prompt_refinement_node)
@@ -1495,15 +1686,19 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_edge("submission", "performance_evaluation")
     workflow.add_edge("performance_evaluation", "meta_evaluator")
 
-    # Meta-Evaluator → Conditional (WEBRL: curriculum or continue?)
+    # Meta-Evaluator → Conditional (WEBRL: curriculum, SOTA search, or continue?)
     workflow.add_conditional_edges(
         "meta_evaluator",
         route_after_meta_evaluator,
         {
+            "sota_search": "auto_sota_search",  # Stagnation detected → search SOTA
             "curriculum": "curriculum_learning",  # WEBRL: Generate sub-tasks
             "continue": "prompt_refinement",  # Standard path
         },
     )
+
+    # Auto SOTA Search → Curriculum Learning (with SOTA guidance)
+    workflow.add_edge("auto_sota_search", "curriculum_learning")
 
     # Curriculum Learning → Inject Guidance → Prompt Refinement
     workflow.add_edge("curriculum_learning", "inject_curriculum")

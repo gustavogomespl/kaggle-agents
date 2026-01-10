@@ -150,6 +150,9 @@ class MetaEvaluatorAgent:
         # Inner Loop Refinement: Check for performance gaps that need debug loops
         debug_loop_trigger = self._check_performance_gap_for_debug(state)
 
+        # Detect stagnation for SOTA search trigger
+        stagnation_detection = self._detect_stagnation(state)
+
         # Update state
         debug_updates = {}
         if debug_loop_trigger.get("trigger_debug"):
@@ -166,6 +169,7 @@ class MetaEvaluatorAgent:
             "reward_signals": reward_signals,
             "refinement_guidance": refinement_guidance,
             "crossover_guidance": crossover_guidance,  # Eureka: for planner
+            "stagnation_detection": stagnation_detection,  # For SOTA search trigger
             "iteration_memory": [iteration_memory],  # Append to list
             "last_updated": datetime.now(),
         }
@@ -272,6 +276,86 @@ class MetaEvaluatorAgent:
             }
 
         return {"trigger_debug": False, "model_scores": model_scores}
+
+    def _detect_stagnation(self, state: KaggleState) -> dict[str, Any]:
+        """
+        Detect if progress has stagnated over recent iterations.
+
+        Triggers SOTA search when:
+        1. Stagnation: avg improvement < threshold over last N iterations
+        2. Score gap: current score is far from target after minimum iterations
+
+        Args:
+            state: Current workflow state
+
+        Returns:
+            Dict with stagnation info and SOTA search trigger
+        """
+        iteration_memory = state.get("iteration_memory", [])
+        current_iteration = state.get("current_iteration", 0)
+        config = self.config.iteration
+
+        # Get stagnation config
+        stagnation_window = getattr(config, "stagnation_window", 3)
+        stagnation_threshold = getattr(config, "stagnation_threshold", 0.01)
+        score_gap_threshold = getattr(config, "score_gap_threshold", 0.3)
+
+        result = {
+            "stagnated": False,
+            "trigger_sota_search": False,
+            "reason": None,
+            "avg_improvement": 0.0,
+            "score_gap": 0.0,
+            "iterations_checked": 0,
+        }
+
+        # Check stagnation: avg improvement over last N iterations
+        # Only run if we have enough iterations for meaningful stagnation detection
+        if len(iteration_memory) >= stagnation_window:
+            recent_improvements = []
+            for memory in iteration_memory[-stagnation_window:]:
+                # IterationMemory is a dataclass, use attribute access (not dict.get())
+                improvement = getattr(memory, "score_improvement", 0)
+                if isinstance(improvement, (int, float)):
+                    recent_improvements.append(abs(float(improvement)))
+
+            if recent_improvements:
+                avg_improvement = sum(recent_improvements) / len(recent_improvements)
+                result["avg_improvement"] = avg_improvement
+                result["iterations_checked"] = len(recent_improvements)
+
+                # Stagnation: improvement below threshold
+                if avg_improvement < stagnation_threshold:
+                    result["stagnated"] = True
+                    result["trigger_sota_search"] = True
+                    result["reason"] = f"stagnation: avg_improvement={avg_improvement:.4f} < {stagnation_threshold}"
+                    print(f"\n   📉 STAGNATION DETECTED: avg improvement {avg_improvement:.4f} over last {len(recent_improvements)} iterations")
+
+        # Check score gap: far from target after minimum iterations
+        # NOTE: This runs INDEPENDENTLY of stagnation check, even in early iterations
+        if current_iteration >= 2:  # After 2 iterations
+            current_score = state.get("current_performance_score", 0.0)
+            target_score = state.get("target_score")
+
+            if target_score and isinstance(target_score, (int, float)) and float(target_score) > 0:
+                try:
+                    score_gap = abs(float(target_score) - float(current_score)) / float(target_score)
+                    result["score_gap"] = score_gap
+
+                    if score_gap > score_gap_threshold:
+                        result["trigger_sota_search"] = True
+                        if result["reason"]:
+                            result["reason"] += f" AND score_gap={score_gap:.1%} > {score_gap_threshold:.0%}"
+                        else:
+                            result["reason"] = f"score_gap: {score_gap:.1%} > {score_gap_threshold:.0%}"
+                        print(f"\n   📊 SCORE GAP DETECTED: {score_gap:.1%} from target after {current_iteration} iterations")
+                except (TypeError, ValueError):
+                    pass
+
+        if result["trigger_sota_search"]:
+            print(f"   🔍 TRIGGERING SOTA SEARCH: {result['reason']}")
+
+        return result
 
     def _analyze_failures(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -384,6 +468,10 @@ class MetaEvaluatorAgent:
         """
         Classify error type from error message.
 
+        Now uses ROOT CAUSE analysis to differentiate data alignment errors
+        from resource errors (e.g., timeout, memory) that may have data
+        alignment as their actual root cause.
+
         Args:
             error_msg: Error message
 
@@ -395,7 +483,25 @@ class MetaEvaluatorAgent:
 
         error_lower = error_msg.lower()
 
-        # LightGBM/XGBoost/CatBoost specific errors (check first for specificity)
+        # ===== PRIORITY 1: Data alignment errors (often misclassified) =====
+        # Check for data alignment issues FIRST before other classifications
+        data_alignment_patterns = [
+            "shape mismatch",
+            "dimension mismatch",
+            "broadcast",
+            "shapes do not match",
+            "could not broadcast",
+            "operands could not be broadcast",
+            "inconsistent number of samples",
+            "number of features",
+            "oof.*mismatch",
+            "prediction.*alignment",
+        ]
+        for pattern in data_alignment_patterns:
+            if pattern in error_lower:
+                return "data_alignment"
+
+        # ===== LightGBM/XGBoost/CatBoost specific errors =====
         if "best gain: -inf" in error_lower:
             return "lightgbm_split_failure"
         if "no more leaves" in error_lower:
@@ -427,22 +533,32 @@ class MetaEvaluatorAgent:
         if "keyerror" in error_lower:
             return "key_error"
         if "valueerror" in error_lower:
+            # Check for data alignment in ValueError
             if "shape" in error_lower or "dimension" in error_lower:
-                return "dimension_mismatch"
+                return "data_alignment"  # Changed from dimension_mismatch
             if "nan" in error_lower or "infinity" in error_lower:
                 return "data_contains_nans"
             return "value_error"
         if "typeerror" in error_lower:
             return "type_error"
         if "memoryerror" in error_lower or "out of memory" in error_lower:
+            # Check if memory error might be caused by data alignment
+            if any(p in error_lower for p in ["shape", "dimension", "broadcast"]):
+                return "data_alignment"
             return "memory_error"
         if "timeout" in error_lower or "timed out" in error_lower:
+            # Check if timeout might be caused by data alignment (stacking wrong shapes)
+            if any(p in error_lower for p in ["shape", "dimension", "broadcast", "stacking"]):
+                return "data_alignment"
             return "timeout_error"
         if "syntaxerror" in error_lower:
             return "syntax_error"
         if "attributeerror" in error_lower:
             return "attribute_error"
         if "indexerror" in error_lower:
+            # Index errors often indicate data alignment issues
+            if "out of bounds" in error_lower:
+                return "data_alignment"
             return "index_error"
         if "validation failed" in error_lower:
             return "validation_error"
@@ -451,6 +567,35 @@ class MetaEvaluatorAgent:
         if "convergence" in error_lower and "warning" in error_lower:
             return "convergence_warning"
         return "runtime_error"
+
+    def _classify_error_root_cause(self, error_message: str, component_type: str = "model") -> dict:
+        """
+        Classify an error by its ROOT CAUSE, not just the symptom.
+
+        This is a more detailed version that returns additional context
+        beyond just the error type string.
+
+        Args:
+            error_message: The error message to classify
+            component_type: Type of component (model, ensemble, etc.)
+
+        Returns:
+            Dict with root_cause, category, priority, is_data_error, and suggested_fix
+        """
+        try:
+            from ..nodes.curriculum_learning import classify_error_root_cause
+            return classify_error_root_cause(error_message, component_type)
+        except ImportError:
+            # Fallback if import fails
+            error_type = self._classify_error(error_message)
+            is_data_error = error_type in ["data_alignment", "dimension_mismatch"]
+            return {
+                "root_cause": error_type,
+                "category": "data" if is_data_error else "unknown",
+                "priority": 1 if is_data_error else 3,
+                "is_data_error": is_data_error,
+                "suggested_fix": "Check data alignment with canonical train_ids." if is_data_error else "Debug and fix.",
+            }
 
     def _analyze_execution_logs(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -799,24 +944,26 @@ class MetaEvaluatorAgent:
         )
 
         # Combined reward (weighted)
-        # In MLE-bench, speed and medal attainment matter more than exploring many components.
+        # Performance-focused weights: prioritize score improvement for aggressive optimization.
+        # MLE-bench mode: speed and medal attainment matter more.
         if run_mode == "mlebench" or "medal" in objective:
             weights = {
-                "functional": 0.25,
-                "performance": 0.45,
-                "improvement": 0.05,
-                "semantics": 0.15,
-                "diversity": 0.05,
-                "robustness": 0.05,
+                "functional": 0.15,      # Reduced: working code is baseline
+                "performance": 0.50,     # Increased: medal achievement is key
+                "improvement": 0.10,     # Increased: reward progress
+                "semantics": 0.10,       # Reduced slightly
+                "diversity": 0.05,       # Reduced: focus on what works
+                "robustness": 0.10,      # Increased: prevent overfitting
             }
         else:
+            # Standard Kaggle mode: heavily prioritize performance/score
             weights = {
-                "functional": 0.25,
-                "performance": 0.40,
-                "improvement": 0.1,
-                "semantics": 0.05,
-                "diversity": 0.1,
-                "robustness": 0.1,
+                "functional": 0.15,      # Reduced from 0.25
+                "performance": 0.55,     # Increased from 0.40 - main driver
+                "improvement": 0.15,     # Increased from 0.10 - reward progress
+                "semantics": 0.05,       # Maintained
+                "diversity": 0.05,       # Reduced from 0.10
+                "robustness": 0.05,      # Reduced from 0.10
             }
 
         r_combined = (
