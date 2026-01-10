@@ -727,6 +727,244 @@ if len(train_eng.columns) < 10:
     print("[LOG:WARNING] Engineered data has too few features, using original train.csv")
     train_df = train_orig  # Fall back to original
 ```
+
+## CANONICAL DATA CONTRACT (MANDATORY FOR TABULAR COMPETITIONS):
+
+All model components MUST load data from canonical artifacts when available.
+This ensures consistent row sampling, fold assignments, and feature columns across ALL components.
+
+### Loading Pattern (MANDATORY):
+```python
+from pathlib import Path
+import numpy as np
+import json
+
+# Check for canonical data directory
+canonical_dir = Path(OUTPUT_DIR) / 'canonical'
+
+if canonical_dir.exists():
+    print("[LOG:INFO] Loading canonical data contract...")
+
+    # Load canonical artifacts (single source of truth)
+    train_ids = np.load(canonical_dir / 'train_ids.npy', allow_pickle=True)
+    y = np.load(canonical_dir / 'y.npy', allow_pickle=True)
+    folds = np.load(canonical_dir / 'folds.npy')
+
+    with open(canonical_dir / 'feature_cols.json') as f:
+        feature_cols = json.load(f)
+
+    with open(canonical_dir / 'metadata.json') as f:
+        metadata = json.load(f)
+
+    n_folds = metadata['n_folds']
+    id_col = metadata['id_col']
+
+    print(f"[LOG:INFO] Canonical: {len(train_ids)} samples, {n_folds} folds, {len(feature_cols)} features")
+
+    # Load train data aligned to canonical IDs
+    train_df = pd.read_csv(TRAIN_PATH)
+    if id_col and id_col in train_df.columns:
+        train_df = train_df.set_index(id_col).loc[train_ids].reset_index()
+    else:
+        train_df = train_df.iloc[:len(train_ids)]
+
+    # Use ONLY canonical feature columns (ensures schema parity with test)
+    X = train_df[feature_cols].values
+
+    # Use canonical folds for CV
+    for fold_idx in range(n_folds):
+        train_mask = folds != fold_idx
+        val_mask = folds == fold_idx
+        X_train, X_val = X[train_mask], X[val_mask]
+        y_train, y_val = y[train_mask], y[val_mask]
+        # ... train model ...
+else:
+    # Fallback to standard loading if canonical data not prepared
+    print("[LOG:WARNING] Canonical data not found, using standard loading")
+```
+
+### NEVER DO (causes OOF shape mismatch and stacking failures):
+```python
+# WRONG: Different sampling/filtering per component
+train_df = train_df.sample(frac=0.1)  # Creates different IDs each run!
+train_df = train_df.drop_duplicates()  # May drop different rows!
+train_df = train_df.dropna()  # Inconsistent NaN handling!
+```
+
+### SAVE TRAIN_IDS FOR ALIGNMENT (MANDATORY):
+```python
+# Save train_ids with model artifacts for ensemble alignment
+np.save(MODELS_DIR / f'train_ids_{COMPONENT_NAME}.npy', train_ids)
+```
+
+## MANDATORY ASSERTIONS (before saving any artifact):
+
+ALL model components MUST validate predictions before saving:
+
+```python
+# Shape validation
+assert oof_preds.shape[0] == n_train, f"OOF shape mismatch: {oof_preds.shape[0]} vs {n_train}"
+assert test_preds.shape[0] == n_test, f"Test shape mismatch: {test_preds.shape[0]} vs {n_test}"
+
+# NaN/Inf check
+assert np.isfinite(oof_preds).all(), f"OOF contains {(~np.isfinite(oof_preds)).sum()} NaN/Inf values"
+assert np.isfinite(test_preds).all(), f"Test contains {(~np.isfinite(test_preds)).sum()} NaN/Inf values"
+
+# Non-empty OOF check (at least 50% of rows should have predictions after CV)
+if oof_preds.ndim > 1:
+    mask = oof_preds.sum(axis=1) > 0
+else:
+    mask = np.abs(oof_preds) > 1e-10
+assert mask.sum() > n_train * 0.5, f"Too many empty OOF rows: {(~mask).sum()}/{n_train}"
+
+# Probability range check for classification
+if oof_preds.ndim > 1 or (oof_preds.min() >= 0 and oof_preds.max() <= 1):
+    assert oof_preds.min() >= 0, f"OOF has negative values: min={oof_preds.min()}"
+    assert oof_preds.max() <= 1, f"OOF has values > 1: max={oof_preds.max()}"
+
+# Regression: clip negative predictions if target is non-negative
+# (e.g., price predictions, counts)
+if problem_type == 'regression' and (y >= 0).all():
+    test_preds = np.clip(test_preds, 0, None)
+    print("[LOG:INFO] Clipped negative test predictions to 0")
+```
+
+### WHY THIS MATTERS:
+- Shape mismatch → Stacking fails silently, meta-model sees garbage
+- NaN/Inf → log_loss becomes inf, score comparison fails
+- Empty OOF rows → Meta-model learns nothing from those samples
+- Negative predictions for non-negative targets → Large RMSE penalty
+
+## TIME-AWARE TRAINING (MANDATORY FOR LARGE DATASETS):
+
+For datasets with >100K rows, ALWAYS estimate training time before full training:
+
+```python
+import time
+
+# Step 1: Estimate training time on 1% sample
+sample_size = max(1000, int(len(X) * 0.01))
+X_sample, y_sample = X[:sample_size], y[:sample_size]
+
+start = time.time()
+model_temp = clone(model)  # sklearn clone
+model_temp.fit(X_sample, y_sample)
+calibration_time = time.time() - start
+
+# Scale to full dataset (with 20% buffer for safety)
+scale_factor = len(X) / sample_size
+estimated_full_time = calibration_time * scale_factor * 1.2
+
+print(f"[LOG:TIMING] calibration={calibration_time:.2f}s estimated_full={estimated_full_time:.2f}s")
+
+# Step 2: Reduce data if training would exceed time budget
+TIME_BUDGET = CANONICAL_METADATA.get('timeout_s', 2700)  # Default 45 min
+if estimated_full_time > TIME_BUDGET * 0.6:  # Use 60% of budget max
+    safe_fraction = (TIME_BUDGET * 0.5) / estimated_full_time
+    X = X.sample(frac=safe_fraction, random_state=42)
+    y = y.loc[X.index]
+    print(f"[LOG:WARNING] Reduced to {safe_fraction:.1%} for time budget ({len(X)} samples)")
+```
+
+### TIME-AWARE EARLY STOPPING (for gradient boosting):
+```python
+# Track iteration time and stop before timeout
+class TimeAwareCallback:
+    def __init__(self, time_budget, buffer_pct=0.15):
+        self.time_budget = time_budget
+        self.start_time = time.time()
+        self.buffer_pct = buffer_pct
+        self.iter_times = []
+
+    def __call__(self, env):
+        elapsed = time.time() - self.start_time
+        remaining = self.time_budget - elapsed
+        self.iter_times.append(elapsed / max(env.iteration, 1))
+
+        # Use recent average iteration time
+        avg_iter = sum(self.iter_times[-10:]) / len(self.iter_times[-10:])
+        remaining_iters = env.end_iteration - env.iteration
+
+        if avg_iter * remaining_iters > remaining * (1 - self.buffer_pct):
+            print(f"[LOG:WARNING] Time-aware early stop at iteration {env.iteration}")
+            raise EarlyStopException(env.iteration, env.best_score)
+
+# Usage with LightGBM:
+callback = TimeAwareCallback(time_budget=TIME_BUDGET * 0.8)
+model = lgb.train(params, train_data, callbacks=[callback])
+```
+
+## FOLD CHECKPOINTING (MANDATORY FOR CV TRAINING):
+
+ALWAYS save progress after each fold to enable partial ensemble recovery:
+
+```python
+from pathlib import Path
+import joblib
+import numpy as np
+
+# Initialize OOF array
+oof_preds = np.zeros((len(X), n_classes)) if n_classes > 1 else np.zeros(len(X))
+fold_scores = []
+fold_models = []
+
+for fold_idx, (train_idx, val_idx) in enumerate(kf.split(X, y)):
+    fold_start = time.time()
+
+    X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
+    y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
+    model = create_model()
+    model.fit(X_train, y_train)
+
+    # Get predictions
+    if hasattr(model, 'predict_proba'):
+        preds = model.predict_proba(X_val)
+    else:
+        preds = model.predict(X_val)
+
+    # Store OOF predictions
+    oof_preds[val_idx] = preds
+
+    # Calculate fold score
+    fold_score = metric(y_val, preds)
+    fold_scores.append(fold_score)
+
+    fold_time = time.time() - fold_start
+    print(f"[LOG:FOLD] fold={fold_idx} score={fold_score:.6f} time={fold_time:.2f}")
+
+    # === CHECKPOINT AFTER EACH FOLD ===
+    checkpoint_dir = MODELS_DIR / 'checkpoints'
+    checkpoint_dir.mkdir(exist_ok=True)
+
+    # Save fold model
+    joblib.dump(model, checkpoint_dir / f'{COMPONENT_NAME}_fold_{fold_idx}.pkl')
+
+    # Save partial OOF (for recovery)
+    np.save(checkpoint_dir / f'{COMPONENT_NAME}_oof_partial.npy', oof_preds)
+    np.save(checkpoint_dir / f'{COMPONENT_NAME}_completed_folds.npy', np.array(fold_scores))
+
+    print(f"[LOG:CHECKPOINT] fold={fold_idx} saved to {checkpoint_dir}")
+
+    # Check time budget before next fold
+    elapsed_total = time.time() - training_start
+    avg_fold_time = elapsed_total / (fold_idx + 1)
+    remaining_folds = n_folds - fold_idx - 1
+
+    if avg_fold_time * remaining_folds > (TIME_BUDGET - elapsed_total) * 0.9:
+        print(f"[LOG:WARNING] Time budget low, stopping after {fold_idx + 1} folds")
+        print(f"[LOG:WARNING] Partial OOF coverage: {(fold_idx + 1) / n_folds:.1%}")
+        break
+
+# Final CV summary
+print(f"[LOG:CV_SUMMARY] mean={np.mean(fold_scores):.6f} std={np.std(fold_scores):.6f}")
+```
+
+### WHY FOLD CHECKPOINTING MATTERS:
+- 3/5 folds provide ~90% of full ensemble performance
+- Timeout mid-CV loses ALL progress without checkpointing
+- Enables ensemble agent to use partial OOF for stacking
+- Allows resume if job is killed/restarted
 """
 
 

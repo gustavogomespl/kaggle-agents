@@ -13,8 +13,11 @@ from sklearn.model_selection import cross_val_predict
 
 from ..core.config import get_config, is_metric_minimization
 from ..core.state import KaggleState
+from ..utils.artifact_manager import ArtifactManager
 from ..utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
+from ..utils.data_contract import load_canonical_data
 from ..utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
+from ..utils.fold_checkpoint import FoldCheckpointManager
 from ..utils.llm_utils import get_text_content
 from ..utils.oof_validation import print_oof_summary, validate_class_order, validate_oof_stack
 
@@ -442,6 +445,393 @@ class EnsembleAgent:
         print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
         return Ridge(alpha=best_alpha, random_state=42)
 
+    def _diagnose_stacking_issues(
+        self,
+        meta_model: LogisticRegression | Ridge,
+        model_names: list[str],
+        meta_X: np.ndarray,
+        y: np.ndarray,
+    ) -> dict[str, Any]:
+        """Diagnose potential issues with stacking meta-model.
+
+        Detects common problems:
+        - Very small coefficients (suggests misalignment)
+        - Large negative coefficients (model hurting ensemble)
+        - Intercept dominance (base models not informative)
+        - High variance in coefficients (unstable stacking)
+
+        Args:
+            meta_model: Fitted meta-model (LogisticRegression or Ridge)
+            model_names: Names of base models
+            meta_X: Meta-features (stacked OOF predictions)
+            y: Target labels
+
+        Returns:
+            Dictionary with diagnostic information
+        """
+        diagnostics: dict[str, Any] = {
+            "warnings": [],
+            "coefficients": {},
+            "intercept": None,
+            "is_healthy": True,
+        }
+
+        if not hasattr(meta_model, "coef_"):
+            return diagnostics
+
+        coefs = meta_model.coef_.flatten()
+
+        # For multi-class LogisticRegression, coef_ has shape (n_classes, n_features)
+        # We average across classes to get a summary per model
+        if meta_model.coef_.ndim > 1 and meta_model.coef_.shape[0] > 1:
+            coefs = np.mean(np.abs(meta_model.coef_), axis=0)
+
+        # Map coefficients to model names
+        # Note: for classification, meta_X has n_classes columns per model
+        n_features_per_model = len(coefs) // len(model_names) if len(model_names) > 0 else 1
+        if n_features_per_model > 1:
+            # Aggregate per-model (sum or mean of class coefficients)
+            model_coefs = []
+            for i in range(len(model_names)):
+                start = i * n_features_per_model
+                end = start + n_features_per_model
+                model_coefs.append(np.mean(np.abs(coefs[start:end])))
+            coefs = np.array(model_coefs)
+
+        diagnostics["coefficients"] = dict(zip(model_names, coefs.tolist()))
+
+        # Check for intercept
+        if hasattr(meta_model, "intercept_"):
+            intercept = meta_model.intercept_
+            if isinstance(intercept, np.ndarray):
+                intercept = float(np.mean(intercept))
+            diagnostics["intercept"] = intercept
+
+        print(f"\n   STACKING DIAGNOSTICS:")
+        print(f"      Model coefficients: {diagnostics['coefficients']}")
+        if diagnostics["intercept"] is not None:
+            print(f"      Intercept: {diagnostics['intercept']:.4f}")
+
+        # Warning: Very small coefficients suggest misalignment
+        if np.abs(coefs).max() < 0.05:
+            warning = (
+                "CRITICAL: Very small coefficients detected! "
+                "This usually means OOF predictions are misaligned with target. "
+                "Check: train_ids alignment, sampling consistency, class order."
+            )
+            diagnostics["warnings"].append(warning)
+            diagnostics["is_healthy"] = False
+            print(f"      ⚠️ {warning}")
+
+        # Warning: Large negative coefficients
+        if np.min(coefs) < -0.5:
+            worst_model = model_names[int(np.argmin(coefs))]
+            warning = (
+                f"Model '{worst_model}' has large negative coefficient ({np.min(coefs):.4f}). "
+                "This model may be hurting the ensemble."
+            )
+            diagnostics["warnings"].append(warning)
+            print(f"      ⚠️ {warning}")
+
+        # Warning: Intercept dominance
+        if diagnostics["intercept"] is not None:
+            if abs(diagnostics["intercept"]) > 10 * np.abs(coefs).max():
+                warning = (
+                    "Intercept dominates over coefficients. "
+                    "Base models may not be informative - meta-model is falling back to prior."
+                )
+                diagnostics["warnings"].append(warning)
+                diagnostics["is_healthy"] = False
+                print(f"      ⚠️ {warning}")
+
+        # Warning: High coefficient variance (unstable)
+        if len(coefs) > 1 and np.std(coefs) > 2 * np.mean(np.abs(coefs)):
+            warning = (
+                "High variance in coefficients. "
+                "Consider reducing model diversity or checking for duplicate models."
+            )
+            diagnostics["warnings"].append(warning)
+            print(f"      ⚠️ {warning}")
+
+        if not diagnostics["warnings"]:
+            print("      ✓ No issues detected - stacking looks healthy")
+
+        return diagnostics
+
+    def _align_oof_by_canonical_ids(
+        self,
+        oof: np.ndarray,
+        model_train_ids: np.ndarray,
+        canonical_train_ids: np.ndarray,
+    ) -> np.ndarray:
+        """Align OOF predictions to canonical ID order.
+
+        Args:
+            oof: OOF predictions from model
+            model_train_ids: Train IDs corresponding to oof rows
+            canonical_train_ids: Target canonical ID order
+
+        Returns:
+            OOF aligned to canonical ID order
+        """
+        # Create ID to index mapping for model predictions
+        model_id_to_idx = {id_val: idx for idx, id_val in enumerate(model_train_ids)}
+
+        # Initialize aligned OOF with zeros (or NaN)
+        if oof.ndim > 1:
+            aligned_oof = np.zeros((len(canonical_train_ids), oof.shape[1]))
+        else:
+            aligned_oof = np.zeros(len(canonical_train_ids))
+
+        # Track how many IDs we successfully aligned
+        aligned_count = 0
+
+        # Map model predictions to canonical order
+        for canonical_idx, canonical_id in enumerate(canonical_train_ids):
+            if canonical_id in model_id_to_idx:
+                model_idx = model_id_to_idx[canonical_id]
+                aligned_oof[canonical_idx] = oof[model_idx]
+                aligned_count += 1
+
+        overlap_pct = aligned_count / len(canonical_train_ids) * 100
+        print(f"      ID alignment: {aligned_count}/{len(canonical_train_ids)} ({overlap_pct:.1f}%) IDs matched")
+
+        if overlap_pct < 90:
+            print(f"      ⚠️ Low ID overlap ({overlap_pct:.1f}%) - model may have used different sampling")
+
+        return aligned_oof
+
+    def _recover_from_checkpoints(
+        self,
+        models_dir: Path,
+        component_names: list[str] | None = None,
+    ) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+        """Recover OOF/test predictions from fold checkpoints.
+
+        Scans checkpoint directories for partial CV results and reconstructs
+        OOF predictions from completed folds.
+
+        Args:
+            models_dir: Directory containing model artifacts
+            component_names: Optional list of component names to check
+
+        Returns:
+            Dict mapping component name to (oof, test) prediction arrays
+        """
+        recovered = {}
+        checkpoints_dir = models_dir / "checkpoints"
+
+        if not checkpoints_dir.exists():
+            return recovered
+
+        print(f"\n   CHECKPOINT RECOVERY:")
+        print(f"      Scanning {checkpoints_dir}")
+
+        # Find checkpoint state files
+        state_files = list(checkpoints_dir.glob("*_checkpoint_state.json"))
+
+        for state_file in state_files:
+            try:
+                import json
+                with open(state_file) as f:
+                    state = json.load(f)
+
+                component_name = state.get("component_name", "unknown")
+
+                # Skip if not in requested list
+                if component_names and component_name not in component_names:
+                    continue
+
+                n_completed = len(state.get("completed_folds", []))
+                min_folds = state.get("min_folds", 2)
+
+                if n_completed < min_folds:
+                    print(f"      {component_name}: Only {n_completed}/{min_folds} folds, skipping")
+                    continue
+
+                # Load partial OOF
+                partial_oof_path = checkpoints_dir / f"{component_name}_oof_partial.npy"
+                if not partial_oof_path.exists():
+                    print(f"      {component_name}: No partial OOF found")
+                    continue
+
+                oof = np.load(partial_oof_path)
+
+                # Check for test predictions (may not exist for partial)
+                test_path = models_dir / f"test_{component_name}.npy"
+                if test_path.exists():
+                    test = np.load(test_path)
+                else:
+                    # Generate test predictions from fold models
+                    test = self._generate_test_from_fold_models(
+                        checkpoints_dir, component_name, state
+                    )
+
+                if test is not None:
+                    recovered[component_name] = (oof, test)
+                    print(f"      {component_name}: Recovered {n_completed} folds, OOF shape {oof.shape}")
+
+            except Exception as e:
+                print(f"      Error recovering from {state_file}: {e}")
+
+        return recovered
+
+    def _generate_test_from_fold_models(
+        self,
+        checkpoints_dir: Path,
+        component_name: str,
+        state: dict,
+    ) -> np.ndarray | None:
+        """Generate test predictions by averaging fold model predictions.
+
+        Args:
+            checkpoints_dir: Directory containing fold checkpoints
+            component_name: Name of the component
+            state: Checkpoint state dictionary
+
+        Returns:
+            Test predictions array or None if not possible
+        """
+        # This would require loading test data and averaging predictions
+        # For now, return None to indicate test predictions need to be generated
+        return None
+
+    def _fallback_to_best_single_model(
+        self,
+        models_dir: Path,
+        problem_type: str = "classification",
+    ) -> tuple[dict[str, Any] | None, np.ndarray | None]:
+        """Fallback to using the best single model when ensemble fails.
+
+        Args:
+            models_dir: Directory containing model artifacts
+            problem_type: 'classification' or 'regression'
+
+        Returns:
+            Tuple of (ensemble_dict, final_predictions) or (None, None)
+        """
+        print("\n   FALLBACK TO BEST SINGLE MODEL:")
+
+        # Find all test prediction files
+        test_files = list(models_dir.glob("test_*.npy"))
+        if not test_files:
+            print("      No test predictions found")
+            return None, None
+
+        # Find corresponding OOF files and pick the one with best coverage
+        best_model = None
+        best_coverage = 0
+        best_test = None
+
+        for test_path in test_files:
+            name = test_path.stem.replace("test_", "", 1)
+            oof_path = models_dir / f"oof_{name}.npy"
+
+            if not oof_path.exists():
+                continue
+
+            try:
+                oof = np.load(oof_path)
+                test = np.load(test_path)
+
+                # Calculate coverage (non-zero predictions)
+                if oof.ndim > 1:
+                    coverage = (oof.sum(axis=1) != 0).mean()
+                else:
+                    coverage = (np.abs(oof) > 1e-10).mean()
+
+                if coverage > best_coverage:
+                    best_coverage = coverage
+                    best_model = name
+                    best_test = test
+
+            except Exception as e:
+                print(f"      Error loading {name}: {e}")
+
+        if best_model is None:
+            print("      No valid models found")
+            return None, None
+
+        print(f"      Selected: {best_model} (coverage: {best_coverage:.1%})")
+
+        ensemble = {
+            "method": "single_model_fallback",
+            "model_name": best_model,
+            "coverage": best_coverage,
+        }
+
+        return ensemble, best_test
+
+    def create_ensemble_with_fallback(
+        self,
+        models_dir: Path,
+        y: np.ndarray | pd.Series,
+        problem_type: str,
+        metric_name: str,
+        expected_class_order: list[str] | None = None,
+        train_ids: np.ndarray | None = None,
+        min_models: int = 2,
+    ) -> tuple[dict[str, Any] | None, np.ndarray | None]:
+        """Create ensemble with graceful fallback for partial models.
+
+        This method attempts to create an ensemble, falling back through:
+        1. Standard ensemble with all valid models
+        2. Recovered checkpoints for partial OOF
+        3. Best single model if ensemble not possible
+
+        Args:
+            models_dir: Directory containing model artifacts
+            y: Target values
+            problem_type: 'classification' or 'regression'
+            metric_name: Metric name for scoring
+            expected_class_order: Expected class order for classification
+            train_ids: Training sample IDs for alignment
+            min_models: Minimum models required for ensemble
+
+        Returns:
+            Tuple of (ensemble_dict, final_predictions) or (None, None)
+        """
+        print(f"\n   ENSEMBLE WITH FALLBACK (min_models={min_models}):")
+
+        # Step 1: Try standard ensemble
+        prediction_pairs = self._find_prediction_pairs(models_dir)
+        print(f"      Found {len(prediction_pairs)} prediction pairs")
+
+        if len(prediction_pairs) >= min_models:
+            # Validate pairs
+            valid_pairs = self._validate_oof_alignment(
+                models_dir, train_ids, expected_class_order
+            )
+
+            if len(valid_pairs) >= min_models:
+                print(f"      {len(valid_pairs)} valid pairs, proceeding with standard ensemble")
+                # Use existing ensemble creation logic
+                return None, None  # Will fall through to standard method
+
+        # Step 2: Try to recover from checkpoints
+        print(f"      Insufficient valid pairs ({len(prediction_pairs)}), trying checkpoint recovery")
+        recovered = self._recover_from_checkpoints(models_dir)
+
+        if recovered:
+            # Add recovered models to prediction pairs
+            for name, (oof, test) in recovered.items():
+                if name not in prediction_pairs:
+                    # Save recovered predictions
+                    oof_path = models_dir / f"oof_{name}_recovered.npy"
+                    test_path = models_dir / f"test_{name}_recovered.npy"
+                    np.save(oof_path, oof)
+                    if test is not None:
+                        np.save(test_path, test)
+                        prediction_pairs[f"{name}_recovered"] = (oof_path, test_path)
+
+            if len(prediction_pairs) >= min_models:
+                print(f"      After recovery: {len(prediction_pairs)} pairs available")
+                return None, None  # Will fall through to standard method
+
+        # Step 3: Fallback to best single model
+        print(f"      Still insufficient models, falling back to best single model")
+        return self._fallback_to_best_single_model(models_dir, problem_type)
+
     def _constrained_meta_learner(
         self,
         oof_stack: np.ndarray,
@@ -751,6 +1141,13 @@ class EnsembleAgent:
                 meta_oof_preds, y_encoded, problem_type, metric_name
             )
             print(f"   [META] Meta-model: {meta_score:.6f}")
+
+            # Run stacking diagnostics to detect potential issues
+            stacking_diagnostics = self._diagnose_stacking_issues(
+                meta_model, model_names, meta_X, y_encoded
+            )
+            if not stacking_diagnostics["is_healthy"]:
+                print("   ⚠️ Stacking issues detected - consider checking data alignment")
         except Exception as e:
             print(f"   ⚠️ Meta-model evaluation failed: {e}")
 

@@ -35,6 +35,12 @@ IMMUTABLE_PATH_VARS = [
     "SAMPLE_SUBMISSION_PATH",
     "AUDIO_SOURCE_DIR",
     "LABEL_FILES",
+    # Canonical data contract paths
+    "CANONICAL_DIR",
+    "CANONICAL_TRAIN_IDS_PATH",
+    "CANONICAL_Y_PATH",
+    "CANONICAL_FOLDS_PATH",
+    "CANONICAL_FEATURE_COLS_PATH",
 ]
 
 
@@ -224,14 +230,67 @@ class CodeGeneratorMixin:
 
         # Check for redefinitions of each immutable path variable
         for var in IMMUTABLE_PATH_VARS:
-            # Pattern matches: VAR = ... (assignment)
-            # But not: VAR.something (attribute access) or VAR[...] (subscript)
-            pattern = rf"^\s*{var}\s*=\s*(?!MODELS_DIR|TRAIN_PATH|TEST_PATH|OUTPUT_DIR)"
-            matches = re.findall(pattern, code_after_header, re.MULTILINE)
-            if matches:
-                violations.append(f"Path redefinition detected: {var}")
+            # Multiple patterns to catch various redefinition attempts
+            patterns = [
+                # VAR = Path(...)
+                rf"^\s*{var}\s*=\s*Path\s*\(",
+                # VAR = "..." or VAR = '...'
+                rf"^\s*{var}\s*=\s*['\"]",
+                # VAR = something / ... (path concatenation)
+                rf"^\s*{var}\s*=\s*\w+\s*/",
+                # VAR = BASE_DIR / ...
+                rf"^\s*{var}\s*=\s*\w+_DIR\s*/",
+                # VAR = os.path.join(...)
+                rf"^\s*{var}\s*=\s*os\.path\.join\s*\(",
+                # VAR = str(...) (converting path)
+                rf"^\s*{var}\s*=\s*str\s*\(",
+            ]
+            for pattern in patterns:
+                if re.search(pattern, code_after_header, re.MULTILINE):
+                    violations.append(f"Path redefinition detected: {var}")
+                    break  # Only report once per variable
 
         return len(violations) == 0, violations
+
+    def _strip_path_redefinitions(
+        self: DeveloperAgent,
+        code: str,
+        path_header_end_marker: str = "# === END PATH CONSTANTS ===",
+    ) -> str:
+        """
+        Strip path redefinitions from LLM-generated code.
+
+        Args:
+            code: The full generated code (with path header prepended)
+            path_header_end_marker: Marker indicating end of injected paths
+
+        Returns:
+            Code with path redefinitions commented out
+        """
+        marker_idx = code.find(path_header_end_marker)
+        if marker_idx == -1:
+            return code
+
+        header = code[:marker_idx + len(path_header_end_marker)]
+        code_after_header = code[marker_idx + len(path_header_end_marker):]
+
+        for var in IMMUTABLE_PATH_VARS:
+            # Pattern to match full line with path redefinition
+            patterns = [
+                rf"^(\s*{var}\s*=\s*Path\s*\([^\)]+\)\s*)$",
+                rf"^(\s*{var}\s*=\s*['\"][^'\"]+['\"]\s*)$",
+                rf"^(\s*{var}\s*=\s*\w+\s*/[^\n]+)$",
+                rf"^(\s*{var}\s*=\s*os\.path\.join\([^\)]+\)\s*)$",
+            ]
+            for pattern in patterns:
+                code_after_header = re.sub(
+                    pattern,
+                    rf"# STRIPPED (path constant): \1",
+                    code_after_header,
+                    flags=re.MULTILINE,
+                )
+
+        return header + code_after_header
 
     def _generate_code(
         self: DeveloperAgent,
@@ -362,20 +421,49 @@ class CodeGeneratorMixin:
         # Store resolved paths for use by fix/debug functions
         self._resolved_paths = paths
 
+        # Check for canonical data (prepared by canonical_data_preparation_node)
+        canonical_dir = working_dir / "canonical"
+        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+
         # Generate path constants header to inject into code
         # This ensures the LLM cannot ignore the correct paths
         path_header = f'''# === PATH CONSTANTS (AUTO-INJECTED - DO NOT MODIFY) ===
 from pathlib import Path
 import pandas as pd
+import numpy as np
+import json
 
 TRAIN_PATH = Path("{resolved_train_path}")
 TEST_PATH = Path("{resolved_test_path}")
 SAMPLE_SUBMISSION_PATH = Path("{sample_submission_path}")
 MODELS_DIR = Path("{models_dir}")
 OUTPUT_DIR = Path("{working_dir}")
+COMPONENT_NAME = "{component.name.replace(" ", "_").lower()}"
 
 # Create models directory
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+'''
+        # Add canonical data paths if available
+        if has_canonical:
+            path_header += f'''
+# === CANONICAL DATA CONTRACT (MANDATORY - DO NOT REDEFINE) ===
+# All model components MUST use these artifacts for consistent data handling
+CANONICAL_DIR = Path("{canonical_dir}")
+CANONICAL_TRAIN_IDS_PATH = CANONICAL_DIR / "train_ids.npy"
+CANONICAL_Y_PATH = CANONICAL_DIR / "y.npy"
+CANONICAL_FOLDS_PATH = CANONICAL_DIR / "folds.npy"
+CANONICAL_FEATURE_COLS_PATH = CANONICAL_DIR / "feature_cols.json"
+CANONICAL_METADATA_PATH = CANONICAL_DIR / "metadata.json"
+
+# Load canonical metadata
+with open(CANONICAL_METADATA_PATH) as _f:
+    CANONICAL_METADATA = json.load(_f)
+    N_FOLDS = CANONICAL_METADATA["n_folds"]
+    ID_COL = CANONICAL_METADATA.get("id_col", "id")
+    TARGET_COL = CANONICAL_METADATA.get("target_col", "target")
+    IS_CLASSIFICATION = CANONICAL_METADATA.get("is_classification", True)
+
+print(f"[LOG:INFO] Canonical data loaded: {{CANONICAL_METADATA.get('canonical_rows', 'unknown')}} samples, {{N_FOLDS}} folds")
 '''
         # Add label files paths if available (for non-standard formats like MLSP 2013 Birds)
         if label_files:
@@ -512,7 +600,8 @@ def parse_id_mapping_file(mapping_path):
         if not is_valid:
             print(f"⚠️  PATH REDEFINITION WARNING: {violations}")
             print("   LLM generated code that redefines injected path constants.")
-            print("   This may cause artifacts to be saved in wrong locations.")
-            # Log but don't block - the validation serves as a warning
+            print("   Stripping redefinitions to prevent artifacts in wrong locations...")
+            # Strip the redefinitions to enforce correct paths
+            full_code = self._strip_path_redefinitions(full_code)
 
         return full_code
