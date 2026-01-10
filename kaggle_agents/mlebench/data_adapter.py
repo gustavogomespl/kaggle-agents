@@ -291,11 +291,21 @@ class MLEBenchDataAdapter:
                 print(f"   Warning: {zip_file.name} is not a valid zip")
 
     def _find_csv_file(self, directory: Path, patterns: list[str]) -> Path | None:
-        """Find a CSV file matching any of the patterns."""
+        """Find a CSV file matching any of the patterns.
+
+        Handles edge case where a match is actually a directory containing the CSV file.
+        """
         for pattern in patterns:
             matches = list(directory.glob(pattern))
-            if matches:
-                return matches[0]
+            for match in matches:
+                if match.is_file():
+                    return match
+                # Handle directory case: look for CSV file inside
+                if match.is_dir():
+                    inner_csvs = sorted(match.glob("*.csv"))
+                    if inner_csvs:
+                        print(f"      📂 Resolved directory '{match.name}' to file: {inner_csvs[0].name}", flush=True)
+                        return inner_csvs[0]
         return None
 
     def _find_label_files(
@@ -924,8 +934,18 @@ class MLEBenchDataAdapter:
             items_to_link.append(("test.csv", info.test_csv_path))
 
         # Add sample submission
+        # Handle case where "sample_submission.csv" is actually a directory containing the real CSV
         if info.sample_submission_path and info.sample_submission_path.exists():
-            items_to_link.append(("sample_submission.csv", info.sample_submission_path))
+            target = info.sample_submission_path
+            if target.is_dir():
+                inner_csvs = sorted(target.glob("*.csv"))
+                if inner_csvs:
+                    target = inner_csvs[0]
+                    print(f"      📂 Resolved sample_submission directory to file: {target.name}", flush=True)
+                    # Update info so downstream code uses the correct path
+                    info.sample_submission_path = target
+            if target.is_file():
+                items_to_link.append(("sample_submission.csv", target))
 
         # Add audio source directory if found (for MLSP-like competitions)
         if info.audio_source_path and info.audio_source_path.is_dir():

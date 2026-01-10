@@ -512,7 +512,7 @@ class DeveloperAgent(
                 working_dir / "sample_submission.csv",
             ]
             submission_path = next(
-                (p for p in submission_candidates if p is not None and p.exists()),
+                (p for p in submission_candidates if p is not None and p.exists() and p.is_file()),
                 None,
             )
             if submission_path:
@@ -527,7 +527,13 @@ class DeveloperAgent(
                     if state.get("sample_submission_path")
                     else working_dir / "sample_submission.csv"
                 )
-                if sample_sub_path and sample_sub_path.exists():
+                # Handle case where sample_submission.csv is a directory
+                if sample_sub_path and sample_sub_path.exists() and sample_sub_path.is_dir():
+                    inner_csvs = sorted(sample_sub_path.glob("*.csv"))
+                    if inner_csvs:
+                        sample_sub_path = inner_csvs[0]
+                        print(f"   📂 Resolved directory to file: {sample_sub_path.name}")
+                if sample_sub_path and sample_sub_path.exists() and sample_sub_path.is_file():
                     is_valid, validation_msg = self.executor.validate_submission_format(
                         submission_path=submission_path,
                         sample_submission_path=sample_sub_path,
