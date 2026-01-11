@@ -589,21 +589,39 @@ class EnsembleAgent:
         oof: np.ndarray,
         model_train_ids: np.ndarray,
         canonical_train_ids: np.ndarray,
-    ) -> np.ndarray:
-        """Align OOF predictions to canonical ID order.
+        model_name: str = "unknown",
+    ) -> np.ndarray | None:
+        """Align OOF predictions to canonical ID order with strict validation.
+
+        QW4: Improved alignment with strict validation to prevent broken ensembles.
 
         Args:
             oof: OOF predictions from model
             model_train_ids: Train IDs corresponding to oof rows
             canonical_train_ids: Target canonical ID order
+            model_name: Name of the model (for error messages)
 
         Returns:
-            OOF aligned to canonical ID order
+            OOF aligned to canonical ID order, or None if alignment is impossible
         """
         # Create ID to index mapping for model predictions
         model_id_to_idx = {id_val: idx for idx, id_val in enumerate(model_train_ids)}
 
-        # Initialize aligned OOF with zeros (or NaN)
+        # Calculate overlap BEFORE alignment
+        common_ids = set(model_train_ids) & set(canonical_train_ids)
+        overlap_pct = len(common_ids) / len(canonical_train_ids) * 100
+
+        # QW4: Strict validation - reject if overlap is too low
+        if overlap_pct < 50:
+            print(f"      ❌ CRITICAL: {model_name} has only {overlap_pct:.1f}% ID overlap!")
+            print(f"         Model trained on different data - EXCLUDING from ensemble")
+            return None
+
+        if overlap_pct < 80:
+            print(f"      ⚠️ WARNING: {model_name} has low ID overlap ({overlap_pct:.1f}%)")
+            print(f"         Ensemble may be degraded - model used different sampling")
+
+        # Initialize aligned OOF with zeros
         if oof.ndim > 1:
             aligned_oof = np.zeros((len(canonical_train_ids), oof.shape[1]))
         else:
@@ -619,11 +637,7 @@ class EnsembleAgent:
                 aligned_oof[canonical_idx] = oof[model_idx]
                 aligned_count += 1
 
-        overlap_pct = aligned_count / len(canonical_train_ids) * 100
-        print(f"      ID alignment: {aligned_count}/{len(canonical_train_ids)} ({overlap_pct:.1f}%) IDs matched")
-
-        if overlap_pct < 90:
-            print(f"      ⚠️ Low ID overlap ({overlap_pct:.1f}%) - model may have used different sampling")
+        print(f"      ✓ ID alignment: {aligned_count}/{len(canonical_train_ids)} ({overlap_pct:.1f}%) IDs matched")
 
         return aligned_oof
 
@@ -1035,6 +1049,25 @@ class EnsembleAgent:
             oof_raw = np.asarray(oof_raw, dtype=float)
             test_raw = np.asarray(test_raw, dtype=float)
 
+            # QW3: Exclude models with NaN/Inf/zero-variance (CRITICAL for ensemble health)
+            if np.isnan(oof_raw).any():
+                nan_pct = np.isnan(oof_raw).mean() * 100
+                print(f"   ⚠️ Excluding {name}: {nan_pct:.1f}% NaN values in OOF")
+                continue
+            if np.isinf(oof_raw).any():
+                print(f"   ⚠️ Excluding {name}: Contains Inf values in OOF")
+                continue
+            if oof_raw.std() < 1e-10:
+                print(f"   ⚠️ Excluding {name}: Zero variance (constant predictions)")
+                continue
+            if np.isnan(test_raw).any():
+                nan_pct = np.isnan(test_raw).mean() * 100
+                print(f"   ⚠️ Excluding {name}: {nan_pct:.1f}% NaN values in test predictions")
+                continue
+            if np.isinf(test_raw).any():
+                print(f"   ⚠️ Excluding {name}: Contains Inf values in test predictions")
+                continue
+
             if enable_calibration and problem_type == "classification":
                 try:
                     cv_folds = self._load_cv_folds(
@@ -1183,6 +1216,19 @@ class EnsembleAgent:
             "meta": meta_score,
         }
         best_method = min(scores, key=scores.get)
+
+        # QW2: Explicit fallback warning when meta-model is significantly worse
+        if meta_score != float("inf") and avg_score != float("inf"):
+            if meta_score > avg_score * 1.05:
+                pct_worse = (meta_score / avg_score - 1) * 100
+                print(f"   ⚠️ Meta-model is {pct_worse:.1f}% worse than simple average!")
+                print(f"      Meta: {meta_score:.6f} vs Avg: {avg_score:.6f}")
+                print("      → Forcing fallback to simple average")
+                best_method = "average"
+            elif meta_score > avg_score:
+                print(f"   ℹ️ Meta-model slightly worse than average, using average")
+                best_method = "average"
+
         print(f"   [META] Best method: {best_method}")
 
         if best_method == "meta" and meta_model is not None:
