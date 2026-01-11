@@ -488,7 +488,106 @@ def build_dynamic_instructions(
     elif component.component_type == "ensemble":
         instructions.extend(build_ensemble_instructions(target_col))
 
+    # Audio-specific context injection (CRITICAL for MLSP-style competitions)
+    if is_audio:
+        instructions.extend(_build_audio_domain_instructions(state))
+
     # Standard requirements
     instructions.extend(build_standard_requirements())
 
     return "\n".join(instructions)
+
+
+def _build_audio_domain_instructions(state: dict) -> list[str]:
+    """
+    Build audio domain-specific instructions from state.
+
+    Injects critical audio competition context:
+    - Submission format (Wide vs Long with ID pattern)
+    - CVfolds train/test split
+    - Precomputed features
+
+    Args:
+        state: Workflow state dictionary
+
+    Returns:
+        List of instruction strings
+    """
+    instructions = []
+
+    # Submission format info (CRITICAL for MLSP-style)
+    submission_format = state.get("submission_format_info")
+    if submission_format and isinstance(submission_format, dict):
+        format_type = submission_format.get("format_type", "unknown")
+        id_multiplier = submission_format.get("id_multiplier")
+        num_classes = submission_format.get("num_classes")
+        id_column = submission_format.get("id_column", "Id")
+        target_columns = submission_format.get("target_columns", [])
+
+        instructions.append("\n🎯 AUDIO SUBMISSION FORMAT (DETECTED FROM sample_submission.csv):")
+        instructions.append(f"  - **Format Type:** {format_type.upper()}")
+
+        if format_type == "long" and id_multiplier:
+            instructions.extend([
+                f"  - **ID Pattern:** Id = rec_id * {id_multiplier} + class_id",
+                f"  - **Number of Classes:** {num_classes}",
+                f"  - **CRITICAL SUBMISSION CODE:**",
+                "    ```python",
+                "    submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
+                "    pred_map = {}",
+                "    for i, rec_id in enumerate(test_rec_ids):",
+                f"        for class_id in range({num_classes}):",
+                f"            submission_id = rec_id * {id_multiplier} + class_id",
+                "            pred_map[submission_id] = predictions[i, class_id]",
+                f"    submission['{target_columns[0] if target_columns else 'Probability'}'] = submission['{id_column}'].map(pred_map)",
+                "    submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)",
+                "    ```",
+            ])
+        elif format_type == "wide":
+            instructions.extend([
+                f"  - **Target Columns:** {target_columns}",
+                f"  - **WIDE FORMAT:** One column per class, one row per sample",
+                "    ```python",
+                "    submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
+                f"    for i, col in enumerate({target_columns}):",
+                "        submission[col] = predictions[:, i]",
+                "    submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)",
+                "    ```",
+            ])
+
+    # CVfolds train/test split
+    if state.get("cv_folds_used"):
+        train_ids = state.get("train_rec_ids", [])
+        test_ids = state.get("test_rec_ids", [])
+        instructions.extend([
+            "\n📊 TRAIN/TEST SPLIT (FROM CVfolds - DO NOT INFER FROM sample_submission):",
+            f"  - Train samples: {len(train_ids)} rec_ids (use train_rec_ids from state)",
+            f"  - Test samples: {len(test_ids)} rec_ids (use test_rec_ids from state)",
+            "  - Filter audio files by rec_id membership in these lists",
+        ])
+
+    # Precomputed features
+    precomputed = state.get("precomputed_features_info")
+    if precomputed and isinstance(precomputed, dict):
+        features_found = precomputed.get("features_found", {})
+        feature_features = {k: v for k, v in features_found.items() if k not in ("cv_folds", "id_mapping")}
+        if feature_features:
+            instructions.append("\n📁 PRECOMPUTED FEATURES (USE THESE INSTEAD OF RE-EXTRACTING):")
+            for feature_type, file_path in feature_features.items():
+                shape = precomputed.get("feature_shapes", {}).get(feature_type, "unknown")
+                instructions.append(f"  - {feature_type}: {file_path} (shape: {shape})")
+            instructions.append("  - Load with pd.read_csv() for .txt/.csv, np.load() for .npy")
+
+    # Label parsing guidance for multi-label
+    if state.get("submission_format_info", {}).get("num_classes", 0) > 1:
+        instructions.extend([
+            "\n⚠️ MULTI-LABEL CLASSIFICATION (MLSP-STYLE):",
+            "  - Use BCEWithLogitsLoss (NOT CrossEntropyLoss)",
+            "  - Use sigmoid activation (NOT softmax)",
+            "  - For sparse label format (e.g., 'rec_id,class1,class5,class12'):",
+            "    from kaggle_agents.utils.label_parser import parse_mlsp_multilabel",
+            "    rec_ids, label_matrix = parse_mlsp_multilabel(label_path, num_classes=N)",
+            "  - DO NOT use np.zeros() as fallback - if label parsing fails, FIX IT",
+        ])
+
+    return instructions

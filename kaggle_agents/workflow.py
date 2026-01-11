@@ -439,6 +439,27 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                     shape_str = f" {precomputed_features_info.feature_shapes[ft]}"
                 print(f"     - {ft}: {path.name}{shape_str}")
 
+            # CVfolds: Extract train/test split if CVfolds file found
+            if "cv_folds" in precomputed_features_info.features_found:
+                cv_folds_path = precomputed_features_info.features_found["cv_folds"]
+                try:
+                    cv_df = pd.read_csv(cv_folds_path)
+                    if len(cv_df.columns) >= 2:
+                        id_col = cv_df.columns[0]
+                        fold_col = cv_df.columns[1]
+
+                        # Standard semantics: fold=1 is train, fold=2 is test
+                        train_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
+                        test_rec_ids = cv_df[cv_df[fold_col] == 2][id_col].tolist()
+
+                        if train_rec_ids or test_rec_ids:
+                            updates["train_rec_ids"] = train_rec_ids
+                            updates["test_rec_ids"] = test_rec_ids
+                            updates["cv_folds_used"] = True
+                            print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
+                except Exception as e:
+                    print(f"   Warning: Failed to parse CVfolds file: {e}")
+
         print("   ---------------------------------")
 
     updates["data_files"] = data_files

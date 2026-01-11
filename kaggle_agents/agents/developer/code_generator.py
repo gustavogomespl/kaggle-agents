@@ -481,10 +481,19 @@ def parse_label_file(label_path, hidden_marker='?'):
 
     Returns DataFrame with columns: ['rec_id', 'label'] in long format
     (one row per rec_id-label pair for multi-label files).
+
+    RAISES ValueError if parsing fails - NEVER returns empty DataFrame silently!
     '''
     import csv
-    content = Path(label_path).read_text(encoding='utf-8', errors='ignore')
+    label_path = Path(label_path)
+    if not label_path.exists():
+        raise ValueError(f"Label file not found: {label_path}")
+
+    content = label_path.read_text(encoding='utf-8', errors='ignore')
     lines = content.strip().split('\\n')
+    if len(lines) < 2:
+        raise ValueError(f"Label file has insufficient lines ({len(lines)}): {label_path}")
+
     sample = '\\n'.join(lines[:20])
 
     # Auto-detect delimiter
@@ -510,7 +519,18 @@ def parse_label_file(label_path, hidden_marker='?'):
             if label and label != hidden_marker:
                 rows.append({'rec_id': rec_id, 'label': label})
 
-    return pd.DataFrame(rows) if rows else pd.DataFrame(columns=['rec_id', 'label'])
+    # FAIL LOUDLY instead of returning empty DataFrame
+    if not rows:
+        raise ValueError(
+            f"parse_label_file() failed to parse any rows from {label_path}. "
+            f"Detected delimiter: {repr(delimiter)}. First 3 lines: {lines[:3]}. "
+            f"If this is a SPARSE multi-label format (e.g., 'rec_id,class1,class5,class12'), "
+            f"use parse_mlsp_multilabel() from kaggle_agents.utils.label_parser instead."
+        )
+
+    df = pd.DataFrame(rows)
+    print(f"[parse_label_file] Parsed {len(df)} label rows from {label_path.name}")
+    return df
 
 def parse_id_mapping_file(mapping_path):
     '''Parse ID to filename mapping file (e.g., rec_id2filename.txt).

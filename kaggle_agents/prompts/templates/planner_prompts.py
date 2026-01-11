@@ -434,6 +434,70 @@ CRITICAL: These require PIXEL-WISE classification/regression!
 - Test-time augmentation (TTA)
 - Post-processing: CRF, morphological operations
 """,
+    "audio_classification": """
+For audio classification competitions (bird call detection, speech recognition, sound event detection):
+
+## CRITICAL: CHECK SUBMISSION FORMAT FIRST
+Audio competitions use TWO main submission formats - WRONG FORMAT = SCORE 0!
+
+### WIDE FORMAT (BirdCLEF style):
+```csv
+row_id,species_0,species_1,...,species_N
+audio_0001,0.1,0.2,...,0.05
+```
+- One row per audio sample
+- One column per class (probability)
+- Use: `submission[col] = predictions[:, i]`
+
+### LONG FORMAT (MLSP 2013 style):
+```csv
+Id,Probability
+100,0.1    # Id = rec_id * 100 + species_id
+101,0.2
+```
+- One row per (sample, class) pair
+- Id encodes BOTH rec_id AND class_id
+- Use: `submission_id = rec_id * multiplier + class_id`
+
+## CHECK STATE FOR SUBMISSION FORMAT:
+The `submission_format_info` in state tells you exactly which format to use!
+
+## PRECOMPUTED FEATURES
+Many audio competitions provide precomputed features (histogram_features.txt, location_features.txt).
+Check `precomputed_features_info` in state - use these instead of re-extracting!
+
+## CVfolds FOR TRAIN/TEST SPLIT
+If `cv_folds_used` is True in state, use `train_rec_ids` and `test_rec_ids` from state.
+Do NOT infer train/test from sample_submission.csv!
+
+## MULTI-LABEL CLASSIFICATION
+Most audio competitions are multi-label:
+- Use BCEWithLogitsLoss (NOT CrossEntropyLoss)
+- Use sigmoid output (NOT softmax)
+- Metric is typically micro-AUC or LWLRAP
+
+## LABEL PARSING
+For MLSP-style sparse labels (e.g., "rec_id,class1,class5,class12"):
+```python
+from kaggle_agents.utils.label_parser import parse_mlsp_multilabel
+rec_ids, label_matrix = parse_mlsp_multilabel(label_path, num_classes=19)
+```
+""",
+    "audio_regression": """
+For audio regression competitions:
+
+## Similar to audio_classification but with continuous targets
+- Check submission format in `submission_format_info`
+- Use MSE or MAE loss
+- Standard audio preprocessing: mel-spectrograms, MFCCs
+- Consider time-series aspects if predicting temporal features
+
+## PRECOMPUTED FEATURES
+Check `precomputed_features_info` in state for available features.
+
+## Train/Test Split
+If `cv_folds_used` is True, use `train_rec_ids` and `test_rec_ids` from state.
+""",
 }
 
 

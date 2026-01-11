@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import random
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -44,6 +45,8 @@ class DynamicContext:
     memory_summary: str | None = None
     # DPO: Preference pairs for contrastive learning
     dpo_examples: str = ""  # Formatted DPO pairs (good vs bad code examples)
+    # Audio-specific context (submission format, precomputed features)
+    audio_context: str = ""  # Formatted audio-specific context for Developer Agent
 
 
 def build_context(state: dict[str, Any], component: Any | None = None) -> DynamicContext:
@@ -228,6 +231,11 @@ def build_context(state: dict[str, Any], component: Any | None = None) -> Dynami
     if preference_pairs:
         context.dpo_examples = _format_dpo_for_prompt(preference_pairs, component)
 
+    # Audio-specific context: submission format and precomputed features
+    audio_context = _build_audio_context(state)
+    if audio_context:
+        context.audio_context = audio_context
+
     return context
 
 
@@ -372,3 +380,122 @@ def _format_attempts_for_prompt(attempts: list[Any]) -> str:
         blocks.append("\n".join(parts))
 
     return "\n\n".join(blocks)
+
+
+def _build_audio_context(state: dict[str, Any]) -> str:
+    """
+    Build audio-specific context for Developer Agent prompts.
+
+    Extracts submission format info and precomputed features from state
+    to ensure the Developer Agent generates code with the correct:
+    - Submission format (Wide vs Long with correct ID pattern)
+    - Precomputed feature loading code
+    - Train/test split based on CVfolds
+
+    Args:
+        state: KaggleState dictionary
+
+    Returns:
+        Formatted audio context string, or empty string if not audio domain
+    """
+    # Check if this is an audio domain
+    domain_type = str(state.get("domain_type", "")).lower()
+    if "audio" not in domain_type:
+        return ""
+
+    lines = ["## Audio Competition Context (CRITICAL)\n"]
+
+    # Extract submission format info
+    submission_format = state.get("submission_format_info")
+    if submission_format and isinstance(submission_format, dict):
+        format_type = submission_format.get("format_type", "unknown")
+        id_column = submission_format.get("id_column", "Id")
+        target_columns = submission_format.get("target_columns", [])
+        id_pattern = submission_format.get("id_pattern")
+        id_multiplier = submission_format.get("id_multiplier")
+        num_classes = submission_format.get("num_classes")
+
+        lines.append("### Submission Format (MUST FOLLOW EXACTLY)")
+        lines.append(f"- **Format Type:** {format_type.upper()}")
+        lines.append(f"- **ID Column:** `{id_column}`")
+        lines.append(f"- **Target Columns:** {target_columns}")
+        if num_classes:
+            lines.append(f"- **Number of Classes:** {num_classes}")
+
+        if format_type == "long" and id_multiplier:
+            lines.append(f"- **ID Pattern:** `{id_pattern}`")
+            lines.append(f"- **ID Multiplier:** {id_multiplier}")
+            lines.append("")
+            lines.append("**LONG FORMAT: Submission code pattern:**")
+            lines.append("```python")
+            lines.append("# For LONG format: Id encodes (rec_id, class_id)")
+            lines.append("submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)")
+            lines.append("pred_map = {}")
+            lines.append("for i, rec_id in enumerate(test_rec_ids):")
+            lines.append(f"    for class_id in range({num_classes or 'num_classes'}):")
+            lines.append(f"        submission_id = rec_id * {id_multiplier} + class_id")
+            lines.append("        pred_map[submission_id] = predictions[i, class_id]")
+            lines.append(f"submission['{target_columns[0] if target_columns else 'Probability'}'] = submission['{id_column}'].map(pred_map)")
+            lines.append("submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)")
+            lines.append("```")
+
+        elif format_type == "wide":
+            lines.append("")
+            lines.append("**WIDE FORMAT: Submission code pattern:**")
+            lines.append("```python")
+            lines.append("# For WIDE format: One column per class")
+            lines.append("submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)")
+            lines.append(f"for i, col in enumerate({target_columns}):")
+            lines.append("    submission[col] = predictions[:, i]")
+            lines.append("submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)")
+            lines.append("```")
+
+        lines.append("")
+
+    # Extract CVfolds info for train/test split
+    if state.get("cv_folds_used"):
+        train_rec_ids = state.get("train_rec_ids", [])
+        test_rec_ids = state.get("test_rec_ids", [])
+        lines.append("### Train/Test Split (CVfolds)")
+        lines.append(f"- **Train samples:** {len(train_rec_ids)} rec_ids (fold=1)")
+        lines.append(f"- **Test samples:** {len(test_rec_ids)} rec_ids (fold=2)")
+        lines.append("- **Use these rec_ids for filtering, do NOT infer from sample_submission.csv**")
+        lines.append("")
+
+    # Extract precomputed features info
+    precomputed_features = state.get("precomputed_features_info")
+    if precomputed_features and isinstance(precomputed_features, dict):
+        features_found = precomputed_features.get("features_found", {})
+        if features_found:
+            lines.append("### Precomputed Features Available")
+            lines.append("Use these instead of re-extracting features:")
+            lines.append("")
+
+            for feature_type, file_path in features_found.items():
+                if feature_type in ("cv_folds", "id_mapping"):
+                    continue  # Skip metadata files
+                shape = precomputed_features.get("feature_shapes", {}).get(feature_type)
+                shape_str = f" (shape: {shape})" if shape else ""
+                lines.append(f"- **{feature_type}:** `{file_path}`{shape_str}")
+
+            lines.append("")
+            lines.append("**Loading code:**")
+            lines.append("```python")
+            for feature_type, file_path in features_found.items():
+                if feature_type in ("cv_folds", "id_mapping"):
+                    continue
+                path_str = str(file_path)
+                if path_str.endswith((".npy", ".npz")):
+                    lines.append(f"{feature_type}_features = np.load(Path('{path_str}'))")
+                elif path_str.endswith(".parquet"):
+                    lines.append(f"{feature_type}_df = pd.read_parquet(Path('{path_str}'))")
+                else:
+                    lines.append(f"{feature_type}_df = pd.read_csv(Path('{path_str}'))")
+            lines.append("```")
+            lines.append("")
+
+    # Only return if we have meaningful content beyond the header
+    if len(lines) > 1:
+        return "\n".join(lines)
+
+    return ""
