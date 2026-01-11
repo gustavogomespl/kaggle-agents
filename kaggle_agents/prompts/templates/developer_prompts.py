@@ -33,7 +33,39 @@ Output: A single Python code block. No explanations outside the code."""
 
 HARD_CONSTRAINTS = """## MUST (violations cause failures):
 1. predict_proba() for classification (NOT predict())
-2. CV folds must respect `KAGGLE_AGENTS_CV_FOLDS` (default 5): StratifiedKFold(n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5")), shuffle=True, random_state=42)
+2. CV FOLDS - MANDATORY CANONICAL DATA USAGE (CRITICAL FOR OOF ALIGNMENT):
+   - **ALWAYS** load canonical folds from `canonical/folds.npy`
+   - **ALWAYS** load canonical train IDs from `canonical/train_ids.npy`
+   - **NEVER** create your own KFold, StratifiedKFold, or GroupKFold
+   - The canonical folds are already correct for classification (StratifiedKFold) or regression (KFold)
+   - Code pattern (MUST USE):
+     ```python
+     from pathlib import Path
+     import numpy as np
+     import json
+
+     canonical_dir = Path(OUTPUT_DIR) / 'canonical'
+     if not canonical_dir.exists():
+         raise RuntimeError("Canonical data directory not found! Workflow must prepare canonical data first.")
+
+     # Load canonical artifacts (SINGLE SOURCE OF TRUTH)
+     folds = np.load(canonical_dir / 'folds.npy')
+     train_ids = np.load(canonical_dir / 'train_ids.npy', allow_pickle=True)
+     y = np.load(canonical_dir / 'y.npy', allow_pickle=True)
+     n_folds = int(folds.max()) + 1
+
+     with open(canonical_dir / 'feature_cols.json') as f:
+         feature_cols = json.load(f)
+
+     # CV loop using canonical folds (NOT creating new KFold!)
+     for fold_idx in range(n_folds):
+         train_mask = folds != fold_idx
+         val_mask = folds == fold_idx
+         X_train, X_val = X[train_mask], X[val_mask]
+         y_train, y_val = y[train_mask], y[val_mask]
+         # ... train model on fold ...
+     ```
+   - WHY: Independent fold creation causes OOF misalignment → stacking fails → ensemble worse than base models
 3. Pipeline/ColumnTransformer for preprocessing - fit INSIDE CV folds only
    - If using manual scaling (e.g., Keras/TF), fit scaler on TRAIN fold only, then transform val/test
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
@@ -779,8 +811,12 @@ if canonical_dir.exists():
         y_train, y_val = y[train_mask], y[val_mask]
         # ... train model ...
 else:
-    # Fallback to standard loading if canonical data not prepared
-    print("[LOG:WARNING] Canonical data not found, using standard loading")
+    # MANDATORY: Canonical data must exist - no fallback allowed
+    raise RuntimeError(
+        "Canonical data not found! All models MUST use canonical data contract. "
+        "Ensure workflow.prepare_canonical_data() was called before model execution. "
+        "Expected files: canonical/train_ids.npy, canonical/y.npy, canonical/folds.npy"
+    )
 ```
 
 ### NEVER DO (causes OOF shape mismatch and stacking failures):

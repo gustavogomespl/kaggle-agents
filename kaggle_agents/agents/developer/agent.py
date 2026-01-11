@@ -1315,9 +1315,20 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     code, working_dir, component.component_type
                 )
                 if not is_valid:
-                    print(f"   Canonical data validation failed: {error_msg}")
-                    print("   Code may have data alignment issues - flagging for review")
-                    state["_canonical_data_error"] = error_msg
+                    print(f"   ❌ Canonical data validation FAILED: {error_msg}")
+                    print("   Blocking execution to prevent OOF alignment issues")
+                    print("   Fix: Use canonical/folds.npy and canonical/train_ids.npy instead of creating KFold")
+                    # Return error result matching expected (DevelopmentResult, attempt_records) contract
+                    canonical_error = f"Canonical data contract violated: {error_msg}. Models MUST use canonical folds from canonical/folds.npy."
+                    return DevelopmentResult(
+                        code=code,
+                        success=False,
+                        stdout="",
+                        stderr=canonical_error,
+                        execution_time=0.0,
+                        artifacts_created=[],
+                        errors=[canonical_error],
+                    ), attempt_records
                 elif warnings:
                     for warning in warnings:
                         print(f"   Canonical data warning: {warning}")

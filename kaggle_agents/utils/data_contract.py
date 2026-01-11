@@ -519,19 +519,40 @@ def validate_canonical_data_usage(
                 continue
             violations.append(message)
 
-    # Model components MUST use canonical data
+    # Model components MUST use canonical data (STRICT ENFORCEMENT)
     if component_type == "model":
-        if not uses_canonical and violations:
+        # Check for required canonical patterns (MUST have these)
+        required_patterns = [
+            (r"canonical.*folds\.npy|folds\.npy.*canonical", "Must load canonical/folds.npy"),
+            (r"canonical.*train_ids\.npy|train_ids\.npy.*canonical", "Must load canonical/train_ids.npy"),
+        ]
+
+        missing_required = []
+        for pattern, message in required_patterns:
+            if not re.search(pattern, generated_code, re.IGNORECASE):
+                missing_required.append(message)
+
+        # Fail if violations exist (creating independent folds)
+        if violations:
             error_msg = (
-                "Model code does not use canonical data contract. "
+                "Model code violates canonical data contract. "
                 f"Violations: {'; '.join(violations)}. "
-                "Use load_canonical_data() or load canonical/*.npy files."
+                "MUST use canonical folds from canonical/folds.npy - do NOT create KFold/StratifiedKFold."
             )
             return False, error_msg, warnings
 
-        if violations:
-            # Has violations but also uses canonical - warn but allow
-            warnings.extend(violations)
+        # Fail if not using canonical data patterns
+        if missing_required and not uses_canonical:
+            error_msg = (
+                "Model code does not use canonical data contract. "
+                f"Missing: {'; '.join(missing_required)}. "
+                "Use load_canonical_data() or load canonical/*.npy files for consistent OOF alignment."
+            )
+            return False, error_msg, warnings
+
+        # Warn if missing required but has some canonical usage
+        if missing_required:
+            warnings.extend(missing_required)
 
     # Feature engineering components should be more flexible
     elif component_type == "feature_engineering":

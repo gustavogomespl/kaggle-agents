@@ -492,10 +492,88 @@ def build_dynamic_instructions(
     if is_audio:
         instructions.extend(_build_audio_domain_instructions(state))
 
+    # Regression post-processing (CRITICAL for valid predictions)
+    if not is_classification:
+        instructions.extend(_build_regression_postprocessing_instructions(state))
+
     # Standard requirements
     instructions.extend(build_standard_requirements())
 
     return "\n".join(instructions)
+
+
+def _build_regression_postprocessing_instructions(state: dict) -> list[str]:
+    """
+    Build regression post-processing instructions for clipping predictions.
+
+    Many regression targets have natural bounds (e.g., taxi fares >= 0).
+    Negative predictions cause large RMSE penalties and are often invalid.
+
+    Args:
+        state: Workflow state dictionary
+
+    Returns:
+        List of instruction strings
+    """
+    # Only for regression problems
+    problem_type = ""
+    try:
+        comp_info = state.get("competition_info")
+        problem_type = comp_info.problem_type if comp_info else ""
+    except Exception:
+        problem_type = ""
+
+    if "regression" not in str(problem_type).lower():
+        return []
+
+    target_col = str(state.get("target_col", "target")).lower()
+
+    # Infer bounds from common regression targets
+    bounds_hints = {
+        "fare": (0, 500),  # Taxi fare: $0-$500
+        "price": (0, None),  # Prices: non-negative
+        "amount": (0, None),  # Amounts: non-negative
+        "count": (0, None),  # Counts: non-negative integers
+        "duration": (0, None),  # Duration: non-negative
+        "age": (0, 120),  # Age: 0-120
+        "distance": (0, None),  # Distance: non-negative
+        "time": (0, None),  # Time: non-negative
+        "sales": (0, None),  # Sales: non-negative
+        "revenue": (0, None),  # Revenue: non-negative
+    }
+
+    lower_bound, upper_bound = None, None
+    for keyword, bounds in bounds_hints.items():
+        if keyword in target_col:
+            lower_bound, upper_bound = bounds
+            break
+
+    instructions = []
+    if lower_bound is not None or upper_bound is not None:
+        instructions = [
+            "\n📊 REGRESSION POST-PROCESSING (MANDATORY):",
+            f"  - Target column '{target_col}' should be clipped to valid bounds",
+            f"  - Lower bound: {lower_bound if lower_bound is not None else 'None (no lower limit)'}",
+            f"  - Upper bound: {upper_bound if upper_bound is not None else 'None (no upper limit)'}",
+            "  - **Apply clipping AFTER predictions to avoid invalid values:**",
+            "    ```python",
+            f"    # Clip predictions to valid range",
+            f"    oof_preds = np.clip(oof_preds, {lower_bound}, {upper_bound})",
+            f"    test_preds = np.clip(test_preds, {lower_bound}, {upper_bound})",
+            "    print(f'[LOG:INFO] Clipped predictions: min={{test_preds.min():.2f}}, max={{test_preds.max():.2f}}')",
+            "    ```",
+            "  - WHY: Negative predictions for non-negative targets cause large RMSE penalties",
+        ]
+    else:
+        # Generic regression guidance
+        instructions = [
+            "\n📊 REGRESSION VALIDATION:",
+            "  - Check if target values are always non-negative (y >= 0)",
+            "  - If so, clip predictions: `preds = np.clip(preds, 0, None)`",
+            "  - Check for outliers and clip to reasonable bounds if needed",
+        ]
+
+    return instructions
 
 
 def _build_audio_domain_instructions(state: dict) -> list[str]:
