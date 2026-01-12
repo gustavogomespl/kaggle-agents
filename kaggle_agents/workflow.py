@@ -770,6 +770,28 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
         max_rows = 200_000
         print(f"   Short timeout ({timeout_s}s): sampling to {max_rows:,} rows")
 
+    # Detect task type from domain for seq2seq handling
+    domain = state.get("domain_detected", "tabular")
+    competition_name = state.get("competition_name", "").lower()
+    seq2seq_domains = {"seq_to_seq", "text_normalization", "translation", "summarization"}
+
+    # Determine task_type with priority:
+    # 1. Specific text_normalization detection from competition name
+    # 2. Domain detected as seq_to_seq variant
+    # 3. Default to tabular
+    text_norm_keywords = ["normalization", "normalize", "text-norm", "tts"]
+    is_text_norm = any(kw in competition_name for kw in text_norm_keywords)
+
+    if is_text_norm:
+        task_type = "text_normalization"
+        print(f"   Task type: text_normalization (detected from competition name)")
+    elif domain in seq2seq_domains:
+        # Map generic seq_to_seq to specific type if possible
+        task_type = domain if domain != "seq_to_seq" else "seq2seq"
+        print(f"   Task type from domain: {task_type}")
+    else:
+        task_type = "tabular"
+
     try:
         canonical_result = prepare_canonical_data(
             train_path=train_path,
@@ -779,6 +801,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             max_rows=max_rows,
             fast_mode=fast_mode,
             timeout_s=timeout_s,
+            task_type=task_type,
         )
 
         print(f"\n   Canonical data artifacts created:")
