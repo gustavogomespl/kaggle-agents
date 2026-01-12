@@ -83,6 +83,8 @@ CREATE_ABLATION_PLAN_PROMPT = """Given the competition info and specific SOTA so
 ## SOTA Patterns Summary
 {sota_summary}
 
+{domain_insights}
+
 ## Memory Insights (Past Results, Errors, Best Hyperparameters)
 {memory_summary}
 

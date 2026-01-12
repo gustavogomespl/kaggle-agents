@@ -34,6 +34,7 @@ from ..prompts.templates.planner_prompts import (
     get_domain_guidance,
 )
 from ..utils.llm_utils import get_text_content
+from ..utils.text_normalization import DETERMINISTIC_CLASSES, AMBIGUOUS_CLASSES
 
 
 # ==================== Extended Strategy Templates ====================
@@ -467,6 +468,156 @@ class PlannerAgent:
 
         return analysis
 
+    def _extract_domain_specific_patterns(
+        self, sota_solutions: list[SOTASolution], domain: str
+    ) -> dict[str, Any]:
+        """Extract domain-specific patterns from SOTA solutions.
+
+        Uses structured SOTASolution fields (strategies, models_used) for reliability,
+        with code snippet scanning as fallback for additional signals.
+
+        Args:
+            sota_solutions: List of SOTA solutions from search
+            domain: Detected domain (e.g., 'seq_to_seq', 'tabular')
+
+        Returns:
+            Dictionary with extracted patterns for the domain
+        """
+        if domain != "seq_to_seq":
+            return {}
+
+        patterns: dict[str, Any] = {
+            "uses_hybrid_lookup": False,
+            "uses_lookup_baseline": False,
+            "lookup_coverage_estimate": 0.0,
+            "deterministic_classes": list(DETERMINISTIC_CLASSES),
+            "ambiguous_classes": list(AMBIGUOUS_CLASSES),
+            "neural_models": set(),
+            "recommended_utilities": set(),
+        }
+
+        for sol in sota_solutions:
+            # PRIMARY: Use structured fields from SOTASolution dataclass
+            for strategy in sol.strategies:
+                strategy_lower = strategy.lower()
+                if any(kw in strategy_lower for kw in ["lookup", "dictionary", "hybrid"]):
+                    patterns["uses_hybrid_lookup"] = True
+                    patterns["lookup_coverage_estimate"] = 0.80
+
+            for model in sol.models_used:
+                model_lower = model.lower()
+                if "t5" in model_lower:
+                    patterns["neural_models"].add("T5")
+                if "seq2seq" in model_lower or "transformer" in model_lower:
+                    patterns["neural_models"].add("Seq2Seq")
+                if "lookup" in model_lower:
+                    patterns["uses_lookup_baseline"] = True
+                    patterns["recommended_utilities"].add("LookupBaseline")
+
+            # FALLBACK: Scan code snippets for additional signals
+            for snippet in sol.code_snippets:
+                snippet_lower = snippet.lower()
+                if "lookupbaseline" in snippet_lower:
+                    patterns["uses_lookup_baseline"] = True
+                    patterns["recommended_utilities"].add("LookupBaseline")
+                if "create_hybrid_pipeline" in snippet_lower:
+                    patterns["recommended_utilities"].add("create_hybrid_pipeline")
+
+        # Add utility recommendations based on detected patterns
+        if patterns["uses_hybrid_lookup"]:
+            patterns["recommended_utilities"].update([
+                "create_hybrid_pipeline",
+                "get_neural_training_config",
+            ])
+
+        # Convert sets to lists for JSON serialization
+        patterns["neural_models"] = list(patterns["neural_models"])
+        patterns["recommended_utilities"] = list(patterns["recommended_utilities"])
+
+        return patterns
+
+    def _format_domain_insights(self, domain: str, domain_patterns: dict[str, Any]) -> str:
+        """Format domain-specific insights for the planner prompt.
+
+        Returns empty string for domains without specific insights.
+
+        Args:
+            domain: Detected domain
+            domain_patterns: Patterns extracted from SOTA solutions
+
+        Returns:
+            Formatted string with domain insights (or empty string)
+        """
+        if domain == "seq_to_seq":
+            return self._format_seq2seq_insights(domain_patterns)
+        # Add more domains as needed:
+        # elif domain == "tabular":
+        #     return self._format_tabular_insights(domain_patterns)
+        return ""
+
+    def _format_seq2seq_insights(self, patterns: dict[str, Any]) -> str:
+        """Format seq2seq-specific insights for text normalization competitions."""
+        # Use imported constants for complete class lists
+        deterministic_str = ", ".join(sorted(DETERMINISTIC_CLASSES))
+        ambiguous_str = ", ".join(sorted(AMBIGUOUS_CLASSES))
+
+        insights = f"""## DOMAIN-SPECIFIC INSIGHTS (CRITICAL FOR seq_to_seq)
+
+### SEQ2SEQ / TEXT NORMALIZATION PATTERNS
+
+**CRITICAL: HYBRID LOOKUP-FIRST STRATEGY**
+SOTA solutions show that lookup-based approaches handle 80%+ of tokens deterministically.
+This is a PROVEN pattern - you MUST include a lookup-first component.
+
+**Class Categories (from text_normalization.py):**
+- DETERMINISTIC (use rules/lookup): {deterministic_str}
+- AMBIGUOUS (use neural): {ambiguous_str}
+
+**RECOMMENDED ARCHITECTURE:**
+1. **Component 1 (Lookup Baseline)**: Handle deterministic classes with O(1) lookup
+   - Use `LookupBaseline` from `kaggle_agents/utils/text_normalization.py`
+   - Expected coverage: 80%+ of tokens
+   - Impact: 0.30-0.40
+
+2. **Component 2 (Neural Seq2Seq)**: Handle ambiguous classes only
+   - Train ONLY on ~20% of data (ambiguous tokens)
+   - Use T5-small with `get_neural_training_config()` for time-aware training
+   - Impact: 0.20-0.30
+
+3. **Component 3 (Hybrid Pipeline)**: Combine lookup + neural
+   - Use `create_hybrid_pipeline()` utility
+   - Lookup first, neural fallback for ambiguous
+   - Impact: 0.10-0.15
+
+**AVAILABLE UTILITIES (USE THESE!):**
+```python
+from kaggle_agents.utils.text_normalization import (
+    LookupBaseline,              # Frequency-based lookup table
+    create_hybrid_pipeline,      # Returns lookup + ambiguous_df + neural_config
+    get_neural_training_config,  # Time-aware training config with max_steps guard
+    DETERMINISTIC_CLASSES,       # Complete set of deterministic classes
+    AMBIGUOUS_CLASSES,           # Complete set of ambiguous classes
+)
+```
+
+**MANDATORY FOR SEQ2SEQ:**
+- At least ONE component must use `LookupBaseline` or equivalent lookup approach
+- At least ONE component must generate the actual "after" text (not just predict class)
+- Neural training MUST use `max_steps` guard to prevent timeout
+- Component impacts must be REALISTIC (sum should be ≤ 0.70 for a 3-component plan)
+"""
+
+        # Add detected patterns if any
+        if patterns.get("uses_hybrid_lookup"):
+            coverage = patterns.get("lookup_coverage_estimate", 0.8)
+            insights += f"\n**DETECTED FROM SOTA:** Hybrid lookup strategy confirmed (est. {coverage:.0%} coverage)"
+
+        if patterns.get("neural_models"):
+            models = ", ".join(patterns["neural_models"])
+            insights += f"\n**DETECTED NEURAL MODELS:** {models}"
+
+        return insights
+
     def _extract_curriculum_insights(self, state: KaggleState) -> str:
         """
         Extract curriculum learning insights from iteration memory.
@@ -569,6 +720,10 @@ class PlannerAgent:
         sota_details = self._format_sota_details(sota_solutions)
         memory_summary = get_memory_summary_for_planning(state)
 
+        # Extract domain-specific patterns and format insights
+        domain_patterns = self._extract_domain_specific_patterns(sota_solutions, domain)
+        domain_insights = self._format_domain_insights(domain, domain_patterns)
+
         # Prepare inputs
         comp_info_str = f"""
 Name: {competition_info.name}
@@ -599,6 +754,10 @@ Domain: {domain}
         if "No previous iteration" not in curriculum_insights:
             print(curriculum_insights)
 
+        # Combine domain_guidance with domain_insights for DSPy path
+        # (Appending avoids modifying the DSPy signature which would require retraining)
+        enhanced_domain_guidance = domain_guidance + "\n\n" + domain_insights if domain_insights else domain_guidance
+
         if self.use_dspy:
             # DSPy path: Use AblationPlannerModule with Adopt & Improve strategy
             print("  🧠 Using DSPy for ablation plan generation (Adopt & Improve)...")
@@ -609,7 +768,7 @@ Domain: {domain}
                         domain=domain,
                         sota_details=sota_details,
                         sota_summary=sota_summary,
-                        domain_guidance=domain_guidance,
+                        domain_guidance=enhanced_domain_guidance,
                         memory_summary=memory_summary,
                     )
                 except TypeError:
@@ -619,7 +778,7 @@ Domain: {domain}
                         domain=domain,
                         sota_details=sota_details,
                         sota_summary=sota_summary,
-                        domain_guidance=domain_guidance,
+                        domain_guidance=enhanced_domain_guidance,
                     )
                 plan_data = self._parse_llm_plan_response(result.ablation_plan, sota_analysis)
                 if len(plan_data) < 3:
@@ -640,6 +799,7 @@ Domain: {domain}
                 domain=domain,
                 sota_details=sota_details,
                 sota_summary=sota_summary,
+                domain_insights=domain_insights,
                 memory_summary=memory_summary,
             )
 
@@ -1387,6 +1547,20 @@ Return a JSON array with up to {max_components} components. Each component must 
 
         # Filter out invalid components
         valid_plan = [c for c in plan if c.estimated_impact >= min_impact]
+
+        # Validate and normalize impact sum
+        # Planner LLM often generates optimistic impacts (e.g., 0.45 + 0.35 + 0.25 = 1.05)
+        # Normalizing keeps relative ordering but makes values realistic
+        MAX_REALISTIC_IMPACT = 0.85
+        total_impact = sum(c.estimated_impact for c in valid_plan)
+        if total_impact > MAX_REALISTIC_IMPACT and valid_plan:
+            print(f"  ⚠️ Impact sum {total_impact:.2f} exceeds {MAX_REALISTIC_IMPACT:.2f}, normalizing...")
+            scale_factor = MAX_REALISTIC_IMPACT / total_impact
+            for component in valid_plan:
+                original = component.estimated_impact
+                component.estimated_impact = round(original * scale_factor, 3)
+                if abs(original - component.estimated_impact) > 0.001:
+                    print(f"     {component.name}: {original:.2f} → {component.estimated_impact:.3f}")
 
         # Guardrail: block tabular models for image competitions without features.
         if self._is_image_competition_without_features(state):
@@ -2413,15 +2587,56 @@ This provides model diversity for ensemble.""",
         """
         if domain == "seq_to_seq":
             # Sequence-to-sequence tasks (translation, text normalization, summarization)
+            # Use hybrid lookup-first strategy proven in SOTA solutions
             return [
                 {
-                    "name": "t5_base_seq2seq",
+                    "name": "lookup_baseline_deterministic",
                     "component_type": "model",
-                    "description": "T5-base fine-tuned for seq2seq task using HuggingFace Trainer API. T5 is designed for text-to-text tasks.",
-                    "estimated_impact": 0.30,
-                    "rationale": "T5 (Text-to-Text Transfer Transformer) is specifically designed for seq2seq tasks. Achieves SOTA on translation, summarization, and text normalization benchmarks.",
-                    "code_outline": "transformers.T5ForConditionalGeneration.from_pretrained('t5-base'), T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, train with learning_rate=1e-4, evaluate with BLEU/ROUGE metrics",
-                }
+                    "description": """LookupBaseline for deterministic semiotic classes.
+Uses frequency-based mapping from training data for PLAIN, PUNCT, LETTERS, VERBATIM.
+Expected coverage: 80%+ of tokens with zero inference cost.""",
+                    "estimated_impact": 0.35,
+                    "rationale": "SOTA pattern: lookup handles majority of tokens deterministically. Proven in text normalization competitions to achieve 99%+ accuracy on deterministic classes.",
+                    "code_outline": """from kaggle_agents.utils.text_normalization import LookupBaseline, DETERMINISTIC_CLASSES
+
+lookup = LookupBaseline()
+lookup.fit(train_df, class_col='class', before_col='before', after_col='after')
+predictions = lookup.predict_batch(test_df)
+# Use predictions['prediction'] for deterministic classes""",
+                },
+                {
+                    "name": "t5_seq2seq_ambiguous",
+                    "component_type": "model",
+                    "description": """T5-small fine-tuned ONLY on ambiguous tokens (CARDINAL, DATE, TIME, MONEY, MEASURE).
+Uses create_hybrid_pipeline() to identify which tokens need neural processing.
+Input format: "class: DATE before: 1/2/2023"
+Output: "january second twenty twenty three" """,
+                    "estimated_impact": 0.25,
+                    "rationale": "Neural model for context-dependent transformations that lookup cannot handle. Training only on ambiguous tokens (20% of data) makes training 5x faster.",
+                    "code_outline": """from kaggle_agents.utils.text_normalization import create_hybrid_pipeline, get_neural_training_config
+
+pipeline = create_hybrid_pipeline(train_df, fast_mode=True, timeout_s=1800)
+ambiguous_df = pipeline['ambiguous_df']
+neural_config = pipeline['neural_config']
+
+# Train T5 only on ambiguous samples with max_steps guard
+from transformers import T5ForConditionalGeneration, Trainer
+model = T5ForConditionalGeneration.from_pretrained('t5-small')
+# Use neural_config['max_steps'] to prevent timeout""",
+                },
+                {
+                    "name": "hybrid_ensemble",
+                    "component_type": "ensemble",
+                    "description": """Combines lookup baseline with T5 neural predictions.
+Uses lookup for confident predictions, T5 for ambiguous cases.""",
+                    "estimated_impact": 0.10,
+                    "rationale": "Hybrid approach proven in SOTA to achieve 99%+ accuracy. Lookup provides fast, deterministic results for common cases; neural handles edge cases.",
+                    "code_outline": """from kaggle_agents.utils.text_normalization import apply_hybrid_predictions
+
+final_predictions = apply_hybrid_predictions(
+    test_df, lookup, neural_predictions, neural_indices
+)""",
+                },
             ]
         # Classification or regression tasks
         return [
