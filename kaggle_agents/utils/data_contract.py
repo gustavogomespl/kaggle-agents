@@ -83,8 +83,11 @@ def validate_schema_parity(
     common = train_cols & test_cols - exclude_cols
     missing_in_test = train_cols - test_cols - exclude_cols
 
-    # Deterministic order
-    return sorted(list(common)), sorted(list(missing_in_test))
+    # Deterministic order - convert to str to handle mixed types (str/float in column names)
+    # This can happen with CSVs that have numeric column headers
+    common_str = [str(c) for c in common]
+    missing_str = [str(c) for c in missing_in_test]
+    return sorted(common_str), sorted(missing_str)
 
 
 def select_cv_strategy(

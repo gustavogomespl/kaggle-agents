@@ -41,6 +41,11 @@ IMMUTABLE_PATH_VARS = [
     "CANONICAL_Y_PATH",
     "CANONICAL_FOLDS_PATH",
     "CANONICAL_FEATURE_COLS_PATH",
+    "CANONICAL_METADATA_PATH",
+    # Common base directory patterns
+    "BASE_DIR",
+    "DATA_DIR",
+    "WORKING_DIR",
 ]
 
 

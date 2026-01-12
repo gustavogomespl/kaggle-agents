@@ -486,6 +486,56 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
     submission_format_type = None
     submission_format_metadata: dict[str, Any] = {}
 
+    # ========================================================================
+    # FORCE DOMAIN OVERRIDE via environment variable
+    # This takes precedence over all detection methods
+    # ========================================================================
+    forced_type = (
+        os.getenv("KAGGLE_AGENTS_FORCE_DATA_TYPE")
+        or os.getenv("KAGGLE_AGENTS_DATA_TYPE")
+        or os.getenv("KAGGLE_AGENTS_FORCE_DOMAIN")
+        or ""
+    ).strip().lower()
+
+    FORCE_TYPE_TO_DOMAIN = {
+        # Seq2seq / text normalization
+        "seq2seq": "seq_to_seq",
+        "seq_to_seq": "seq_to_seq",
+        "text_normalization": "seq_to_seq",
+        # Image domains
+        "image": "image_classification",
+        "image_classification": "image_classification",
+        "image_to_image": "image_to_image",
+        # Audio domains
+        "audio": "audio_classification",
+        "audio_classification": "audio_classification",
+        "audio_tagging": "audio_tagging",
+        # Text domains
+        "text": "text_classification",
+        "text_classification": "text_classification",
+        "nlp": "text_classification",
+        # Tabular domains
+        "tabular": "tabular_classification",
+        "tabular_classification": "tabular_classification",
+        "tabular_regression": "tabular_regression",
+        "regression": "tabular_regression",
+    }
+
+    if forced_type in FORCE_TYPE_TO_DOMAIN:
+        forced_domain = FORCE_TYPE_TO_DOMAIN[forced_type]
+        print(f"   ⚠️ Domain FORCED via env var: {forced_domain}")
+        print(f"      (KAGGLE_AGENTS_FORCE_DATA_TYPE={forced_type})")
+        competition_info.domain = forced_domain
+        return {
+            "domain_detected": forced_domain,
+            "domain_confidence": 1.0,  # User explicitly requested
+            "submission_format_type": None,
+            "submission_format_metadata": {},
+            "submission_format": {},
+            "last_updated": datetime.now(),
+        }
+    # ========================================================================
+
     # Get LLM for domain detection (use planner's LLM with low temperature)
     from .core.config import get_llm_for_role
 

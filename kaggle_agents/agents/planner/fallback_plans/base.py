@@ -10,6 +10,7 @@ from typing import Any
 from ....core.state import KaggleState
 from .audio import create_audio_fallback_plan
 from .image import create_image_fallback_plan, create_image_to_image_fallback_plan
+from .seq2seq import create_seq2seq_fallback_plan
 from .tabular import create_tabular_fallback_plan
 from .text import create_text_fallback_plan
 
@@ -22,7 +23,8 @@ IMAGE_DOMAINS = {
     "image_to_image",
     "image_segmentation",
 }
-TEXT_DOMAINS = {"text_classification", "text_regression", "seq_to_seq"}
+TEXT_DOMAINS = {"text_classification", "text_regression"}
+SEQ2SEQ_DOMAINS = {"seq_to_seq", "text_normalization", "translation", "summarization"}
 AUDIO_DOMAINS = {"audio_classification", "audio_regression"}
 
 
@@ -136,6 +138,8 @@ def create_fallback_plan(
         return create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
     if domain in IMAGE_DOMAINS or domain.startswith("image_"):
         return create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode, competition_name=competition_name)
+    if domain in SEQ2SEQ_DOMAINS or domain == "seq_to_seq":
+        return create_seq2seq_fallback_plan(domain, sota_analysis, competition_name=competition_name)
     if domain in TEXT_DOMAINS or domain.startswith("text_"):
         return create_text_fallback_plan(domain, sota_analysis)
     if domain in AUDIO_DOMAINS or domain.startswith("audio_"):
