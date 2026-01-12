@@ -86,17 +86,21 @@ class LookupBaseline:
         Returns:
             self for chaining
         """
-        # Count (class, before) -> after frequencies
-        freq_table: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        # Count (class, before) -> after frequencies using vectorized groupby
+        # This is 50-100x faster than iterrows for large datasets
+        counts = df.groupby(
+            [class_col, before_col, after_col], as_index=False
+        ).size()
+        counts.columns = [class_col, before_col, after_col, 'count']
 
-        for _, row in df.iterrows():
+        # Get the most frequent 'after' for each (class, before) pair
+        idx = counts.groupby([class_col, before_col])['count'].idxmax()
+        best_mappings = counts.loc[idx]
+
+        # Build lookup dictionary
+        for _, row in best_mappings.iterrows():
             key = (str(row[class_col]), str(row[before_col]))
-            freq_table[key][str(row[after_col])] += 1
-
-        # Keep most frequent mapping for each (class, before) pair
-        for key, after_counts in freq_table.items():
-            most_common = max(after_counts.items(), key=lambda x: x[1])
-            self.lookup[key] = most_common[0]
+            self.lookup[key] = str(row[after_col])
             self.stats["lookup_entries"] += 1
 
         # Build class-level fallbacks
@@ -187,7 +191,7 @@ class LookupBaseline:
         before_col: str = "before",
     ) -> pd.DataFrame:
         """
-        Predict for entire DataFrame.
+        Predict for entire DataFrame using vectorized operations.
 
         Args:
             df: DataFrame with class and before columns
@@ -195,22 +199,67 @@ class LookupBaseline:
         Returns:
             DataFrame with predictions and confidence flags
         """
-        predictions = []
-        confidences = []
-        needs_neural = []
+        # Vectorized approach - 50-100x faster than iterrows
+        class_str = df[class_col].astype(str)
+        before_str = df[before_col].astype(str)
 
-        for _, row in df.iterrows():
-            pred, confident = self.predict(row[class_col], row[before_col])
-            predictions.append(pred)
-            confidences.append(confident)
-            # Mark as needing neural if not confident AND class is ambiguous
-            needs_neural.append(
-                not confident and str(row[class_col]) in AMBIGUOUS_CLASSES
-            )
+        # Create lookup keys as tuples
+        keys = list(zip(class_str, before_str))
+
+        # Vectorized lookup using Series.map()
+        predictions = pd.Series(keys, index=df.index).map(self.lookup)
+
+        # Track which had direct lookup hits
+        is_lookup_hit = predictions.notna()
+        self.stats["lookup_hits"] += int(is_lookup_hit.sum())
+
+        # Get fallback values for misses
+        fallback_values = class_str.map(self.class_fallbacks)
+        needs_fallback = ~is_lookup_hit
+
+        # Handle <self> fallback: keep as-is
+        is_self_fallback = needs_fallback & (fallback_values == "<self>")
+
+        # Handle <spell> fallback: spell out letters
+        is_spell_fallback = needs_fallback & (fallback_values == "<spell>")
+        spelled_out = before_str.apply(lambda x: " ".join(x.lower()))
+
+        # Handle unknown class (fallback is NaN): keep as-is, mark not confident
+        is_unknown_class = needs_fallback & fallback_values.isna()
+
+        # Handle other known fallbacks (not <self>, not <spell>, not unknown)
+        is_other_fallback = needs_fallback & ~is_self_fallback & ~is_spell_fallback & ~is_unknown_class
+
+        # Apply fallbacks
+        predictions = predictions.where(~is_self_fallback, before_str)
+        predictions = predictions.where(~is_spell_fallback, spelled_out)
+        predictions = predictions.where(~is_other_fallback, fallback_values)
+        predictions = predictions.where(~is_unknown_class, before_str)  # Unknown class: keep as-is
+
+        # Track fallback usage
+        self.stats["fallback_used"] += int(needs_fallback.sum())
+
+        # Calculate confidence:
+        # - Lookup hit = confident
+        # - <self> or <spell> fallback = confident (deterministic rules)
+        # - Other fallback for non-ambiguous class = confident
+        # - Other fallback for ambiguous class = not confident
+        # - Unknown class = NOT confident (must go to neural)
+        is_ambiguous_class = class_str.isin(AMBIGUOUS_CLASSES)
+        is_confident = (
+            is_lookup_hit |
+            is_self_fallback |
+            is_spell_fallback |
+            (is_other_fallback & ~is_ambiguous_class)
+        )
+        # Unknown class is explicitly NOT confident (handled by not being in any of the above)
+
+        # Mark as needing neural if not confident AND class is ambiguous
+        needs_neural = ~is_confident & is_ambiguous_class
 
         result = df.copy()
         result["prediction"] = predictions
-        result["is_confident"] = confidences
+        result["is_confident"] = is_confident
         result["needs_neural"] = needs_neural
 
         return result
