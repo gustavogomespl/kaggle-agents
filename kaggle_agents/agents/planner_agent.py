@@ -1247,40 +1247,11 @@ Return a JSON array with up to {max_components} components. Each component must 
                 )
                 valid_plan = filtered_plan
 
-        # If an NN/MLP is dominant in tabular tasks, avoid tree models.
-        avoid_tree_models = False
-        if domain.startswith("tabular"):
-            best_name = str((state or {}).get("best_single_model_name", "")).lower()
-            if any(token in best_name for token in ("mlp", "nn", "neural", "keras")):
-                avoid_tree_models = True
-                tree_signals = [
-                    "lightgbm",
-                    "lgbm",
-                    "xgboost",
-                    "xgb",
-                    "catboost",
-                    "randomforest",
-                    "random_forest",
-                    "extratrees",
-                    "extra_trees",
-                    "gradientboost",
-                    "gbdt",
-                ]
-                filtered_plan = []
-                removed = []
-                for comp in valid_plan:
-                    if comp.component_type == "model":
-                        text = f"{comp.name} {comp.code}".lower()
-                        if any(sig in text for sig in tree_signals):
-                            removed.append(comp.name)
-                            continue
-                    filtered_plan.append(comp)
-                if removed:
-                    print(
-                        "  ⚠️  Removed tree models due to NN-dominant results: "
-                        + ", ".join(removed)
-                    )
-                valid_plan = filtered_plan
+        # NOTE: NN-dominant tree removal logic REMOVED (was harmful for tabular tasks).
+        # Tree models (LightGBM, XGBoost, CatBoost) are typically the best performers
+        # for tabular classification/regression. Removing them when an MLP happened
+        # to score well in one iteration caused severe performance degradation.
+        # Tree models should ALWAYS be available for tabular competitions.
 
         # Limit components (quality over quantity)
         max_components = 3 if fast_mode else 6

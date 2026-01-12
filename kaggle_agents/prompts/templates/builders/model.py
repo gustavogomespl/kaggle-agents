@@ -325,14 +325,23 @@ def build_dynamic_instructions(
     is_image = domain.startswith("image") or domain in {"computer_vision", "vision"} or is_audio
     is_image_to_image = domain == "image_to_image" or submission_format_type == "pixel_level"
 
-    # Detect problem type
-    problem_type = ""
-    try:
-        comp_info = state.get("competition_info")
-        problem_type = comp_info.problem_type if comp_info else ""
-    except Exception:
+    # Detect problem type - CRITICAL: Use canonical metadata as authoritative source
+    canonical_metadata = state.get("canonical_metadata", {}) if state else {}
+    is_classification = canonical_metadata.get("is_classification")
+
+    # Fallback to problem_type string if canonical metadata unavailable
+    if is_classification is None:
         problem_type = ""
-    is_classification = "class" in str(problem_type).lower()
+        try:
+            comp_info = state.get("competition_info")
+            problem_type = comp_info.problem_type if comp_info else ""
+        except Exception:
+            problem_type = ""
+        is_classification = "class" in str(problem_type).lower()
+        print(f"[DEBUG] is_classification={is_classification} (from problem_type string)")
+    else:
+        is_classification = bool(is_classification)
+        print(f"[DEBUG] is_classification={is_classification} (from canonical metadata)")
 
     # Check sample submission for integer labels
     sample_integer_labels = False
@@ -390,6 +399,32 @@ def build_dynamic_instructions(
                 "  - CRITICAL: Final Validation Performance MUST be log_loss value (NOT accuracy/AUC)",
                 "  - Lower is better: 0.02 = excellent, 0.7+ = nearly random for multiclass",
                 "  - Use: `from sklearn.metrics import log_loss; score = log_loss(y_true, oof_preds)`",
+            ])
+
+    # Explicit model type requirement based on is_classification
+    if not is_image:
+        if is_classification:
+            instructions.extend([
+                "\n⚠️ CLASSIFICATION MODEL REQUIREMENT (CRITICAL):",
+                "  - IS_CLASSIFICATION = True (from canonical metadata)",
+                "  - MUST use CLASSIFIER models: MLPClassifier, LGBMClassifier, XGBClassifier, CatBoostClassifier",
+                "  - DO NOT use REGRESSOR models: MLPRegressor, LGBMRegressor, XGBRegressor will produce INVALID predictions",
+                "  - Predictions MUST be probabilities in range [0.0, 1.0]",
+                "  - For sklearn: use predict_proba()[:, 1] for binary classification (2 classes)",
+                "  - For AUC metric: probability predictions are REQUIRED (not class labels)",
+                "  ```python",
+                "  # MANDATORY CHECK: Validate predictions are probabilities",
+                "  assert 0 <= oof_preds.min() <= oof_preds.max() <= 1, 'Predictions must be probabilities [0,1]'",
+                "  if oof_preds.min() < 0 or oof_preds.max() > 1:",
+                "      raise ValueError(f'INVALID: predictions outside [0,1]: min={oof_preds.min()}, max={oof_preds.max()}')",
+                "  ```",
+            ])
+        else:
+            instructions.extend([
+                "\n📊 REGRESSION MODEL REQUIREMENT:",
+                "  - IS_CLASSIFICATION = False (from canonical metadata)",
+                "  - MUST use REGRESSOR models: MLPRegressor, LGBMRegressor, XGBRegressor",
+                "  - DO NOT use CLASSIFIER models",
             ])
 
     # Build budget instructions
