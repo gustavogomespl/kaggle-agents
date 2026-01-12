@@ -10,7 +10,12 @@ This module provides sandboxed Python code execution with:
 - Real-time stdout streaming for training logs
 """
 
+from __future__ import annotations
+
+import os
+import platform
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -19,6 +24,87 @@ from dataclasses import dataclass
 from pathlib import Path
 from queue import Empty, Queue
 from typing import Any
+
+
+# Feature flag for resource limits (can be disabled via environment variable)
+ENABLE_RESOURCE_LIMITS = os.getenv("KAGGLE_AGENTS_ENABLE_LIMITS", "true").lower() == "true"
+
+
+def _set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
+    """
+    Set resource limits for subprocess (Unix only).
+
+    Falls back silently on Windows or if limits cannot be set.
+
+    Args:
+        memory_mb: Maximum memory in MB (default 8GB)
+        cpu_time_s: Maximum CPU time in seconds (default 1 hour)
+    """
+    if not ENABLE_RESOURCE_LIMITS:
+        return
+
+    # RLIMIT only works on Unix
+    if platform.system() == "Windows":
+        return
+
+    try:
+        import resource
+
+        # Memory limit (soft, hard)
+        memory_bytes = memory_mb * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+
+        # CPU time limit
+        resource.setrlimit(resource.RLIMIT_CPU, (cpu_time_s, cpu_time_s))
+
+        # Disable core dumps
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+
+    except (ImportError, OSError, ValueError) as e:
+        # Fallback: just log warning, don't fail
+        print(f"[WARN] Could not set resource limits: {e}")
+
+
+def _start_new_process_group() -> None:
+    """Start process in new group for kill tree to work."""
+    if platform.system() != "Windows":
+        os.setpgrp()
+
+
+def _kill_process_tree(process: subprocess.Popen) -> None:
+    """
+    Kill process and all its children.
+
+    Uses process group kill on Unix, falls back to simple kill on Windows.
+
+    Args:
+        process: The subprocess to kill
+    """
+    if platform.system() == "Windows":
+        # Windows: just terminate the process
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        return
+
+    # Unix: kill entire process group
+    try:
+        pgid = os.getpgid(process.pid)
+        os.killpg(pgid, signal.SIGTERM)
+
+        # Wait for graceful termination
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Force kill if not terminated
+            os.killpg(pgid, signal.SIGKILL)
+            process.wait(timeout=2)
+
+    except (ProcessLookupError, OSError):
+        # Process already terminated
+        pass
 
 
 @dataclass
@@ -444,7 +530,78 @@ class CodeExecutor:
             # This is just a warning, not a failure
             print("   ⚠️  Warning: LightGBM/XGBoost code without categorical encoding detected")
 
+        # Check 7: Optuna pruning contract (only for model/ensemble with Hyperband)
+        # This is CONDITIONAL - only validates when a pruner is active in the code
+        is_valid, pruning_error = self._validate_optuna_pruning_contract(code)
+        if not is_valid:
+            return False, f"HPO Contract Violation: {pruning_error}"
+
         return True, "Validation passed"
+
+    def _validate_optuna_pruning_contract(self, code: str) -> tuple[bool, str]:
+        """
+        Validate that generated code follows the Optuna pruning contract.
+
+        The contract requires (when a pruner is active):
+        1. trial.report(score, step) called at each iteration
+        2. trial.should_prune() checked and TrialPruned raised if True
+
+        This validation is CONDITIONAL - only applies when a pruner is active.
+
+        Args:
+            code: Generated Python code string
+
+        Returns:
+            Tuple of (is_valid, error_message)
+        """
+        # Check if Optuna is being used
+        uses_optuna = any(pattern in code for pattern in [
+            "import optuna",
+            "from optuna",
+            "optuna.create_study",
+            "optuna.Study",
+        ])
+
+        if not uses_optuna:
+            return True, ""  # No Optuna = no validation needed
+
+        # Check if a pruner is being used (not NopPruner)
+        pruner_patterns = [
+            ("HyperbandPruner", "Hyperband"),
+            ("MedianPruner", "Median"),
+            ("SuccessiveHalvingPruner", "SuccessiveHalving"),
+            ("ThresholdPruner", "Threshold"),
+            ("PercentilePruner", "Percentile"),
+        ]
+
+        active_pruner = None
+        for pattern, name in pruner_patterns:
+            if pattern in code:
+                active_pruner = name
+                break
+
+        if active_pruner is None:
+            return True, ""  # No active pruner = no validation needed
+
+        # Pruner is active - check contract
+        has_report = "trial.report" in code
+        has_prune_check = "should_prune" in code or "TrialPruned" in code
+
+        if not has_report:
+            return False, (
+                f"Code uses {active_pruner}Pruner but does not call trial.report(). "
+                "The pruner cannot work without intermediate score reporting. "
+                "Add: trial.report(score, step) inside your training loop."
+            )
+
+        if not has_prune_check:
+            return False, (
+                f"Code uses {active_pruner}Pruner but does not check trial.should_prune(). "
+                "Trials will never be pruned, wasting compute. "
+                "Add: if trial.should_prune(): raise optuna.TrialPruned()"
+            )
+
+        return True, ""
 
     # ==========================================================================
     # Submission Validation (post-execution)
@@ -678,6 +835,11 @@ class CodeExecutor:
             # Execute in subprocess with REAL-TIME STREAMING
             start_time = time.time()
 
+            # Prepare preexec_fn for Unix resource limits
+            def preexec_setup():
+                _start_new_process_group()
+                _set_resource_limits(memory_mb=16384, cpu_time_s=7200)  # 16GB, 2 hours
+
             # Start process with line-buffered output for real-time streaming
             process = subprocess.Popen(
                 [sys.executable, "-u", str(script_file)],  # -u for unbuffered output
@@ -686,6 +848,8 @@ class CodeExecutor:
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffered
+                preexec_fn=preexec_setup if platform.system() != "Windows" else None,
+                start_new_session=True if platform.system() != "Windows" else False,
             )
 
             # Queues for collecting output from threads
@@ -798,8 +962,8 @@ class CodeExecutor:
                 # Check timeout
                 elapsed = time.time() - start_time
                 if elapsed >= self.timeout:
-                    process.kill()
-                    process.wait()
+                    # CRITICAL: Kill entire process group, not just parent
+                    _kill_process_tree(process)
                     # Drain remaining output after kill
                     time.sleep(0.1)
                     while not stdout_queue.empty():

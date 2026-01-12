@@ -21,8 +21,92 @@ if len(train_df.columns) <= 2:
 
 ### 2. Feature Preprocessing
 - Use Pipeline/ColumnTransformer for preprocessing
-- Fit INSIDE CV folds only (prevent data leakage)
+- Fit feature transformers INSIDE CV folds only (prevent data leakage)
 - Handle missing values: `SimpleImputer(strategy='median')`
+
+### 2b. TARGET LABEL ENCODING (CRITICAL - DIFFERENT FROM FEATURE PREPROCESSING!)
+**IMPORTANT**: Target variable encoding is DIFFERENT from feature preprocessing:
+- **Feature preprocessing** (scalers, encoders for X): Fit INSIDE each CV fold
+- **Target LabelEncoder** (for y): Fit ONCE on FULL training data BEFORE CV loop
+
+**WHY THIS MATTERS**:
+- If LabelEncoder is fit per-fold, rare classes may be missing from some folds
+- This causes `ValueError: y contains previously unseen labels` when validation set has classes not in training fold
+- LightGBM/XGBoost internal LabelEncoder will also fail on unseen classes
+
+**CORRECT PATTERN (MANDATORY FOR MULTICLASS)**:
+```python
+from sklearn.preprocessing import LabelEncoder
+import numpy as np
+
+# ==========================================
+# STEP 1: Fit LabelEncoder on FULL y BEFORE CV (NOT inside loop!)
+# ==========================================
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)  # Fit on ALL training data
+n_classes = len(le.classes_)
+print(f"[LOG:INFO] Classes: {le.classes_} (n={n_classes})")
+
+# For Cover_Type (1-7) or similar 1-indexed targets, simpler approach:
+# y_encoded = y - 1  # Direct subtraction, no LabelEncoder needed
+
+# ==========================================
+# STEP 2: CV loop uses PRE-ENCODED labels
+# ==========================================
+for fold_idx in range(n_folds):
+    train_mask = folds != fold_idx
+    val_mask = folds == fold_idx
+
+    # y is ALREADY encoded - no transform needed inside loop
+    y_train = y_encoded[train_mask]
+    y_val = y_encoded[val_mask]  # Safe: all classes known from full fit
+
+    model.fit(X_train, y_train)
+    # LightGBM won't fail because y_val classes are subset of y_train's encoder
+```
+
+**WRONG PATTERN (CAUSES CRASHES)**:
+```python
+# ❌ WRONG: Fitting LabelEncoder inside each fold
+for fold_idx in range(n_folds):
+    y_train, y_val = y[train_mask], y[val_mask]
+
+    le = LabelEncoder()
+    y_train_enc = le.fit_transform(y_train)  # Only sees this fold's classes!
+    y_val_enc = le.transform(y_val)  # FAILS if y_val has unseen class
+```
+
+**FOR LIGHTGBM SPECIFICALLY**:
+LightGBM's `fit()` with `eval_set` uses an internal LabelEncoder. To avoid issues:
+```python
+# Option 1: Pre-encode y and ensure all classes in every fold's training set
+y_encoded = le.fit_transform(y)  # Full fit
+
+# Option 2: Use lgb.Dataset directly with all classes
+train_data = lgb.Dataset(X_train, label=y_train, reference=None)
+# Set reference to first fold's dataset for consistent class handling
+```
+
+**TYPE CONSISTENCY (PREVENTS KeyError: np.str_('2'))**:
+Ensure target and class_order have the SAME type:
+```python
+# Check target type
+print(f"Target dtype: {y.dtype}, sample values: {y[:3]}")
+
+# If sample_submission columns are strings but y is int:
+class_order = sample_sub.columns[1:].tolist()
+
+# Option 1: Convert y to string to match class_order
+y = y.astype(str)
+le = LabelEncoder()
+y_encoded = le.fit_transform(y)
+
+# Option 2: Convert class_order to match y's type (preferred for numeric targets)
+class_order_typed = [int(c) for c in class_order]  # or float(c)
+le = LabelEncoder()
+le.fit(class_order_typed)  # Fit on typed class order
+y_encoded = le.transform(y)  # y must be same type
+```
 
 ### 3. Classification
 - Use `predict_proba()` NOT `predict()`
@@ -31,13 +115,44 @@ if len(train_df.columns) <= 2:
   - XGBoost: `scale_pos_weight`
   - CatBoost: `class_weights`
 
-### 4. Callbacks
+### 4. Callbacks and Early Stopping
 ```python
 # LightGBM
-callbacks = [lgb.early_stopping(stopping_rounds=100)]
+callbacks = [
+    lgb.early_stopping(stopping_rounds=100),  # Use 100, not 50
+    lgb.log_evaluation(period=50)
+]
 
 # XGBoost
 callbacks = [xgb.callback.EarlyStopping(rounds=100)]
+```
+
+### 4b. LightGBM Hyperparameters for Large Datasets (>1M rows)
+If you see "[Warning] No further splits with positive gain, best gain: -inf":
+```python
+params = {
+    'objective': 'multiclass',
+    'num_class': n_classes,
+    'metric': 'multi_logloss',
+
+    # CRITICAL for large datasets - defaults are too restrictive
+    'min_data_in_leaf': 100,      # Default 20 too small for millions of rows
+    'min_gain_to_split': 0.0,     # Allow any positive gain
+    'num_leaves': 127,            # Increase from default 31
+    'max_depth': -1,              # Unlimited depth
+
+    'learning_rate': 0.05,
+    'n_estimators': 1000,
+    'feature_fraction': 0.8,
+    'bagging_fraction': 0.8,
+    'bagging_freq': 5,
+    'class_weight': 'balanced',   # Handle class imbalance
+    'random_state': 42,
+    'n_jobs': -1,
+    'verbose': -1,
+}
+
+model = lgb.LGBMClassifier(**params)
 ```
 
 ### 5. Target Column Identification
@@ -108,5 +223,59 @@ predictions = np.clip(predictions, 0, None)
 
 # For specific domains (e.g., taxi fares, prices):
 predictions = np.clip(predictions, min_valid, max_valid)
+```
+"""
+
+MULTI_LABEL_CONSTRAINTS = """## MULTI-LABEL CLASSIFICATION (target_type="multi_label")
+
+### CRITICAL: Use Sigmoid PER CLASS, NOT Softmax
+- **Softmax**: Classes are mutually exclusive (single-label multiclass)
+- **Sigmoid**: Each class is INDEPENDENT (multi-label)
+
+```python
+# CORRECT for multi-label
+predictions = torch.sigmoid(logits)  # Independent per class
+# or with numpy:
+predictions = 1 / (1 + np.exp(-logits))
+
+# WRONG for multi-label (DO NOT use)
+predictions = torch.softmax(logits, dim=1)  # Sum = 1, classes exclusive
+predictions = predictions / predictions.sum(axis=1, keepdims=True)  # Also wrong!
+```
+
+### Metric Calculation
+Log-loss PER COLUMN, then AVERAGE (not overall log_loss):
+```python
+from sklearn.metrics import log_loss
+import numpy as np
+
+# CORRECT: Per-column log-loss
+scores = [log_loss(y_true[:, i], y_pred[:, i]) for i in range(n_classes)]
+final_score = np.mean(scores)
+print(f"Final Validation Performance: {final_score:.6f}")
+
+# WRONG: Overall log-loss (treats as single multi-class)
+# score = log_loss(y_true, y_pred)  # DO NOT USE for multi-label
+```
+
+### Submission Format
+- Each row should have INDEPENDENT probabilities [0, 1]
+- Rows should NOT sum to 1 (that would be softmax)
+- If binary submission is required:
+```python
+binary_preds = (predictions > 0.5).astype(int)
+```
+
+### Loss Function in Training
+Use BCEWithLogitsLoss (binary cross-entropy), NOT CrossEntropyLoss:
+```python
+import torch.nn as nn
+
+# CORRECT for multi-label
+criterion = nn.BCEWithLogitsLoss()  # Applies sigmoid internally
+loss = criterion(logits, targets.float())
+
+# WRONG for multi-label
+# criterion = nn.CrossEntropyLoss()  # This is for single-label
 ```
 """

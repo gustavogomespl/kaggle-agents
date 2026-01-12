@@ -1,11 +1,29 @@
 """
 Optuna hyperparameter tuning instruction builder.
+
+Includes:
+- Standard Optuna tuning with TPESampler
+- Multi-fidelity optimization with Hyperband/ASHA for early stopping
 """
 
 
-def build_optuna_tuning_instructions(n_trials: int = 5, timeout: int = 540) -> list[str]:
-    """Build Optuna hyperparameter tuning instructions."""
-    return [
+def build_optuna_tuning_instructions(
+    n_trials: int = 5,
+    timeout: int = 540,
+    use_pruner: bool = False,
+) -> list[str]:
+    """
+    Build Optuna hyperparameter tuning instructions.
+
+    Args:
+        n_trials: Maximum number of trials
+        timeout: Timeout in seconds
+        use_pruner: If True, include Hyperband pruner instructions
+
+    Returns:
+        List of instruction strings
+    """
+    instructions = [
         "\nHYPERPARAMETER OPTIMIZATION (OPTUNA) REQUIRED:",
         "  - MUST use 'optuna' library for hyperparameter search",
         f"  - Run AT MOST {n_trials} trials (n_trials={n_trials}) and timeout={timeout}s to prevent timeouts",
@@ -39,4 +57,56 @@ def build_optuna_tuning_instructions(n_trials: int = 5, timeout: int = 540) -> l
         "    - If memory errors persist, reduce train_size from 0.25 → 0.15 (15% of data)",
         "  - **ROBUST TRIALS**: Wrap objective logic in try/except; on exception log and return 0.0 so trials finish",
         "  - **NO-COMPLETION GUARD**: After study.optimize, if NO trials completed, fall back to safe default params instead of study.best_params",
+    ]
+
+    # Add multi-fidelity pruning instructions if requested
+    if use_pruner:
+        instructions.extend(_build_pruner_instructions())
+
+    return instructions
+
+
+def _build_pruner_instructions() -> list[str]:
+    """Build Hyperband/ASHA pruner instructions."""
+    return [
+        "\n🚀 MULTI-FIDELITY OPTIMIZATION (HYPERBAND PRUNER):",
+        "  - Use HyperbandPruner to early-stop unpromising trials:",
+        "    ```python",
+        "    from optuna.pruners import HyperbandPruner",
+        "    study = optuna.create_study(",
+        "        direction='minimize',",
+        "        pruner=HyperbandPruner(min_resource=1, max_resource=100, reduction_factor=3),",
+        "    )",
+        "    ```",
+        "",
+        "  - **CONTRACT (MANDATORY for pruning to work)**:",
+        "    1. Call trial.report(score, step) at EACH iteration/epoch",
+        "    2. Check trial.should_prune() and raise TrialPruned if True",
+        "",
+        "  - **For LightGBM** (callback-based):",
+        "    ```python",
+        "    def objective(trial):",
+        "        def optuna_callback(env):",
+        "            score = env.evaluation_result_list[0][2]",
+        "            trial.report(score, env.iteration)",
+        "            if trial.should_prune():",
+        "                raise optuna.TrialPruned()",
+        "",
+        "        model = lgb.train(",
+        "            params, dtrain,",
+        "            valid_sets=[dvalid],",
+        "            callbacks=[optuna_callback],  # REQUIRED",
+        "        )",
+        "    ```",
+        "",
+        "  - **For XGBoost** (use integration):",
+        "    ```python",
+        "    from optuna.integration import XGBoostPruningCallback",
+        "    pruning_callback = XGBoostPruningCallback(trial, observation_key='validation-logloss')",
+        "    model = xgb.train(params, dtrain, evals=[(dvalid, 'validation')], callbacks=[pruning_callback])",
+        "    ```",
+        "",
+        "  - **VALIDATION**: If your code uses a Pruner but does NOT contain:",
+        "    - trial.report() → Pruner cannot work (no intermediate scores)",
+        "    - trial.should_prune() → Trials never pruned (compute wasted)",
     ]

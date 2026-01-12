@@ -15,6 +15,7 @@ Key artifacts generated:
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -112,39 +113,133 @@ def select_cv_strategy(
         return {"n_folds": 5, "strategy": "stratified_kfold"}
 
 
+def _deterministic_hash(value: str, seed: int = 42) -> int:
+    """
+    Deterministic hash using MD5 + seed.
+
+    Unlike Python's built-in hash(), this produces the same result
+    across different Python processes (PYTHONHASHSEED independent).
+
+    Args:
+        value: String value to hash
+        seed: Random seed for reproducibility
+
+    Returns:
+        Integer hash value (0 to 2^32-1)
+    """
+    combined = f"{seed}_{value}"
+    return int(hashlib.md5(combined.encode()).hexdigest()[:8], 16)
+
+
+def _ensure_id_column(
+    df: pd.DataFrame,
+    id_col: str | None,
+) -> tuple[pd.DataFrame, str, bool]:
+    """
+    Ensure a valid ID column exists for deterministic sampling.
+
+    If no ID column is found, creates a synthetic '_row_id' based on
+    the original row index. This MUST be done BEFORE any transformations.
+
+    Args:
+        df: DataFrame to check
+        id_col: Detected or specified ID column name
+
+    Returns:
+        Tuple of (df_with_id, id_col_name, is_synthetic)
+    """
+    is_synthetic = False
+
+    if id_col is None or id_col not in df.columns:
+        # Create synthetic ID based on original index (preserves order)
+        # IMPORTANT: Must be done BEFORE any transformation/shuffle
+        df = df.copy()
+        df["_row_id"] = df.index.astype(str)
+        id_col = "_row_id"
+        is_synthetic = True
+        print(f"[LOG:WARN] No ID column found, using synthetic '_row_id' for sampling")
+
+    return df, id_col, is_synthetic
+
+
+def _remove_synthetic_id_from_features(
+    df: pd.DataFrame,
+    is_synthetic: bool,
+) -> pd.DataFrame:
+    """
+    Remove synthetic _row_id from features AFTER artifacts are generated.
+
+    Args:
+        df: DataFrame potentially containing _row_id
+        is_synthetic: Whether the ID was synthetically created
+
+    Returns:
+        DataFrame without _row_id column (if synthetic)
+    """
+    if is_synthetic and "_row_id" in df.columns:
+        return df.drop(columns=["_row_id"])
+    return df
+
+
 def _hash_based_sample(
     df: pd.DataFrame,
-    id_col: str,
+    id_col: str | None,
     max_rows: int,
+    seed: int = 42,
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """
-    Deterministic hash-based sampling.
+    Deterministic hash-based sampling using MD5.
 
-    Uses hash of ID to select rows - same result every run.
+    Uses MD5 hash of ID (not Python's built-in hash) to ensure
+    the same rows are selected across different Python processes.
+
+    Args:
+        df: DataFrame to sample
+        id_col: ID column name (can be None, will be created)
+        max_rows: Maximum rows to keep
+        seed: Random seed for reproducibility
 
     Returns:
         Tuple of (sampled_df, sampling_metadata)
     """
+    # Step 1: Ensure ID column exists
+    df, id_col, is_synthetic = _ensure_id_column(df, id_col)
+
     original_rows = len(df)
     if original_rows <= max_rows:
-        return df, {"sampled": False, "original_rows": original_rows}
+        return df, {
+            "sampled": False,
+            "original_rows": original_rows,
+            "id_column": id_col,
+            "id_is_synthetic": is_synthetic,
+        }
 
+    # Step 2: Calculate threshold for sampling
     sample_frac = max_rows / original_rows
     threshold = int(10000 * sample_frac)
 
+    # Step 3: Apply deterministic MD5 hash
     def should_include(id_val):
-        return (hash(str(id_val)) % 10000) < threshold
+        return (_deterministic_hash(str(id_val), seed) % 10000) < threshold
 
     sample_mask = df[id_col].apply(should_include).values
     sampled_df = df[sample_mask].reset_index(drop=True)
+
+    # Step 4: Keep _row_id for now (needed for alignment)
+    # Will be removed AFTER generating artifacts (folds, train_ids)
 
     metadata = {
         "sampled": True,
         "original_rows": original_rows,
         "sampled_rows": len(sampled_df),
-        "sampling_method": "hash_based",
+        "sampling_method": "hash_based_md5",
         "sampling_threshold": threshold,
+        "sampling_seed": seed,
+        "hash_method": "md5",
+        "id_column": id_col,
+        "id_is_synthetic": is_synthetic,
         "deterministic": True,
+        "canonical_version": "1.2",
     }
 
     return sampled_df, metadata
@@ -194,36 +289,49 @@ def prepare_canonical_data(
 
     print(f"\n   Preparing canonical data contract...")
 
-    # Load training data
+    # Step 1: Load training data RAW (no transformations yet)
     train_df = pd.read_csv(train_path)
     original_rows = len(train_df)
     print(f"   Loaded {original_rows:,} training rows")
 
-    # Detect ID column
+    # Step 2: Detect ID column BEFORE any operations
     if id_col is None:
         id_col = _detect_id_column(train_df)
-    if id_col is None:
-        # Create synthetic ID
-        id_col = "_row_id"
-        train_df[id_col] = range(len(train_df))
-        print(f"   Created synthetic ID column: {id_col}")
-    else:
-        print(f"   Using ID column: {id_col}")
 
     # Validate target exists
     if target_col not in train_df.columns:
         raise ValueError(f"Target column '{target_col}' not found in training data")
 
-    # Hash-based sampling if needed
+    # Step 3: Ensure ID exists and apply sampling (proper order)
+    # The _hash_based_sample function handles _ensure_id_column internally
+    is_synthetic_id = False
     sampling_metadata = {"sampled": False, "original_rows": original_rows}
+
     if max_rows and len(train_df) > max_rows:
-        train_df, sampling_metadata = _hash_based_sample(train_df, id_col, max_rows)
-        print(f"   Sampled {len(train_df):,} rows via hash-based selection")
+        train_df, sampling_metadata = _hash_based_sample(train_df, id_col, max_rows, seed=42)
+        id_col = sampling_metadata.get("id_column", id_col)
+        is_synthetic_id = sampling_metadata.get("id_is_synthetic", False)
+        print(f"   Sampled {len(train_df):,} rows via deterministic MD5 hash (seed=42)")
+    else:
+        # Even without sampling, ensure ID column exists
+        train_df, id_col, is_synthetic_id = _ensure_id_column(train_df, id_col)
+        sampling_metadata["id_column"] = id_col
+        sampling_metadata["id_is_synthetic"] = is_synthetic_id
+
+    if is_synthetic_id:
+        print(f"   Using synthetic ID column: {id_col}")
+    else:
+        print(f"   Using ID column: {id_col}")
 
     # Schema parity check
     feature_cols, missing_in_test = validate_schema_parity(
         train_path, test_path, id_col, target_col
     )
+
+    # Remove synthetic _row_id from feature columns if present
+    if is_synthetic_id and "_row_id" in feature_cols:
+        feature_cols.remove("_row_id")
+
     if missing_in_test:
         print(f"   Warning: {len(missing_in_test)} columns missing in test: {missing_in_test[:5]}...")
 
@@ -292,11 +400,13 @@ def prepare_canonical_data(
         "n_folds": n_folds,
         "cv_strategy": cv_config["strategy"],
         "id_col": id_col,
+        "id_is_synthetic": is_synthetic_id,
         "target_col": target_col,
         "n_features": len(feature_cols),
         "group_col": group_col,
         "is_classification": is_classification,
         "n_classes": n_unique if is_classification else None,
+        "canonical_version": "1.2",
         **sampling_metadata,
     }
 

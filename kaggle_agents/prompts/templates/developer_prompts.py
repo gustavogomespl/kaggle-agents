@@ -66,8 +66,19 @@ HARD_CONSTRAINTS = """## MUST (violations cause failures):
          # ... train model on fold ...
      ```
    - WHY: Independent fold creation causes OOF misalignment → stacking fails → ensemble worse than base models
-3. Pipeline/ColumnTransformer for preprocessing - fit INSIDE CV folds only
+3. Pipeline/ColumnTransformer for FEATURE preprocessing - fit INSIDE CV folds only
    - If using manual scaling (e.g., Keras/TF), fit scaler on TRAIN fold only, then transform val/test
+   - **EXCEPTION - TARGET ENCODING**: LabelEncoder for y must be fit ONCE on FULL data BEFORE CV loop:
+     ```python
+     # CORRECT: Fit LabelEncoder on ALL training data before CV
+     le = LabelEncoder()
+     y_encoded = le.fit_transform(y)  # Full dataset
+
+     for fold_idx in range(n_folds):
+         y_train = y_encoded[train_mask]  # Already encoded
+         y_val = y_encoded[val_mask]      # All classes known
+     ```
+   - WHY: Rare classes may be absent from some training folds → causes "unseen labels" errors
 4. Save OOF predictions: np.save('models/oof_{component_name}.npy', oof_predictions)
    - Save test predictions: np.save('models/test_{component_name}.npy', test_predictions)
    - **CRITICAL CLASS ORDER ALIGNMENT (PREVENTS ENSEMBLE DEGRADATION)**:

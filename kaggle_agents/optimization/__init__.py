@@ -7,8 +7,18 @@ Enhanced with:
 - ImprovementTrackingRewardModel: Tracks score progression across iterations
 - PreferenceCollector: DPO-style preference learning from code fixes
 - PreferenceRewardModel: Scores code based on learned preferences
+- HPO utilities: Multi-fidelity optimization with Hyperband/ASHA
 """
 
+from .hpo import (
+    HPO_MULTI_FIDELITY_INSTRUCTIONS,
+    create_lgbm_pruning_callback,
+    create_study,
+    create_xgb_pruning_callback,
+    suggest_lgbm_params,
+    suggest_xgb_params,
+    validate_pruning_contract,
+)
 from .preference_learning import (
     # DPO-style Preference Learning
     PreferenceCollector,
@@ -47,7 +57,15 @@ from .reward_model import (
 
 
 __all__ = [
-    # Enhanced Reward Models (NEW - recommended for RL optimization)
+    # HPO Multi-Fidelity (NEW - Hyperband/ASHA support)
+    "HPO_MULTI_FIDELITY_INSTRUCTIONS",
+    "create_lgbm_pruning_callback",
+    "create_study",
+    "create_xgb_pruning_callback",
+    "suggest_lgbm_params",
+    "suggest_xgb_params",
+    "validate_pruning_contract",
+    # Enhanced Reward Models (recommended for RL optimization)
     "AblationRewardModel",
     "ExecutionFeedbackRewardModel",
     "ImprovementTrackingRewardModel",

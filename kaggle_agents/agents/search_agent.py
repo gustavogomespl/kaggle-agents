@@ -19,6 +19,54 @@ from ..tools.kaggle_search import search_competition_notebooks
 from ..utils.llm_utils import get_text_content
 
 
+def calculate_adaptive_k(
+    current_iteration: int,
+    iteration_memory: list | None = None,
+    base_k: int = 5,
+    expanded_k: int = 10,
+) -> int:
+    """
+    Calculate number of notebooks to search based on iteration and improvement trend.
+
+    Strategy:
+    - Iteration 1-2: Base search (top 5)
+    - Iteration 3+: Evaluate improvement trend
+    - If stagnating (trend < 0.01): Expand to top 10
+
+    Args:
+        current_iteration: Current iteration number (1-indexed)
+        iteration_memory: List of iteration memories with score_improvement
+        base_k: Base number of notebooks (default 5)
+        expanded_k: Expanded number on stagnation (default 10)
+
+    Returns:
+        Number of notebooks to search
+    """
+    # Early iterations: use base k
+    if current_iteration <= 2:
+        return base_k
+
+    # Iteration 3+: evaluate improvement trend
+    if iteration_memory and len(iteration_memory) >= 2:
+        # Get recent improvements (last 3 iterations)
+        recent_improvements = []
+        for mem in iteration_memory[-3:]:
+            if hasattr(mem, "score_improvement"):
+                recent_improvements.append(mem.score_improvement)
+            elif isinstance(mem, dict) and "score_improvement" in mem:
+                recent_improvements.append(mem["score_improvement"])
+
+        if recent_improvements:
+            trend = sum(recent_improvements) / len(recent_improvements)
+
+            # Stagnation threshold
+            if trend < 0.01:
+                print(f"   📈 Low improvement trend ({trend:.4f}), expanding search to top {expanded_k}")
+                return expanded_k
+
+    return base_k
+
+
 class SearchAgent:
     """
     Agent responsible for retrieving state-of-the-art solutions.
@@ -72,6 +120,19 @@ class SearchAgent:
         competition_name = state["competition_info"].name
         state.get("domain_detected", "tabular")
 
+        # Get current iteration and memory for adaptive k
+        current_iteration = state.get("current_iteration", 1)
+        iteration_memory = state.get("iteration_memory", [])
+
+        # 0. Calculate adaptive top-K
+        adaptive_k = calculate_adaptive_k(
+            current_iteration=current_iteration,
+            iteration_memory=iteration_memory,
+            base_k=self.config.search.max_notebooks or 5,
+            expanded_k=10,
+        )
+        print(f"\n= Adaptive search: top {adaptive_k} solutions (iteration {current_iteration})")
+
         # 1. Generate search queries
         search_queries = self._generate_search_queries(state)
         print(f"\n= Generated {len(search_queries)} search queries:")
@@ -82,7 +143,7 @@ class SearchAgent:
         print(f"\n= Searching notebooks for: {competition_name}")
         sota_solutions = search_competition_notebooks(
             competition=competition_name,
-            max_notebooks=self.config.search.max_notebooks,
+            max_notebooks=adaptive_k,  # Use adaptive k instead of fixed config
             min_votes=self.config.search.min_votes,
         )
 
@@ -99,6 +160,8 @@ class SearchAgent:
         return {
             "sota_solutions": enhanced_solutions,
             "search_queries_used": search_queries,
+            "sota_retrieval_k": adaptive_k,  # Track how many solutions were searched
+            "last_sota_update_iteration": current_iteration,  # Track when SOTA was updated
             "last_updated": datetime.now(),
         }
 
