@@ -297,6 +297,57 @@ class CodeGeneratorMixin:
 
         return header + code_after_header
 
+    def _strip_nrows_param(
+        self: DeveloperAgent,
+        code: str,
+    ) -> tuple[str, int]:
+        """
+        Strip nrows parameter from pd.read_csv() calls to prevent data truncation.
+
+        The nrows parameter causes OOF shape mismatches when models are trained on
+        different subsets of data, breaking the stacking ensemble. This function
+        removes nrows to force all models to use the full canonical dataset.
+
+        Args:
+            code: The generated code to sanitize
+
+        Returns:
+            Tuple of (sanitized_code, number_of_removals)
+        """
+        # Universal pattern to match nrows parameter regardless of value type:
+        # - nrows=1000000 (numeric literal)
+        # - nrows=5_000_000 (underscore separator)
+        # - nrows=MAX_ROWS (uppercase constant)
+        # - nrows=max_rows (lowercase variable)
+        # - nrows=cfg.nrows (attribute access)
+        # - nrows=args.nrows (attribute access)
+        # - nrows=config['nrows'] (dict access)
+        # - nrows=int(...) (function call)
+        # - nrows=None (None value - keep this one as it means "no limit")
+        #
+        # Strategy: Handle different value types with separate patterns.
+        # Order matters - function calls must be matched first to handle nested parens.
+        patterns = [
+            # 1. nrows with simple function call like int(...) or min(...) or len(...)
+            #    Match: ", nrows=func_name(...)"
+            r",\s*nrows\s*=\s*\w+\([^)]*\)(?=[,)])",
+            # 2. nrows with simple value (number, variable, attribute, dict access)
+            #    Match: ", nrows=<value>" stopping before ) or ,
+            #    Negative lookahead for None (we want to keep nrows=None)
+            r",\s*nrows\s*=\s*(?!None\b|none\b)[^,)]+(?=[,)])",
+            # 3. nrows at start of kwargs: "nrows=<value>,"
+            r"nrows\s*=\s*(?!None\b|none\b)[^,)]+\s*,",
+        ]
+
+        removals = 0
+        sanitized = code
+        for pattern in patterns:
+            matches = re.findall(pattern, sanitized)
+            removals += len(matches)
+            sanitized = re.sub(pattern, "", sanitized)
+
+        return sanitized, removals
+
     def _generate_code(
         self: DeveloperAgent,
         component: AblationComponent,
@@ -628,5 +679,12 @@ def parse_id_mapping_file(mapping_path):
             print("   Stripping redefinitions to prevent artifacts in wrong locations...")
             # Strip the redefinitions to enforce correct paths
             full_code = self._strip_path_redefinitions(full_code)
+
+        # Strip nrows parameters to prevent data truncation and OOF shape mismatches
+        # This is critical for ensemble alignment - all models must use full dataset
+        full_code, nrows_removals = self._strip_nrows_param(full_code)
+        if nrows_removals > 0:
+            print(f"⚠️  NROWS STRIPPED: Removed {nrows_removals} nrows parameter(s) to enforce full dataset usage")
+            print("   All models must use the canonical dataset for proper OOF alignment.")
 
         return full_code
