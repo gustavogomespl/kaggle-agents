@@ -66,9 +66,17 @@ def _set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
 
 
 def _start_new_process_group() -> None:
-    """Start process in new group for kill tree to work."""
+    """Start process in new group for kill tree to work.
+
+    Note: This may fail in containerized environments (Docker, Colab, etc.)
+    where setpgrp() is not permitted. We catch and ignore such errors.
+    """
     if platform.system() != "Windows":
-        os.setpgrp()
+        try:
+            os.setpgrp()
+        except (OSError, PermissionError) as e:
+            # Silently ignore - setpgrp may not be allowed in containers/Colab
+            pass
 
 
 def _kill_process_tree(process: subprocess.Popen) -> None:
@@ -837,8 +845,12 @@ class CodeExecutor:
 
             # Prepare preexec_fn for Unix resource limits
             def preexec_setup():
-                _start_new_process_group()
-                _set_resource_limits(memory_mb=16384, cpu_time_s=7200)  # 16GB, 2 hours
+                try:
+                    _start_new_process_group()
+                    _set_resource_limits(memory_mb=16384, cpu_time_s=7200)  # 16GB, 2 hours
+                except Exception:
+                    # Silently ignore all preexec errors (Colab/container compatibility)
+                    pass
 
             # Start process with line-buffered output for real-time streaming
             process = subprocess.Popen(
