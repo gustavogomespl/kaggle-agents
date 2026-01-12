@@ -115,6 +115,48 @@ y_encoded = le.transform(y)  # y must be same type
   - XGBoost: `scale_pos_weight`
   - CatBoost: `class_weights`
 
+### 3b. CatBoost Classification (CRITICAL - PREVENTS COMMON ERRORS)
+**ALWAYS use CatBoostClassifier for classification tasks, NEVER CatBoostRegressor:**
+
+```python
+from catboost import CatBoostClassifier  # NOT CatBoostRegressor!
+import torch  # For GPU detection
+
+# CORRECT: Classification with MultiClass loss
+model = CatBoostClassifier(
+    iterations=2000,
+    learning_rate=0.05,
+    depth=6,
+    loss_function='MultiClass',    # For multiclass: 'MultiClass', NOT 'RMSE'
+    eval_metric='Accuracy',        # Or 'MultiClass' (logloss)
+    random_seed=42,
+    early_stopping_rounds=100,
+    verbose=200,
+    class_weights='balanced',      # Handle imbalanced classes
+    task_type='GPU' if torch.cuda.is_available() else 'CPU',
+)
+
+# WRONG: Using Regressor for classification (will produce invalid outputs)
+# model = CatBoostRegressor(...)  # NEVER use for classification!
+
+# WRONG: Using RMSE loss for classification
+# model = CatBoostClassifier(loss_function='RMSE')  # INVALID for classification!
+```
+
+**NEVER drop rows with rare classes** - use class_weights instead:
+```python
+# WRONG: Dropping rare classes causes OOF alignment issues
+# rare_classes = counts[counts < 10].index.tolist()
+# train_df = train_df[~train_df[target].isin(rare_classes)]  # BREAKS CV alignment!
+
+# CORRECT: Handle rare classes with class weights
+model = CatBoostClassifier(
+    class_weights='balanced',      # Automatically handles rare classes
+    # OR compute manual weights:
+    # class_weights={0: 1.0, 1: 10.0, 2: 5.0, ...}
+)
+```
+
 ### 4. Callbacks and Early Stopping
 ```python
 # LightGBM

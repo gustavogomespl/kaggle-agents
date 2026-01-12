@@ -239,8 +239,23 @@ class MetaEvaluatorAgent:
 
         # For logloss (lower is better), gap > 1.0 is HUGE
         if max_gap > 1.0:
-            worst_model = max(model_scores, key=model_scores.get)
-            best_model = min(model_scores, key=model_scores.get)
+            # FIX: Respect metric direction when identifying best/worst models
+            from ..core.config import is_metric_minimization
+
+            competition_info = state.get("competition_info")
+            metric_name = ""
+            if competition_info:
+                metric_name = getattr(competition_info, "evaluation_metric", "") or ""
+            is_minimize = is_metric_minimization(metric_name) if metric_name else True
+
+            if is_minimize:
+                # For minimize metrics (logloss, rmse): highest score = worst
+                worst_model = max(model_scores, key=model_scores.get)
+                best_model = min(model_scores, key=model_scores.get)
+            else:
+                # For maximize metrics (accuracy, auc): lowest score = worst
+                worst_model = min(model_scores, key=model_scores.get)
+                best_model = max(model_scores, key=model_scores.get)
 
             debug_hints = [
                 "Check if LabelEncoder class order is consistent with other models",
@@ -296,10 +311,11 @@ class MetaEvaluatorAgent:
         current_iteration = state.get("current_iteration", 0)
         config = self.config.iteration
 
-        # Get stagnation config
-        stagnation_window = getattr(config, "stagnation_window", 3)
-        stagnation_threshold = getattr(config, "stagnation_threshold", 0.01)
-        score_gap_threshold = getattr(config, "score_gap_threshold", 0.3)
+        # Get stagnation config (more aggressive defaults to detect issues faster)
+        # FIX: Lowered thresholds to trigger exploration earlier
+        stagnation_window = getattr(config, "stagnation_window", 2)  # Was 3
+        stagnation_threshold = getattr(config, "stagnation_threshold", 0.005)  # Was 0.01
+        score_gap_threshold = getattr(config, "score_gap_threshold", 0.15)  # Was 0.3
 
         result = {
             "stagnated": False,

@@ -387,18 +387,43 @@ def build_dynamic_instructions(
 
     if metric_name:
         metric_lower = str(metric_name).lower()
+        is_minimize = is_metric_minimization(metric_name)
+        direction = "LOWER is better" if is_minimize else "HIGHER is better"
+
         instructions.extend(
             [
-                "\n📏 METRIC REQUIREMENT (CONSISTENT EVALUATION):",
-                f"  - Use competition metric '{metric_name}' for Final Validation Performance",
+                "\n📏 METRIC REQUIREMENT (CRITICAL - MUST FOLLOW):",
+                f"  - Competition metric: '{metric_name}' ({direction})",
+                f"  - ⚠️ Final Validation Performance MUST report {metric_name} ONLY",
+                f"  - DO NOT report a different metric (e.g., don't report LogLoss if metric is Accuracy)",
             ]
         )
+
+        # Specific instructions based on metric type
         if is_classification and ("log" in metric_lower or "loss" in metric_lower):
             instructions.extend([
                 "  - For log_loss metrics: compute log_loss on OOF predictions (clip + renormalize)",
-                "  - CRITICAL: Final Validation Performance MUST be log_loss value (NOT accuracy/AUC)",
                 "  - Lower is better: 0.02 = excellent, 0.7+ = nearly random for multiclass",
                 "  - Use: `from sklearn.metrics import log_loss; score = log_loss(y_true, oof_preds)`",
+            ])
+        elif is_classification and ("accuracy" in metric_lower or "acc" in metric_lower):
+            instructions.extend([
+                "  - For accuracy metrics: compute accuracy_score on predicted classes",
+                "  - Higher is better: 1.0 = perfect, 0.5 = random for binary",
+                "  - Use: `from sklearn.metrics import accuracy_score; score = accuracy_score(y_true, y_pred)`",
+                "  - ⚠️ DO NOT report log_loss or AUC - only report Accuracy",
+            ])
+        elif is_classification and ("auc" in metric_lower or "roc" in metric_lower):
+            instructions.extend([
+                "  - For AUC metrics: compute roc_auc_score on probability predictions",
+                "  - Higher is better: 1.0 = perfect, 0.5 = random",
+                "  - Use: `from sklearn.metrics import roc_auc_score; score = roc_auc_score(y_true, y_proba)`",
+            ])
+        elif "rmse" in metric_lower or "mse" in metric_lower:
+            instructions.extend([
+                "  - For RMSE/MSE metrics: compute mean_squared_error then sqrt for RMSE",
+                "  - Lower is better: 0 = perfect",
+                "  - Use: `from sklearn.metrics import mean_squared_error; score = np.sqrt(mean_squared_error(y_true, y_pred))`",
             ])
 
     # Explicit model type requirement based on is_classification

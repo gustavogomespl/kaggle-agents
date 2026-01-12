@@ -953,7 +953,138 @@ Return a JSON array with up to {max_components} components. Each component must 
         # Sort by estimated impact
         components.sort(key=lambda x: x.estimated_impact, reverse=True)
 
+        # FIX: Plan diversity check - detect and avoid repeating same plan
+        previous_plan_hashes = state.get("previous_plan_hashes", [])
+        plan_hash = hash(tuple(sorted(c.name for c in components)))
+
+        max_diversity_retries = 3
+        retry_count = 0
+
+        while plan_hash in previous_plan_hashes and retry_count < max_diversity_retries:
+            # Select strategy BEFORE incrementing retry_count to avoid off-by-one
+            diversity_strategies = [
+                {"name": "neural_exploration", "focus": "deep_learning"},
+                {"name": "feature_heavy", "focus": "feature_engineering"},
+                {"name": "ensemble_focus", "focus": "ensemble"},
+            ]
+            strategy = diversity_strategies[retry_count % len(diversity_strategies)]
+
+            retry_count += 1
+            print(f"   [Planner] ⚠️ Plan already tried (attempt {retry_count}/{max_diversity_retries}) - trying {strategy['name']}...")
+
+            # Try to generate a different plan using fallback with new strategy hint
+            alternative_plan = self._create_diversified_fallback_plan(
+                state, sota_analysis, strategy["focus"]
+            )
+
+            # Convert to components
+            components = []
+            for i, item in enumerate(alternative_plan):
+                code = item.get("code_outline", item.get("description", ""))
+                component = AblationComponent(
+                    name=item.get("name", f"diverse_component_{i + 1}"),
+                    component_type=item.get("component_type", "model"),
+                    code=code,
+                    estimated_impact=item.get("estimated_impact", 0.15),
+                )
+                components.append(component)
+
+            components.sort(key=lambda x: x.estimated_impact, reverse=True)
+            plan_hash = hash(tuple(sorted(c.name for c in components)))
+
+        # Record this plan hash (keep last 10)
+        previous_plan_hashes.append(plan_hash)
+        state["previous_plan_hashes"] = previous_plan_hashes[-10:]
+
+        if retry_count > 0:
+            print(f"   [Planner] ✓ Found diverse plan after {retry_count} retries")
+
         return components
+
+    def _create_diversified_fallback_plan(
+        self,
+        state: KaggleState,
+        sota_analysis: dict[str, Any],
+        focus: str,
+    ) -> list[dict[str, Any]]:
+        """
+        Create a diversified fallback plan with a specific focus.
+
+        Args:
+            state: Current state
+            sota_analysis: SOTA analysis
+            focus: Focus area ('deep_learning', 'feature_engineering', 'ensemble')
+
+        Returns:
+            Diversified plan as list of dicts
+        """
+        domain = str(state.get("domain_detected", "tabular")).lower()
+
+        if focus == "deep_learning":
+            return [
+                {
+                    "name": "nn_tabular",
+                    "component_type": "model",
+                    "description": "Neural network for tabular data (TabNet or MLP)",
+                    "estimated_impact": 0.18,
+                    "rationale": "Deep learning alternative to tree models",
+                    "code_outline": "TabNet/MLP with entity embeddings, batch norm, dropout",
+                },
+                {
+                    "name": "gradient_blend",
+                    "component_type": "ensemble",
+                    "description": "Gradient-based blending of NN and tree models",
+                    "estimated_impact": 0.12,
+                    "rationale": "Combine NN and tree strengths",
+                    "code_outline": "Weighted average with learned weights via gradient descent",
+                },
+            ]
+        elif focus == "feature_engineering":
+            return [
+                {
+                    "name": "target_encoding_cv",
+                    "component_type": "feature_engineering",
+                    "description": "Target encoding with proper CV to avoid leakage",
+                    "estimated_impact": 0.15,
+                    "rationale": "Powerful encoding for categorical features",
+                    "code_outline": "category_encoders.TargetEncoder with cv=5 folds",
+                },
+                {
+                    "name": "feature_selection",
+                    "component_type": "feature_engineering",
+                    "description": "Feature selection using importance + RFE",
+                    "estimated_impact": 0.10,
+                    "rationale": "Remove noise features",
+                    "code_outline": "RFECV or SelectFromModel with LightGBM importances",
+                },
+                {
+                    "name": "lightgbm_tuned",
+                    "component_type": "model",
+                    "description": "LightGBM with Optuna hyperparameter tuning",
+                    "estimated_impact": 0.20,
+                    "rationale": "Better hyperparameters",
+                    "code_outline": "Optuna study with n_trials=50 for LGBM params",
+                },
+            ]
+        else:  # ensemble focus
+            return [
+                {
+                    "name": "stacking_meta",
+                    "component_type": "ensemble",
+                    "description": "Stacking ensemble with ridge meta-learner",
+                    "estimated_impact": 0.15,
+                    "rationale": "Combine diverse model predictions",
+                    "code_outline": "StackingClassifier/Regressor with Ridge meta",
+                },
+                {
+                    "name": "voting_diverse",
+                    "component_type": "ensemble",
+                    "description": "Voting ensemble with diverse base models",
+                    "estimated_impact": 0.10,
+                    "rationale": "Simple but effective ensemble",
+                    "code_outline": "VotingClassifier with LGBM, XGB, CatBoost",
+                },
+            ]
 
     def _create_refined_fallback_plan(
         self,
@@ -990,10 +1121,49 @@ Return a JSON array with up to {max_components} components. Each component must 
                 }
             )
 
-        # Exploit: keep top-2 successful arms
-        successful_arms = [a for a in arms if a["success"]]
-        successful_arms.sort(key=lambda a: a["reward"], reverse=True)
-        keep = successful_arms[:2]
+        # Exploit: keep top-2 successful arms that ACTUALLY IMPROVED score
+        # FIX: Check for actual improvement, not just "didn't crash"
+        from ..core.config import is_metric_minimization
+
+        previous_best = state.get("best_score", 0.0) or 0.0
+        competition_info = state.get("competition_info")
+        metric_name = ""
+        if competition_info:
+            metric_name = getattr(competition_info, "evaluation_metric", "") or ""
+        is_minimize = is_metric_minimization(metric_name) if metric_name else True
+
+        def actually_improved(arm: dict) -> bool:
+            """Check if arm actually improved over previous best score."""
+            if not arm["success"]:
+                return False
+            reward = arm["reward"]
+            if reward is None or reward == 0.0:
+                return False
+            # For first iteration or no previous score, accept any result
+            if previous_best == 0.0:
+                return True
+            if is_minimize:
+                return reward < previous_best  # Lower is better
+            return reward > previous_best      # Higher is better
+
+        # First try to find arms that actually improved
+        improved_arms = [a for a in arms if actually_improved(a)]
+
+        if improved_arms:
+            # Use arms that improved
+            improved_arms.sort(key=lambda a: a["reward"], reverse=not is_minimize)
+            keep = improved_arms[:2]
+            print(f"   [Planner] Keeping {len(keep)} arm(s) that improved score")
+        else:
+            # No arms improved - fall back to successful arms but log warning
+            successful_arms = [a for a in arms if a["success"]]
+            if successful_arms:
+                successful_arms.sort(key=lambda a: a["reward"], reverse=not is_minimize)
+                keep = successful_arms[:1]  # Keep only 1 to encourage exploration
+                print(f"   [Planner] ⚠️ No components improved score - keeping only 1 for stability")
+            else:
+                keep = []
+                print(f"   [Planner] ⚠️ No successful components - forcing full exploration")
 
         plan = []
 
