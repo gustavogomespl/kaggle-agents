@@ -348,6 +348,64 @@ class CodeGeneratorMixin:
 
         return sanitized, removals
 
+    def _rewrite_base_dir_references(
+        self: DeveloperAgent,
+        code: str,
+    ) -> tuple[str, int]:
+        """
+        Rewrite BASE_DIR references to use correct path constants.
+
+        Does NOT define BASE_DIR - that would mask errors.
+        Instead, rewrites specific patterns to correct paths:
+        - BASE_DIR / "train*.csv" → TRAIN_PATH
+        - BASE_DIR / "test*.csv" → TEST_PATH
+        - BASE_DIR / "sample_submission*.csv" → SAMPLE_SUBMISSION_PATH
+        - BASE_DIR / anything else → OUTPUT_DIR / "..."
+
+        Args:
+            code: The generated code to sanitize
+
+        Returns:
+            Tuple of (sanitized_code, number_of_rewrites)
+        """
+        rewrites = [
+            # BASE_DIR / "train*.csv" → TRAIN_PATH (more specific patterns first)
+            (r'BASE_DIR\s*/\s*["\']train\.csv["\']', 'TRAIN_PATH'),
+            (r'BASE_DIR\s*/\s*["\']train[^"\']*\.csv["\']', 'TRAIN_PATH'),
+
+            # BASE_DIR / "test*.csv" → TEST_PATH
+            (r'BASE_DIR\s*/\s*["\']test\.csv["\']', 'TEST_PATH'),
+            (r'BASE_DIR\s*/\s*["\']test[^"\']*\.csv["\']', 'TEST_PATH'),
+
+            # BASE_DIR / "sample_submission*.csv" → SAMPLE_SUBMISSION_PATH
+            (r'BASE_DIR\s*/\s*["\']sample_submission\.csv["\']', 'SAMPLE_SUBMISSION_PATH'),
+            (r'BASE_DIR\s*/\s*["\']sample_submission[^"\']*\.csv["\']', 'SAMPLE_SUBMISSION_PATH'),
+            (r'BASE_DIR\s*/\s*["\']sample[^"\']*submission[^"\']*\.csv["\']', 'SAMPLE_SUBMISSION_PATH'),
+
+            # BASE_DIR / "submission.csv" → SUBMISSION_PATH
+            (r'BASE_DIR\s*/\s*["\']submission\.csv["\']', 'SUBMISSION_PATH'),
+
+            # BASE_DIR / anything else → OUTPUT_DIR / "..."
+            (r'BASE_DIR\s*/\s*(["\'][^"\']+["\'])', r'OUTPUT_DIR / \1'),
+
+            # str(BASE_DIR) → str(OUTPUT_DIR)
+            (r'str\s*\(\s*BASE_DIR\s*\)', 'str(OUTPUT_DIR)'),
+
+            # Bare BASE_DIR → OUTPUT_DIR (last, as it's most general)
+            (r'\bBASE_DIR\b', 'OUTPUT_DIR'),
+        ]
+
+        rewrite_count = 0
+        rewritten = code
+
+        for pattern, replacement in rewrites:
+            matches = re.findall(pattern, rewritten)
+            if matches:
+                rewrite_count += len(matches)
+                rewritten = re.sub(pattern, replacement, rewritten)
+
+        return rewritten, rewrite_count
+
     def _generate_code(
         self: DeveloperAgent,
         component: AblationComponent,
@@ -686,5 +744,12 @@ def parse_id_mapping_file(mapping_path):
         if nrows_removals > 0:
             print(f"⚠️  NROWS STRIPPED: Removed {nrows_removals} nrows parameter(s) to enforce full dataset usage")
             print("   All models must use the canonical dataset for proper OOF alignment.")
+
+        # Rewrite BASE_DIR references to use correct path constants
+        # BASE_DIR is not defined - LLM sometimes generates it from training examples
+        full_code, base_dir_rewrites = self._rewrite_base_dir_references(full_code)
+        if base_dir_rewrites > 0:
+            print(f"⚠️  BASE_DIR REWRITTEN: Replaced {base_dir_rewrites} BASE_DIR reference(s) with correct path constants")
+            print("   BASE_DIR is not defined. Use TRAIN_PATH, TEST_PATH, SAMPLE_SUBMISSION_PATH, or OUTPUT_DIR.")
 
         return full_code

@@ -1377,11 +1377,27 @@ elif TRAIN_PATH.is_dir():
     print(f"Found {{len(train_files)}} files in {{TRAIN_PATH}}")
 ```
 
-**NEVER** do this (WRONG - will cause FileNotFoundError):
+**NEVER** do this (WRONG - will cause FileNotFoundError or NameError):
 ```python
-train_df = pd.read_csv('train.csv')  # WRONG!
-train_df = pd.read_csv(BASE_DIR / 'train.csv')  # WRONG!
+train_df = pd.read_csv('train.csv')  # WRONG! Relative path fails
+train_df = pd.read_csv(BASE_DIR / 'train.csv')  # WRONG! BASE_DIR is NOT defined
+test_df = pd.read_csv(BASE_DIR / 'test.csv')  # WRONG! Use TEST_PATH instead
+sample = pd.read_csv(BASE_DIR / 'sample_submission.csv')  # WRONG! Use SAMPLE_SUBMISSION_PATH
 ```
+
+## PATH CONSTANTS (CRITICAL - DO NOT USE BASE_DIR)
+The following path constants ARE pre-defined in the execution environment:
+- **TRAIN_PATH**: Path to training data (use directly, NOT `OUTPUT_DIR / "train.csv"`)
+- **TEST_PATH**: Path to test data
+- **SAMPLE_SUBMISSION_PATH**: Path to sample_submission.csv
+- **OUTPUT_DIR**: Directory for all outputs (models, predictions, submission.csv)
+- **SUBMISSION_PATH**: `OUTPUT_DIR / "submission.csv"`
+
+**BASE_DIR IS NOT DEFINED** - using it will cause `NameError: name 'BASE_DIR' is not defined`!
+- For train data: use `TRAIN_PATH` directly
+- For test data: use `TEST_PATH` directly
+- For sample submission: use `SAMPLE_SUBMISSION_PATH` directly
+- For intermediate files: use `OUTPUT_DIR / "filename"`
 
 The paths may point to:
 - CSV files: `train.csv`, `test.csv`

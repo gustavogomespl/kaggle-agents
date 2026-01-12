@@ -15,6 +15,197 @@ from .image_model import build_image_model_instructions
 from .optuna import build_optuna_tuning_instructions
 
 
+# Constants for task type detection
+CLASSIFICATION_METRICS = {
+    "auc", "roc_auc", "roc-auc", "log_loss", "logloss",
+    "accuracy", "f1", "precision", "recall", "mcc",
+    "balanced_accuracy", "cohen_kappa", "gini", "f1_weighted",
+    "f1_macro", "quadratic_weighted_kappa", "qwk",
+}
+REGRESSION_METRICS = {
+    "rmse", "mse", "mae", "mape", "r2", "rmsle", "smape",
+    "mean_squared", "mean_absolute", "medae", "msle",
+}
+CLASSIFICATION_KEYWORDS = {
+    "classification", "classifier", "multiclass", "binary",
+    "multi-class", "multi-label", "categorical",
+}
+REGRESSION_KEYWORDS = {
+    "regression", "regressor", "continuous", "forecasting",
+    "prediction", "estimation",
+}
+
+
+def _detect_is_classification(state: dict | None) -> bool | None:
+    """
+    Detect if task is classification using multiple sources.
+
+    Priority order:
+    1. canonical_metadata from state
+    2. Load metadata.json from canonical path if not in state
+    3. evaluation_metric (reliable signal)
+    4. submission_format_type (single_col_regression vs proba_df)
+    5. domain_detected (tabular_classification vs tabular_regression)
+    6. problem_type string (expanded patterns)
+    7. Return None (caller must handle - no unsafe default)
+
+    Args:
+        state: Workflow state dictionary
+
+    Returns:
+        True for classification, False for regression, None if undetermined
+    """
+    if state is None:
+        return None
+
+    # Step 1: Try canonical_metadata from state (most authoritative)
+    canonical_metadata = state.get("canonical_metadata", {})
+    if canonical_metadata:
+        is_classification = canonical_metadata.get("is_classification")
+        if is_classification is not None:
+            return bool(is_classification)
+
+    # Step 2: Load metadata.json from canonical path if available
+    try:
+        import json
+        from pathlib import Path
+
+        comp_info = state.get("competition_info")
+        if comp_info and hasattr(comp_info, "data_files") and comp_info.data_files:
+            for data_file in comp_info.data_files:
+                data_path = Path(data_file)
+                metadata_path = data_path.parent / "metadata.json"
+                if metadata_path.exists():
+                    with open(metadata_path) as f:
+                        metadata = json.load(f)
+                        is_classification = metadata.get("is_classification")
+                        if is_classification is not None:
+                            return bool(is_classification)
+                    break
+    except Exception:
+        pass
+
+    # Step 3: Try evaluation_metric (reliable signal)
+    eval_metric = ""
+    try:
+        comp_info = state.get("competition_info")
+        eval_metric = (comp_info.evaluation_metric or "").lower() if comp_info else ""
+    except Exception:
+        pass
+
+    if eval_metric:
+        if any(m in eval_metric for m in CLASSIFICATION_METRICS):
+            return True
+        if any(m in eval_metric for m in REGRESSION_METRICS):
+            return False
+
+    # Step 4: Try submission_format_type
+    try:
+        comp_info = state.get("competition_info")
+        fmt_type = comp_info.submission_format_type if comp_info else None
+        if fmt_type:
+            fmt_str = str(fmt_type).lower()
+            if "proba" in fmt_str or "multi" in fmt_str:
+                return True
+            if "regression" in fmt_str or "single_col" in fmt_str:
+                return False
+    except Exception:
+        pass
+
+    # Step 5: Try domain_detected
+    domain = state.get("domain_detected", "")
+    if domain:
+        domain_lower = str(domain).lower()
+        if "classification" in domain_lower:
+            return True
+        if "regression" in domain_lower:
+            return False
+
+    # Step 6: Try problem_type string (expanded patterns)
+    problem_type = ""
+    try:
+        comp_info = state.get("competition_info")
+        problem_type = (comp_info.problem_type or "").lower() if comp_info else ""
+    except Exception:
+        pass
+
+    if problem_type:
+        if any(kw in problem_type for kw in CLASSIFICATION_KEYWORDS):
+            return True
+        if any(kw in problem_type for kw in REGRESSION_KEYWORDS):
+            return False
+
+    # NO DEFAULT - return None if undetermined
+    return None
+
+
+def _infer_from_sample_submission(state: dict | None) -> bool:
+    """
+    Infer task type from sample_submission.csv structure.
+
+    Heuristics:
+    - If >2 columns (id + multiple targets) -> likely classification proba
+    - If 2 columns with float values in [0,1] -> likely classification proba
+    - If 2 columns with values outside [0,1] -> likely regression
+    - Default to True (classification is more common in Kaggle)
+
+    Args:
+        state: Workflow state dictionary
+
+    Returns:
+        True for classification (default), False for regression
+    """
+    if state is None:
+        return True  # Default to classification
+
+    sample_submission_path = state.get("sample_submission_path")
+    if not sample_submission_path:
+        return True  # Default
+
+    try:
+        import pandas as pd
+
+        sample_df = pd.read_csv(sample_submission_path)
+        n_cols = len(sample_df.columns)
+
+        # Multiple target columns -> classification proba
+        if n_cols > 2:
+            print("[LOG:INFO] sample_submission has >2 columns -> inferring classification")
+            return True
+
+        # Single target column -> check value range
+        if n_cols == 2:
+            target_col = sample_df.columns[1]
+            values = sample_df[target_col]
+
+            if pd.api.types.is_numeric_dtype(values):
+                min_val, max_val = values.min(), values.max()
+
+                # All zeros (placeholder) - check column name
+                if min_val == 0 and max_val == 0:
+                    col_lower = str(target_col).lower()
+                    if any(kw in col_lower for kw in ["proba", "prob", "class", "target"]):
+                        return True
+                    if any(kw in col_lower for kw in ["price", "fare", "amount", "sales"]):
+                        return False
+                    return True  # Default to classification
+
+                # Values in [0, 1] range -> likely probabilities
+                if 0 <= min_val <= max_val <= 1:
+                    return True
+
+                # Values outside [0, 1] -> likely regression
+                if min_val < 0 or max_val > 1:
+                    print(f"[LOG:INFO] sample_submission values outside [0,1]: [{min_val}, {max_val}] -> inferring regression")
+                    return False
+
+    except Exception as e:
+        print(f"[LOG:WARNING] Could not infer from sample_submission: {e}")
+
+    # Default to classification (more common in Kaggle)
+    return True
+
+
 def build_iteration_context(current_iteration: int, refinement_guidance: dict) -> list[str]:
     """Build iteration context instructions."""
     instructions = []
@@ -325,23 +516,14 @@ def build_dynamic_instructions(
     is_image = domain.startswith("image") or domain in {"computer_vision", "vision"} or is_audio
     is_image_to_image = domain == "image_to_image" or submission_format_type == "pixel_level"
 
-    # Detect problem type - CRITICAL: Use canonical metadata as authoritative source
-    canonical_metadata = state.get("canonical_metadata", {}) if state else {}
-    is_classification = canonical_metadata.get("is_classification")
-
-    # Fallback to problem_type string if canonical metadata unavailable
+    # Detect problem type - CRITICAL: Use robust multi-source detection
+    is_classification = _detect_is_classification(state)
     if is_classification is None:
-        problem_type = ""
-        try:
-            comp_info = state.get("competition_info")
-            problem_type = comp_info.problem_type if comp_info else ""
-        except Exception:
-            problem_type = ""
-        is_classification = "class" in str(problem_type).lower()
-        print(f"[DEBUG] is_classification={is_classification} (from problem_type string)")
+        # Final fallback: check sample_submission structure
+        is_classification = _infer_from_sample_submission(state)
+        print(f"[DEBUG] is_classification={is_classification} (from sample_submission inference)")
     else:
-        is_classification = bool(is_classification)
-        print(f"[DEBUG] is_classification={is_classification} (from canonical metadata)")
+        print(f"[DEBUG] is_classification={is_classification} (from detection chain)")
 
     # Check sample submission for integer labels
     sample_integer_labels = False

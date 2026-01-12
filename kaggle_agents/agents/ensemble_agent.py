@@ -416,14 +416,30 @@ class EnsembleAgent:
         meta_X: np.ndarray,
         y: np.ndarray,
         problem_type: str,
-    ) -> LogisticRegression | Ridge:
+        n_classes: int | None = None,
+    ) -> tuple[LogisticRegression | Ridge, str]:
         """Tune meta-model regularization using cross-validation.
 
         Uses grid search over C (classification) or alpha (regression) values
         with explicit StratifiedKFold/KFold and proper clip/normalize before log_loss.
+
+        Args:
+            meta_X: Meta-feature matrix (stacked OOF predictions)
+            y: Target values (encoded for classification)
+            problem_type: "classification" or "regression"
+            n_classes: Number of classes (for multiclass handling)
+
+        Returns:
+            Tuple of (fitted_model, metric_name)
         """
-        from sklearn.metrics import log_loss, mean_squared_error
+        from sklearn.metrics import log_loss, mean_squared_error, roc_auc_score
         from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
+
+        # Detect number of classes if not provided
+        if n_classes is None and problem_type == "classification":
+            n_classes = len(np.unique(y))
+
+        is_multiclass = n_classes is not None and n_classes > 2
 
         if problem_type == "classification":
             best_score = float("inf")
@@ -433,9 +449,14 @@ class EnsembleAgent:
 
             for C in [0.001, 0.01, 0.1, 1.0]:
                 try:
-                    # Don't pass multi_class (deprecated)
+                    # Use multinomial for multiclass, auto otherwise
                     model = LogisticRegression(
-                        C=C, random_state=42, max_iter=1000, solver="lbfgs"
+                        C=C,
+                        random_state=42,
+                        max_iter=1000,
+                        solver="lbfgs",
+                        multi_class="multinomial" if is_multiclass else "auto",
+                        class_weight="balanced" if is_multiclass else None,
                     )
                     # cross_val_predict to get OOF predictions
                     oof_preds = cross_val_predict(model, meta_X, y, cv=cv, method="predict_proba")
@@ -450,8 +471,20 @@ class EnsembleAgent:
                     print(f"      ⚠️ C={C} failed: {e}")
                     continue
 
+            metric_name = "roc_auc_ovr" if is_multiclass else "roc_auc"
             print(f"   Meta-model tuning: best C={best_C} (OOF log_loss={best_score:.4f})")
-            return LogisticRegression(C=best_C, random_state=42, max_iter=1000, solver="lbfgs")
+            print(f"   Using metric: {metric_name} for {'multiclass' if is_multiclass else 'binary'} classification")
+            final_model = LogisticRegression(
+                C=best_C,
+                random_state=42,
+                max_iter=1000,
+                solver="lbfgs",
+                multi_class="multinomial" if is_multiclass else "auto",
+                class_weight="balanced" if is_multiclass else None,
+            )
+            return final_model, metric_name
+
+        # Regression
         best_score = float("inf")
         best_alpha = 1.0
         cv = KFold(n_splits=3, shuffle=True, random_state=42)
@@ -469,7 +502,200 @@ class EnsembleAgent:
                 continue
 
         print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
-        return Ridge(alpha=best_alpha, random_state=42)
+        return Ridge(alpha=best_alpha, random_state=42), "neg_rmse"
+
+    def _validate_and_align_submission(
+        self,
+        submission_path: Path,
+        sample_submission_path: Path,
+        output_path: Path | None = None,
+    ) -> tuple[bool, str, Path | None]:
+        """Validate submission against sample_submission schema.
+
+        If IDs are same set but different order, reorders to match sample.
+
+        Args:
+            submission_path: Path to submission to validate
+            sample_submission_path: Path to sample_submission.csv
+            output_path: Where to save aligned submission (if None, overwrites in place)
+
+        Returns:
+            Tuple of (is_valid, error_message, aligned_path)
+        """
+        output_path = output_path or submission_path
+
+        try:
+            sub_df = pd.read_csv(submission_path)
+            sample_df = pd.read_csv(sample_submission_path)
+        except Exception as e:
+            return False, f"Failed to read CSV: {e}", None
+
+        # Check columns match
+        if list(sub_df.columns) != list(sample_df.columns):
+            return False, f"Column mismatch: {sub_df.columns.tolist()} vs {sample_df.columns.tolist()}", None
+
+        # Check row count
+        if len(sub_df) != len(sample_df):
+            return False, f"Row count mismatch: {len(sub_df)} vs {len(sample_df)}", None
+
+        # Check ID column - same SET but possibly different order
+        id_col = sub_df.columns[0]
+        sub_ids = set(sub_df[id_col])
+        sample_ids = set(sample_df[id_col])
+
+        if sub_ids != sample_ids:
+            missing = sample_ids - sub_ids
+            extra = sub_ids - sample_ids
+            return False, f"ID mismatch: missing={len(missing)}, extra={len(extra)}", None
+
+        # If order differs, reorder to match sample
+        if not sub_df[id_col].equals(sample_df[id_col]):
+            print(f"      [LOG:INFO] Reordering submission to match sample_submission ID order")
+            # Reorder using merge
+            sub_df = sample_df[[id_col]].merge(sub_df, on=id_col, how='left')
+
+        # Check for NaN in predictions (after potential reorder)
+        pred_cols = sub_df.columns[1:]
+        nan_count = sub_df[pred_cols].isna().sum().sum()
+        if nan_count > 0:
+            return False, f"Submission contains {nan_count} NaN values", None
+
+        # Save aligned submission
+        sub_df.to_csv(output_path, index=False)
+        return True, "", output_path
+
+    def _safe_restore_submission(
+        self,
+        source_path: Path,
+        dest_path: Path,
+        sample_submission_path: Path | None,
+    ) -> bool:
+        """Safely restore submission with validation.
+
+        Args:
+            source_path: Path to source submission (e.g., submission_best.csv)
+            dest_path: Path to destination (e.g., submission.csv)
+            sample_submission_path: Path to sample_submission.csv for validation
+
+        Returns:
+            True if restoration succeeded, False otherwise
+        """
+        import shutil
+
+        if not source_path.exists():
+            print(f"      ⚠️ Source submission not found: {source_path}")
+            return False
+
+        if sample_submission_path and Path(sample_submission_path).exists():
+            is_valid, error_msg, _ = self._validate_and_align_submission(
+                source_path,
+                sample_submission_path,
+                dest_path
+            )
+            if is_valid:
+                print(f"      ✅ Validated and restored submission to {dest_path}")
+                return True
+            else:
+                print(f"      ⚠️ Submission validation failed: {error_msg}")
+                print(f"      Copying without validation as fallback...")
+                shutil.copy(source_path, dest_path)
+                return True
+        else:
+            # No sample_submission available, just copy
+            shutil.copy(source_path, dest_path)
+            print(f"      ✅ Restored submission to {dest_path} (no validation)")
+            return True
+
+    def _load_and_align_oof(
+        self,
+        oof_path: Path,
+        train_ids_path: Path,
+        reference_ids: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Load OOF predictions and align to reference ID order.
+
+        Uses vectorized pandas Index operations for efficiency.
+
+        Args:
+            oof_path: Path to oof_*.npy
+            train_ids_path: Path to train_ids_*.npy (same order as oof)
+            reference_ids: Target ID order (from train.csv)
+
+        Returns:
+            Tuple of (aligned_oof, valid_mask) - mask is True where alignment succeeded
+        """
+        oof = np.load(oof_path)
+
+        if not train_ids_path.exists():
+            print(f"      [LOG:WARNING] No train_ids file for {oof_path.name}, assuming aligned")
+            return oof, np.ones(len(oof), dtype=bool)
+
+        train_ids = np.load(train_ids_path, allow_pickle=True)
+
+        if len(train_ids) != len(oof):
+            raise ValueError(f"train_ids length {len(train_ids)} != oof length {len(oof)}")
+
+        # Convert to pandas Index for vectorized lookup
+        oof_index = pd.Index(train_ids)
+        ref_index = pd.Index(reference_ids)
+
+        # Get positions of reference IDs in OOF index (-1 for missing)
+        indexer = oof_index.get_indexer(ref_index)
+
+        # Create valid mask (where alignment succeeded)
+        valid_mask = indexer >= 0
+        n_missing = (~valid_mask).sum()
+
+        if n_missing > 0:
+            print(f"      [LOG:WARNING] {n_missing}/{len(ref_index)} IDs not found in OOF predictions")
+
+        # Allocate aligned array
+        if oof.ndim == 1:
+            aligned_oof = np.zeros(len(ref_index), dtype=oof.dtype)
+        else:
+            aligned_oof = np.zeros((len(ref_index), oof.shape[1]), dtype=oof.dtype)
+
+        # Fill valid positions using vectorized indexing
+        aligned_oof[valid_mask] = oof[indexer[valid_mask]]
+
+        return aligned_oof, valid_mask
+
+    def _stack_with_alignment(
+        self,
+        oof_paths: list[Path],
+        train_ids_paths: list[Path],
+        reference_ids: np.ndarray,
+        y_true: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Stack multiple OOF predictions with proper alignment.
+
+        Args:
+            oof_paths: List of paths to oof_*.npy files
+            train_ids_paths: List of paths to train_ids_*.npy files
+            reference_ids: Reference ID order (from train.csv)
+            y_true: Target values in reference order
+
+        Returns:
+            Tuple of (X_meta, y_aligned, combined_mask) - only rows with ALL predictions
+        """
+        all_oof = []
+        all_masks = []
+
+        for oof_path, ids_path in zip(oof_paths, train_ids_paths):
+            oof, mask = self._load_and_align_oof(oof_path, ids_path, reference_ids)
+            all_oof.append(oof)
+            all_masks.append(mask)
+
+        # Combined mask: only where ALL OOF predictions exist
+        combined_mask = np.all(all_masks, axis=0)
+        n_valid = combined_mask.sum()
+        print(f"      [LOG:INFO] Stacking {n_valid}/{len(combined_mask)} rows with complete OOF predictions")
+
+        # Stack features (only for valid rows)
+        X_meta = np.column_stack([oof[combined_mask] for oof in all_oof])
+        y_aligned = y_true[combined_mask]
+
+        return X_meta, y_aligned, combined_mask
 
     def _diagnose_stacking_issues(
         self,
@@ -1179,8 +1405,10 @@ class EnsembleAgent:
         meta_score = float("inf")
         meta_oof_preds = None
         meta_model = None
+        meta_metric_name = metric_name  # Default to passed metric
         try:
-            meta_model = self._tune_meta_model(meta_X, y_encoded, problem_type)
+            n_classes = len(np.unique(y_encoded)) if problem_type == "classification" else None
+            meta_model, meta_metric_name = self._tune_meta_model(meta_X, y_encoded, problem_type, n_classes)
             if problem_type == "classification":
                 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
@@ -1911,7 +2139,9 @@ class EnsembleAgent:
 
         # Train meta-model with tuned regularization
         print("    Tuning and training meta-model...")
-        meta_model = self._tune_meta_model(meta_X, y.values if hasattr(y, "values") else y, problem_type)
+        y_arr = y.values if hasattr(y, "values") else y
+        n_classes = len(np.unique(y_arr)) if problem_type == "classification" else None
+        meta_model, _ = self._tune_meta_model(meta_X, y_arr, problem_type, n_classes)
         meta_model.fit(meta_X, y)
 
         # We don't need to retrain base models if we use the saved test preds!
