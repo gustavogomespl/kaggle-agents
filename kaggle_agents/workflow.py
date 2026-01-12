@@ -488,40 +488,55 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
 
     # ========================================================================
     # FORCE DOMAIN OVERRIDE via environment variable
-    # This takes precedence over all detection methods
+    # This takes ABSOLUTE precedence over all detection methods
     # ========================================================================
-    forced_type = (
-        os.getenv("KAGGLE_AGENTS_FORCE_DATA_TYPE")
-        or os.getenv("KAGGLE_AGENTS_DATA_TYPE")
-        or os.getenv("KAGGLE_AGENTS_FORCE_DOMAIN")
-        or ""
-    ).strip().lower()
+    env_force_data_type = os.getenv("KAGGLE_AGENTS_FORCE_DATA_TYPE", "")
+    env_data_type = os.getenv("KAGGLE_AGENTS_DATA_TYPE", "")
+    env_force_domain = os.getenv("KAGGLE_AGENTS_FORCE_DOMAIN", "")
+
+    forced_type = (env_force_data_type or env_data_type or env_force_domain).strip().lower()
+
+    # Debug: show which env vars are set
+    if env_force_data_type or env_data_type or env_force_domain:
+        print(f"   [ENV] KAGGLE_AGENTS_FORCE_DATA_TYPE={env_force_data_type!r}")
+        print(f"   [ENV] KAGGLE_AGENTS_DATA_TYPE={env_data_type!r}")
+        print(f"   [ENV] KAGGLE_AGENTS_FORCE_DOMAIN={env_force_domain!r}")
+        print(f"   [ENV] Resolved forced_type={forced_type!r}")
 
     FORCE_TYPE_TO_DOMAIN = {
         # Seq2seq / text normalization
         "seq2seq": "seq_to_seq",
         "seq_to_seq": "seq_to_seq",
         "text_normalization": "seq_to_seq",
+        "text-normalization": "seq_to_seq",
+        "textnormalization": "seq_to_seq",
         # Image domains
         "image": "image_classification",
         "image_classification": "image_classification",
+        "image-classification": "image_classification",
         "image_to_image": "image_to_image",
+        "image-to-image": "image_to_image",
         # Audio domains
         "audio": "audio_classification",
         "audio_classification": "audio_classification",
+        "audio-classification": "audio_classification",
         "audio_tagging": "audio_tagging",
+        "audio-tagging": "audio_tagging",
         # Text domains
         "text": "text_classification",
         "text_classification": "text_classification",
+        "text-classification": "text_classification",
         "nlp": "text_classification",
         # Tabular domains
         "tabular": "tabular_classification",
         "tabular_classification": "tabular_classification",
+        "tabular-classification": "tabular_classification",
         "tabular_regression": "tabular_regression",
+        "tabular-regression": "tabular_regression",
         "regression": "tabular_regression",
     }
 
-    if forced_type in FORCE_TYPE_TO_DOMAIN:
+    if forced_type and forced_type in FORCE_TYPE_TO_DOMAIN:
         forced_domain = FORCE_TYPE_TO_DOMAIN[forced_type]
         print(f"   ⚠️ Domain FORCED via env var: {forced_domain}")
         print(f"      (KAGGLE_AGENTS_FORCE_DATA_TYPE={forced_type})")

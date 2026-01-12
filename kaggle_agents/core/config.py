@@ -80,6 +80,11 @@ class AblationConfig:
     code_preview_lines: int = 30  # number of lines to show in preview
     enable_refinement: bool = True  # enable iterative refinement of successful components
 
+    # Debug code truncation (prevent token overflow in debug LLM calls)
+    max_code_lines_debug: int = field(
+        default_factory=lambda: int(os.getenv("MAX_CODE_LINES_DEBUG", "2000"))
+    )  # max lines of code to send to debug LLM (default 2000 to avoid >1M token errors)
+
     # Training adaptation settings (prevent cascade of epoch reductions)
     max_epoch_reductions: int = field(
         default_factory=lambda: int(os.getenv("KAGGLE_AGENTS_MAX_EPOCH_REDUCTIONS", "1"))

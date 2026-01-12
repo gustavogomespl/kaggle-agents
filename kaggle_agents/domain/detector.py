@@ -70,7 +70,7 @@ SOURCE_WEIGHTS = {
     "structural": 1.0,    # Structural heuristics - most reliable
     "submission": 0.9,    # Submission format analysis
     "metric": 0.85,       # Evaluation metric signal
-    "llm": 0.7,           # LLM inference
+    "llm": 0.9,           # LLM inference (increased from 0.7 to prioritize semantic detection for seq_to_seq)
     "sota": 0.6,          # SOTA tags from notebooks
     "fallback": 0.5,      # Fallback generic
 }
@@ -1052,6 +1052,50 @@ Final answer (category name only):"""
         Returns:
             Tuple of (detected_domain, confidence_score)
         """
+        # =====================================================================
+        # FORCE DOMAIN OVERRIDE - Check environment variables first
+        # This takes ABSOLUTE precedence over all detection methods
+        # =====================================================================
+        import os
+        FORCE_TYPE_TO_DOMAIN = {
+            "seq2seq": "seq_to_seq",
+            "seq_to_seq": "seq_to_seq",
+            "text_normalization": "seq_to_seq",
+            "text-normalization": "seq_to_seq",
+            "image": "image_classification",
+            "image_classification": "image_classification",
+            "image-classification": "image_classification",
+            "image_to_image": "image_to_image",
+            "audio": "audio_classification",
+            "audio_classification": "audio_classification",
+            "audio_tagging": "audio_tagging",
+            "text": "text_classification",
+            "text_classification": "text_classification",
+            "nlp": "text_classification",
+            "tabular": "tabular_classification",
+            "tabular_classification": "tabular_classification",
+            "tabular_regression": "tabular_regression",
+            "regression": "tabular_regression",
+        }
+
+        forced_type = (
+            os.getenv("KAGGLE_AGENTS_FORCE_DATA_TYPE", "")
+            or os.getenv("KAGGLE_AGENTS_DATA_TYPE", "")
+            or os.getenv("KAGGLE_AGENTS_FORCE_DOMAIN", "")
+        ).strip().lower()
+
+        if forced_type and forced_type in FORCE_TYPE_TO_DOMAIN:
+            forced_domain = FORCE_TYPE_TO_DOMAIN[forced_type]
+            print("\n" + "=" * 60)
+            print("= DOMAIN DETECTION RESULTS (FORCED)")
+            print("=" * 60)
+            print(f"\n⚠️  Domain FORCED via environment variable")
+            print(f"   KAGGLE_AGENTS_FORCE_DATA_TYPE={forced_type!r}")
+            print(f"\n✅ FINAL: {forced_domain} (confidence: 1.00)")
+            print("=" * 60 + "\n")
+            return forced_domain, 1.0  # type: ignore
+        # =====================================================================
+
         data_dir = Path(data_directory) if isinstance(data_directory, str) else data_directory
         signals: list[DetectionSignal] = []
 

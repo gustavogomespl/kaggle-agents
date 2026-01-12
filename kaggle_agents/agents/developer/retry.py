@@ -588,8 +588,19 @@ Sample Submission: {paths.get('sample_submission', 'N/A')}
 Models: {paths.get('models', 'models/')}
 Output Dir: {paths.get('output_dir', '.')}"""
 
+            # Truncate code to prevent token overflow in debug LLM calls (default 2000 lines)
+            max_lines = getattr(getattr(self, 'config', None), 'ablation', None)
+            max_lines = getattr(max_lines, 'max_code_lines_debug', 2000) if max_lines else 2000
+            code_lines = code.split("\n")
+            if len(code_lines) > max_lines:
+                code_truncated = "\n".join(code_lines[:max_lines])
+                code_truncated += f"\n\n# ... [TRUNCATED: {len(code_lines) - max_lines} more lines]"
+                print(f"   [DEBUG] Code truncated from {len(code_lines)} to {max_lines} lines")
+            else:
+                code_truncated = code
+
             prompt = DEBUG_CODE_PROMPT.format(
-                code=code,
+                code=code_truncated,
                 issue=issue,
                 stdout=exec_result.stdout[-2000:] if exec_result.stdout else "",
                 stderr=exec_result.stderr[-2000:] if exec_result.stderr else "",
