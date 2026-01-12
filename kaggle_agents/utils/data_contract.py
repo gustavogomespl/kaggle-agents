@@ -32,6 +32,19 @@ GROUP_COLUMN_CANDIDATES = [
     "user_id", "userId", "group_id", "groupId", "session_id",
 ]
 
+# Group columns specific to seq2seq/text normalization tasks
+SEQ2SEQ_GROUP_CANDIDATES = [
+    "sentence_id", "utterance_id", "document_id", "paragraph_id",
+    "source_id", "conversation_id", "dialog_id",
+]
+
+# Task type indicators for auto-detecting seq2seq column mappings
+SEQ2SEQ_TASK_INDICATORS = {
+    "text_normalization": {"source_col": "before", "target_col": "after", "class_col": "class"},
+    "translation": {"source_col": "source", "target_col": "target"},
+    "summarization": {"source_col": "document", "target_col": "summary"},
+}
+
 
 def _detect_id_column(df: pd.DataFrame) -> str | None:
     """Detect the ID column in a dataframe."""
@@ -53,6 +66,29 @@ def _detect_group_column(df: pd.DataFrame) -> str | None:
             n_unique = df[col].nunique()
             n_rows = len(df)
             if n_unique < n_rows * 0.9:  # At least 10% rows share groups
+                return col
+    return None
+
+
+def _detect_seq2seq_group_column(df: pd.DataFrame) -> str | None:
+    """
+    Detect group column for seq2seq tasks (e.g., sentence_id for text normalization).
+
+    In text normalization, multiple tokens from the same sentence MUST NOT
+    be split between train and validation to prevent data leakage.
+
+    Args:
+        df: DataFrame to check for seq2seq group columns
+
+    Returns:
+        Name of the seq2seq group column if found, None otherwise
+    """
+    for col in SEQ2SEQ_GROUP_CANDIDATES:
+        if col in df.columns:
+            n_unique = df[col].nunique()
+            n_rows = len(df)
+            # Valid if groups have multiple rows (not 1:1 mapping)
+            if n_unique < n_rows * 0.9:
                 return col
     return None
 
@@ -242,7 +278,7 @@ def _hash_based_sample(
         "id_column": id_col,
         "id_is_synthetic": is_synthetic,
         "deterministic": True,
-        "canonical_version": "1.2",
+        # Note: canonical_version is set in prepare_canonical_data, not here
     }
 
     return sampled_df, metadata
@@ -258,6 +294,11 @@ def prepare_canonical_data(
     n_folds: int | None = None,
     fast_mode: bool = False,
     timeout_s: int | None = None,
+    # Seq2seq specific parameters
+    task_type: str = "tabular",
+    source_col: str | None = None,
+    class_col: str | None = None,
+    seq2seq_group_col: str | None = None,
 ) -> dict[str, Any]:
     """
     Prepare canonical data artifacts that all model components must use.
@@ -278,6 +319,10 @@ def prepare_canonical_data(
         n_folds: Number of CV folds (auto-selected if None)
         fast_mode: Whether running in fast mode
         timeout_s: Component timeout in seconds
+        task_type: Type of task ("tabular", "seq2seq", "text_normalization", etc.)
+        source_col: Source column for seq2seq tasks (e.g., "before" for text normalization)
+        class_col: Class column for text normalization (e.g., "class" for semiotic class)
+        seq2seq_group_col: Group column for seq2seq (e.g., "sentence_id" to prevent leakage)
 
     Returns:
         Dict with paths to all canonical artifacts
@@ -296,6 +341,32 @@ def prepare_canonical_data(
     train_df = pd.read_csv(train_path)
     original_rows = len(train_df)
     print(f"   Loaded {original_rows:,} training rows")
+
+    # Step 1.5: Detect seq2seq task type and auto-configure columns
+    is_seq2seq = task_type in ("seq2seq", "text_normalization", "translation", "summarization")
+
+    if is_seq2seq:
+        # Auto-detect columns for known task types
+        if task_type in SEQ2SEQ_TASK_INDICATORS:
+            indicator = SEQ2SEQ_TASK_INDICATORS[task_type]
+            source_col = source_col or indicator.get("source_col")
+            if target_col == "target" and indicator.get("target_col"):
+                # Override generic "target" with task-specific column
+                if indicator["target_col"] in train_df.columns:
+                    target_col = indicator["target_col"]
+            class_col = class_col or indicator.get("class_col")
+
+        # Detect seq2seq group column (e.g., sentence_id) to prevent data leakage
+        if seq2seq_group_col is None:
+            seq2seq_group_col = _detect_seq2seq_group_column(train_df)
+            if seq2seq_group_col:
+                print(f"   Detected seq2seq group column: {seq2seq_group_col}")
+
+        print(f"   Task type: {task_type} (seq2seq)")
+        if source_col:
+            print(f"   Source column: {source_col}")
+        if class_col:
+            print(f"   Class column: {class_col}")
 
     # Step 2: Detect ID column BEFORE any operations
     if id_col is None:
@@ -350,20 +421,42 @@ def prepare_canonical_data(
     print(f"   CV strategy: {n_folds} folds ({cv_config['strategy']})")
 
     # Detect group column for preventing data leakage
-    group_col = _detect_group_column(train_df)
-    if group_col:
-        print(f"   Detected group column: {group_col} (using GroupKFold)")
+    # For seq2seq tasks, prioritize seq2seq-specific group column (e.g., sentence_id)
+    if is_seq2seq and seq2seq_group_col:
+        group_col = seq2seq_group_col
+        print(f"   Using seq2seq group column: {group_col} (GroupKFold to prevent data leakage)")
+    else:
+        group_col = _detect_group_column(train_df)
+        if group_col:
+            print(f"   Detected group column: {group_col} (using GroupKFold)")
 
     # Generate fold assignments
     y = train_df[target_col].values
-    n_unique = len(np.unique(y))
-    is_classification = n_unique < 20
+
+    # Detect if target is string type
+    target_is_string = y.dtype == object or np.issubdtype(y.dtype, np.str_)
+
+    # Determine classification vs regression/seq2seq
+    if is_seq2seq:
+        # Seq2seq tasks (text normalization, translation, summarization) are NOT classification
+        # They have high-cardinality string targets that shouldn't be stratified
+        is_classification = False
+        n_unique = None  # Don't count unique strings (could be millions)
+        print(f"   Target type: seq2seq (string, non-classification)")
+    else:
+        # For tabular tasks (including string-labeled classification like "cat"/"dog")
+        # Count unique values to determine if it's classification
+        n_unique = len(np.unique(y))
+        is_classification = n_unique < 20
+        if target_is_string and is_classification:
+            print(f"   Target type: string classification ({n_unique} classes)")
 
     fold_assignments = np.zeros(len(train_df), dtype=int)
 
     if group_col:
         groups = train_df[group_col].values
-        if is_classification and n_unique <= 10:
+        # For seq2seq tasks or when stratification is not possible, use GroupKFold
+        if is_classification and n_unique is not None and n_unique <= 10:
             try:
                 kf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=42)
                 for fold, (_, val_idx) in enumerate(kf.split(train_df, y, groups)):
@@ -373,6 +466,7 @@ def prepare_canonical_data(
                 for fold, (_, val_idx) in enumerate(kf.split(train_df, groups=groups)):
                     fold_assignments[val_idx] = fold
         else:
+            # Seq2seq tasks or high-cardinality targets use GroupKFold
             kf = GroupKFold(n_splits=n_folds)
             for fold, (_, val_idx) in enumerate(kf.split(train_df, groups=groups)):
                 fold_assignments[val_idx] = fold
@@ -390,7 +484,14 @@ def prepare_canonical_data(
 
     # Save canonical artifacts
     np.save(canonical_dir / "train_ids.npy", train_ids)
-    np.save(canonical_dir / "y.npy", y)
+
+    # Save targets - use allow_pickle=True for string/object arrays (seq2seq tasks)
+    if target_is_string or y.dtype == object:
+        np.save(canonical_dir / "y.npy", y, allow_pickle=True)
+        print(f"   Saved string targets (dtype=object) with allow_pickle=True")
+    else:
+        np.save(canonical_dir / "y.npy", y)
+
     np.save(canonical_dir / "folds.npy", fold_assignments)
 
     with open(canonical_dir / "feature_cols.json", "w") as f:
@@ -409,7 +510,14 @@ def prepare_canonical_data(
         "group_col": group_col,
         "is_classification": is_classification,
         "n_classes": n_unique if is_classification else None,
-        "canonical_version": "1.2",
+        "canonical_version": "1.3",  # Bumped version for seq2seq support
+        # Seq2seq specific metadata
+        "task_type": task_type,
+        "is_seq2seq": is_seq2seq,
+        "source_col": source_col,
+        "class_col": class_col,
+        "seq2seq_group_col": seq2seq_group_col,
+        "target_dtype": str(y.dtype),
         **sampling_metadata,
     }
 

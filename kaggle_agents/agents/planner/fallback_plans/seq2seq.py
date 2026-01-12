@@ -37,72 +37,95 @@ def create_seq2seq_fallback_plan(
 
     if is_text_norm:
         # Specialized plan for text normalization (ITN/TN tasks)
+        # PRIORITY: Lookup-first strategy for 80%+ coverage, neural only for ambiguous
         return [
+            {
+                "name": "lookup_baseline",
+                "component_type": "preprocessing",
+                "description": (
+                    "Frequency-based lookup table for (class, before) -> after mappings. "
+                    "Handles 80%+ of tokens with zero inference cost. "
+                    "Identifies ambiguous samples that need neural refinement."
+                ),
+                "estimated_impact": 0.75,
+                "rationale": (
+                    "Text normalization has high determinism: PUNCT/PLAIN/VERBATIM always map to <self>, "
+                    "LETTERS always spell out, common CARDINALs have fixed mappings. "
+                    "Building lookup from training data captures these patterns perfectly. "
+                    "Neural models are overkill for deterministic classes."
+                ),
+                "code_outline": (
+                    "from kaggle_agents.utils.text_normalization import LookupBaseline, create_hybrid_pipeline; "
+                    "pipeline = create_hybrid_pipeline(train_df, fast_mode=FAST_MODE); "
+                    "lookup = pipeline['lookup']; "
+                    "lookup.save(MODELS_DIR / 'lookup_baseline.json'); "
+                    "Identify ambiguous samples via pipeline['ambiguous_indices']"
+                ),
+            },
             {
                 "name": "rule_based_normalizer",
                 "component_type": "preprocessing",
                 "description": (
-                    "Class-specific regex rules for deterministic text normalization. "
+                    "Class-specific fallback rules for deterministic text normalization. "
                     "Handles PUNCT (keep as-is), LETTERS (spell out), PLAIN (keep), "
                     "VERBATIM (keep), TRANS (transliteration), ELECTRONIC (URLs/emails). "
-                    "These classes have deterministic transformations without ambiguity."
+                    "Complements lookup for unseen (class, before) pairs."
                 ),
-                "estimated_impact": 0.70,
+                "estimated_impact": 0.10,
                 "rationale": (
-                    "80%+ of text normalization tokens have deterministic mappings. "
-                    "Rule-based approaches achieve near-perfect accuracy on these classes "
-                    "while being infinitely faster than neural approaches. Focus neural "
-                    "compute budget on genuinely ambiguous cases."
+                    "Fallback rules handle cases not seen in training data. "
+                    "For deterministic classes like PUNCT/PLAIN, keep as-is is always correct. "
+                    "LETTERS can be reliably spelled out. Rules provide guaranteed coverage."
                 ),
                 "code_outline": (
-                    "Create class-specific normalization rules: "
-                    "PUNCT='<self>', PLAIN='<self>', LETTERS=spell_out(), "
-                    "CARDINAL=num2words(), ORDINAL=ordinal2words(), "
-                    "MONEY=format_currency(), DATE/TIME=format_datetime(), "
-                    "Use regex patterns to identify classes, apply transformations"
+                    "Class-specific fallbacks already built into LookupBaseline; "
+                    "For additional coverage: use num2words for unseen CARDINALs, "
+                    "spell_out for LETTERS, keep-as-is for PLAIN/PUNCT/VERBATIM"
                 ),
             },
             {
-                "name": "t5_seq2seq_ambiguous",
+                "name": "t5_small_ambiguous_only",
                 "component_type": "model",
                 "description": (
-                    "T5-small fine-tuned ONLY on ambiguous cases (DATE, CARDINAL, MEASURE). "
-                    "Smaller model is faster and sufficient when most cases are handled by rules."
+                    "T5-small fine-tuned ONLY on ambiguous cases (DATE, TIME, MEASURE). "
+                    "CRITICAL: max_steps=2000 guard prevents runaway training. "
+                    "Uses HF compatibility wrapper for eval_strategy parameter."
                 ),
-                "estimated_impact": 0.25,
+                "estimated_impact": 0.12,
                 "rationale": (
-                    "T5 excels at text-to-text tasks but is expensive to run on all tokens. "
-                    "By filtering to only ambiguous cases (DATE with multiple formats, "
-                    "CARDINAL with context-dependent pronunciation), we get neural accuracy "
-                    "where needed without wasting compute on deterministic classes."
+                    "T5-small (60M params) is faster than T5-base (220M) and sufficient "
+                    "when most tokens are already handled by lookup/rules. "
+                    "Training only on ambiguous samples (~10-20% of data) dramatically "
+                    "reduces training time from 140 hours to ~30 minutes."
                 ),
                 "code_outline": (
-                    "Filter training data to ambiguous classes only, "
-                    "T5ForConditionalGeneration.from_pretrained('t5-small'), "
-                    "Seq2SeqTrainer with DataCollatorForSeq2Seq, "
-                    "Train with learning_rate=3e-4, batch_size=32, "
-                    "Evaluate with exact match accuracy"
+                    "from kaggle_agents.utils.hf_compat import get_training_args_kwargs; "
+                    "from kaggle_agents.utils.text_normalization import get_neural_training_config; "
+                    "config = get_neural_training_config(n_ambiguous, fast_mode=FAST_MODE); "
+                    "model = T5ForConditionalGeneration.from_pretrained('t5-small'); "
+                    "args = Seq2SeqTrainingArguments(max_steps=config['max_steps'], "
+                    "**get_training_args_kwargs(eval_strategy='steps', eval_steps=500)); "
+                    "Train ONLY on ambiguous_df from pipeline"
                 ),
             },
             {
                 "name": "hybrid_ensemble",
                 "component_type": "ensemble",
                 "description": (
-                    "Rule-priority ensemble: apply rules first, use T5 for unhandled/ambiguous cases. "
-                    "This achieves high accuracy with fast inference."
+                    "Lookup-priority ensemble: use lookup/rules first, T5 only for failures. "
+                    "Achieves high accuracy with sub-second inference per sample."
                 ),
-                "estimated_impact": 0.05,
+                "estimated_impact": 0.03,
                 "rationale": (
-                    "Deterministic rules should always override neural predictions for reliability. "
-                    "Neural model only fills gaps where rules don't apply or are ambiguous. "
-                    "This hybrid approach is the winning strategy for text normalization competitions."
+                    "Deterministic lookup is always correct when available. "
+                    "Neural model fills gaps for ambiguous patterns. "
+                    "This hybrid achieves winning-level accuracy with 100x faster inference."
                 ),
                 "code_outline": (
-                    "For each (class, token) pair: "
-                    "1. Check if deterministic rule exists for class "
-                    "2. If yes, apply rule (faster, reliable) "
-                    "3. If no, use T5 prediction (neural fallback) "
-                    "4. Save final predictions in submission format"
+                    "from kaggle_agents.utils.text_normalization import apply_hybrid_predictions; "
+                    "lookup = LookupBaseline.load(MODELS_DIR / 'lookup_baseline.json'); "
+                    "final_preds = apply_hybrid_predictions(test_df, lookup, neural_preds, neural_indices); "
+                    "submission['after'] = final_preds"
                 ),
             },
         ]
@@ -114,19 +137,22 @@ def create_seq2seq_fallback_plan(
             "component_type": "model",
             "description": (
                 "T5-base fine-tuned for seq2seq task using HuggingFace Seq2SeqTrainer. "
-                "T5 uses text-to-text format ideal for translation, summarization, and generation."
+                "T5 uses text-to-text format ideal for translation, summarization, and generation. "
+                "CRITICAL: Uses max_steps=2000 guard and HF compatibility wrapper."
             ),
             "estimated_impact": 0.35,
             "rationale": (
                 "T5 (Text-to-Text Transfer Transformer) achieves SOTA on multiple seq2seq benchmarks. "
                 "The text-to-text format unifies different NLP tasks into a single paradigm. "
-                "Base size provides good balance between performance and training speed."
+                "max_steps=2000 prevents timeout in constrained environments."
             ),
             "code_outline": (
+                "from kaggle_agents.utils.hf_compat import get_training_args_kwargs; "
                 "T5ForConditionalGeneration.from_pretrained('t5-base'), "
                 "T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, "
-                "learning_rate=1e-4, per_device_train_batch_size=8, "
-                "evaluation_strategy='steps', metric: BLEU or ROUGE depending on task"
+                "args = Seq2SeqTrainingArguments(max_steps=2000, learning_rate=1e-4, "
+                "**get_training_args_kwargs(eval_strategy='steps', eval_steps=500)), "
+                "metric: BLEU or ROUGE depending on task"
             ),
         },
         {
