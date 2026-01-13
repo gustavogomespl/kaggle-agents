@@ -65,6 +65,25 @@ def _detect_is_classification(state: dict | None) -> bool | None:
         if is_classification is not None:
             return bool(is_classification)
 
+    # Step 1.5: Load from canonical directory using working_directory
+    # This bypasses state timing issues by reading directly from disk
+    try:
+        import json
+        from pathlib import Path
+
+        working_dir = state.get("working_directory")
+        if working_dir:
+            canonical_metadata_path = Path(working_dir) / "canonical" / "metadata.json"
+            if canonical_metadata_path.exists():
+                with open(canonical_metadata_path) as f:
+                    metadata = json.load(f)
+                    is_classification = metadata.get("is_classification")
+                    if is_classification is not None:
+                        print(f"[DEBUG] is_classification={is_classification} (from canonical/metadata.json)")
+                        return bool(is_classification)
+    except Exception:
+        pass
+
     # Step 2: Load metadata.json from canonical path if available
     try:
         import json
