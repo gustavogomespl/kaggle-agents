@@ -741,12 +741,14 @@ def validate_canonical_data_usage(
                 continue
             # Exception: train_test_split for Optuna subsampling is OK
             # (subsampling for speed, not creating CV splits)
+            # Note: uses_canonical check removed - subsampling is always OK for Optuna
+            # because canonical enforcement already happens at lines 756-782
             if "train_test_split" in pattern:
                 is_optuna_subsample = (
                     "optuna" in generated_code.lower()
                     and re.search(r"train_size\s*=\s*0\.[0-4]", generated_code)
                 )
-                if is_optuna_subsample and uses_canonical:
+                if is_optuna_subsample:
                     continue
             violations.append(message)
 
