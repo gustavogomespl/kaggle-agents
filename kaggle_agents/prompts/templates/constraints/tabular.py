@@ -145,28 +145,79 @@ model = CatBoostClassifier(
 
 **NEVER drop rows with rare classes** - use class_weights instead:
 ```python
-# WRONG: Dropping rare classes causes OOF alignment issues
+# ❌ WRONG: Dropping rare classes causes OOF alignment issues
 # rare_classes = counts[counts < 10].index.tolist()
 # train_df = train_df[~train_df[target].isin(rare_classes)]  # BREAKS CV alignment!
+# WHY THIS BREAKS:
+# 1. OOF array initialized with len(original_train) but predictions only for filtered rows
+# 2. Canonical folds.npy has len(original_train) entries, now misaligned
+# 3. Ensemble fails: "shape mismatch: (1200000,6) vs (1200000,7)"
 
-# CORRECT: Handle rare classes with class weights
+# ✅ CORRECT: Handle ALL classes with class weights
+# For LightGBM:
+model = lgb.LGBMClassifier(
+    class_weight='balanced',       # Automatically handles rare classes
+    n_jobs=-1,
+    random_state=42,
+)
+
+# For CatBoost:
 model = CatBoostClassifier(
     class_weights='balanced',      # Automatically handles rare classes
     # OR compute manual weights:
     # class_weights={0: 1.0, 1: 10.0, 2: 5.0, ...}
 )
+
+# For XGBoost multiclass: compute sample weights manually
+from sklearn.utils.class_weight import compute_sample_weight
+sample_weights = compute_sample_weight('balanced', y_train)
+model.fit(X_train, y_train, sample_weight=sample_weights)
 ```
 
-### 4. Callbacks and Early Stopping
+**CRITICAL: OOF Array Initialization**:
 ```python
-# LightGBM
+# Initialize OOF with ACTUAL number of classes from LabelEncoder (not assumed)
+n_classes = len(le.classes_)  # Get from LabelEncoder, NOT hardcoded
+n_train = len(train_df)       # Use ORIGINAL train size
+oof_preds = np.zeros((n_train, n_classes))
+test_preds = np.zeros((n_test, n_classes))
+```
+
+### 4. Callbacks and Early Stopping (CRITICAL FOR STABILITY)
+Early stopping triggered too early (< 200 iterations) indicates:
+- Learning rate too high → reduce to 0.02-0.05
+- Early stopping patience too short → increase to 100-200
+
+```python
+# LightGBM - RECOMMENDED SETTINGS
+model = lgb.LGBMClassifier(
+    n_estimators=3000,           # Allow many iterations
+    learning_rate=0.02,          # Conservative LR (NOT 0.1!)
+    early_stopping_rounds=150,   # Generous patience
+    # ... other params
+)
+
 callbacks = [
-    lgb.early_stopping(stopping_rounds=100),  # Use 100, not 50
-    lgb.log_evaluation(period=50)
+    lgb.early_stopping(stopping_rounds=150),  # Use 100-200, NOT 50
+    lgb.log_evaluation(period=100)
 ]
 
 # XGBoost
-callbacks = [xgb.callback.EarlyStopping(rounds=100)]
+callbacks = [xgb.callback.EarlyStopping(rounds=150)]
+
+# CatBoost
+model = CatBoostClassifier(
+    iterations=3000,
+    learning_rate=0.03,
+    early_stopping_rounds=150,
+)
+```
+
+**DIAGNOSTIC**: If early stopping triggers at < 100 iterations:
+```python
+# Check if learning rate is too high
+if best_iteration < 100:
+    print(f"[LOG:WARN] Early stopping at {best_iteration} iterations - consider reducing learning_rate")
 ```
 
 ### 4b. LightGBM Hyperparameters for Large Datasets (>1M rows)
@@ -197,20 +248,48 @@ params = {
 model = lgb.LGBMClassifier(**params)
 ```
 
-### 5. Target Column Identification
+### 5. Submission Format Detection and Generation (CRITICAL)
+**ALWAYS detect submission format BEFORE generating submission!**
+
 ```python
 sample_sub = pd.read_csv(sample_submission_path)
-print("Columns:", sample_sub.columns.tolist())
+submission_cols = sample_sub.columns[1:].tolist()  # All columns except ID
+print(f"[LOG:INFO] Submission columns: {submission_cols}")
 
-# Target is NOT always columns[1]!
-# Match target column name from train.csv
-train_df = pd.read_csv(train_path)
-target_col = [c for c in sample_sub.columns if c in train_df.columns and c != 'id'][0]
-print(f"Target column: {target_col}")
+# === FORMAT DETECTION ===
+if len(submission_cols) == 1:
+    # LABEL FORMAT: Single column for class labels (TPS, most classification)
+    # Example: Id,Cover_Type or Id,target
+    target_col = submission_cols[0]
+    print(f"[LOG:INFO] Label format detected - target column: {target_col}")
 
-sample_sub[target_col] = predictions
-sample_sub.to_csv('submission.csv', index=False)
+    # For classification: convert probabilities to class labels
+    if predictions.ndim == 2:
+        # Multiclass: argmax to get predicted class index
+        predicted_labels = le.inverse_transform(np.argmax(predictions, axis=1))
+        sample_sub[target_col] = predicted_labels
+    else:
+        # Binary or regression: use predictions directly
+        sample_sub[target_col] = predictions
+
+elif len(submission_cols) > 1:
+    # WIDE FORMAT: Multiple columns for class probabilities
+    # Example: Id,class_0,class_1,class_2,...
+    print(f"[LOG:INFO] Wide format detected - {len(submission_cols)} probability columns")
+
+    # Assign probabilities to each class column
+    for i, col in enumerate(submission_cols):
+        if predictions.ndim == 2:
+            sample_sub[col] = predictions[:, i]
+        else:
+            # 1D predictions: replicate for each column (unusual)
+            sample_sub[col] = predictions
+
+sample_sub.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
+print(f"[LOG:INFO] Submission saved with {len(submission_cols)} target column(s)")
 ```
+
+**CRITICAL**: Do NOT assume submission format - always check `len(sample_sub.columns[1:])`!
 
 ### 6. Optuna Hyperparameter Tuning
 ```python

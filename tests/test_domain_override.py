@@ -107,10 +107,16 @@ class TestSeq2SeqFallbackPlan:
             competition_name="text-normalization-challenge-english-language",
         )
 
-        assert len(plan) == 3
-        assert plan[0]["name"] == "rule_based_normalizer"
-        assert plan[1]["name"] == "t5_seq2seq_ambiguous"
-        assert plan[2]["name"] == "hybrid_ensemble"
+        # Text normalization uses 4-component hybrid approach:
+        # 1. lookup_baseline (frequency-based lookup table)
+        # 2. rule_based_normalizer (class-specific fallback rules)
+        # 3. t5_small_ambiguous_only (neural for ambiguous cases)
+        # 4. hybrid_ensemble (lookup-priority ensemble)
+        assert len(plan) == 4
+        assert plan[0]["name"] == "lookup_baseline"
+        assert plan[1]["name"] == "rule_based_normalizer"
+        assert plan[2]["name"] == "t5_small_ambiguous_only"
+        assert plan[3]["name"] == "hybrid_ensemble"
 
     def test_creates_generic_seq2seq_plan_for_translation(self, create_seq2seq_fallback_plan):
         """Should create generic seq2seq plan for non-normalization tasks."""
@@ -141,8 +147,9 @@ class TestSeq2SeqFallbackPlan:
                 sota_analysis={},
                 competition_name=name,
             )
-            # Text normalization should use hybrid approach
-            assert plan[0]["name"] == "rule_based_normalizer", f"Failed for {name}"
+            # Text normalization should use hybrid approach with lookup_baseline first
+            assert plan[0]["name"] == "lookup_baseline", f"Failed for {name}"
+            assert len(plan) == 4, f"Expected 4 components for {name}"
 
     def test_text_normalization_domain_overrides_competition_name(self, create_seq2seq_fallback_plan):
         """Should use text normalization plan when domain is explicitly set, regardless of competition name."""
@@ -153,11 +160,12 @@ class TestSeq2SeqFallbackPlan:
             competition_name="some-generic-competition",
         )
 
-        # Should still use the hybrid text normalization approach
-        assert len(plan) == 3
-        assert plan[0]["name"] == "rule_based_normalizer"
-        assert plan[1]["name"] == "t5_seq2seq_ambiguous"
-        assert plan[2]["name"] == "hybrid_ensemble"
+        # Should still use the hybrid text normalization approach (4 components)
+        assert len(plan) == 4
+        assert plan[0]["name"] == "lookup_baseline"
+        assert plan[1]["name"] == "rule_based_normalizer"
+        assert plan[2]["name"] == "t5_small_ambiguous_only"
+        assert plan[3]["name"] == "hybrid_ensemble"
 
 
 class TestDataContractStrFloatComparison:
