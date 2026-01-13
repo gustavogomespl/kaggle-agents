@@ -57,6 +57,16 @@ class TextTabularDetectionMixin:
         if df.empty:
             return None
 
+        # Block text detection if strong numeric/tabular signal exists
+        # This prevents false-positives on competitions like NYC taxi fare
+        # where datetime string columns trigger text detection
+        numeric_cols = df.select_dtypes(include="number").columns
+        numeric_ratio = len(numeric_cols) / max(len(df.columns), 1)
+
+        if len(numeric_cols) >= 5 and numeric_ratio > 0.5:
+            print(f"   Skipping text detection: {len(numeric_cols)} numeric cols ({numeric_ratio:.0%})")
+            return None
+
         # Signal 1: Well-known text column names
         text_column_names = {
             "text", "sentence", "content", "body", "comment", "review",
