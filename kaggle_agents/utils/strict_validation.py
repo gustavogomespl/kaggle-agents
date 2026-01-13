@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
@@ -34,7 +35,7 @@ class StrictValidationConfig:
     empty_row_threshold: float = 0.0  # Fraction of empty rows allowed (0 = none)
 
     @classmethod
-    def from_env(cls) -> "StrictValidationConfig":
+    def from_env(cls) -> StrictValidationConfig:
         """Load configuration from environment variables."""
         return cls(
             strict_mode=os.getenv("KAGGLE_AGENTS_STRICT_MODE", "0").lower()

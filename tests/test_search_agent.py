@@ -1,10 +1,8 @@
 """Tests for search agent - adaptive SOTA retrieval."""
 
 import importlib.util
-import sys
 from pathlib import Path
 
-import pytest
 
 # Import directly from module file to avoid circular imports through __init__.py
 _module_path = Path(__file__).parent.parent / "kaggle_agents" / "agents" / "search_agent.py"

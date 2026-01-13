@@ -17,6 +17,7 @@ from bs4 import BeautifulSoup
 
 from .kaggle_search import KaggleSearcher
 
+
 if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
@@ -251,7 +252,7 @@ class DataFormatDiscoverer:
 
     def generate_parsing_instructions(
         self,
-        llm: "BaseChatModel",
+        llm: BaseChatModel,
         context: dict[str, Any],
     ) -> dict[str, Any]:
         """
@@ -414,10 +415,9 @@ def detect_traditional_format(working_dir: Path) -> dict[str, str] | None:
 
                 if has_label_csv:
                     return {"train": str(train_dir), "test": str(test_dir)}
-                else:
-                    # Media files exist but no label CSV - this is a non-standard format
-                    # Return None to trigger LLM-based discovery
-                    return None
+                # Media files exist but no label CSV - this is a non-standard format
+                # Return None to trigger LLM-based discovery
+                return None
 
     return None
 

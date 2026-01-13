@@ -161,18 +161,17 @@ class ComponentTimeoutConfig:
 
         if component_type_lower == "preprocessing":
             return self.preprocessing
-        elif component_type_lower == "feature_engineering":
+        if component_type_lower == "feature_engineering":
             return self.feature_engineering
-        elif component_type_lower == "model":
+        if component_type_lower == "model":
             # Check if it's a heavy model
             if any(pattern in model_name_lower for pattern in self.heavy_model_patterns):
                 return self.model_heavy
             return self.model_light
-        elif component_type_lower == "ensemble":
+        if component_type_lower == "ensemble":
             return self.ensemble
-        else:
-            # Default to light model timeout
-            return self.model_light
+        # Default to light model timeout
+        return self.model_light
 
 
 @dataclass

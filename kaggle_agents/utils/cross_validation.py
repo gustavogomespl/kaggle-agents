@@ -6,7 +6,13 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import GroupKFold, KFold, StratifiedKFold, StratifiedGroupKFold, TimeSeriesSplit
+from sklearn.model_selection import (
+    GroupKFold,
+    KFold,
+    StratifiedGroupKFold,
+    StratifiedKFold,
+    TimeSeriesSplit,
+)
 
 
 # Common group column names in medical imaging and other competitions
@@ -127,7 +133,7 @@ def _validate_temporal_folds(
                 f"< fold {prev_fold} max time ({prev_max}). Data should be chronological."
             )
 
-    print(f"      ✅ Temporal folds validated: non-decreasing order")
+    print("      ✅ Temporal folds validated: non-decreasing order")
 
 
 def generate_folds(
@@ -175,11 +181,11 @@ def generate_folds(
 
     if detected_temporal:
         print(f"      ⏰ Detected temporal column: '{detected_temporal}'")
-        print(f"      🔒 Using TimeSeriesSplit to prevent future leakage!")
+        print("      🔒 Using TimeSeriesSplit to prevent future leakage!")
     elif detected_group:
         n_groups = df[detected_group].nunique()
         print(f"      ⚠️  Detected group column: '{detected_group}' ({n_groups} unique groups)")
-        print(f"      🔒 Using GroupKFold to prevent data leakage!")
+        print("      🔒 Using GroupKFold to prevent data leakage!")
 
     # Check if target_col exists - for multi-label competitions, target_col might not exist
     # in train.csv (targets are multiple columns matching sample_submission)
@@ -193,7 +199,7 @@ def generate_folds(
     else:
         # Multi-label or target not in train - can't stratify
         print(f"      ⚠️ Target column '{target_col}' not found in train data")
-        print(f"      This is likely a MULTI-LABEL competition - using GroupKFold/KFold without stratification")
+        print("      This is likely a MULTI-LABEL competition - using GroupKFold/KFold without stratification")
         n_unique = 100  # Force non-stratified
         is_classification = False
 
@@ -215,7 +221,7 @@ def generate_folds(
         df = df.sort_values(detected_temporal).reset_index(drop=True)
 
         # TimeSeriesSplit (pure chronological, no shuffle)
-        print(f"      Using TimeSeriesSplit (chronological, no shuffle)")
+        print("      Using TimeSeriesSplit (chronological, no shuffle)")
         kf = TimeSeriesSplit(n_splits=n_folds)
         for fold, (_train_idx, val_idx) in enumerate(kf.split(df)):
             df.loc[val_idx, "fold"] = fold
@@ -234,7 +240,7 @@ def generate_folds(
         groups = df[detected_group]
         if is_classification and n_unique <= 10 and target_col_exists:
             try:
-                print(f"      Using StratifiedGroupKFold (classification + groups)")
+                print("      Using StratifiedGroupKFold (classification + groups)")
                 kf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=seed)
                 y = df[target_col]
                 for fold, (_train_idx, val_idx) in enumerate(kf.split(df, y, groups)):
@@ -246,7 +252,7 @@ def generate_folds(
                 for fold, (_train_idx, val_idx) in enumerate(kf.split(df, groups=groups)):
                     df.loc[val_idx, "fold"] = fold
         else:
-            print(f"      Using GroupKFold (groups detected, no stratification)")
+            print("      Using GroupKFold (groups detected, no stratification)")
             kf = GroupKFold(n_splits=n_folds)
             for fold, (_train_idx, val_idx) in enumerate(kf.split(df, groups=groups)):
                 df.loc[val_idx, "fold"] = fold

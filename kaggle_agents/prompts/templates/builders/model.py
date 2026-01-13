@@ -577,7 +577,7 @@ def build_dynamic_instructions(
                 "\n📏 METRIC REQUIREMENT (CRITICAL - MUST FOLLOW):",
                 f"  - Competition metric: '{metric_name}' ({direction})",
                 f"  - ⚠️ Final Validation Performance MUST report {metric_name} ONLY",
-                f"  - DO NOT report a different metric (e.g., don't report LogLoss if metric is Accuracy)",
+                "  - DO NOT report a different metric (e.g., don't report LogLoss if metric is Accuracy)",
             ]
         )
 
@@ -799,7 +799,7 @@ def _build_regression_postprocessing_instructions(state: dict) -> list[str]:
             f"  - Upper bound: {upper_bound if upper_bound is not None else 'None (no upper limit)'}",
             "  - **Apply clipping AFTER predictions to avoid invalid values:**",
             "    ```python",
-            f"    # Clip predictions to valid range",
+            "    # Clip predictions to valid range",
             f"    oof_preds = np.clip(oof_preds, {lower_bound}, {upper_bound})",
             f"    test_preds = np.clip(test_preds, {lower_bound}, {upper_bound})",
             "    print(f'[LOG:INFO] Clipped predictions: min={{test_preds.min():.2f}}, max={{test_preds.max():.2f}}')",
@@ -851,7 +851,7 @@ def _build_audio_domain_instructions(state: dict) -> list[str]:
             instructions.extend([
                 f"  - **ID Pattern:** Id = rec_id * {id_multiplier} + class_id",
                 f"  - **Number of Classes:** {num_classes}",
-                f"  - **CRITICAL SUBMISSION CODE:**",
+                "  - **CRITICAL SUBMISSION CODE:**",
                 "    ```python",
                 "    submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
                 "    pred_map = {}",
@@ -866,7 +866,7 @@ def _build_audio_domain_instructions(state: dict) -> list[str]:
         elif format_type == "wide":
             instructions.extend([
                 f"  - **Target Columns:** {target_columns}",
-                f"  - **WIDE FORMAT:** One column per class, one row per sample",
+                "  - **WIDE FORMAT:** One column per class, one row per sample",
                 "    ```python",
                 "    submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
                 f"    for i, col in enumerate({target_columns}):",

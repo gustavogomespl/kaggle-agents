@@ -5,6 +5,7 @@ import platform
 
 import pytest
 
+
 # Feature flag constant (copied from code_executor.py)
 ENABLE_RESOURCE_LIMITS = os.getenv("KAGGLE_AGENTS_ENABLE_LIMITS", "true").lower() == "true"
 
@@ -135,7 +136,7 @@ class TestResourceLimits:
         if platform.system() != "Windows":
             try:
                 _start_new_process_group()
-            except Exception as e:
+            except Exception:
                 # os.setpgrp() may fail in some contexts (e.g., already group leader)
                 # This is expected behavior, not a bug
                 pass

@@ -1,18 +1,15 @@
 """Tests for seq2seq canonical data contract support."""
 
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from kaggle_agents.utils.data_contract import (
-    _detect_seq2seq_group_column,
-    prepare_canonical_data,
-    load_canonical_data,
     SEQ2SEQ_GROUP_CANDIDATES,
     SEQ2SEQ_TASK_INDICATORS,
+    _detect_seq2seq_group_column,
+    load_canonical_data,
+    prepare_canonical_data,
 )
 
 

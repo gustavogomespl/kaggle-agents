@@ -10,7 +10,6 @@ from kaggle_agents.utils.precomputed_features import (
     detect_precomputed_features,
     generate_feature_loading_code,
     load_precomputed_features,
-    KNOWN_FEATURE_PATTERNS,
 )
 
 

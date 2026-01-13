@@ -34,7 +34,7 @@ from ..prompts.templates.planner_prompts import (
     get_domain_guidance,
 )
 from ..utils.llm_utils import get_text_content
-from ..utils.text_normalization import DETERMINISTIC_CLASSES, AMBIGUOUS_CLASSES
+from ..utils.text_normalization import AMBIGUOUS_CLASSES, DETERMINISTIC_CLASSES
 
 
 # ==================== Extended Strategy Templates ====================
@@ -1199,7 +1199,7 @@ Return a JSON array with up to {max_components} components. Each component must 
                     "code_outline": "Weighted average with learned weights via gradient descent",
                 },
             ]
-        elif focus == "feature_engineering":
+        if focus == "feature_engineering":
             return [
                 {
                     "name": "target_encoding_cv",
@@ -1226,25 +1226,25 @@ Return a JSON array with up to {max_components} components. Each component must 
                     "code_outline": "Optuna study with n_trials=50 for LGBM params",
                 },
             ]
-        else:  # ensemble focus
-            return [
-                {
-                    "name": "stacking_meta",
-                    "component_type": "ensemble",
-                    "description": "Stacking ensemble with ridge meta-learner",
-                    "estimated_impact": 0.15,
-                    "rationale": "Combine diverse model predictions",
-                    "code_outline": "StackingClassifier/Regressor with Ridge meta",
-                },
-                {
-                    "name": "voting_diverse",
-                    "component_type": "ensemble",
-                    "description": "Voting ensemble with diverse base models",
-                    "estimated_impact": 0.10,
-                    "rationale": "Simple but effective ensemble",
-                    "code_outline": "VotingClassifier with LGBM, XGB, CatBoost",
-                },
-            ]
+        # ensemble focus
+        return [
+            {
+                "name": "stacking_meta",
+                "component_type": "ensemble",
+                "description": "Stacking ensemble with ridge meta-learner",
+                "estimated_impact": 0.15,
+                "rationale": "Combine diverse model predictions",
+                "code_outline": "StackingClassifier/Regressor with Ridge meta",
+            },
+            {
+                "name": "voting_diverse",
+                "component_type": "ensemble",
+                "description": "Voting ensemble with diverse base models",
+                "estimated_impact": 0.10,
+                "rationale": "Simple but effective ensemble",
+                "code_outline": "VotingClassifier with LGBM, XGB, CatBoost",
+            },
+        ]
 
     def _create_refined_fallback_plan(
         self,
@@ -1320,10 +1320,10 @@ Return a JSON array with up to {max_components} components. Each component must 
             if successful_arms:
                 successful_arms.sort(key=lambda a: a["reward"], reverse=not is_minimize)
                 keep = successful_arms[:1]  # Keep only 1 to encourage exploration
-                print(f"   [Planner] ⚠️ No components improved score - keeping only 1 for stability")
+                print("   [Planner] ⚠️ No components improved score - keeping only 1 for stability")
             else:
                 keep = []
-                print(f"   [Planner] ⚠️ No successful components - forcing full exploration")
+                print("   [Planner] ⚠️ No successful components - forcing full exploration")
 
         plan = []
 
@@ -3172,7 +3172,7 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
             ]
             return random.choice(mutations)
 
-        elif "xgboost" in model_lower or "xgb" in model_lower:
+        if "xgboost" in model_lower or "xgb" in model_lower:
             mutations = [
                 "learning_rate: [0.01, 0.05, 0.1]",
                 "max_depth: [4, 6, 8]",
@@ -3181,7 +3181,7 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
             ]
             return random.choice(mutations)
 
-        elif "catboost" in model_lower:
+        if "catboost" in model_lower:
             mutations = [
                 "learning_rate: [0.01, 0.03, 0.1]",
                 "depth: [4, 6, 8]",
@@ -3189,7 +3189,7 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
             ]
             return random.choice(mutations)
 
-        elif "neural" in model_lower or "mlp" in model_lower or "tabnet" in model_lower:
+        if "neural" in model_lower or "mlp" in model_lower or "tabnet" in model_lower:
             mutations = [
                 "learning_rate: [1e-4, 1e-3, 1e-2]",
                 "dropout: [0.1, 0.2, 0.3]",
@@ -3197,9 +3197,8 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
             ]
             return random.choice(mutations)
 
-        else:
-            # Generic mutations
-            return "try different hyperparameter values"
+        # Generic mutations
+        return "try different hyperparameter values"
 
     def _evaluate_plan_fitness(
         self,

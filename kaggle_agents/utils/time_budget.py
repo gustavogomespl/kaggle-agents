@@ -12,11 +12,10 @@ Research: FLAML achieves same performance with 10% computation via cost-frugal o
 
 from __future__ import annotations
 
-import json
 import time
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 
@@ -278,14 +277,14 @@ class TimeBudgetManager:
 
     def log_estimate(self, estimate: TimeEstimate) -> None:
         """Log time estimation for debugging."""
-        print(f"\n   TIME BUDGET ESTIMATION:")
+        print("\n   TIME BUDGET ESTIMATION:")
         print(f"      Calibration: {estimate.calibration_time:.2f}s on {estimate.sample_size:,} samples")
         print(f"      Estimated full: {estimate.estimated_full_time:.2f}s on {estimate.full_size:,} samples")
         print(f"      Time budget: {self.time_budget:.2f}s, remaining: {self.remaining_time:.2f}s")
 
         if estimate.estimated_full_time > self.time_budget * 0.8:
             safe_frac = estimate.get_safe_sample_fraction(self.time_budget)
-            print(f"      WARNING: Full training exceeds budget!")
+            print("      WARNING: Full training exceeds budget!")
             print(f"      Recommended sample fraction: {safe_frac:.1%}")
 
 

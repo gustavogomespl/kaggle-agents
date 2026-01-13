@@ -144,12 +144,11 @@ def select_cv_strategy(
     """
     if fast_mode or n_rows > 2_000_000:
         return {"n_folds": 3, "strategy": "kfold"}
-    elif n_rows > 500_000:
+    if n_rows > 500_000:
         return {"n_folds": 3, "strategy": "stratified_kfold"}
-    elif n_rows > 200_000:
+    if n_rows > 200_000:
         return {"n_folds": 4, "strategy": "stratified_kfold"}
-    else:
-        return {"n_folds": 5, "strategy": "stratified_kfold"}
+    return {"n_folds": 5, "strategy": "stratified_kfold"}
 
 
 def _deterministic_hash(value: str, seed: int = 42) -> int:
@@ -196,7 +195,7 @@ def _ensure_id_column(
         df["_row_id"] = df.index.astype(str)
         id_col = "_row_id"
         is_synthetic = True
-        print(f"[LOG:WARN] No ID column found, using synthetic '_row_id' for sampling")
+        print("[LOG:WARN] No ID column found, using synthetic '_row_id' for sampling")
 
     return df, id_col, is_synthetic
 
@@ -335,7 +334,7 @@ def prepare_canonical_data(
     canonical_dir = output_dir / "canonical"
     canonical_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\n   Preparing canonical data contract...")
+    print("\n   Preparing canonical data contract...")
 
     # Step 1: Load training data RAW (no transformations yet)
     train_df = pd.read_csv(train_path)
@@ -442,7 +441,7 @@ def prepare_canonical_data(
         # They have high-cardinality string targets that shouldn't be stratified
         is_classification = False
         n_unique = None  # Don't count unique strings (could be millions)
-        print(f"   Target type: seq2seq (string, non-classification)")
+        print("   Target type: seq2seq (string, non-classification)")
     else:
         # For tabular tasks (including string-labeled classification like "cat"/"dog")
         # Count unique values to determine if it's classification
@@ -488,7 +487,7 @@ def prepare_canonical_data(
     # Save targets - use allow_pickle=True for string/object arrays (seq2seq tasks)
     if target_is_string or y.dtype == object:
         np.save(canonical_dir / "y.npy", y, allow_pickle=True)
-        print(f"   Saved string targets (dtype=object) with allow_pickle=True")
+        print("   Saved string targets (dtype=object) with allow_pickle=True")
     else:
         np.save(canonical_dir / "y.npy", y)
 
@@ -872,8 +871,7 @@ np.save("models/oof_{{model_name}}.npy", oof)
 assert len(oof) == len(train_ids), "OOF must match canonical row count"
 ```
 '''
-    else:
-        return '''
+    return '''
 ## Note: Canonical Data Will Be Prepared
 
 The canonical data contract will be prepared before your component runs.

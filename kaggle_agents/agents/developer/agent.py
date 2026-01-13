@@ -429,9 +429,9 @@ class DeveloperAgent(
             # === STRICT VALIDATION OF MODEL ARTIFACTS ===
             # This replaces the old warning-only approach with comprehensive validation
             from kaggle_agents.utils.strict_validation import (
+                StrictValidationConfig,
                 validate_model_artifacts,
                 validate_prediction_quality,
-                StrictValidationConfig,
             )
 
             validation_config = StrictValidationConfig.from_env()
@@ -1303,7 +1303,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             try:
                 code_file.write_text(code)
                 print(f"Code saved to: {code_file.name}")
-            except Exception as e:
+            except Exception:
                 pass  # Continue even if save fails
 
         # Pre-execution validation: Check canonical data usage
@@ -1329,7 +1329,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                         artifacts_created=[],
                         errors=[canonical_error],
                     ), attempt_records
-                elif warnings:
+                if warnings:
                     for warning in warnings:
                         print(f"   Canonical data warning: {warning}")
             except Exception as exc:

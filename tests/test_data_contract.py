@@ -1,11 +1,8 @@
 """Tests for data contract utilities - deterministic sampling."""
 
-import tempfile
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import pytest
 
 from kaggle_agents.utils.data_contract import (
     _deterministic_hash,

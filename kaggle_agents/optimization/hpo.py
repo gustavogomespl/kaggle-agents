@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
+
 if TYPE_CHECKING:
     import optuna
 
@@ -31,7 +32,7 @@ def create_study(
     max_resource: int = 100,
     reduction_factor: int = 3,
     seed: int = 42,
-) -> "optuna.Study":
+) -> optuna.Study:
     """
     Create an Optuna study with multi-fidelity pruning.
 
@@ -82,7 +83,7 @@ def create_study(
 
 
 def suggest_lgbm_params(
-    trial: "optuna.Trial",
+    trial: optuna.Trial,
     max_depth_range: tuple[int, int] = (3, 12),
     n_estimators_range: tuple[int, int] = (100, 1000),
     learning_rate_range: tuple[float, float] = (0.01, 0.3),
@@ -113,7 +114,7 @@ def suggest_lgbm_params(
 
 
 def suggest_xgb_params(
-    trial: "optuna.Trial",
+    trial: optuna.Trial,
     max_depth_range: tuple[int, int] = (3, 12),
     n_estimators_range: tuple[int, int] = (100, 1000),
     learning_rate_range: tuple[float, float] = (0.01, 0.3),
@@ -143,7 +144,7 @@ def suggest_xgb_params(
     }
 
 
-def create_lgbm_pruning_callback(trial: "optuna.Trial", metric: str = "valid_0"):
+def create_lgbm_pruning_callback(trial: optuna.Trial, metric: str = "valid_0"):
     """
     Create a LightGBM callback for Optuna pruning.
 
@@ -177,7 +178,7 @@ def create_lgbm_pruning_callback(trial: "optuna.Trial", metric: str = "valid_0")
     return callback
 
 
-def create_xgb_pruning_callback(trial: "optuna.Trial"):
+def create_xgb_pruning_callback(trial: optuna.Trial):
     """
     Create an XGBoost callback for Optuna pruning.
 
@@ -195,7 +196,6 @@ def create_xgb_pruning_callback(trial: "optuna.Trial"):
     Returns:
         XGBoost callback object
     """
-    import optuna
     from optuna.integration import XGBoostPruningCallback
 
     return XGBoostPruningCallback(trial, observation_key="valid-logloss")

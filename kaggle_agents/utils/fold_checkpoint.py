@@ -231,7 +231,7 @@ class FoldCheckpointManager:
 
             # Verify compatibility
             if state.get("n_samples") != self.n_samples:
-                print(f"   Warning: Checkpoint n_samples mismatch, ignoring")
+                print("   Warning: Checkpoint n_samples mismatch, ignoring")
                 return
 
             # Load checkpoints
@@ -275,7 +275,7 @@ class FoldCheckpointManager:
                 f"Completed: {self.completed_folds}"
             )
 
-        print(f"\n   RECOVERING PARTIAL ENSEMBLE:")
+        print("\n   RECOVERING PARTIAL ENSEMBLE:")
         print(f"      Completed folds: {self.completed_folds} ({self.n_completed}/{self.min_folds} minimum)")
 
         # Initialize full OOF array

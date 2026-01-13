@@ -262,9 +262,8 @@ def deduplicate_for_merge(
     if agg_dict:
         # Aggregate duplicates
         return df.groupby(on, as_index=False).agg(agg_dict)
-    else:
-        # Drop duplicates
-        return df.drop_duplicates(subset=on, keep=keep)
+    # Drop duplicates
+    return df.drop_duplicates(subset=on, keep=keep)
 
 
 def validate_row_alignment(

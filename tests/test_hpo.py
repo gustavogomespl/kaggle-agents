@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+
 # Import directly from module file to avoid circular imports through __init__.py
 # This is a test-specific workaround
 _module_path = Path(__file__).parent.parent / "kaggle_agents" / "optimization"
@@ -12,6 +13,8 @@ sys.path.insert(0, str(_module_path.parent))
 
 # Direct import from hpo.py without going through __init__.py
 import importlib.util
+
+
 spec = importlib.util.spec_from_file_location("hpo", _module_path / "hpo.py")
 hpo_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hpo_module)

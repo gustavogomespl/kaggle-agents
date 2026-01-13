@@ -373,7 +373,7 @@ class ArtifactManager:
     def print_summary(self) -> None:
         """Print a summary of discovered artifacts."""
         summary = self.summary()
-        print(f"\n   Artifact Summary:")
+        print("\n   Artifact Summary:")
         print(f"      Total models: {summary['n_models']}")
         print(f"      With train_ids: {summary['with_train_ids']}")
         print(f"      With class_order: {summary['with_class_order']}")

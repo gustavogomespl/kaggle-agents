@@ -32,24 +32,22 @@ from .nodes.curriculum_learning import (
     inject_subtask_guidance,
 )
 from .nodes.prompt_refinement import prompt_refinement_node
-from .tools.kaggle_api import KaggleAPIClient
 from .tools.data_format_discovery import (
     DataFormatDiscoverer,
     detect_traditional_format,
 )
+from .tools.kaggle_api import KaggleAPIClient
 from .utils.data_audit import (
-    audit_audio_competition,
     AuditFailedError,
+    audit_audio_competition,
     print_audit_report,
 )
 from .utils.data_contract import prepare_canonical_data
-from .utils.submission_format import (
-    detect_audio_submission_format,
-    print_format_info,
-)
 from .utils.precomputed_features import (
     detect_precomputed_features,
-    print_features_info,
+)
+from .utils.submission_format import (
+    detect_audio_submission_format,
 )
 
 
@@ -784,7 +782,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
 
     if is_text_norm:
         task_type = "text_normalization"
-        print(f"   Task type: text_normalization (detected from competition name)")
+        print("   Task type: text_normalization (detected from competition name)")
     elif domain in seq2seq_domains:
         # Map generic seq_to_seq to specific type if possible
         task_type = domain if domain != "seq_to_seq" else "seq2seq"
@@ -804,7 +802,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             task_type=task_type,
         )
 
-        print(f"\n   Canonical data artifacts created:")
+        print("\n   Canonical data artifacts created:")
         print(f"      train_ids: {canonical_result['metadata']['canonical_rows']:,} rows")
         print(f"      n_folds: {canonical_result['metadata']['n_folds']}")
         print(f"      n_features: {canonical_result['metadata']['n_features']}")
@@ -1250,12 +1248,11 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
             if has_gold:
                 print("   🥇 GOLD MEDAL ACHIEVED - Ending")
                 return "end"
-            elif current_iteration >= max_iterations:
+            if current_iteration >= max_iterations:
                 print(f"   ⏱️  Max iterations reached with medal ({current_iteration}/{max_iterations})")
                 return "end"
-            else:
-                # Reset skip flag and continue refining for better medal
-                print(f"   🔄 Medal achieved but continuing for gold (iteration {current_iteration + 1}/{max_iterations})")
+            # Reset skip flag and continue refining for better medal
+            print(f"   🔄 Medal achieved but continuing for gold (iteration {current_iteration + 1}/{max_iterations})")
                 # Note: State update happens in iteration_control_node, not here
         else:
             print("   ⏩ skip_remaining_components=True - Ending")
@@ -1328,7 +1325,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
             # Respect min_iterations before early stopping
             if iter_config.adaptive_iterations and current_iteration < iter_config.min_iterations:
                 print(f"   🎯 Goal achieved but below min_iterations ({current_iteration}/{iter_config.min_iterations})")
-                print(f"      Continuing to consolidate improvements...")
+                print("      Continuing to consolidate improvements...")
                 return "refine"
             print(f"   ✅ Goal achieved: {current_score:.4f} vs target {target_score:.4f}")
             return "end"

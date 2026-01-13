@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import functools
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -82,7 +82,7 @@ class PredictionArtifact(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_shapes_compatible(self) -> "PredictionArtifact":
+    def validate_shapes_compatible(self) -> PredictionArtifact:
         """Ensure OOF and test have compatible column counts."""
         # OOF and test should have same number of columns
         if len(self.oof_shape) == 2 and len(self.test_shape) == 2:
@@ -150,7 +150,7 @@ class EnsembleResult(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_weights_match_models(self) -> "EnsembleResult":
+    def validate_weights_match_models(self) -> EnsembleResult:
         """Ensure weights count matches model count."""
         if self.weights is not None:
             if len(self.weights) != self.n_models_used:
@@ -160,7 +160,7 @@ class EnsembleResult(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_model_names_match_count(self) -> "EnsembleResult":
+    def validate_model_names_match_count(self) -> EnsembleResult:
         """Ensure model names count matches n_models_used."""
         if len(self.model_names) != self.n_models_used:
             raise ValueError(

@@ -1,16 +1,14 @@
 """Tests for submission format detection."""
 
-import tempfile
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
 from kaggle_agents.utils.submission_format import (
     SubmissionFormatInfo,
+    _detect_multiplier_pattern,
     detect_audio_submission_format,
     generate_submission_code_hint,
-    _detect_multiplier_pattern,
 )
 
 

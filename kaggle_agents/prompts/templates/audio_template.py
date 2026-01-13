@@ -56,10 +56,9 @@ def get_audio_config(domain: str = "general") -> dict:
 
     if domain_lower in ("bird", "birds", "avian", "bird_classification", "wildlife"):
         return BIRD_AUDIO_CONFIG
-    elif domain_lower in ("music", "song", "musical"):
+    if domain_lower in ("music", "song", "musical"):
         return MUSIC_AUDIO_CONFIG
-    else:
-        return GENERAL_AUDIO_CONFIG
+    return GENERAL_AUDIO_CONFIG
 
 
 # Audio preprocessing configuration constants (default to general)

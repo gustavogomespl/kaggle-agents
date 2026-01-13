@@ -325,7 +325,7 @@ for i, col in enumerate({format_info.target_columns}):
 submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
 '''
 
-    elif format_info.format_type == "long" and format_info.id_multiplier:
+    if format_info.format_type == "long" and format_info.id_multiplier:
         return f'''# Long format submission (MLSP style)
 # ID pattern: {format_info.id_pattern}
 # predictions shape: (num_samples, {format_info.num_classes})
@@ -341,8 +341,7 @@ submission['{format_info.target_columns[0]}'] = submission['{format_info.id_colu
 submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
 '''
 
-    else:
-        return f'''# Long format submission (pattern: {format_info.id_pattern or 'unknown'})
+    return f'''# Long format submission (pattern: {format_info.id_pattern or 'unknown'})
 # Adjust mapping based on your specific ID format
 submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 # TODO: Map predictions to submission IDs

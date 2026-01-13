@@ -12,19 +12,14 @@ from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.model_selection import cross_val_predict
 
 from ..core.config import get_config, is_metric_minimization
-from ..core.state import KaggleState
-from ..utils.artifact_manager import ArtifactManager
-from ..utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
-from ..utils.data_contract import load_canonical_data
-from ..utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
 from ..core.contracts import (
-    EnsembleInput,
-    EnsembleResult,
     PredictionArtifact,
     validate_prediction_artifacts,
 )
+from ..core.state import KaggleState
+from ..utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
 from ..utils.csv_utils import read_csv_auto
-from ..utils.fold_checkpoint import FoldCheckpointManager
+from ..utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
 from ..utils.llm_utils import get_text_content
 from ..utils.oof_validation import print_oof_summary, validate_class_order, validate_oof_stack
 
@@ -164,8 +159,7 @@ class EnsembleAgent:
                 if strict_mode:
                     skip_reasons.append(msg)
                     continue
-                else:
-                    print(f"   ⚠️ {msg} - including with caution")
+                print(f"   ⚠️ {msg} - including with caution")
 
             # 2. Verify train_ids (row order)
             train_ids_path = models_dir / f"train_ids_{name}.npy"
@@ -178,13 +172,12 @@ class EnsembleAgent:
                 except Exception as e:
                     skip_reasons.append(f"{name}: Failed to load train_ids: {e}")
                     continue
+            # Metadata missing: warn but include in lenient mode
+            elif strict_mode:
+                skip_reasons.append(f"{name}: Missing train_ids file (strict mode)")
+                continue
             else:
-                # Metadata missing: warn but include in lenient mode
-                if strict_mode:
-                    skip_reasons.append(f"{name}: Missing train_ids file (strict mode)")
-                    continue
-                else:
-                    print(f"   ⚠️ {name}: Missing train_ids file - including with caution")
+                print(f"   ⚠️ {name}: Missing train_ids file - including with caution")
 
             valid_pairs[name] = (oof_path, test_path)
 
@@ -281,16 +274,15 @@ class EnsembleAgent:
                     if y_true.ndim > 1 and y_true.shape[1] > 1:
                         # 2D probability array - convert to class labels
                         y_true = np.argmax(y_true, axis=1)
+                    # 1D - might be probabilities or actual numeric labels
+                    # If values are close to integers 0,1,2..., treat as labels
+                    elif np.allclose(y_true, y_true.astype(int)):
+                        y_true = y_true.astype(int)
                     else:
-                        # 1D - might be probabilities or actual numeric labels
-                        # If values are close to integers 0,1,2..., treat as labels
-                        if np.allclose(y_true, y_true.astype(int)):
-                            y_true = y_true.astype(int)
-                        else:
-                            raise ValueError(
-                                f"y_true appears to be probabilities, not class labels. "
-                                f"Values: {y_true[:5]}"
-                            )
+                        raise ValueError(
+                            f"y_true appears to be probabilities, not class labels. "
+                            f"Values: {y_true[:5]}"
+                        )
                 else:
                     # Float values outside [0,1] - likely actual labels, convert to int
                     y_true = y_true.astype(int)
@@ -432,7 +424,7 @@ class EnsembleAgent:
         Returns:
             Tuple of (fitted_model, metric_name)
         """
-        from sklearn.metrics import log_loss, mean_squared_error, roc_auc_score
+        from sklearn.metrics import log_loss, mean_squared_error
         from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
 
         # Detect number of classes if not provided
@@ -550,7 +542,7 @@ class EnsembleAgent:
 
         # If order differs, reorder to match sample
         if not sub_df[id_col].equals(sample_df[id_col]):
-            print(f"      [LOG:INFO] Reordering submission to match sample_submission ID order")
+            print("      [LOG:INFO] Reordering submission to match sample_submission ID order")
             # Reorder using merge
             sub_df = sample_df[[id_col]].merge(sub_df, on=id_col, how='left')
 
@@ -595,16 +587,14 @@ class EnsembleAgent:
             if is_valid:
                 print(f"      ✅ Validated and restored submission to {dest_path}")
                 return True
-            else:
-                print(f"      ⚠️ Submission validation failed: {error_msg}")
-                print(f"      Copying without validation as fallback...")
-                shutil.copy(source_path, dest_path)
-                return True
-        else:
-            # No sample_submission available, just copy
+            print(f"      ⚠️ Submission validation failed: {error_msg}")
+            print("      Copying without validation as fallback...")
             shutil.copy(source_path, dest_path)
-            print(f"      ✅ Restored submission to {dest_path} (no validation)")
             return True
+        # No sample_submission available, just copy
+        shutil.copy(source_path, dest_path)
+        print(f"      ✅ Restored submission to {dest_path} (no validation)")
+        return True
 
     def _load_and_align_oof(
         self,
@@ -759,7 +749,7 @@ class EnsembleAgent:
                 intercept = float(np.mean(intercept))
             diagnostics["intercept"] = intercept
 
-        print(f"\n   STACKING DIAGNOSTICS:")
+        print("\n   STACKING DIAGNOSTICS:")
         print(f"      Model coefficients: {diagnostics['coefficients']}")
         if diagnostics["intercept"] is not None:
             print(f"      Intercept: {diagnostics['intercept']:.4f}")
@@ -840,12 +830,12 @@ class EnsembleAgent:
         # QW4: Strict validation - reject if overlap is too low
         if overlap_pct < 50:
             print(f"      ❌ CRITICAL: {model_name} has only {overlap_pct:.1f}% ID overlap!")
-            print(f"         Model trained on different data - EXCLUDING from ensemble")
+            print("         Model trained on different data - EXCLUDING from ensemble")
             return None
 
         if overlap_pct < 80:
             print(f"      ⚠️ WARNING: {model_name} has low ID overlap ({overlap_pct:.1f}%)")
-            print(f"         Ensemble may be degraded - model used different sampling")
+            print("         Ensemble may be degraded - model used different sampling")
 
         # Initialize aligned OOF with zeros
         if oof.ndim > 1:
@@ -890,7 +880,7 @@ class EnsembleAgent:
         if not checkpoints_dir.exists():
             return recovered
 
-        print(f"\n   CHECKPOINT RECOVERY:")
+        print("\n   CHECKPOINT RECOVERY:")
         print(f"      Scanning {checkpoints_dir}")
 
         # Find checkpoint state files
@@ -1095,7 +1085,7 @@ class EnsembleAgent:
                 return None, None  # Will fall through to standard method
 
         # Step 3: Fallback to best single model
-        print(f"      Still insufficient models, falling back to best single model")
+        print("      Still insufficient models, falling back to best single model")
         return self._fallback_to_best_single_model(models_dir, problem_type)
 
     def _constrained_meta_learner(
@@ -1359,7 +1349,7 @@ class EnsembleAgent:
             model_names = list(valid_pairs.keys())[: len(oof_list)]
 
             if len(oof_shapes) > 1 or len(test_shapes) > 1:
-                print(f"   ⚠️ Shape mismatch detected after normalization:")
+                print("   ⚠️ Shape mismatch detected after normalization:")
                 print(f"      OOF shapes: {oof_shapes}")
                 print(f"      Test shapes: {test_shapes}")
 
@@ -1454,7 +1444,7 @@ class EnsembleAgent:
                 print("      → Forcing fallback to simple average")
                 best_method = "average"
             elif meta_score > avg_score:
-                print(f"   ℹ️ Meta-model slightly worse than average, using average")
+                print("   ℹ️ Meta-model slightly worse than average, using average")
                 best_method = "average"
 
         print(f"   [META] Best method: {best_method}")

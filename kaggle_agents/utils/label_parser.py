@@ -97,7 +97,7 @@ class RobustLabelParser:
                 dialect = csv.Sniffer().sniff(sample, delimiters=",\t ;|")
                 delimiter = dialect.delimiter
                 has_header = csv.Sniffer().has_header(sample)
-                self._log(f"Sniffer detected delimiter={repr(delimiter)}, header={has_header}")
+                self._log(f"Sniffer detected delimiter={delimiter!r}, header={has_header}")
             except csv.Error:
                 # Fallback: count delimiter occurrences in first line
                 self._log("csv.Sniffer failed, using fallback detection")
@@ -118,7 +118,7 @@ class RobustLabelParser:
             elif delimiter == ";":
                 format_type = "csv_semicolon"
             else:
-                format_type = f"delimited_{repr(delimiter)}"
+                format_type = f"delimited_{delimiter!r}"
 
             # Count columns and detect header
             first_fields = self._split_line(lines[0], delimiter)
@@ -162,8 +162,7 @@ class RobustLabelParser:
         if delimiter == " ":
             # For space delimiter, split by any whitespace
             return [f.strip() for f in re.split(r"\s+", line.strip()) if f.strip()]
-        else:
-            return [f.strip() for f in line.split(delimiter)]
+        return [f.strip() for f in line.split(delimiter)]
 
     def _is_numeric(self, s: str) -> bool:
         """Check if string is numeric (int or float)."""
@@ -491,7 +490,7 @@ def parse_mlsp_multilabel(
 
     file_path = Path(file_path)
 
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+    with open(file_path, encoding="utf-8", errors="replace") as f:
         lines = f.readlines()
 
     # Skip header if present (first char is not a digit)

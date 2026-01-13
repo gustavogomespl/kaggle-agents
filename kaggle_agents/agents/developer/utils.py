@@ -229,8 +229,8 @@ class DeveloperUtilsMixin:
         if domain == "audio" and component_type in ("model", "preprocessing"):
             try:
                 from ...prompts.templates.audio_template import (
-                    AUDIO_CONSTRAINTS,
                     AUDIO_CONFIG_TEMPLATE,
+                    AUDIO_CONSTRAINTS,
                     AUDIO_LOAD_TEMPLATE,
                     AUDIO_MELSPEC_TEMPLATE,
                 )

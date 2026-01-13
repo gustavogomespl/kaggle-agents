@@ -73,7 +73,7 @@ class LookupBaseline:
         class_col: str = "class",
         before_col: str = "before",
         after_col: str = "after",
-    ) -> "LookupBaseline":
+    ) -> LookupBaseline:
         """
         Build lookup table from training data.
 
@@ -172,17 +172,16 @@ class LookupBaseline:
         if fallback == "<self>":
             # Deterministic: keep as-is
             return before_val, True
-        elif fallback == "<spell>":
+        if fallback == "<spell>":
             # Spell out letters: "ABC" -> "a b c"
             spelled = " ".join(before_val.lower())
             return spelled, True
-        elif fallback:
+        if fallback:
             # Used class-level fallback, may need neural refinement
             is_ambiguous = str(class_val) in AMBIGUOUS_CLASSES
             return fallback, not is_ambiguous
-        else:
-            # Unknown class, keep as-is
-            return before_val, False
+        # Unknown class, keep as-is
+        return before_val, False
 
     def predict_batch(
         self,
@@ -282,7 +281,7 @@ class LookupBaseline:
         print(f"[LookupBaseline] Saved to {path}")
 
     @classmethod
-    def load(cls, path: str | Path) -> "LookupBaseline":
+    def load(cls, path: str | Path) -> LookupBaseline:
         """Load lookup table from file."""
         with open(path) as f:
             data = json.load(f)

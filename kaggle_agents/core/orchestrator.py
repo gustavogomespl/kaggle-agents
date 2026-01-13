@@ -5,6 +5,8 @@ This module provides a high-level interface for running
 the complete agent pipeline with progress tracking and control.
 """
 
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -13,7 +15,6 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from ..workflow import run_simple_workflow, run_workflow
 from .config import get_competition_dir, get_config
 from .state import KaggleState
 
@@ -92,6 +93,9 @@ class KaggleOrchestrator:
         self._display_header(competition_name, problem_type, evaluation_metric)
 
         try:
+            # Lazy import to avoid circular dependency
+            from ..workflow import run_simple_workflow, run_workflow
+
             # Run workflow
             if simple_mode:
                 final_state = run_simple_workflow(

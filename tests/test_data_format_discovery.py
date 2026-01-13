@@ -2,11 +2,8 @@
 Tests for data format discovery tool.
 """
 
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 from kaggle_agents.tools.data_format_discovery import (
     DataFormatDiscoverer,
@@ -306,8 +303,8 @@ class TestAudioDomainDetection:
         - train/test dirs have spectrogram images (.bmp)
         - Audio files (.wav) are in essential_data/src_wavs/
         """
-        from kaggle_agents.domain.detector import DomainDetector
         from kaggle_agents.core.state import CompetitionInfo
+        from kaggle_agents.domain.detector import DomainDetector
 
         # Create train/test with spectrograms (images)
         train_dir = tmp_path / "train"
@@ -348,8 +345,8 @@ class TestAudioDomainDetection:
 
     def test_detects_audio_when_only_audio_files_exist(self, tmp_path: Path) -> None:
         """Should detect audio_classification when only audio files exist."""
-        from kaggle_agents.domain.detector import DomainDetector
         from kaggle_agents.core.state import CompetitionInfo
+        from kaggle_agents.domain.detector import DomainDetector
 
         # Create audio files directory
         audio_dir = tmp_path / "audio"
@@ -373,8 +370,8 @@ class TestAudioDomainDetection:
 
     def test_audio_in_nested_directory_detected(self, tmp_path: Path) -> None:
         """Should detect audio files in deeply nested directories."""
-        from kaggle_agents.domain.detector import DomainDetector
         from kaggle_agents.core.state import CompetitionInfo
+        from kaggle_agents.domain.detector import DomainDetector
 
         # Create deeply nested audio directory (like essential_data/src_wavs/)
         nested = tmp_path / "data" / "raw" / "audio"
@@ -397,8 +394,8 @@ class TestAudioDomainDetection:
 
     def test_pure_image_competition_still_detected(self, tmp_path: Path) -> None:
         """Should still correctly detect image_classification when no audio exists."""
-        from kaggle_agents.domain.detector import DomainDetector
         from kaggle_agents.core.state import CompetitionInfo
+        from kaggle_agents.domain.detector import DomainDetector
 
         # Create image directories (no audio)
         train_dir = tmp_path / "train"

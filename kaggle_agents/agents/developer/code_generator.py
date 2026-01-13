@@ -159,10 +159,10 @@ class CodeGeneratorMixin:
             # First check for train.csv in working_dir
             if (working_dir / "train.csv").exists():
                 resolved_train = working_dir / "train.csv"
-                print(f"   ✓ Found train.csv in working_dir")
+                print("   ✓ Found train.csv in working_dir")
             elif (working_dir / "train").exists():
                 resolved_train = working_dir / "train"
-                print(f"   ✓ Found train/ directory in working_dir")
+                print("   ✓ Found train/ directory in working_dir")
             else:
                 # Search subdirectories
                 for subdir_name in data_subdirs:
@@ -200,7 +200,7 @@ class CodeGeneratorMixin:
             # For audio/image competitions, test data might be in same dir as train
             elif resolved_train.is_dir() and resolved_train != train_path:
                 resolved_test = resolved_train
-                print(f"   ℹ️ Using train directory for test data (shared)")
+                print("   ℹ️ Using train directory for test data (shared)")
 
         return resolved_train, resolved_test
 
@@ -290,7 +290,7 @@ class CodeGeneratorMixin:
             for pattern in patterns:
                 code_after_header = re.sub(
                     pattern,
-                    rf"# STRIPPED (path constant): \1",
+                    r"# STRIPPED (path constant): \1",
                     code_after_header,
                     flags=re.MULTILINE,
                 )

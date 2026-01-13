@@ -196,7 +196,7 @@ def _get_feature_info(file_path: Path) -> tuple[tuple[int, ...] | None, list[str
             # Try to read first few rows to get shape
             df = pd.read_csv(file_path, nrows=5)
             # Get full row count by counting lines
-            with open(file_path, 'r') as f:
+            with open(file_path) as f:
                 num_rows = sum(1 for _ in f) - 1  # Subtract header
             shape = (num_rows, len(df.columns))
             columns = list(df.columns)
@@ -345,7 +345,7 @@ def generate_feature_loading_code(features_info: PrecomputedFeaturesInfo) -> str
             code_lines.append(f"{ft}_df = pd.read_parquet(Path('{path}'))")
         elif ext == ".npy":
             code_lines.append(f"{ft}_arr = np.load(Path('{path}'))")
-            code_lines.append(f"# Convert to DataFrame if needed:")
+            code_lines.append("# Convert to DataFrame if needed:")
             code_lines.append(f"# {ft}_df = pd.DataFrame({ft}_arr, columns=[f'{ft}_{{i}}' for i in range({ft}_arr.shape[1])])")
         elif ext == ".npz":
             code_lines.append(f"{ft}_data = np.load(Path('{path}'))")

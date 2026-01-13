@@ -76,26 +76,25 @@ Mixed precision training. Save full model to models/best_model.pth.""",
                     "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv with N_CLASSES columns",
                 },
             ]
-        else:
-            # Standard (non-medical) fast mode
-            return [
-                {
-                    "name": f"efficientnet_b0_fast_{task}",
-                    "component_type": "model",
-                    "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern. Save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras).",
-                    "estimated_impact": 0.30,
-                    "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
-                    "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras), implement _check_deadline() pattern",
-                },
-                {
-                    "name": "tta_inference_only",
-                    "component_type": "ensemble",
-                    "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.* (auto-detect extension) and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
-                    "estimated_impact": 0.05,
-                    "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
-                    "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
-                },
-            ]
+        # Standard (non-medical) fast mode
+        return [
+            {
+                "name": f"efficientnet_b0_fast_{task}",
+                "component_type": "model",
+                "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern. Save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras).",
+                "estimated_impact": 0.30,
+                "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
+                "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save full model to models/best_model.pth (PyTorch) or models/best_model.keras (Keras), implement _check_deadline() pattern",
+            },
+            {
+                "name": "tta_inference_only",
+                "component_type": "ensemble",
+                "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained full model from models/best_model.* (auto-detect extension) and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
+                "estimated_impact": 0.05,
+                "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
+                "code_outline": "Load full model from models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
+            },
+        ]
 
     # NORMAL MODE: 3 components (2 models + TTA ensemble)
     return [

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import csv
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -156,7 +156,7 @@ def detect_label_format(file_path: Path, sample_lines: int = 20) -> dict[str, An
         elif result["delimiter"] == " ":
             result["format_type"] = "txt_space"
         else:
-            result["format_type"] = f"delimited_{repr(result['delimiter'])}"
+            result["format_type"] = f"delimited_{result['delimiter']!r}"
 
         # Count columns
         if lines:

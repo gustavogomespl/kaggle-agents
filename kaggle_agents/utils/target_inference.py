@@ -155,7 +155,7 @@ binary_preds = (predictions > 0.5).astype(int)
 ```
 """
 
-    elif target_type == "multi_target":
+    if target_type == "multi_target":
         return """
 ## Multi-Target Regression
 
@@ -173,8 +173,8 @@ print(f"Final Validation Performance: {final_score:.6f}")
 ```
 """
 
-    else:  # single
-        return """
+    # single
+    return """
 ## Single Target
 
 Standard classification/regression:
@@ -184,7 +184,7 @@ Standard classification/regression:
 
 
 def validate_predictions_shape(
-    predictions: "np.ndarray",  # type: ignore
+    predictions: np.ndarray,  # type: ignore
     target_info: TargetInfo,
     stage: str = "validation",
 ) -> tuple[bool, str]:

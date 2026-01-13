@@ -32,7 +32,7 @@ def detect_delimiter(file_path: Path | str, sample_lines: int = 5) -> str:
     """
     file_path = Path(file_path)
 
-    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+    with open(file_path, encoding="utf-8", errors="replace") as f:
         sample = "".join(f.readline() for _ in range(sample_lines))
 
     # Try csv.Sniffer first (most reliable)

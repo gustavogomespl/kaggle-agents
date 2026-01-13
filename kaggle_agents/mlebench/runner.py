@@ -148,8 +148,8 @@ class MLEBenchRunner:
                     "valid_submission": False,
                     "error": (
                         "MLE-bench private directory is empty - ground truth data not available for grading. "
-                        "Run 'mlebench prepare {competition}' to download full dataset."
-                    ).format(competition=competition_id),
+                        f"Run 'mlebench prepare {competition_id}' to download full dataset."
+                    ),
                     "grading_unavailable": True,
                 }
 
