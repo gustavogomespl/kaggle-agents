@@ -722,13 +722,15 @@ def validate_canonical_data_usage(
     uses_canonical = any(re.search(p, generated_code) for p in canonical_patterns)
 
     # Anti-patterns: things that suggest independent data handling
+    # NOTE: shuffle=True is intentionally NOT blocked here because DataLoader(shuffle=True)
+    # is standard practice for batch randomization and does NOT affect canonical fold alignment.
+    # Actual fold shuffling violations are caught by KFold/StratifiedKFold patterns above.
     anti_patterns = [
         (r"train_test_split\s*\(", "Using train_test_split - should use canonical folds"),
         (r"StratifiedKFold\s*\(", "Creating new folds - should use canonical folds"),
         (r"KFold\s*\(", "Creating new folds - should use canonical folds"),
         (r"GroupKFold\s*\(", "Creating new folds - should use canonical folds"),
         (r"\.sample\s*\(", "Sampling data - may cause alignment issues with canonical"),
-        (r"shuffle\s*=\s*True", "Shuffling data - may cause alignment issues"),
     ]
 
     violations = []
