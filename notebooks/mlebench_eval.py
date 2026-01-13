@@ -122,8 +122,8 @@ MLEBENCH_LITE = [
     },
     {
         "id": "tabular-playground-series-may-2022",
-        "type": "regression",
-        "metric": "rmse",
+        "type": "binary_classification",
+        "metric": "auc",
         "size_gb": 0.57,
     },
     # Audio
