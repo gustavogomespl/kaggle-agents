@@ -7,7 +7,11 @@ from __future__ import annotations
 import os
 
 from ....core.config import is_metric_minimization
-from .budget import build_budget_instructions, build_mlebench_objective_instructions
+from .budget import (
+    build_budget_instructions,
+    build_mlebench_objective_instructions,
+    build_timeout_safe_training_instructions,
+)
 from .cv import build_cv_instructions, build_stacking_oof_instructions
 from .ensemble import build_ensemble_instructions
 from .feature_eng import build_feature_engineering_instructions
@@ -579,6 +583,11 @@ def build_model_component_instructions(
             "  ✅ ALWAYS map predictions to IDs using dict(zip(test_ids, preds))",
         ]
     )
+
+    # Timeout-safe training for long-running image/audio components
+    # Epochs can take 20+ minutes, so we need pre-epoch timeout checks
+    if is_image or is_audio:
+        instructions.extend(build_timeout_safe_training_instructions())
 
     return instructions
 
