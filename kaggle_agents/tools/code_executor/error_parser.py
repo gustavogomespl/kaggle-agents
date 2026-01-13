@@ -92,9 +92,31 @@ class ErrorParserMixin:
             return ""
 
         drop_patterns = [
+            # CUDA factory registration warnings
             r"Unable to register cuFFT factory",
             r"Unable to register cuDNN factory",
             r"Unable to register cuBLAS factory",
+            # TensorFlow INFO/WARNING logs (written to stderr by default)
+            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+: [IWE] tensorflow/",
+            r"^[IWE]\d+ .*tensorflow/",
+            r"^[IWE]\d+ .*cuda_dnn\.cc",
+            r"^[IWE]\d+ .*cuda_blas\.cc",
+            r"^[IWE]\d+ .*cuda_fft\.cc",
+            r"^[IWE]\d+ .*device_compiler",
+            r"^[IWE]\d+ .*service\.cc",
+            r"^[IWE]\d+ .*gpu_device\.cc",
+            r"This TensorFlow binary is optimized",
+            r"oneDNN custom operations are on",
+            r"computation placer already registered",
+            r"Registers are spilled to local memory",
+            r"TF_FORCE_GPU_ALLOW_GROWTH",
+            r"XLA service.*initialized for platform",
+            r"StreamExecutor device",
+            r"Compiled cluster using XLA",
+            r"ptxas warning",
+            r"disabling MLIR crash reproducer",
+            r"Loaded cuDNN version",
+            r"Created device /job:localhost",
         ]
 
         kept_lines: list[str] = []

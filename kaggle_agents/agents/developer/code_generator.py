@@ -33,6 +33,7 @@ IMMUTABLE_PATH_VARS = [
     "MODELS_DIR",
     "OUTPUT_DIR",
     "SAMPLE_SUBMISSION_PATH",
+    "SUBMISSION_PATH",
     "AUDIO_SOURCE_DIR",
     "LABEL_FILES",
     # Canonical data contract paths

@@ -737,6 +737,15 @@ def validate_canonical_data_usage(
             # Exception: If it's used to create canonical data, that's OK
             if "prepare_canonical_data" in generated_code:
                 continue
+            # Exception: train_test_split for Optuna subsampling is OK
+            # (subsampling for speed, not creating CV splits)
+            if "train_test_split" in pattern:
+                is_optuna_subsample = (
+                    "optuna" in generated_code.lower()
+                    and re.search(r"train_size\s*=\s*0\.[0-4]", generated_code)
+                )
+                if is_optuna_subsample and uses_canonical:
+                    continue
             violations.append(message)
 
     # Model components MUST use canonical data (STRICT ENFORCEMENT)
