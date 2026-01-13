@@ -552,6 +552,7 @@ TEST_PATH = Path("{resolved_test_path}")
 SAMPLE_SUBMISSION_PATH = Path("{sample_submission_path}")
 MODELS_DIR = Path("{models_dir}")
 OUTPUT_DIR = Path("{working_dir}")
+SUBMISSION_PATH = OUTPUT_DIR / "submission.csv"
 COMPONENT_NAME = "{component.name.replace(" ", "_").lower()}"
 
 # Create models directory
