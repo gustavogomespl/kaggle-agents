@@ -14,6 +14,26 @@ from .base import (
     merge_dict,
 )
 
+# Contracts (Source of Truth) - PR1
+from .contracts import (
+    CanonicalDataContract,
+    DataUsageContract,
+    EvalFidelityContract,
+    MetricContract,
+    SubmissionContract,
+    create_metric_contract,
+    create_submission_contract_from_sample,
+)
+
+# MLE-STAR Registries - PR2
+from .ablation import AblationExecution, AblationHistory
+from .checks import CheckResult, RobustnessChecks
+from .model_registry import ModelRegistry, RegisteredModel
+from .registry import CodeBlock, CodeBlockRegistry
+
+# Artifact Index - PR3
+from .artifacts import ArtifactIndex, ArtifactRef
+
 # Competition types
 from .competition import (
     AblationComponent,
@@ -66,6 +86,26 @@ __all__ = [
     # Types
     "DomainType",
     "SubmissionFormatType",
+    # Contracts (Source of Truth) - PR1
+    "MetricContract",
+    "CanonicalDataContract",
+    "SubmissionContract",
+    "EvalFidelityContract",
+    "DataUsageContract",
+    "create_metric_contract",
+    "create_submission_contract_from_sample",
+    # MLE-STAR Registries - PR2
+    "CodeBlock",
+    "CodeBlockRegistry",
+    "AblationExecution",
+    "AblationHistory",
+    "RegisteredModel",
+    "ModelRegistry",
+    "CheckResult",
+    "RobustnessChecks",
+    # Artifact Index - PR3
+    "ArtifactRef",
+    "ArtifactIndex",
     # Competition
     "AblationComponent",
     "CompetitionInfo",

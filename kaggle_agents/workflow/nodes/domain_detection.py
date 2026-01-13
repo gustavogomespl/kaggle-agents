@@ -6,6 +6,12 @@ from pathlib import Path
 from typing import Any
 
 from ...core.state import KaggleState
+from ...core.state.contracts import (
+    MetricContract,
+    SubmissionContract,
+    create_metric_contract,
+    create_submission_contract_from_sample,
+)
 from ...domain import detect_competition_domain
 
 
@@ -164,6 +170,41 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
 
     competition_info.domain = domain
 
+    # ========================================================================
+    # CREATE METRIC CONTRACT (Single Source of Truth for evaluation)
+    # ========================================================================
+    metric_contract_dict = None
+    metric_name = getattr(competition_info, "evaluation_metric", None) or "unknown"
+    if metric_name and metric_name != "unknown":
+        try:
+            metric_contract = create_metric_contract(metric_name)
+            metric_contract_dict = metric_contract.to_dict()
+            print(f"\n   MetricContract created:")
+            print(f"      metric: {metric_name}")
+            print(f"      is_lower_better: {metric_contract.is_lower_better}")
+        except Exception as e:
+            print(f"   Warning: Could not create MetricContract: {e}")
+
+    # ========================================================================
+    # CREATE SUBMISSION CONTRACT (Schema validation for submissions)
+    # ========================================================================
+    submission_contract_dict = None
+    sample_sub_path = (
+        data_files.get("sample_submission", "")
+        or state.get("sample_submission_path", "")
+    )
+    if sample_sub_path and Path(sample_sub_path).exists():
+        try:
+            submission_contract = create_submission_contract_from_sample(sample_sub_path)
+            submission_contract_dict = submission_contract.to_dict()
+            print(f"\n   SubmissionContract created:")
+            print(f"      id_col: {submission_contract.id_col}")
+            print(f"      target_cols: {submission_contract.target_cols[:3]}{'...' if len(submission_contract.target_cols) > 3 else ''}")
+            print(f"      expected_rows: {submission_contract.expected_rows}")
+            print(f"      format_type: {submission_contract.format_type}")
+        except Exception as e:
+            print(f"   Warning: Could not create SubmissionContract: {e}")
+
     return {
         "domain_detected": domain,
         "domain_confidence": confidence,
@@ -172,5 +213,7 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
         "submission_format": {"type": submission_format_type, **submission_format_metadata}
         if submission_format_type
         else {},
+        "metric_contract": metric_contract_dict,
+        "submission_contract": submission_contract_dict,
         "last_updated": datetime.now(),
     }

@@ -1,10 +1,14 @@
 """Canonical data preparation node for the Kaggle Agents workflow."""
 
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from ...core.state import KaggleState
+from ...core.state.contracts import CanonicalDataContract
 from ...utils.data_contract import prepare_canonical_data
 
 
@@ -119,6 +123,51 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
         if canonical_result["metadata"].get("group_col"):
             print(f"      Group column: {canonical_result['metadata']['group_col']} (GroupKFold)")
 
+        # Compute hashes for fingerprinting
+        train_ids_arr = np.load(canonical_result["train_ids_path"], allow_pickle=True)
+        y_arr = np.load(canonical_result["y_path"], allow_pickle=True)
+        folds_arr = np.load(canonical_result["folds_path"])
+
+        train_ids_hash = CanonicalDataContract.compute_array_hash(train_ids_arr)
+        y_hash = CanonicalDataContract.compute_array_hash(y_arr)
+        folds_hash = CanonicalDataContract.compute_array_hash(folds_arr)
+
+        # Compute schema hash from feature columns
+        # NOTE: Schema hash currently uses placeholder dtypes ("unknown") instead of actual dtypes.
+        # This means the hash will detect column additions/removals/reordering but NOT dtype changes.
+        # Loading actual dtypes would require reading the full dataset which is expensive.
+        # For full dtype validation, compare against the original train.csv at runtime.
+        with open(canonical_result["feature_cols_path"]) as f:
+            feature_cols = json.load(f)
+        train_schema_hash = CanonicalDataContract.compute_schema_hash(
+            columns=feature_cols, dtypes=["unknown"] * len(feature_cols)
+        )
+
+        # Create CanonicalDataContract
+        metadata = canonical_result["metadata"]
+        canonical_contract = CanonicalDataContract(
+            canonical_dir=canonical_result["canonical_dir"],
+            train_ids_path=canonical_result["train_ids_path"],
+            y_path=canonical_result["y_path"],
+            folds_path=canonical_result["folds_path"],
+            feature_cols_path=canonical_result["feature_cols_path"],
+            metadata_path=str(Path(canonical_result["canonical_dir"]) / "metadata.json"),
+            n_train=metadata["canonical_rows"],
+            n_test=0,  # Will be updated when test data is processed
+            n_folds=metadata["n_folds"],
+            id_col=metadata["id_col"],
+            target_col=metadata["target_col"],
+            is_classification=metadata["is_classification"],
+            folds_hash=folds_hash,
+            y_hash=y_hash,
+            train_ids_hash=train_ids_hash,
+            train_schema_hash=train_schema_hash,
+        )
+
+        print(f"      folds_hash: {folds_hash[:8]}...")
+        print(f"      y_hash: {y_hash[:8]}...")
+        print(f"      train_ids_hash: {train_ids_hash[:8]}...")
+
         return {
             "canonical_data_prepared": True,
             "canonical_dir": canonical_result["canonical_dir"],
@@ -127,6 +176,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             "canonical_folds_path": canonical_result["folds_path"],
             "canonical_feature_cols_path": canonical_result["feature_cols_path"],
             "canonical_metadata": canonical_result["metadata"],
+            "canonical_contract": canonical_contract.to_dict(),
             "last_updated": datetime.now(),
         }
 

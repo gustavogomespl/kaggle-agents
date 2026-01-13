@@ -65,6 +65,36 @@ class KaggleState(TypedDict):
     domain_detected: DomainType | None
     domain_confidence: float
 
+    # ========================================================================
+    # CONTRACTS (Source of Truth) - PR1
+    # All contracts are stored as dict for JSON serialization compatibility
+    # Use *Contract.from_dict() to reconstruct objects when needed
+    # ========================================================================
+    metric_contract: dict[str, Any] | None  # MetricContract.to_dict()
+    canonical_contract: dict[str, Any] | None  # CanonicalDataContract.to_dict()
+    submission_contract: dict[str, Any] | None  # SubmissionContract.to_dict()
+    eval_fidelity: dict[str, Any] | None  # EvalFidelityContract.to_dict()
+    data_usage: dict[str, Any] | None  # DataUsageContract.to_dict()
+
+    # ========================================================================
+    # MLE-STAR REGISTRIES (PR2)
+    # Track code blocks, ablations, models, and robustness checks
+    # All stored as dict for JSON serialization compatibility
+    # ========================================================================
+    code_registry: dict[str, Any] | None  # CodeBlockRegistry.to_dict()
+    ablation_history: dict[str, Any] | None  # AblationHistory.to_dict()
+    model_registry: dict[str, Any] | None  # ModelRegistry.to_dict()
+    robustness_checks: dict[str, Any] | None  # RobustnessChecks.to_dict()
+
+    # ========================================================================
+    # ARTIFACT INDEX (PR3)
+    # References to artifacts on disk (reduces state bloat)
+    # ========================================================================
+    artifact_index: dict[str, Any] | None  # ArtifactIndex.to_dict()
+
+    # ========================================================================
+    # SEARCH PHASE
+    # ========================================================================
     # Search Phase
     sota_solutions: Annotated[list[SOTASolution], add]
     search_queries_used: Annotated[list[str], add]
@@ -91,10 +121,10 @@ class KaggleState(TypedDict):
 
     # Submission Phase
     submissions: Annotated[list[SubmissionResult], add]
-    best_score: float
+    best_score: float  # [DERIVABLE] from metric_contract.best_score
     target_percentile: float
-    best_single_model_score: float | None
-    best_single_model_name: str | None
+    best_single_model_score: float | None  # [DERIVABLE] from model_registry.get_best_overall()
+    best_single_model_name: str | None  # [DERIVABLE] from model_registry.get_best_overall()
     baseline_cv_score: float | None
     submission_validation_error: str | None
     retry_submission_count: int
@@ -110,23 +140,33 @@ class KaggleState(TypedDict):
     iteration_memory: Annotated[list[IterationMemory], add]
     learned_patterns: dict[str, Any]
 
-    # Structured Memory
+    # ========================================================================
+    # MEMORY (accumulated learning)
+    # NOTE: Some fields below are DERIVABLE from registries and may be removed
+    # in future refactoring. Marked with [DERIVABLE] comment.
+    # ========================================================================
     data_insights: DataInsights | None
     model_performance_history: Annotated[list[ModelPerformanceRecord], add]
-    best_models_by_type: dict[str, Any]
+    best_models_by_type: dict[str, Any]  # [DERIVABLE] from model_registry.get_best_by_type()
     error_pattern_memory: Annotated[list[ErrorPatternMemory], merge_error_pattern_memory]
     hyperparameter_history: Annotated[list[HyperparameterHistory], add]
-    best_hyperparameters_by_model: dict[str, dict[str, Any]]
-    aggregated_feature_importance: dict[str, float]
-    top_features: list[str]
-    successful_strategies: list[str]
-    failed_strategies: list[str]
+    best_hyperparameters_by_model: dict[str, dict[str, Any]]  # [DERIVABLE] from model_registry
+    aggregated_feature_importance: dict[str, float]  # [DERIVABLE] compute from model artifacts
+    top_features: list[str]  # [DERIVABLE] compute from model_registry feature importance
+    successful_strategies: list[str]  # [DERIVABLE] from ablation_history.get_effective_ablations()
+    failed_strategies: list[str]  # [DERIVABLE] from ablation_history.get_regressions()
     failed_component_names: Annotated[list[str], add]  # Component names that failed (for planner to avoid)
-    strategy_effectiveness: dict[str, Any]
+    strategy_effectiveness: dict[str, Any]  # [DERIVABLE] compute from ablation_history
+
+    # ========================================================================
+    # OPTIONAL FEATURES
+    # These are only initialized when their respective features are enabled.
+    # Default to empty dicts/lists. May be removed if unused.
+    # ========================================================================
 
     # Prompt Optimization (DSPy)
-    optimized_prompts: dict[str, str]
-    prompt_performance: dict[str, float]
+    optimized_prompts: dict[str, str]  # [OPTIONAL] Only when DSPy enabled
+    prompt_performance: dict[str, float]  # [OPTIONAL] Only when DSPy enabled
 
     # Meta-Evaluator & RL
     failure_analysis: dict[str, Any]
@@ -134,26 +174,29 @@ class KaggleState(TypedDict):
     reward_signals: dict[str, float]
 
     # WEBRL: Curriculum Learning
-    curriculum_subtasks: list[dict[str, Any]]
+    curriculum_subtasks: list[dict[str, Any]]  # [OPTIONAL] Only when WEBRL enabled
     needs_subtask_resolution: bool
 
     # Eureka: Multi-candidate Evolutionary Plans
-    candidate_plans: list[CandidatePlan]
+    candidate_plans: list[CandidatePlan]  # [OPTIONAL] Only when Eureka enabled
     current_plan_index: int
     evolutionary_generation: int
     crossover_guidance: dict[str, Any]
 
     # GRPO: Reasoning Traces
-    reasoning_traces: Annotated[list[ReasoningTrace], add]
+    reasoning_traces: Annotated[list[ReasoningTrace], add]  # [OPTIONAL] Only when GRPO enabled
     current_reasoning: ReasoningTrace | None
 
     # DPO: Preference Learning
-    preference_pairs: Annotated[list[PreferencePair], add]
+    preference_pairs: Annotated[list[PreferencePair], add]  # [OPTIONAL] Only when DPO enabled
 
     # Quiet-STaR: Self-Evaluation
-    self_evaluations: Annotated[list[SelfEvaluation], add]
+    self_evaluations: Annotated[list[SelfEvaluation], add]  # [OPTIONAL] Only when Quiet-STaR enabled
     last_self_evaluation: SelfEvaluation | None
 
+    # ========================================================================
+    # METADATA
+    # ========================================================================
     # Metadata
     workflow_start_time: datetime
     last_updated: datetime
@@ -214,6 +257,19 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         # Domain Detection
         domain_detected=None,
         domain_confidence=0.0,
+        # Contracts (Source of Truth) - PR1
+        metric_contract=None,
+        canonical_contract=None,
+        submission_contract=None,
+        eval_fidelity=None,
+        data_usage=None,
+        # MLE-STAR Registries - PR2
+        code_registry=None,
+        ablation_history=None,
+        model_registry=None,
+        robustness_checks=None,
+        # Artifact Index - PR3
+        artifact_index=None,
         # Search Phase
         sota_solutions=[],
         search_queries_used=[],
