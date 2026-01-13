@@ -645,17 +645,27 @@ class DeveloperAgent(
 
                 is_best = False
                 if primary_score is not None:
+                    # Log score comparison for debugging MLE-bench vs CV
+                    # Format current_best_score consistently (could be None)
+                    best_str = f"{current_best_score:.5f}" if current_best_score is not None else "None"
+                    print(f"[SCORE COMPARISON] Current best: {best_str}, New score: {primary_score:.5f} (source: {primary_score_source})")
+
                     if current_best_score is None:
                         is_best = True
+                        print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
                     else:
                         improvement = calculate_score_improvement(
                             primary_score, current_best_score, metric_name
                         )
+                        print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
                         if improvement > 0:
                             is_best = True
+                            print(f"[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
+                        else:
+                            print(f"[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
 
                 if is_best:
-                    print(f"New Best Single Model! ({primary_score:.4f})")
+                    print(f"✅ New Best Single Model! ({primary_score:.4f}, source: {primary_score_source})")
                     state_updates["best_single_model_score"] = primary_score
                     state_updates["best_single_model_name"] = component.name
 

@@ -23,6 +23,7 @@ from ..nodes import (
     canonical_data_preparation_node,
     data_audit_node,
     data_download_node,
+    data_exploration_node,
     data_format_discovery_node,
     data_validation_node,
     domain_detection_node,
@@ -54,6 +55,7 @@ def create_workflow() -> StateGraph:
     workflow.add_node("domain_detection", domain_detection_node)
     workflow.add_node("data_audit", data_audit_node)
     workflow.add_node("canonical_data_preparation", canonical_data_preparation_node)
+    workflow.add_node("data_exploration", data_exploration_node)
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
@@ -79,9 +81,10 @@ def create_workflow() -> StateGraph:
     workflow.add_edge("data_validation", "domain_detection")
     workflow.add_edge("domain_detection", "data_audit")
 
-    # Data Audit → Canonical Data Preparation → Search
+    # Data Audit → Canonical Data Preparation → Data Exploration → Search
     workflow.add_edge("data_audit", "canonical_data_preparation")
-    workflow.add_edge("canonical_data_preparation", "search")
+    workflow.add_edge("canonical_data_preparation", "data_exploration")
+    workflow.add_edge("data_exploration", "search")
 
     # Search → Planner
     workflow.add_edge("search", "planner")

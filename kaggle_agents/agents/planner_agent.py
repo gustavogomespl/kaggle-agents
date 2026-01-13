@@ -1152,6 +1152,30 @@ Return a JSON array with up to {max_components} components. Each component must 
             components.sort(key=lambda x: x.estimated_impact, reverse=True)
             plan_hash = hash(tuple(sorted(c.name for c in components)))
 
+        # FIX: Force exploration if plan is still a duplicate after max retries
+        if plan_hash in previous_plan_hashes and retry_count >= max_diversity_retries:
+            # Count consecutive identical plans
+            consecutive_duplicates = sum(1 for h in previous_plan_hashes[-3:] if h == plan_hash)
+
+            if consecutive_duplicates >= 2:
+                print("   [Planner] ⚠️ STAGNATION DETECTED: 2+ identical plans. Forcing novel exploration.")
+                # Force completely different approach with components not used recently
+                exploration_plan = self._create_exploration_plan(state, sota_analysis)
+                if exploration_plan:
+                    components = []
+                    for i, item in enumerate(exploration_plan):
+                        code = item.get("code_outline", item.get("description", ""))
+                        component = AblationComponent(
+                            name=item.get("name", f"explore_component_{i + 1}"),
+                            component_type=item.get("component_type", "model"),
+                            code=code,
+                            estimated_impact=item.get("estimated_impact", 0.15),
+                        )
+                        components.append(component)
+                    components.sort(key=lambda x: x.estimated_impact, reverse=True)
+                    plan_hash = hash(tuple(sorted(c.name for c in components)))
+                    print(f"   [Planner] ✓ Forced exploration plan: {[c.name for c in components]}")
+
         # Record this plan hash (keep last 10)
         previous_plan_hashes.append(plan_hash)
         state["previous_plan_hashes"] = previous_plan_hashes[-10:]
@@ -1160,6 +1184,377 @@ Return a JSON array with up to {max_components} components. Each component must 
             print(f"   [Planner] ✓ Found diverse plan after {retry_count} retries")
 
         return components
+
+    def _extract_sota_recommendations(
+        self,
+        sota_analysis: dict[str, Any] | None,
+    ) -> list[str]:
+        """
+        Extract model and technique recommendations from SOTA analysis.
+
+        Parses SOTA search results to identify recommended approaches.
+        Used by both exploration plans and fallback plans.
+
+        Args:
+            sota_analysis: SOTA analysis dict from search agent
+
+        Returns:
+            List of recommendation categories (e.g., ["catboost", "feature_engineering"])
+        """
+        if not sota_analysis:
+            return []
+
+        recommendations = []
+        sota_str = str(sota_analysis).lower()
+
+        # Model recommendations
+        if "catboost" in sota_str:
+            recommendations.append("catboost")
+        if "lightgbm" in sota_str or "lgbm" in sota_str:
+            recommendations.append("lightgbm")
+        if "xgboost" in sota_str or "xgb" in sota_str:
+            recommendations.append("xgboost")
+        if "neural" in sota_str or "tabnet" in sota_str or "mlp" in sota_str or "nn" in sota_str:
+            recommendations.append("neural_network")
+        if "random forest" in sota_str or "randomforest" in sota_str:
+            recommendations.append("random_forest")
+
+        # Technique recommendations
+        if "feature" in sota_str or "encoding" in sota_str:
+            recommendations.append("feature_engineering")
+        if "optuna" in sota_str or "hyperparameter" in sota_str or "tuning" in sota_str:
+            recommendations.append("hyperparameter_tuning")
+        if "ensemble" in sota_str or "stacking" in sota_str or "blend" in sota_str:
+            recommendations.append("ensemble")
+
+        return recommendations
+
+    def _create_exploration_plan(
+        self,
+        state: KaggleState,
+        sota_analysis: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """
+        Create plan with novel components not used in recent iterations.
+
+        This is the nuclear option for breaking stagnation loops.
+        Combines:
+        1. SOTA guidance from search results
+        2. Intensive training options (more epochs/folds)
+        3. Novel component combinations
+
+        Args:
+            state: Current state
+            sota_analysis: SOTA analysis
+
+        Returns:
+            Exploration plan with novel components
+        """
+        domain = str(state.get("domain_detected", "tabular")).lower()
+        competition_name = state.get("competition_name", "")
+
+        # Extract SOTA guidance if available
+        sota_guidance = {}
+        if state:
+            refinement_guidance = state.get("refinement_guidance", {})
+            sota_guidance = refinement_guidance.get("sota_guidance", {})
+
+        # Check what components were used recently to avoid them
+        used_components = set()
+
+        # 1. Check development_history for executed components
+        development_history = state.get("development_history", [])
+        for entry in development_history[-6:]:  # Last 6 components
+            if isinstance(entry, dict):
+                used_components.add(entry.get("component_name", ""))
+
+        # 2. Check current ablation_plan for planned components (may not be executed yet)
+        current_plan = state.get("ablation_plan", [])
+        if isinstance(current_plan, list):
+            for component in current_plan:
+                if isinstance(component, dict):
+                    used_components.add(component.get("name", ""))
+                elif hasattr(component, "name"):  # AblationComponent object
+                    used_components.add(component.name)
+
+        # 3. Check failed components to avoid retrying failures
+        # NOTE: The state uses THREE different keys for failed components:
+        #   - failed_components: list of component names (used by tests and some code paths)
+        #   - failed_component_names: list of component name strings (state definition)
+        #   - failure_analysis["failed_components"]: list of component dicts
+        all_failed_names = []
+
+        # Check state["failed_components"] (used by tests and some code paths)
+        failed_components_list = state.get("failed_components", [])
+        for comp in failed_components_list:
+            if isinstance(comp, str):
+                used_components.add(comp)
+                all_failed_names.append(comp)
+            elif isinstance(comp, dict):
+                comp_name = comp.get("name") or comp.get("component_name", "")
+                if comp_name:
+                    used_components.add(comp_name)
+                    all_failed_names.append(comp_name)
+
+        # Check state["failed_component_names"] (state definition)
+        failed_names = state.get("failed_component_names", [])
+        for comp_name in failed_names:
+            if isinstance(comp_name, str):
+                used_components.add(comp_name)
+                all_failed_names.append(comp_name)
+
+        # Also check failure_analysis for additional failed component info
+        failure_analysis = state.get("failure_analysis", {})
+        failed_component_dicts = failure_analysis.get("failed_components", [])
+        for comp in failed_component_dicts:
+            if isinstance(comp, dict):
+                comp_name = comp.get("name") or comp.get("component_name", "")
+                if comp_name:
+                    used_components.add(comp_name)
+                    all_failed_names.append(comp_name)
+            elif isinstance(comp, str):
+                used_components.add(comp)
+                all_failed_names.append(comp)
+
+        if all_failed_names:
+            # Deduplicate for logging
+            unique_failed = list(dict.fromkeys(all_failed_names))
+            print(f"   [EXPLORATION] Excluding failed components: {unique_failed}")
+
+        print(f"   [EXPLORATION] Domain: {domain}, Recently used/planned/failed: {used_components}")
+
+        # SOTA-guided exploration: extract recommendations using helper
+        sota_recommended = self._extract_sota_recommendations(sota_analysis)
+        if sota_recommended:
+            print(f"   [EXPLORATION] SOTA recommends: {sota_recommended}")
+
+        # For tabular: dynamic exploration based on SOTA + unused components
+        if "tabular" in domain:
+            plan = []
+
+            # PRIORITY 1: SOTA-recommended approaches
+            # Check exact component name to avoid re-adding used/failed components
+            if "feature_engineering" in sota_recommended and "sota_feature_engineering" not in used_components:
+                plan.append({
+                    "name": "sota_feature_engineering",
+                    "component_type": "feature_engineering",
+                    "description": "Advanced feature engineering based on SOTA analysis. Includes target encoding, interactions, and aggregations.",
+                    "estimated_impact": 0.18,
+                    "code_outline": """SOTA-guided feature engineering:
+# Install category_encoders if not available
+try:
+    from category_encoders import TargetEncoder
+except ImportError:
+    import subprocess
+    subprocess.check_call(['pip', 'install', 'category_encoders', '-q'], timeout=60)
+    from category_encoders import TargetEncoder
+
+# Target encoding with smoothing
+te = TargetEncoder(cols=cat_cols, smoothing=0.3)
+
+# Feature interactions (identified by SOTA)
+for c1, c2 in high_importance_pairs:
+    X[f'{c1}_x_{c2}'] = X[c1] * X[c2]
+    X[f'{c1}_div_{c2}'] = X[c1] / (X[c2] + 1e-8)
+
+# Aggregation features by categorical groups
+for cat in important_cats:
+    for num in important_nums:
+        X[f'{cat}_{num}_mean'] = X.groupby(cat)[num].transform('mean')
+        X[f'{cat}_{num}_std'] = X.groupby(cat)[num].transform('std')""",
+                })
+
+            # Add CatBoost Optuna if SOTA recommends tuning AND component not already used/failed
+            if ("hyperparameter_tuning" in sota_recommended or "catboost" in sota_recommended) and "catboost_optuna_intensive" not in used_components:
+                plan.append({
+                    "name": "catboost_optuna_intensive",
+                    "component_type": "model",
+                    "description": "CatBoost with intensive Optuna tuning (20 trials). SOTA recommends hyperparameter optimization.",
+                    "estimated_impact": 0.21,
+                    "code_outline": """INTENSIVE CatBoost tuning with timeout awareness:
+import optuna
+import time
+import os
+
+TIMEOUT = int(os.environ.get('KAGGLE_AGENTS_COMPONENT_TIMEOUT_S', 3600))
+START = time.time()
+TUNING_BUDGET = min(TIMEOUT * 0.4, 1200)  # Max 40% of timeout for tuning
+
+def objective(trial):
+    if time.time() - START > TUNING_BUDGET:
+        raise optuna.TrialPruned()
+    params = {
+        'depth': trial.suggest_int('depth', 4, 10),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'l2_leaf_reg': trial.suggest_float('l2_leaf_reg', 1, 10),
+        'iterations': trial.suggest_int('iterations', 500, 2000),
+    }
+    model = CatBoostClassifier(**params, verbose=0, early_stopping_rounds=100)
+    model.fit(X_train, y_train, eval_set=(X_val, y_val))
+    return model.best_score_['validation']['Logloss']
+
+study = optuna.create_study(direction='minimize')
+study.optimize(objective, n_trials=20, timeout=TUNING_BUDGET)
+best_params = study.best_params""",
+                })
+
+            # PRIORITY 2: Intensive training if score is plateauing
+            # Check exact component name that will be added
+            if "lgbm_intensive_7fold" not in used_components:
+                plan.append({
+                    "name": "lgbm_intensive_7fold",
+                    "component_type": "model",
+                    "description": "LightGBM with 7-fold CV and 3000 iterations. For breaking score plateau.",
+                    "estimated_impact": 0.19,
+                    "code_outline": """INTENSIVE 7-fold LightGBM with checkpoint saving:
+import time
+import os
+
+TIMEOUT = int(os.environ.get('KAGGLE_AGENTS_COMPONENT_TIMEOUT_S', 3600))
+START = time.time()
+SAVE_BUFFER = 180
+
+# Adaptive fold count based on remaining time
+remaining = TIMEOUT - (time.time() - START)
+n_folds = 7 if remaining > 3000 else 5 if remaining > 1800 else 3
+
+params = {
+    'n_estimators': 3000,
+    'learning_rate': 0.015,
+    'num_leaves': 128,
+    'min_child_samples': 15,
+    'feature_fraction': 0.8,
+    'bagging_fraction': 0.8,
+    'bagging_freq': 1,
+    'early_stopping_rounds': 200,
+}
+
+# Train with per-fold checkpoints
+for fold in range(n_folds):
+    remaining = TIMEOUT - (time.time() - START) - SAVE_BUFFER
+    if remaining < 400:
+        print(f"[INTENSIVE] Early stop at fold {fold}")
+        break
+    # ... train fold ...
+    np.save(f'models/oof_lgbm_intensive_fold{fold}.npy', oof_preds)
+    np.save(f'models/test_lgbm_intensive_fold{fold}.npy', test_preds)""",
+                })
+
+            # PRIORITY 3: Weighted ensemble if not tried
+            # Check exact component name to avoid re-adding used/failed components
+            if len(plan) < 3 and "weighted_rank_blend" not in used_components:
+                plan.append({
+                    "name": "weighted_rank_blend",
+                    "component_type": "ensemble",
+                    "description": "Rank-based weighted blending optimized with scipy.minimize.",
+                    "estimated_impact": 0.12,
+                    "code_outline": """Rank-based weighted ensemble:
+from scipy.optimize import minimize
+from scipy.stats import rankdata
+
+# Convert predictions to ranks
+def to_ranks(preds):
+    return rankdata(preds) / len(preds)
+
+# Load all OOF predictions
+oof_files = list(Path('models').glob('oof_*.npy'))
+oofs = [np.load(f) for f in oof_files]
+oofs_ranked = [to_ranks(oof) for oof in oofs]
+
+# Optimize weights
+def loss(weights):
+    weights = np.abs(weights) / np.sum(np.abs(weights))
+    blend = np.average(oofs_ranked, axis=0, weights=weights)
+    return -roc_auc_score(y_true, blend)
+
+result = minimize(loss, x0=np.ones(len(oofs))/len(oofs), method='Nelder-Mead')
+best_weights = np.abs(result.x) / np.sum(np.abs(result.x))""",
+                })
+
+            return plan[:3]  # Return top 3 components
+
+        # For image: try different architectures with TTA and intensive training
+        if "image" in domain:
+            image_candidates = [
+                {
+                    "name": "efficientnet_b2_tta_intensive",
+                    "component_type": "model",
+                    "description": "EfficientNet-B2 with TTA and more epochs. Timeout-aware training.",
+                    "estimated_impact": 0.19,
+                    "code_outline": """EfficientNet-B2 with timeout-aware intensive training:
+import time
+import os
+
+TIMEOUT = int(os.environ.get('KAGGLE_AGENTS_COMPONENT_TIMEOUT_S', 3600))
+START = time.time()
+
+# Adaptive epochs based on remaining time
+remaining = TIMEOUT - (time.time() - START)
+max_epochs = 15 if remaining > 3000 else 10 if remaining > 1800 else 5
+
+model = timm.create_model('efficientnet_b2', pretrained=True, num_classes=num_classes)
+optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max_epochs)
+
+for epoch in range(max_epochs):
+    remaining = TIMEOUT - (time.time() - START) - 120
+    if remaining < 300:
+        print(f"[TIMEOUT] Stopping at epoch {epoch}")
+        break
+    # ... train epoch ...
+    torch.save(model.state_dict(), f'models/effnet_b2_epoch{epoch}.pth')
+
+# TTA at inference
+tta_preds = []
+for transform in [identity, hflip, vflip, rotate90]:
+    preds = model(transform(test_images))
+    tta_preds.append(preds)
+final_preds = np.mean(tta_preds, axis=0)""",
+                },
+                {
+                    "name": "convnext_tiny_mixup",
+                    "component_type": "model",
+                    "description": "ConvNeXt-Tiny with MixUp augmentation. Modern architecture.",
+                    "estimated_impact": 0.18,
+                    "code_outline": "timm.create_model('convnext_tiny'), MixUp(alpha=0.4), CutMix(alpha=1.0)",
+                },
+                {
+                    "name": "geometric_mean_ensemble",
+                    "component_type": "ensemble",
+                    "description": "Geometric mean of predictions. Better for log-loss metrics.",
+                    "estimated_impact": 0.10,
+                    "code_outline": "np.exp(np.mean(np.log(predictions + 1e-15), axis=0))",
+                },
+            ]
+            # Filter out used/failed components
+            return [c for c in image_candidates if c["name"] not in used_components][:3]
+
+        # Default fallback with intensive options
+        default_candidates = [
+            {
+                "name": "histgradient_intensive",
+                "component_type": "model",
+                "description": "HistGradientBoosting with max_iter=1000. Very fast sklearn implementation.",
+                "estimated_impact": 0.16,
+                "code_outline": "HistGradientBoostingClassifier(max_iter=1000, early_stopping=True, validation_fraction=0.1)",
+            },
+            {
+                "name": "gradient_boosting_sklearn",
+                "component_type": "model",
+                "description": "Scikit-learn GradientBoosting with n_estimators=500.",
+                "estimated_impact": 0.14,
+                "code_outline": "GradientBoostingClassifier(n_estimators=500, max_depth=6, subsample=0.8)",
+            },
+            {
+                "name": "simple_average_ensemble",
+                "component_type": "ensemble",
+                "description": "Simple average of all model predictions.",
+                "estimated_impact": 0.08,
+                "code_outline": "np.mean(all_predictions, axis=0)",
+            },
+        ]
+        # Filter out used/failed components
+        return [c for c in default_candidates if c["name"] not in used_components][:3]
 
     def _create_diversified_fallback_plan(
         self,
@@ -2141,6 +2536,15 @@ Return a JSON array with up to {max_components} components. Each component must 
             or (isinstance(timeout_cap, int) and timeout_cap <= 1200)
         )
 
+        # Calculate stagnation_iteration from previous plan hashes
+        # This is used to rotate model selection and break stagnation loops
+        stagnation_iteration = 0
+        if state:
+            previous_plan_hashes = state.get("previous_plan_hashes", [])
+            stagnation_iteration = len(previous_plan_hashes)
+            if stagnation_iteration > 0:
+                print(f"  [DEBUG] Stagnation iteration: {stagnation_iteration} (previous plans: {len(previous_plan_hashes)})")
+
         # Define domain sets for routing
         IMAGE_DOMAINS = {
             "image_classification",
@@ -2173,6 +2577,7 @@ Return a JSON array with up to {max_components} components. Each component must 
             curriculum_insights,
             fast_mode=fast_mode,
             state=state,
+            stagnation_iteration=stagnation_iteration,
         )
 
     def _create_tabular_fallback_plan(
@@ -2183,6 +2588,7 @@ Return a JSON array with up to {max_components} components. Each component must 
         *,
         fast_mode: bool = False,
         state: KaggleState | None = None,
+        stagnation_iteration: int = 0,
     ) -> list[dict[str, Any]]:
         """
         Create fallback plan for tabular competitions (classification/regression).
@@ -2195,6 +2601,7 @@ Return a JSON array with up to {max_components} components. Each component must 
             curriculum_insights: Insights from previous iterations (optional)
             fast_mode: Whether to use speed-optimized plan
             state: Current workflow state (used to filter failed components)
+            stagnation_iteration: Number of times fallback was used (rotates model selection)
 
         Returns:
             List of component dictionaries (5 components: 1 FE + 4 models + 1 ensemble)
@@ -2206,45 +2613,108 @@ Return a JSON array with up to {max_components} components. Each component must 
             if failed_names:
                 print(f"   📋 Filtering out previously failed components: {failed_names}")
 
-        # Note: Curriculum insights are logged but fallback uses fixed plan
-        # In future iterations, could use insights to reorder components
+        # Extract SOTA guidance from state for informed rotation
+        sota_guidance = None
+        sota_recommended_models = []
+        if state:
+            refinement_guidance = state.get("refinement_guidance", {})
+            sota_guidance = refinement_guidance.get("sota_guidance", {})
+            if sota_guidance:
+                print(f"   📊 SOTA guidance available: {list(sota_guidance.keys())}")
+                # Use helper method to extract recommendations
+                sota_recommended_models = self._extract_sota_recommendations(sota_guidance)
+                if sota_recommended_models:
+                    print(f"   📊 SOTA recommends: {sota_recommended_models}")
+
+        # STAGNATION-AWARE ROTATION: Different model combinations per iteration
+        # This breaks the loop of repeating the same 3 components
         if fast_mode:
-            # Full candidate pool with alternatives for failed components
-            all_fast_candidates = [
-                {
+            print(f"   🔄 Stagnation iteration: {stagnation_iteration}")
+
+            # Define model rotation sets - each iteration uses different combination
+            model_rotations = [
+                # Iteration 0: Default (LGBM + XGB)
+                ["lightgbm_fast_cv", "xgboost_fast_cv"],
+                # Iteration 1: CatBoost + LGBM tuned
+                ["catboost_fast_cv", "lightgbm_tuned_cv"],
+                # Iteration 2: Neural Network + Random Forest (different model families)
+                ["neural_network_mlp", "random_forest_fast"],
+                # Iteration 3: Feature Engineering + CatBoost (FE can improve score significantly)
+                ["target_encoding_fe", "catboost_fast_cv"],
+                # Iteration 4: Intensive training - more folds/epochs
+                ["lightgbm_intensive", "catboost_fast_cv"],
+            ]
+
+            # SOTA-guided rotation override: if SOTA recommends specific approach, prioritize it
+            if "catboost" in sota_recommended_models and stagnation_iteration > 0:
+                print("   📊 SOTA override: prioritizing CatBoost rotation")
+                model_rotations[stagnation_iteration % len(model_rotations)] = ["catboost_fast_cv", "lightgbm_tuned_cv"]
+            if "neural_network" in sota_recommended_models and stagnation_iteration > 1:
+                print("   📊 SOTA override: prioritizing Neural Network rotation")
+                model_rotations[stagnation_iteration % len(model_rotations)] = ["neural_network_mlp", "catboost_fast_cv"]
+            if "feature_engineering" in sota_recommended_models and stagnation_iteration > 0:
+                print("   📊 SOTA override: prioritizing Feature Engineering rotation")
+                model_rotations[stagnation_iteration % len(model_rotations)] = ["target_encoding_fe", "lightgbm_fast_cv"]
+
+            # Component definitions with MANDATORY StandardScaler for MLP
+            component_defs = {
+                "lightgbm_fast_cv": {
                     "name": "lightgbm_fast_cv",
                     "component_type": "model",
-                    "description": "LightGBM baseline tuned for speed (no Optuna). Use fewer estimators + early stopping/callbacks. Respect KAGGLE_AGENTS_CV_FOLDS for faster iteration.",
+                    "description": "LightGBM baseline tuned for speed (no Optuna). Use fewer estimators + early stopping/callbacks.",
                     "estimated_impact": 0.18,
-                    "rationale": "High ROI baseline for tabular tasks; fast enough to iterate under tight time budgets (MLE-bench).",
-                    "code_outline": "LGBMClassifier/Regressor with sane defaults, 3-fold CV when FAST_MODE, save OOF/test preds",
+                    "rationale": "High ROI baseline for tabular tasks.",
+                    "code_outline": "LGBMClassifier/Regressor with sane defaults, 3-fold CV, save OOF/test preds",
                 },
-                {
+                "xgboost_fast_cv": {
                     "name": "xgboost_fast_cv",
                     "component_type": "model",
-                    "description": "XGBoost baseline tuned for speed (no Optuna). Use hist/gpu_hist where available. Respect time budget and fold count env vars.",
+                    "description": "XGBoost baseline tuned for speed (no Optuna). Use hist/gpu_hist where available.",
                     "estimated_impact": 0.16,
-                    "rationale": "Provides diversity vs LightGBM with similar compute budget; useful for a quick ensemble.",
-                    "code_outline": "XGBClassifier/Regressor with fixed params, 3-fold CV when FAST_MODE, save OOF/test preds",
+                    "rationale": "Provides diversity vs LightGBM with similar compute budget.",
+                    "code_outline": "XGBClassifier/Regressor with fixed params, 3-fold CV, save OOF/test preds",
                 },
-                # ALTERNATIVE MODELS (used when primary models fail)
-                {
+                "catboost_fast_cv": {
                     "name": "catboost_fast_cv",
                     "component_type": "model",
-                    "description": "CatBoost baseline tuned for speed (no Optuna). Handles categoricals natively. Respect time budget and fold count env vars.",
-                    "estimated_impact": 0.15,
-                    "rationale": "Alternative to XGBoost/LightGBM with different regularization; handles categoricals well.",
-                    "code_outline": "CatBoostClassifier/Regressor with sane defaults, 3-fold CV when FAST_MODE, save OOF/test preds",
+                    "description": "CatBoost baseline tuned for speed (no Optuna). Handles categoricals natively.",
+                    "estimated_impact": 0.17,
+                    "rationale": "Different regularization than XGBoost/LightGBM; handles categoricals well.",
+                    "code_outline": "CatBoostClassifier/Regressor with sane defaults, 3-fold CV, save OOF/test preds",
                 },
-                {
-                    "name": "logistic_tfidf",
+                "lightgbm_tuned_cv": {
+                    "name": "lightgbm_tuned_cv",
                     "component_type": "model",
-                    "description": "Logistic Regression with TF-IDF features. Very fast fallback for text-heavy tabular data.",
-                    "estimated_impact": 0.12,
-                    "rationale": "Extremely fast linear model; useful when tree models timeout.",
-                    "code_outline": "TfidfVectorizer + LogisticRegression/Ridge, save OOF/test preds",
+                    "description": "LightGBM with light Optuna tuning (5 trials). Better than defaults, still fast.",
+                    "estimated_impact": 0.19,
+                    "rationale": "Quick hyperparameter search often finds 2-5% improvement.",
+                    "code_outline": "LGBMClassifier/Regressor with Optuna (5 trials), tune learning_rate/num_leaves, 3-fold CV",
                 },
-                {
+                "neural_network_mlp": {
+                    "name": "neural_network_mlp",
+                    "component_type": "model",
+                    "description": "MLP Neural Network with MANDATORY StandardScaler. Different pattern capture than trees.",
+                    "estimated_impact": 0.14,
+                    "rationale": "Neural Networks capture non-linear patterns differently, adds diversity.",
+                    "code_outline": """MANDATORY: Use StandardScaler for ALL numeric features (without this, AUC will be ~0.50!).
+from sklearn.preprocessing import StandardScaler
+from sklearn.neural_network import MLPClassifier  # or MLPRegressor
+
+# Per-fold scaling (fit on train, transform val and test)
+scaler = StandardScaler()
+numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+
+# Inside CV loop:
+X_train_fold_scaled = scaler.fit_transform(X_train_fold[numeric_cols])
+X_val_fold_scaled = scaler.transform(X_val_fold[numeric_cols])
+X_test_scaled = scaler.transform(X_test[numeric_cols])
+
+model = MLPClassifier(hidden_layer_sizes=(128, 64), early_stopping=True, validation_fraction=0.1, max_iter=500, random_state=42)
+model.fit(X_train_fold_scaled, y_train_fold)
+oof_preds[val_idx] = model.predict_proba(X_val_fold_scaled)[:, 1]  # Binary
+test_preds += model.predict_proba(X_test_scaled)[:, 1] / n_folds""",
+                },
+                "random_forest_fast": {
                     "name": "random_forest_fast",
                     "component_type": "model",
                     "description": "Random Forest baseline with limited trees (n_estimators=200) for speed.",
@@ -2252,37 +2722,138 @@ Return a JSON array with up to {max_components} components. Each component must 
                     "rationale": "Robust tree ensemble that rarely fails; good fallback option.",
                     "code_outline": "RandomForestClassifier/Regressor with n_estimators=200, 3-fold CV, save OOF/test preds",
                 },
-                {
+                "stacking_ensemble": {
                     "name": "stacking_ensemble",
                     "component_type": "ensemble",
-                    "description": "Stack OOF predictions from available models with LogisticRegression/Ridge meta-learner. Fallback to weighted average if needed.",
+                    "description": "Stack OOF predictions from available models with LogisticRegression/Ridge meta-learner.",
                     "estimated_impact": 0.10,
-                    "rationale": "Cheap ensemble step that often improves generalization without additional heavy training.",
+                    "rationale": "Cheap ensemble step that often improves generalization.",
                     "code_outline": "Load models/oof_*.npy + models/test_*.npy, fit meta-model on OOF, predict test, write submission",
                 },
-            ]
-
-            # Filter out failed components
-            filtered_plan = [c for c in all_fast_candidates if c["name"] not in failed_names]
-
-            # Ensure we have at least 2 models (excluding ensemble) for meaningful stacking
-            model_count = sum(1 for c in filtered_plan if c["component_type"] == "model")
-            if model_count < 2:
-                print("   ⚠️ Less than 2 models available after filtering. Adding simple baseline.")
-                # Add a very simple baseline that's unlikely to fail
-                filtered_plan.insert(0, {
+                "simple_ridge_baseline": {
                     "name": "simple_ridge_baseline",
                     "component_type": "model",
-                    "description": "Simple Ridge regression baseline. Cannot fail, always produces predictions.",
+                    "description": "Simple Ridge regression baseline with StandardScaler. Cannot fail, always produces predictions.",
                     "estimated_impact": 0.08,
                     "rationale": "Failsafe baseline that always works.",
                     "code_outline": "StandardScaler + Ridge, 3-fold CV, save OOF/test preds",
-                })
+                },
+                "target_encoding_fe": {
+                    "name": "target_encoding_fe",
+                    "component_type": "feature_engineering",
+                    "description": "Target encoding with K-fold CV to prevent leakage. Creates powerful features from categoricals.",
+                    "estimated_impact": 0.16,
+                    "rationale": "Target encoding often provides 2-5% improvement on tabular competitions with categoricals.",
+                    "code_outline": """Target encoding with CV to prevent leakage:
+# Install category_encoders if not available
+try:
+    from category_encoders import TargetEncoder
+except ImportError:
+    import subprocess
+    subprocess.check_call(['pip', 'install', 'category_encoders', '-q'], timeout=60)
+    from category_encoders import TargetEncoder
 
-            # Keep top 2 models + ensemble (avoid bloated plans)
-            models = [c for c in filtered_plan if c["component_type"] == "model"][:2]
-            ensemble = [c for c in filtered_plan if c["component_type"] == "ensemble"][:1]
-            return models + ensemble
+from sklearn.model_selection import KFold
+
+# Initialize with CV to prevent leakage
+te = TargetEncoder(cols=categorical_cols, smoothing=0.3)
+
+# Encode within CV folds
+kf = KFold(n_splits=5, shuffle=True, random_state=42)
+X_encoded = X.copy()
+for train_idx, val_idx in kf.split(X):
+    te.fit(X.iloc[train_idx], y.iloc[train_idx])
+    X_encoded.iloc[val_idx] = te.transform(X.iloc[val_idx])
+
+# Fit final encoder for test data
+te.fit(X, y)
+X_test_encoded = te.transform(X_test)
+
+# Save encoded features for downstream models
+np.save(MODELS_DIR / 'X_train_encoded.npy', X_encoded.values)
+np.save(MODELS_DIR / 'X_test_encoded.npy', X_test_encoded.values)""",
+                },
+                "lightgbm_intensive": {
+                    "name": "lightgbm_intensive",
+                    "component_type": "model",
+                    "description": "LightGBM with MORE folds (5-7) and iterations for better score. Uses timeout-aware training.",
+                    "estimated_impact": 0.20,
+                    "rationale": "More folds and iterations reduce variance and often improve leaderboard score by 1-3%.",
+                    "code_outline": """INTENSIVE training with timeout awareness:
+import time
+import os
+
+TIMEOUT = int(os.environ.get('KAGGLE_AGENTS_COMPONENT_TIMEOUT_S', 3600))
+START_TIME = time.time()
+SAVE_BUFFER = 180  # Reserve 3 min for saving
+
+# Increase folds for better CV estimate (only if time permits)
+remaining = TIMEOUT - (time.time() - START_TIME)
+n_folds = 7 if remaining > 2400 else 5 if remaining > 1200 else 3
+print(f"[INTENSIVE] Using {n_folds} folds (remaining time: {remaining:.0f}s)")
+
+# More iterations with early stopping
+params = {
+    'n_estimators': 2000,  # More iterations
+    'learning_rate': 0.02,  # Lower LR for better convergence
+    'num_leaves': 64,
+    'min_child_samples': 20,
+    'early_stopping_rounds': 150,  # More patience
+    'verbose': -1,
+}
+
+# Per-fold timeout check
+for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
+    fold_start = time.time()
+    remaining = TIMEOUT - (time.time() - START_TIME) - SAVE_BUFFER
+    if remaining < 300:  # Need at least 5 min per fold
+        print(f"[INTENSIVE] Stopping at fold {fold} (not enough time)")
+        break
+
+    model = LGBMClassifier(**params)
+    model.fit(X_train_fold, y_train_fold, eval_set=[(X_val_fold, y_val_fold)])
+    oof_preds[val_idx] = model.predict_proba(X_val_fold)[:, 1]
+    test_preds += model.predict_proba(X_test)[:, 1] / n_folds
+
+    # Save checkpoint after each fold
+    np.save(MODELS_DIR / f'oof_checkpoint_fold{fold}.npy', oof_preds)
+    np.save(MODELS_DIR / f'test_checkpoint_fold{fold}.npy', test_preds)
+    print(f"[INTENSIVE] Fold {fold} done in {time.time()-fold_start:.0f}s")""",
+                },
+            }
+
+            # Select rotation based on stagnation_iteration (with wrap-around)
+            rotation_idx = stagnation_iteration % len(model_rotations)
+            selected_model_names = model_rotations[rotation_idx]
+            print(f"   📋 Selected rotation {rotation_idx}: {selected_model_names}")
+
+            # Build plan from selected models, filtering out failed ones
+            models = []
+            for name in selected_model_names:
+                if name not in failed_names and name in component_defs:
+                    models.append(component_defs[name])
+                else:
+                    print(f"      ⚠️ Skipping {name} (failed or unavailable)")
+
+            # If both models filtered out, try fallback models
+            if len(models) < 2:
+                fallback_order = ["catboost_fast_cv", "lightgbm_fast_cv", "xgboost_fast_cv", "random_forest_fast", "simple_ridge_baseline"]
+                for fallback_name in fallback_order:
+                    if fallback_name not in failed_names and fallback_name not in [m["name"] for m in models]:
+                        models.append(component_defs[fallback_name])
+                        if len(models) >= 2:
+                            break
+
+            # Ensure we have at least 2 models
+            if len(models) < 2:
+                print("   ⚠️ Less than 2 models available. Adding simple baseline.")
+                models.append(component_defs["simple_ridge_baseline"])
+
+            # Always add ensemble at the end
+            ensemble = [component_defs["stacking_ensemble"]]
+            final_plan = models[:2] + ensemble
+            print(f"   ✅ Final plan: {[c['name'] for c in final_plan]}")
+            return final_plan
 
         plan = []
 
