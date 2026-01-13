@@ -112,11 +112,17 @@ def _detect_is_classification(state: dict | None) -> bool | None:
     except Exception:
         pass
 
+    # Debug: Show what metric is being checked
     if eval_metric:
+        print(f"[DEBUG] eval_metric='{eval_metric}' for classification detection")
         if any(m in eval_metric for m in CLASSIFICATION_METRICS):
+            print(f"[DEBUG] Metric '{eval_metric}' matched CLASSIFICATION_METRICS -> True")
             return True
         if any(m in eval_metric for m in REGRESSION_METRICS):
+            print(f"[DEBUG] Metric '{eval_metric}' matched REGRESSION_METRICS -> False")
             return False
+    else:
+        print("[DEBUG] eval_metric is empty, skipping metric-based detection")
 
     # Step 4: Try submission_format_type
     try:
@@ -131,13 +137,52 @@ def _detect_is_classification(state: dict | None) -> bool | None:
     except Exception:
         pass
 
+    # Step 4.5: Try target column name heuristic
+    # Target names like "Cover_Type", "class", "label" suggest classification
+    # NOTE: We use ONLY specific patterns here to avoid misclassifying regression tasks
+    # that happen to have generic names like "target"
+    try:
+        target_col = state.get("target_col", "")
+        if target_col:
+            target_lower = target_col.lower()
+            # Only exact matches for unambiguous classification terms
+            # DO NOT include "target" - it's too generic (used in regression too)
+            exact_classification_targets = {"class", "label", "category"}
+
+            # Suffix patterns that strongly indicate classification
+            # e.g., "cover_type", "product_class", "spam_label"
+            suffix_classification_targets = {"_class", "_label", "_category"}
+
+            # Check exact match (very high confidence)
+            if target_lower in exact_classification_targets:
+                print(f"[DEBUG] Target column '{target_col}' exact match -> classification")
+                return True
+
+            # Check suffix match (high confidence)
+            if any(target_lower.endswith(suffix) for suffix in suffix_classification_targets):
+                print(f"[DEBUG] Target column '{target_col}' suffix match -> classification")
+                return True
+
+            # Special case: "_type" suffix only if it's a known classification pattern
+            # This catches "cover_type", "soil_type" but not generic "data_type"
+            if target_lower.endswith("_type"):
+                # Check if it's a likely classification target by looking for known patterns
+                classification_type_patterns = {"cover_type", "soil_type", "species_type", "class_type"}
+                if target_lower in classification_type_patterns:
+                    print(f"[DEBUG] Target column '{target_col}' is known classification type -> True")
+                    return True
+    except Exception:
+        pass
+
     # Step 5: Try domain_detected
     domain = state.get("domain_detected", "")
     if domain:
         domain_lower = str(domain).lower()
+        print(f"[DEBUG] domain_detected='{domain_lower}' for classification detection")
         if "classification" in domain_lower:
             return True
         if "regression" in domain_lower:
+            print(f"[DEBUG] domain_detected contains 'regression' -> False")
             return False
 
     # Step 6: Try problem_type string (expanded patterns)
@@ -425,10 +470,31 @@ def build_model_component_instructions(
         instructions.extend(
             [
                 f"  - CRITICAL: Use target_col from dataset info (target_col='{target_col}' if available)",
-                "  - CRITICAL: MUST encode categorical features (object/category dtypes) using ColumnTransformer + OneHotEncoder",
-                "  - CRITICAL: Never pass raw categorical strings to LightGBM/XGBoost/sklearn (will fail with 'could not convert string to float')",
-                "  - CatBoost is the ONLY exception that handles categorical features natively",
-                "  - Use OneHotEncoder(handle_unknown='ignore', sparse_output=False) (NOT sparse=...)",
+                "  - CRITICAL: Encode categorical features BASED ON CARDINALITY (prevents OOM):",
+                "    ```python",
+                "    HIGH_CARDINALITY_THRESHOLD = 50  # Use label encoding above this",
+                "    cat_cols = X.select_dtypes(include=['object', 'category']).columns.tolist()",
+                "    # Exclude ID and target columns",
+                "    exclude_cols = {'id', 'target'}  # Add your actual ID/target column names if different",
+                "    cat_cols = [c for c in cat_cols if c.lower() not in exclude_cols]",
+                "    ",
+                "    low_card_cols = [c for c in cat_cols if X[c].nunique() <= HIGH_CARDINALITY_THRESHOLD]",
+                "    high_card_cols = [c for c in cat_cols if X[c].nunique() > HIGH_CARDINALITY_THRESHOLD]",
+                "    print(f'Low cardinality (OHE): {low_card_cols}')",
+                "    print(f'High cardinality (Label): {high_card_cols}')",
+                "    ",
+                "    from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder",
+                "    from sklearn.compose import ColumnTransformer",
+                "    transformers = []",
+                "    if low_card_cols:",
+                "        transformers.append(('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False), low_card_cols))",
+                "    if high_card_cols:",
+                "        transformers.append(('ordinal', OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1), high_card_cols))",
+                "    preprocessor = ColumnTransformer(transformers, remainder='passthrough') if transformers else None",
+                "    ```",
+                "  - CRITICAL: NEVER use OneHotEncoder on columns with >50 unique values (causes OOM/memory crash)",
+                "  - For LightGBM: Can also convert high-cardinality cols to 'category' dtype for native handling",
+                "  - CatBoost handles ALL categorical features natively (no encoding needed)",
                 "  - If X has 0 real features after preprocessing, STOP with a clear error (do NOT create dummy features)",
             ]
         )
