@@ -553,12 +553,30 @@ def build_model_component_instructions(
     # Add submission format instructions (CRITICAL for CV vs public score match)
     instructions.extend(
         [
-            "\n⚠️ SUBMISSION FORMAT (CRITICAL - SEE HARD_CONSTRAINTS):",
+            "\n⚠️ SUBMISSION FORMAT (CRITICAL - ID MAPPING REQUIRED):",
             "  - ALWAYS read sample_submission.csv and use its columns and order",
             "  - If sample has 2 columns: fill sample.columns[1] only",
             "  - If sample has >2 columns: fill ALL target columns (columns[1:]) in order",
-            "  - Keep ID column values and order exactly as in sample_submission",
-            "  - DO NOT add/drop columns or reorder rows",
+            "",
+            "  ### MANDATORY ID-MAPPING PATTERN (prevents score=0.50 bugs):",
+            "  ```python",
+            "  # STEP 1: Capture test IDs BEFORE any processing",
+            "  test_ids = test_df[ID_COL].values  # Preserve original order",
+            "  ",
+            "  # STEP 2: After generating predictions, MAP to IDs explicitly",
+            "  pred_map = dict(zip(test_ids, test_preds))",
+            "  submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
+            "  submission[target_col] = submission[ID_COL].map(pred_map)",
+            "  ",
+            "  # STEP 3: Validate before saving",
+            "  assert submission[target_col].notna().all(), 'Missing predictions for some IDs!'",
+            "  submission.to_csv(SUBMISSION_PATH, index=False)",
+            "  ```",
+            "",
+            "  ❌ NEVER DO THIS (assumes row order matches):",
+            "    sample_sub[target_col] = test_preds  # DANGEROUS!",
+            "",
+            "  ✅ ALWAYS map predictions to IDs using dict(zip(test_ids, preds))",
         ]
     )
 
