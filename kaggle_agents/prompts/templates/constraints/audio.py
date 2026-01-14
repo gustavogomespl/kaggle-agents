@@ -256,7 +256,7 @@ except ImportError:
     import librosa
 
 def load_audio(path: Path | str, target_sr: int = 16000, duration: float | None = None) -> np.ndarray:
-    """
+    \"\"\"
     Load audio file using torchaudio (primary) with librosa fallback.
 
     Args:
@@ -266,7 +266,7 @@ def load_audio(path: Path | str, target_sr: int = 16000, duration: float | None 
 
     Returns:
         np.ndarray: Audio waveform (mono, target sample rate)
-    """
+    \"\"\"
     path = Path(path)
 
     if AUDIO_BACKEND == "torchaudio":

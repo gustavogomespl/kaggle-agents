@@ -374,3 +374,220 @@ def print_format_info(format_info: SubmissionFormatInfo) -> None:
             print(f"  - {w}")
 
     print("=" * 60 + "\n")
+
+
+def infer_submission_logic(
+    test_ids: list,
+    sample_sub_ids: list,
+    num_classes: int | None = None,
+) -> dict[str, Any]:
+    """
+    Deduce the relationship between test IDs and submission IDs.
+
+    Handles common patterns:
+    - Direct mapping (test_id == submission_id)
+    - Multiplier pattern (MLSP: submission_id = test_id * 100 + class_id)
+    - String concatenation (submission_id = f"{test_id}_{class_id}")
+
+    Args:
+        test_ids: Sample of test set IDs (rec_ids from test data)
+        sample_sub_ids: Sample of submission IDs from sample_submission.csv
+        num_classes: Number of classes (if known from elsewhere)
+
+    Returns:
+        dict with:
+        - 'pattern': str describing the detected pattern
+        - 'multiplier': int if multiplier pattern detected
+        - 'inferred_classes': int if classes can be inferred
+        - 'code_hint': str with Python code to generate submission IDs
+
+    Examples:
+        >>> result = infer_submission_logic([1, 2, 3], [100, 101, ..., 118, 200, 201, ...])
+        >>> print(result['multiplier'])  # 100
+        >>> print(result['inferred_classes'])  # 19
+    """
+    # Normalize inputs
+    test_ids_str = [str(x).strip() for x in test_ids[:20] if str(x).strip()]
+    sub_ids_str = [str(x).strip() for x in sample_sub_ids[:200] if str(x).strip()]
+
+    if not test_ids_str or not sub_ids_str:
+        return {
+            "pattern": "unknown",
+            "description": "Insufficient data to infer pattern",
+            "code_hint": "# TODO: Manual mapping required - check sample_submission.csv",
+        }
+
+    # Case 1: Direct identity mapping
+    test_set = set(test_ids_str[:10])
+    sub_set = set(sub_ids_str)
+    if test_set.issubset(sub_set):
+        return {
+            "pattern": "direct",
+            "description": "Submission ID matches Test ID directly (1:1 mapping)",
+            "code_hint": """# Direct mapping - each test ID appears once in submission
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+for i, test_id in enumerate(test_ids):
+    submission.loc[submission[id_col] == test_id, target_col] = predictions[i]
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
+        }
+
+    # Case 2: Multiplier pattern (numeric IDs like MLSP)
+    # Try to parse as integers
+    try:
+        t_ids_int = []
+        for x in test_ids_str:
+            # Handle both pure digits and potential leading zeros
+            if x.lstrip("0").isdigit() or x == "0":
+                t_ids_int.append(int(x))
+
+        s_ids_int = []
+        for x in sub_ids_str:
+            if x.lstrip("0").isdigit() or x == "0":
+                s_ids_int.append(int(x))
+
+        if t_ids_int and s_ids_int:
+            s_ids_sorted = sorted(s_ids_int)
+
+            for multiplier in [100, 1000, 10, 50, 200]:
+                # Check if test_id * multiplier appears in submission
+                matches = 0
+                for t in t_ids_int[:10]:
+                    base = t * multiplier
+                    # Check if any submission ID is in range [base, base + multiplier)
+                    for s in s_ids_sorted:
+                        if base <= s < base + multiplier:
+                            matches += 1
+                            break
+
+                match_rate = matches / len(t_ids_int[:10]) if t_ids_int else 0
+                if match_rate >= 0.8:
+                    # Infer num_classes from submission ID range
+                    class_ids = set()
+                    for s in s_ids_sorted:
+                        class_id = s % multiplier
+                        class_ids.add(class_id)
+
+                    inferred_classes = max(class_ids) + 1 if class_ids else num_classes
+
+                    return {
+                        "pattern": "multiplier",
+                        "description": f"submission_id = test_id * {multiplier} + class_id",
+                        "multiplier": multiplier,
+                        "inferred_classes": inferred_classes,
+                        "code_hint": f"""# MLSP-style submission: Id = rec_id * {multiplier} + class_id
+# predictions shape: (num_test_samples, {inferred_classes})
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+pred_map = {{}}
+
+for i, rec_id in enumerate(test_rec_ids):
+    for class_id in range({inferred_classes}):
+        sub_id = rec_id * {multiplier} + class_id
+        pred_map[sub_id] = predictions[i, class_id]
+
+submission[target_col] = submission[id_col].map(pred_map)
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
+                    }
+    except (ValueError, TypeError):
+        pass
+
+    # Case 3: String concatenation patterns
+    # Scan sample for delimiter prevalence (not just first element)
+    underscore_count = sum(1 for s in sub_ids_str[:50] if "_" in s)
+    dash_count = sum(1 for s in sub_ids_str[:50] if "-" in s)
+    sample_size = min(50, len(sub_ids_str))
+
+    # Check for underscore pattern: "test_id_class_id"
+    # Require at least 50% of sample to contain underscore
+    if underscore_count >= sample_size * 0.5:
+        # Extract prefixes and see if they match test IDs
+        underscore_pattern = r"^(.+)_(\d+)$"
+        matched_prefixes = set()
+        for s in sub_ids_str[:50]:
+            match = re.match(underscore_pattern, s)
+            if match:
+                matched_prefixes.add(match.group(1))
+
+        # Check overlap with test IDs
+        test_id_set = set(test_ids_str)
+        overlap = matched_prefixes & test_id_set
+        if len(overlap) >= len(test_ids_str[:5]) * 0.5:
+            # Infer number of classes
+            suffixes = set()
+            for s in sub_ids_str:
+                match = re.match(underscore_pattern, s)
+                if match:
+                    suffixes.add(int(match.group(2)))
+
+            inferred_classes = max(suffixes) + 1 if suffixes else num_classes
+
+            return {
+                "pattern": "underscore_concat",
+                "description": f"submission_id = f'{{test_id}}_{{class_id}}'",
+                "inferred_classes": inferred_classes,
+                "code_hint": f"""# Underscore concatenation: Id = "{{test_id}}_{{class_id}}"
+# predictions shape: (num_test_samples, {inferred_classes})
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+pred_map = {{}}
+
+for i, test_id in enumerate(test_ids):
+    for class_id in range({inferred_classes}):
+        sub_id = f"{{test_id}}_{{class_id}}"
+        pred_map[sub_id] = predictions[i, class_id]
+
+submission[target_col] = submission[id_col].map(pred_map)
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
+            }
+
+    # Case 4: Dash pattern: "test_id-class_id"
+    # Require at least 50% of sample to contain dash
+    if dash_count >= sample_size * 0.5:
+        dash_pattern = r"^(.+)-(\d+)$"
+        matched_prefixes = set()
+        for s in sub_ids_str[:50]:
+            match = re.match(dash_pattern, s)
+            if match:
+                matched_prefixes.add(match.group(1))
+
+        test_id_set = set(test_ids_str)
+        overlap = matched_prefixes & test_id_set
+        if len(overlap) >= len(test_ids_str[:5]) * 0.5:
+            suffixes = set()
+            for s in sub_ids_str:
+                match = re.match(dash_pattern, s)
+                if match:
+                    suffixes.add(int(match.group(2)))
+
+            inferred_classes = max(suffixes) + 1 if suffixes else num_classes
+
+            return {
+                "pattern": "dash_concat",
+                "description": f"submission_id = f'{{test_id}}-{{class_id}}'",
+                "inferred_classes": inferred_classes,
+                "code_hint": f"""# Dash concatenation: Id = "{{test_id}}-{{class_id}}"
+# predictions shape: (num_test_samples, {inferred_classes})
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+pred_map = {{}}
+
+for i, test_id in enumerate(test_ids):
+    for class_id in range({inferred_classes}):
+        sub_id = f"{{test_id}}-{{class_id}}"
+        pred_map[sub_id] = predictions[i, class_id]
+
+submission[target_col] = submission[id_col].map(pred_map)
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
+            }
+
+    # Could not determine pattern
+    return {
+        "pattern": "unknown",
+        "description": "Could not infer ID mapping - inspect sample_submission.csv manually",
+        "sample_test_ids": test_ids_str[:5],
+        "sample_sub_ids": sub_ids_str[:10],
+        "code_hint": f"""# TODO: Manual mapping required
+# Compare test IDs to submission IDs to determine the transformation
+# Sample test IDs: {test_ids_str[:5]}
+# Sample submission IDs: {sub_ids_str[:10]}
+submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+# ... implement custom mapping logic ...
+submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
+    }

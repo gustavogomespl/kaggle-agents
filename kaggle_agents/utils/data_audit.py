@@ -190,6 +190,105 @@ def _is_numeric(s: str) -> bool:
         return False
 
 
+def check_id_integrity(
+    sample_ids: list[str],
+    data_dir: Path,
+    extensions: list[str] | None = None,
+) -> tuple[bool, str, dict[str, Any]]:
+    """
+    Validate that IDs match files in a directory.
+
+    CRITICAL: Call this early to catch ID-extension mismatches before wasting GPU time.
+    This prevents the common error where ID mappings don't include file extensions.
+
+    Args:
+        sample_ids: List of file IDs to check (typically from rec_id2filename.txt)
+        data_dir: Directory where files should exist
+        extensions: Extensions to probe (None = common audio/image types)
+
+    Returns:
+        Tuple of (is_valid, message, details_dict)
+        - is_valid: True if IDs match files directly
+        - message: Human-readable explanation
+        - details_dict: Contains 'match_type', 'suggested_extension', 'match_rate'
+
+    Examples:
+        >>> is_valid, msg, details = check_id_integrity(
+        ...     ['PC1_123', 'PC1_456'], audio_dir
+        ... )
+        >>> if not is_valid and details.get('suggested_extension'):
+        ...     print(f"Add {details['suggested_extension']} to IDs when loading")
+    """
+    if extensions is None:
+        extensions = [".wav", ".mp3", ".flac", ".aiff", ".aif", ".jpg", ".png", ".jpeg"]
+
+    data_dir = Path(data_dir)
+
+    if not data_dir.exists():
+        return False, f"Directory does not exist: {data_dir}", {"match_type": "dir_missing"}
+
+    # Filter to first 20 samples
+    sample_ids = [str(x).strip() for x in sample_ids[:20] if str(x).strip()]
+
+    if not sample_ids:
+        return False, "No sample IDs provided", {"match_type": "no_ids"}
+
+    # Phase 1: Try direct match (IDs already include extension)
+    direct_matches = sum(1 for rid in sample_ids if (data_dir / rid).exists())
+
+    if direct_matches == len(sample_ids):
+        return True, "All IDs match files directly", {"match_type": "direct", "match_rate": 1.0}
+
+    if direct_matches > 0:
+        # Partial direct match - some IDs work, but most likely need extensions
+        # Return False to surface the warning - partial matches often indicate
+        # inconsistent data that will cause failures downstream
+        match_rate = direct_matches / len(sample_ids)
+        return False, (
+            f"WARNING: Only {direct_matches}/{len(sample_ids)} IDs match files directly. "
+            f"Remaining IDs may need file extensions appended."
+        ), {
+            "match_type": "partial_direct",
+            "match_rate": match_rate,
+        }
+
+    # Phase 2: Try with extensions
+    for ext in extensions:
+        ext_matches = sum(1 for rid in sample_ids if (data_dir / f"{rid}{ext}").exists())
+        match_rate = ext_matches / len(sample_ids) if sample_ids else 0
+
+        if match_rate >= 0.8:  # 80% threshold
+            return False, (
+                f"CRITICAL: IDs lack extensions. "
+                f"Found files ending in '{ext}'. "
+                f"Add '{ext}' to IDs when loading audio files."
+            ), {
+                "match_type": "extension_required",
+                "suggested_extension": ext,
+                "match_rate": match_rate,
+            }
+
+    # Phase 3: No match found - provide debugging info
+    try:
+        actual_files = [f.name for f in list(data_dir.iterdir())[:5] if f.is_file()]
+        actual_exts = list(set(f.suffix for f in data_dir.iterdir() if f.is_file()))[:5]
+    except PermissionError:
+        actual_files = ["<permission denied>"]
+        actual_exts = []
+
+    return False, (
+        f"CRITICAL: IDs do not match any files in {data_dir}. "
+        f"Sample IDs: {sample_ids[:3]}. "
+        f"Actual files: {actual_files}. "
+        f"Extensions found: {actual_exts}"
+    ), {
+        "match_type": "no_match",
+        "sample_ids": sample_ids[:5],
+        "actual_files": actual_files,
+        "actual_extensions": actual_exts,
+    }
+
+
 def validate_label_file(file_path: Path) -> tuple[bool, str, list[str]]:
     """
     Validate that a label file is parseable.

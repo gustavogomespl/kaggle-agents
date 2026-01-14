@@ -8,6 +8,7 @@ from typing import Any
 import pandas as pd
 
 from ...core.state import KaggleState
+from ...utils.data_audit import check_id_integrity
 from ...utils.precomputed_features import detect_precomputed_features
 from ...utils.submission_format import detect_audio_submission_format
 
@@ -216,6 +217,26 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                             print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
                 except Exception as e:
                     print(f"   Warning: Failed to parse CVfolds file: {e}")
+
+        # ID Integrity Check: Validate that IDs match actual files
+        # This catches early errors like MLSP-2013 where IDs lack .wav extension
+        audio_source = data_files.get("audio_source") or ""
+        train_rec_ids = updates.get("train_rec_ids", [])
+
+        if audio_source and train_rec_ids:
+            audio_dir = Path(audio_source)
+            if audio_dir.exists():
+                sample_ids = [str(x) for x in train_rec_ids[:20]]
+                is_valid, msg, details = check_id_integrity(sample_ids, audio_dir)
+
+                if not is_valid:
+                    print(f"\n   ⚠️ ID INTEGRITY WARNING:")
+                    print(f"   {msg}")
+                    if details.get("suggested_extension"):
+                        updates["id_extension_hint"] = details["suggested_extension"]
+                        print(f"   HINT: Add '{details['suggested_extension']}' extension to IDs")
+                else:
+                    print(f"   ✓ ID integrity validated: IDs match files in {audio_dir.name}/")
 
         print("   ---------------------------------")
 

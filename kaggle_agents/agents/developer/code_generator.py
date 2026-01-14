@@ -459,6 +459,7 @@ class CodeGeneratorMixin:
         # Non-standard label files (e.g., .txt files for MLSP 2013 Birds)
         label_files = data_files.get("label_files", [])
         audio_source_path = data_files.get("audio_source", "")
+        data_type = data_files.get("data_type", "tabular")
 
         competition_context = f"""
         Name: {competition_info.name}
@@ -702,8 +703,123 @@ def parse_id_mapping_file(mapping_path):
         if audio_source_path:
             path_header += f'\n# Audio source directory\nAUDIO_SOURCE_DIR = Path("{audio_source_path}")\n'
 
+        # Inject smart file locator for audio/image competitions
+        # This handles missing extensions (e.g., MLSP 2013 Birds where IDs lack .wav extension)
+        if data_type in ("audio", "image"):
+            path_header += '''
+# === SMART FILE LOCATOR (handles missing extensions) ===
+# CRITICAL: Use smart_locate_file() when loading audio/image files by ID
+# This probes extensions automatically when the exact path doesn't exist
+import glob as _glob_module
+
+AUDIO_EXTENSIONS = [".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"]
+IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".gif", ".webp"]
+
+def smart_locate_file(base_dir, file_id, likely_extensions=None, case_variants=True):
+    """
+    Robustly locate a file, handling missing extensions and case sensitivity.
+
+    Args:
+        base_dir: Directory to search in (Path or str)
+        file_id: ID or partial filename (may lack extension)
+        likely_extensions: Extensions to try ['.wav', '.mp3'], or None for auto-detect
+        case_variants: Try uppercase/lowercase extension variants
+
+    Returns:
+        Full path as string if found, None if not found
+
+    Example:
+        >>> path = smart_locate_file(audio_dir, "PC1_123")
+        '/data/audio/PC1_123.wav'  # Found with .wav extension
+    """
+    base_dir = Path(base_dir)
+    file_id = str(file_id).strip()
+
+    if not file_id or not base_dir.exists():
+        return None
+
+    # 1. Direct exact match (ID already has extension)
+    direct_path = base_dir / file_id
+    if direct_path.exists():
+        return str(direct_path)
+
+    # 2. Auto-detect extensions from directory if not provided
+    if likely_extensions is None:
+        sample_files = list(base_dir.iterdir())[:20]
+        found_exts = set(f.suffix.lower() for f in sample_files if f.is_file() and f.suffix)
+        likely_extensions = [e for e in AUDIO_EXTENSIONS + IMAGE_EXTENSIONS if e in found_exts]
+        if not likely_extensions:
+            likely_extensions = AUDIO_EXTENSIONS  # Default fallback
+
+    # 3. Try with extensions
+    for ext in likely_extensions:
+        ext = f".{ext.lstrip('.')}"  # Normalize: ensure starts with dot
+
+        candidate = base_dir / f"{file_id}{ext}"
+        if candidate.exists():
+            return str(candidate)
+
+        if case_variants:
+            candidate_lower = base_dir / f"{file_id}{ext.lower()}"
+            if candidate_lower.exists():
+                return str(candidate_lower)
+            candidate_upper = base_dir / f"{file_id}{ext.upper()}"
+            if candidate_upper.exists():
+                return str(candidate_upper)
+
+    # 4. Glob fallback (more expensive)
+    # Escape glob special characters in file_id to prevent pattern issues
+    escaped_id = _glob_module.escape(file_id)
+    matches = list(base_dir.glob(f"{escaped_id}.*"))
+    if matches:
+        return str(matches[0])
+
+    # 5. Case-insensitive stem match (last resort)
+    try:
+        for f in base_dir.iterdir():
+            if f.is_file() and f.stem.lower() == file_id.lower():
+                return str(f)
+    except PermissionError:
+        pass
+
+    return None
+
+
+def build_id_to_path_map(id_list, base_dir, extensions=None, verbose=True):
+    """
+    Build a mapping from IDs to resolved file paths.
+
+    Args:
+        id_list: List of file IDs (potentially without extensions)
+        base_dir: Directory containing files
+        extensions: Extensions to try (None = auto-detect)
+        verbose: Print warnings for unresolved IDs
+
+    Returns:
+        Tuple of (id_to_path_map, unresolved_ids)
+    """
+    base_dir = Path(base_dir)
+    id_to_path = {}
+    unresolved = []
+
+    for file_id in id_list:
+        path = smart_locate_file(base_dir, str(file_id), extensions)
+        if path:
+            id_to_path[str(file_id)] = path
+        else:
+            unresolved.append(str(file_id))
+
+    if verbose and unresolved:
+        print(f"[WARNING] Could not resolve {len(unresolved)}/{len(id_list)} file IDs")
+        print(f"[WARNING] Sample unresolved: {unresolved[:5]}")
+
+    return id_to_path, unresolved
+
+
+print("[INFO] smart_locate_file() available - use for loading audio/image by ID")
+'''
+
         # For audio competitions without label files, inject filename-based label parser
-        data_type = data_files.get("data_type", "tabular")
         if data_type == "audio" and not label_files:
             path_header += '''
 # === FILENAME-BASED LABEL PARSER (for audio without train.csv) ===
