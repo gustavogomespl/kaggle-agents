@@ -104,6 +104,65 @@ NEVER USE THIS PATTERN (fails on variable-width rows):
 labels_df = pd.read_csv(label_file, header=None, names=['rec_id', 'label'])
 ```
 
+### 3.5. Filename-Based Label Parsing
+Some audio competitions embed labels directly in filenames instead of a CSV.
+Examples:
+- `train12345_1.aif` → Label = 1 (whale call detected)
+- `train12345_0.aif` → Label = 0 (no whale call)
+- `sample_42.wav` → Label = 42 (multi-class support)
+
+```python
+import re
+
+def create_train_df_from_filenames(audio_dir: Path, label_pattern: str = r'_(\d+)\.'):
+    \"\"\"
+    Create training DataFrame by parsing labels from filenames.
+
+    Args:
+        audio_dir: Directory containing audio files
+        label_pattern: Regex pattern to extract label. Default r'_(\d+)\.' matches
+                       any digits before the extension (e.g., '_0.', '_1.', '_42.')
+
+    Returns:
+        DataFrame with columns: id, path, target
+    \"\"\"
+    AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aiff', '.aif'}
+    audio_files = [f for f in audio_dir.rglob('*') if f.suffix.lower() in AUDIO_EXTS]
+
+    data = []
+    for file_path in audio_files:
+        match = re.search(label_pattern, file_path.name)
+        if match:
+            label = int(match.group(1))
+            data.append({
+                'id': file_path.stem,
+                'path': str(file_path),
+                'target': label
+            })
+
+    if not data:
+        raise ValueError(f"No files with label pattern '{label_pattern}' found in {audio_dir}")
+
+    df = pd.DataFrame(data)
+    print(f"Created train_df from filenames: {len(df)} samples")
+    print(f"Label distribution: {df['target'].value_counts().to_dict()}")
+    return df
+
+# Usage when no train.csv exists:
+# First, define where the extracted training data is located
+# (adjust path based on where you extracted train.zip or train2.zip)
+train_extract_dir = Path("train_extracted")  # or use TRAIN_PATH.parent / "train2" if already extracted
+
+# Check if we need to parse labels from filenames
+train_csv_exists = any('train' in f.name.lower() and f.suffix == '.csv'
+                       for f in OUTPUT_DIR.glob('*.csv') if f.is_file())
+if not train_csv_exists and train_extract_dir.exists():
+    print("[INFO] No train.csv found - attempting to parse labels from filenames")
+    train_df = create_train_df_from_filenames(train_extract_dir)
+    y = train_df['target'].values
+    train_ids = train_df['id'].values
+```
+
 ### 4. Mel Spectrogram Processing
 Use consistent parameters and normalize properly.
 

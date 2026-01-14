@@ -38,14 +38,22 @@ class DetectionMixin:
             return False
 
         # 1) Check common directories (recursively, to handle nested zips)
-        for dir_name in ["train", "test", "images", "train_images", "test_images"]:
-            dir_path = public_dir / dir_name
-            if not dir_path.is_dir():
-                continue
-            if _dir_contains_ext(dir_path, image_exts):
-                return "image"
-            if _dir_contains_ext(dir_path, audio_exts):
-                return "audio"
+        # Use exact matches first, then numbered patterns (train2, test2) to avoid duplicates
+        checked_dirs = set()
+        # Exact matches first, then numbered patterns for non-standard naming
+        patterns = [
+            "train", "test", "images", "train_images", "test_images",  # Exact matches
+            "train[0-9]*", "test[0-9]*",  # Numbered variants (train2, test2, etc.)
+        ]
+        for pattern in patterns:
+            for dir_path in public_dir.glob(pattern):
+                if not dir_path.is_dir() or dir_path in checked_dirs:
+                    continue
+                checked_dirs.add(dir_path)
+                if _dir_contains_ext(dir_path, image_exts):
+                    return "image"
+                if _dir_contains_ext(dir_path, audio_exts):
+                    return "audio"
 
         # 2) Check root for obvious media files (some zips extract flat)
         for p in list(public_dir.glob("*"))[:500]:

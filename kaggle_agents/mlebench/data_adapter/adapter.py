@@ -292,6 +292,14 @@ class MLEBenchDataAdapter(
                 print(f"   Train dir: {train_dir.name}/")
                 break
 
+        # If no exact match, try pattern matching for numbered train directories (e.g., train2)
+        if info.train_path is None:
+            for train_dir in sorted(public_dir.glob("train[0-9]*")):
+                if train_dir.is_dir():  # Excludes train2.zip (only directories)
+                    info.train_path = train_dir
+                    print(f"   Train dir (pattern match): {train_dir.name}/")
+                    break
+
         # If no standard train dir found, check non-standard directories for audio/image data
         if info.train_path is None:
             audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
@@ -396,6 +404,14 @@ class MLEBenchDataAdapter(
                 info.test_path = test_dir
                 print(f"   Test dir: {test_dir.name}/")
                 break
+
+        # If no exact match, try pattern matching for numbered test directories (e.g., test2)
+        if info.test_path is None:
+            for test_dir in sorted(public_dir.glob("test[0-9]*")):
+                if test_dir.is_dir():  # Excludes test2.zip (only directories)
+                    info.test_path = test_dir
+                    print(f"   Test dir (pattern match): {test_dir.name}/")
+                    break
 
         # If no standard test dir found but train was found in non-standard dir,
         # check if the same directory contains test data
