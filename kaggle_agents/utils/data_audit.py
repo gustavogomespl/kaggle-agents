@@ -302,6 +302,8 @@ def audit_audio_competition(
         "raw_audio",
         "train_audio",
         "train",
+        "train2",  # for whale competition (non-standard naming)
+        "test2",   # for whale competition (non-standard naming)
         "essential_data",
     ]
 
