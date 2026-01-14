@@ -4,6 +4,39 @@ Audio-specific constraints for audio classification/regression tasks.
 
 AUDIO_CONSTRAINTS = """## AUDIO TASK REQUIREMENTS:
 
+## ⚠️ CRITICAL: AUDIO COMPETITIONS DO NOT USE CANONICAL DATA ⚠️
+
+For audio competitions, the canonical data preparation is SKIPPED. Therefore:
+- **DO NOT** use `CANONICAL_DIR` or try to load `folds.npy` - these files DO NOT EXIST
+- **DO NOT** assume `train.csv` exists - labels are often embedded in filenames
+- **DO** use sklearn's `StratifiedKFold` to generate your own CV folds
+- **DO** check if labels are in filenames (e.g., `train12345_1.aif` means label=1)
+
+### How to handle missing train.csv (labels in filenames):
+```python
+# If filenames contain labels like: train12345_0.aif (label=0), train12345_1.aif (label=1)
+# Use the injected create_train_df_from_filenames() function:
+train_df = create_train_df_from_filenames(TRAIN_PATH)  # Parses labels from filenames
+y = train_df['target'].values
+```
+
+### How to generate CV folds WITHOUT canonical data:
+```python
+from sklearn.model_selection import StratifiedKFold
+
+N_FOLDS = 5
+skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
+train_df['fold'] = -1
+for fold_idx, (_, val_idx) in enumerate(skf.split(train_df, train_df['target'])):
+    train_df.loc[train_df.index[val_idx], 'fold'] = fold_idx
+
+# Then use in CV loop:
+for fold in range(N_FOLDS):
+    train_mask = train_df['fold'] != fold
+    val_mask = train_df['fold'] == fold
+    # ... train model
+```
+
 ### 0. Data Audit (CRITICAL - MUST DO FIRST)
 Before any processing, validate that audio data exists and is sufficient.
 NEVER proceed with dummy data - fail fast if data is missing.

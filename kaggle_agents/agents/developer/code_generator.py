@@ -678,6 +678,44 @@ def parse_id_mapping_file(mapping_path):
         if audio_source_path:
             path_header += f'\n# Audio source directory\nAUDIO_SOURCE_DIR = Path("{audio_source_path}")\n'
 
+        # For audio competitions without label files, inject filename-based label parser
+        data_type = data_files.get("data_type", "tabular")
+        if data_type == "audio" and not label_files:
+            path_header += '''
+# === FILENAME-BASED LABEL PARSER (for audio without train.csv) ===
+# Use this when labels are embedded in filenames (e.g., train12345_1.aif means label=1)
+def create_train_df_from_filenames(audio_dir, label_pattern=r'_(\\d+)\\.'):
+    """Parse labels from audio filenames.
+
+    Args:
+        audio_dir: Directory containing audio files
+        label_pattern: Regex to extract label (default: matches _0., _1., _42., etc.)
+
+    Returns:
+        DataFrame with columns: id, path, target
+    """
+    import re
+    AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aiff', '.aif'}
+    audio_files = [f for f in Path(audio_dir).rglob('*') if f.suffix.lower() in AUDIO_EXTS]
+
+    data = []
+    for fp in audio_files:
+        match = re.search(label_pattern, fp.name)
+        if match:
+            data.append({'id': fp.stem, 'path': str(fp), 'target': int(match.group(1))})
+
+    if not data:
+        raise ValueError(f"No files with label pattern '{label_pattern}' found in {audio_dir}")
+
+    df = pd.DataFrame(data)
+    print(f"[INFO] Created train_df from filenames: {len(df)} samples")
+    print(f"[INFO] Label distribution: {df['target'].value_counts().to_dict()}")
+    return df
+
+# NOTE: For this audio competition, use create_train_df_from_filenames(TRAIN_PATH)
+# instead of loading train.csv (which does not exist)
+'''
+
         path_header += "\n# === END PATH CONSTANTS ===\n"
 
         def _generate_with_llm() -> str:
