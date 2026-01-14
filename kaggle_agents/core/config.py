@@ -119,11 +119,11 @@ class ComponentTimeoutConfig:
         default_factory=lambda: int(os.getenv("TIMEOUT_FEATURE_ENGINEERING", "900"))
     )  # 15 min
     model_light: int = field(
-        default_factory=lambda: int(os.getenv("TIMEOUT_MODEL_LIGHT", "1800"))
-    )  # 30 min (LightGBM, XGBoost, CatBoost)
+        default_factory=lambda: int(os.getenv("TIMEOUT_MODEL_LIGHT", "2700"))
+    )  # 45 min (LightGBM, XGBoost, CatBoost) - increased from 30 for more training iterations
     model_heavy: int = field(
-        default_factory=lambda: int(os.getenv("TIMEOUT_MODEL_HEAVY", "3600"))
-    )  # 60 min (Neural networks, deep models)
+        default_factory=lambda: int(os.getenv("TIMEOUT_MODEL_HEAVY", "5400"))
+    )  # 90 min (Neural networks, deep models) - increased from 60 for better convergence
     ensemble: int = field(
         default_factory=lambda: int(os.getenv("TIMEOUT_ENSEMBLE", "600"))
     )  # 10 min

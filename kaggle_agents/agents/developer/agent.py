@@ -488,6 +488,28 @@ class DeveloperAgent(
                 try:
                     import numpy as np
                     oof_preds = np.load(oof_file)
+
+                    # CRITICAL FIX: Check for empty OOF rows (unfilled predictions)
+                    # This can cause random-chance MLE-bench scores (0.50 AUC)
+                    # NOTE: Only check multiclass problems where OOF is a probability distribution
+                    # For binary/regression, zero is a legitimate prediction value
+                    if problem_type == "multiclass" and oof_preds.ndim > 1:
+                        # Multiclass OOF should be probability distributions summing to ~1
+                        # Rows summing to 0 are definitely unfilled
+                        empty_rows = int(np.sum(oof_preds.sum(axis=1) == 0))
+
+                        if empty_rows > 0:
+                            empty_pct = empty_rows / oof_preds.shape[0] * 100
+                            print(f"   ⚠️ Empty OOF rows detected: {empty_rows} ({empty_pct:.2f}%)")
+
+                            # In MLE-bench mode, block submissions with >1% empty rows
+                            if run_mode == "mlebench" and empty_pct > 1.0:
+                                print(f"   ❌ BLOCKING: Too many empty OOF rows ({empty_pct:.2f}% > 1.0%) - would cause random-chance MLE-bench score")
+                                result.success = False
+                                if not hasattr(result, 'errors') or result.errors is None:
+                                    result.errors = []
+                                result.errors.append(f"Empty OOF rows: {empty_rows} ({empty_pct:.2f}%) - blocking submission")
+
                     is_quality_ok, quality_issues = validate_prediction_quality(
                         oof_preds, problem_type=problem_type
                     )
@@ -650,19 +672,44 @@ class DeveloperAgent(
                     best_str = f"{current_best_score:.5f}" if current_best_score is not None else "None"
                     print(f"[SCORE COMPARISON] Current best: {best_str}, New score: {primary_score:.5f} (source: {primary_score_source})")
 
-                    if current_best_score is None:
-                        is_best = True
-                        print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
-                    else:
-                        improvement = calculate_score_improvement(
-                            primary_score, current_best_score, metric_name
-                        )
-                        print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
-                        if improvement > 0:
+                    # CRITICAL FIX: Skip update if MLE-bench score is random chance (0.48-0.52)
+                    # This prevents good submissions from being overwritten by broken ones
+                    # NOTE: Only apply to maximization metrics (AUC, accuracy) where 0.5 = random chance
+                    # For minimization metrics (RMSE, logloss), 0.5 could be a valid good score
+                    if run_mode == "mlebench" and primary_score_source == "mlebench":
+                        is_maximize_metric = not is_metric_minimization(metric_name)
+                        is_random_chance = is_maximize_metric and 0.48 <= primary_score <= 0.52
+                        if is_random_chance:
+                            print(f"[SCORE COMPARISON] SKIP: MLE-bench score {primary_score:.5f} is random chance for {metric_name} - preserving submission_best")
+                            # Do NOT set is_best = True - keep existing submission_best intact
+                        elif current_best_score is None:
                             is_best = True
-                            print(f"[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
+                            print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
                         else:
-                            print(f"[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
+                            improvement = calculate_score_improvement(
+                                primary_score, current_best_score, metric_name
+                            )
+                            print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
+                            if improvement > 0:
+                                is_best = True
+                                print(f"[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
+                            else:
+                                print(f"[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
+                    else:
+                        # Non-MLE-bench mode: original logic
+                        if current_best_score is None:
+                            is_best = True
+                            print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
+                        else:
+                            improvement = calculate_score_improvement(
+                                primary_score, current_best_score, metric_name
+                            )
+                            print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
+                            if improvement > 0:
+                                is_best = True
+                                print(f"[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
+                            else:
+                                print(f"[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
 
                 if is_best:
                     print(f"✅ New Best Single Model! ({primary_score:.4f}, source: {primary_score_source})")
@@ -1426,7 +1473,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 cv_folds = max(2, min(int(cv_folds_override), 10))
             except ValueError:
                 cv_folds = (
-                    2
+                    5  # Increased from 2: More folds = more stable OOF predictions
                     if run_mode == "mlebench"
                     else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
                 )
@@ -1434,7 +1481,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             cv_folds = min(state_cv_folds, 10)
         else:
             cv_folds = (
-                2
+                5  # Increased from 2: More folds = more stable OOF predictions
                 if run_mode == "mlebench"
                 else (3 if (fast_mode or getattr(self.executor, "timeout", 0) <= 1200) else 5)
             )
