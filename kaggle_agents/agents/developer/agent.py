@@ -1364,7 +1364,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 pass  # Continue even if save fails
 
         # Pre-execution validation: Check canonical data usage
-        if component.component_type in ("model", "ensemble"):
+        # SKIP validation if canonical data was intentionally not prepared (audio/image)
+        canonical_data_prepared = state.get("canonical_data_prepared", False)
+        if component.component_type in ("model", "ensemble") and canonical_data_prepared:
             try:
                 from kaggle_agents.utils.data_contract import validate_canonical_data_usage
 
@@ -1391,6 +1393,9 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                         print(f"   Canonical data warning: {warning}")
             except Exception as exc:
                 print(f"   Canonical data validation skipped: {exc}")
+        elif component.component_type in ("model", "ensemble") and not canonical_data_prepared:
+            canonical_reason = state.get("canonical_data_skipped_reason", "unknown")
+            print(f"   Skipping canonical data validation ({canonical_reason})")
 
         is_valid, syntax_error = self.executor.validate_syntax(code)
         if not is_valid:

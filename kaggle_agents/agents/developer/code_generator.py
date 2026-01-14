@@ -716,6 +716,33 @@ def create_train_df_from_filenames(audio_dir, label_pattern=r'_(\\d+)\\.'):
 # instead of loading train.csv (which does not exist)
 '''
 
+        # Inject submission format hint for multi-label/multi-class competitions
+        submission_format = data_files.get("submission_format_info", {})
+        if submission_format:
+            num_classes = submission_format.get("num_classes", 1)
+            id_pattern = submission_format.get("id_pattern", "")
+            if num_classes > 1 or id_pattern:
+                path_header += f'''
+# === SUBMISSION FORMAT (AUTO-DETECTED) ===
+# num_classes: {num_classes}
+# id_pattern: {id_pattern}
+# IMPORTANT: Output shape must be (N_samples, {num_classes})
+'''
+                if "rec_id * 100" in id_pattern or "* 100 +" in id_pattern:
+                    path_header += f'''
+# CRITICAL: Submission Id = rec_id * 100 + class_id
+# Example: rec_id=5, class=3 → Id=503
+NUM_CLASSES = {num_classes}
+
+def create_submission_ids(rec_ids, num_classes={num_classes}):
+    """Generate submission IDs in rec_id * 100 + class format."""
+    ids = []
+    for rec_id in rec_ids:
+        for cls in range(num_classes):
+            ids.append(rec_id * 100 + cls)
+    return ids
+'''
+
         path_header += "\n# === END PATH CONSTANTS ===\n"
 
         def _generate_with_llm() -> str:

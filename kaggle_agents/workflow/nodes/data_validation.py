@@ -196,9 +196,18 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                         id_col = cv_df.columns[0]
                         fold_col = cv_df.columns[1]
 
-                        # Standard semantics: fold=1 is train, fold=2 is test
-                        train_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
-                        test_rec_ids = cv_df[cv_df[fold_col] == 2][id_col].tolist()
+                        # Auto-detect fold semantics based on unique values
+                        unique_folds = set(cv_df[fold_col].unique())
+                        if unique_folds == {0, 1}:
+                            # MLSP-style: fold=0 is train, fold=1 is test
+                            train_rec_ids = cv_df[cv_df[fold_col] == 0][id_col].tolist()
+                            test_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
+                            print(f"   CVfolds semantics: 0=train, 1=test")
+                        else:
+                            # Standard semantics: fold=1 is train, fold=2 is test
+                            train_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
+                            test_rec_ids = cv_df[cv_df[fold_col] == 2][id_col].tolist()
+                            print(f"   CVfolds semantics: 1=train, 2=test")
 
                         if train_rec_ids or test_rec_ids:
                             updates["train_rec_ids"] = train_rec_ids

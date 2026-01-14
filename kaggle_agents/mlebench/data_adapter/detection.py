@@ -44,6 +44,7 @@ class DetectionMixin:
         patterns = [
             "train", "test", "images", "train_images", "test_images",  # Exact matches
             "train[0-9]*", "test[0-9]*",  # Numbered variants (train2, test2, etc.)
+            "essential_data", "supplemental_data", "src_wavs",  # MLSP-style competitions
         ]
         for pattern in patterns:
             for dir_path in public_dir.glob(pattern):
