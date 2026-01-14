@@ -733,6 +733,13 @@ def validate_canonical_data_usage(
         (r"\.sample\s*\(", "Sampling data - may cause alignment issues with canonical"),
     ]
 
+    # Check if canonical folds are being loaded (primary path)
+    # If so, fallback KFold/StratifiedKFold is acceptable
+    loads_canonical_folds = bool(
+        re.search(r"np\.load.*CANONICAL_FOLDS_PATH|CANONICAL_FOLDS\s*=\s*np\.load", generated_code)
+        or re.search(r"np\.load.*canonical.*folds\.npy", generated_code, re.IGNORECASE)
+    )
+
     violations = []
     for pattern, message in anti_patterns:
         if re.search(pattern, generated_code):
@@ -750,6 +757,11 @@ def validate_canonical_data_usage(
                 )
                 if is_optuna_subsample:
                     continue
+            # Exception: KFold/StratifiedKFold in fallback is OK if canonical folds ARE loaded
+            # This allows code like: if canonical_exists: load(folds.npy) else: StratifiedKFold()
+            if "KFold" in pattern and loads_canonical_folds:
+                # Primary path uses canonical, fallback KFold is acceptable
+                continue
             violations.append(message)
 
     # Model components MUST use canonical data (STRICT ENFORCEMENT)

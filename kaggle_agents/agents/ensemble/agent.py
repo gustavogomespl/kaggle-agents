@@ -195,62 +195,180 @@ class EnsembleAgent:
         prediction_pairs: dict[str, tuple[Path, Path]],
         sample_submission_path: Path,
         output_path: Path,
+        models_dir: Path | None = None,
     ) -> bool:
-        """Create a simple average ensemble directly from saved predictions."""
+        """Create a simple average ensemble directly from saved predictions.
+
+        Uses ID-based merging when shapes don't match to handle models trained
+        on different subsets of data.
+        """
         if not sample_submission_path.exists():
             print("   Sample submission not found")
             return False
 
         sample_sub = read_csv_auto(sample_submission_path)
-        preds_list = []
-        names = []
+        n_test = len(sample_sub)
+        preds_dict: dict[str, np.ndarray] = {}
+        ids_dict: dict[str, np.ndarray | None] = {}
 
         for name, (_, test_path) in prediction_pairs.items():
             preds = np.load(test_path)
             preds = np.asarray(preds, dtype=np.float32)
             if preds.ndim == 1:
                 preds = preds.reshape(-1, 1)
-            preds_list.append(preds)
-            names.append(name)
+            preds_dict[name] = preds
+
+            # Try to load test IDs if available
+            if models_dir:
+                test_ids_path = models_dir / f"test_ids_{name}.npy"
+                if test_ids_path.exists():
+                    ids_dict[name] = np.load(test_ids_path, allow_pickle=True)
+                else:
+                    ids_dict[name] = None
+            else:
+                ids_dict[name] = None
+
+        if len(preds_dict) < 1:
+            print("   No prediction pairs found")
+            return False
+
+        names = list(preds_dict.keys())
+        preds_list = list(preds_dict.values())
 
         if len(preds_list) == 1:
             ensemble_preds = preds_list[0]
-            if ensemble_preds.shape[0] != len(sample_sub):
-                print("   Row count mismatch")
+            if ensemble_preds.shape[0] != n_test:
+                print(f"   Row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
                 return False
+
+            # Validate column count matches submission template
+            expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
+            if ensemble_preds.shape[1] > expected_cols:
+                print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
+                ensemble_preds = ensemble_preds[:, :expected_cols]
+
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
-            else:
+            elif ensemble_preds.shape[1] == expected_cols:
                 sample_sub.iloc[:, 1:] = ensemble_preds
+            else:
+                # Fewer prediction columns than expected - pad with 0.5
+                print(f"   WARNING: Padding {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
+                padded = np.full((n_test, expected_cols), 0.5)
+                padded[:, :ensemble_preds.shape[1]] = ensemble_preds
+                sample_sub.iloc[:, 1:] = padded
+
             output_path.parent.mkdir(parents=True, exist_ok=True)
             sample_sub.to_csv(output_path, index=False)
             return True
 
-        if len(preds_list) < 2:
-            print("   Not enough prediction pairs")
-            return False
-
         shapes = {p.shape for p in preds_list}
         if len(shapes) != 1:
-            from collections import Counter
-            shape_counts = Counter(p.shape for p in preds_list)
-            target_shape = shape_counts.most_common(1)[0][0]
-            valid_idx = [i for i, p in enumerate(preds_list) if p.shape == target_shape]
-            preds_list = [preds_list[i] for i in valid_idx]
-            names = [names[i] for i in valid_idx]
-            if len(preds_list) < 1:
+            print(f"   Shape mismatch detected: {shapes}")
+            print("   Attempting ID-based merging with nanmean...")
+
+            # Use ID-based merging instead of filtering
+            # Get sample_sub IDs as reference
+            test_ids_ref = sample_sub.iloc[:, 0].astype(str).values
+
+            # CRITICAL: Use sample submission's expected column count, not max from predictions
+            # This prevents ValueError when predictions have more columns than submission expects
+            expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
+            pred_cols = max(p.shape[1] for p in preds_list)
+
+            if pred_cols > expected_cols:
+                print(f"   WARNING: Predictions have {pred_cols} cols, submission expects {expected_cols}")
+                print(f"   Truncating predictions to {expected_cols} columns")
+            n_cols = min(pred_cols, expected_cols) if expected_cols > 0 else pred_cols
+
+            # Initialize merged array with NaN
+            merged = np.full((n_test, len(names), n_cols), np.nan)
+
+            models_contributed = 0
+            for model_idx, name in enumerate(names):
+                preds = preds_dict[name]
+                model_ids = ids_dict.get(name)
+
+                # Truncate prediction columns if needed
+                if preds.shape[1] > n_cols:
+                    preds = preds[:, :n_cols]
+
+                if model_ids is not None and len(model_ids) == len(preds):
+                    # Use ID-based mapping
+                    id_to_pred = {str(id_): preds[i] for i, id_ in enumerate(model_ids)}
+                    matched = 0
+                    for ref_idx, ref_id in enumerate(test_ids_ref):
+                        if ref_id in id_to_pred:
+                            pred = id_to_pred[ref_id]
+                            cols_to_copy = min(pred.shape[0] if pred.ndim > 0 else 1, n_cols)
+                            merged[ref_idx, model_idx, :cols_to_copy] = pred[:cols_to_copy] if pred.ndim > 0 else pred
+                            matched += 1
+                    print(f"      {name}: ID-matched {matched}/{n_test} ({100*matched/n_test:.1f}%)")
+                    if matched > 0:
+                        models_contributed += 1
+                elif len(preds) == n_test:
+                    # Assume aligned order
+                    cols_to_copy = min(preds.shape[1], n_cols)
+                    merged[:, model_idx, :cols_to_copy] = preds[:, :cols_to_copy]
+                    print(f"      {name}: Assumed aligned ({len(preds)} rows)")
+                    models_contributed += 1
+                else:
+                    print(f"      {name}: SKIPPED (shape {preds.shape}, no IDs)")
+
+            # CRITICAL: Fail fast if no models contributed predictions
+            if models_contributed == 0:
+                print("   ERROR: No models contributed valid predictions - cannot create ensemble")
                 return False
 
-        stacked = np.stack(preds_list, axis=0)
-        ensemble_preds = stacked.mean(axis=0)
+            # Check if merged array has any valid (non-NaN) values
+            valid_count = np.count_nonzero(~np.isnan(merged))
+            if valid_count == 0:
+                print("   ERROR: Merged array is entirely NaN - no valid predictions")
+                return False
 
-        if ensemble_preds.shape[0] != len(sample_sub):
-            return False
+            print(f"   {models_contributed}/{len(names)} models contributed, {valid_count} valid predictions")
 
-        if ensemble_preds.shape[1] == 1:
-            sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+            # Compute nanmean across models
+            ensemble_preds = np.nanmean(merged, axis=1)
+
+            # Fill any remaining NaN with 0.5 (neutral for binary classification)
+            ensemble_preds = np.where(np.isnan(ensemble_preds), 0.5, ensemble_preds)
+
+            # Squeeze if single column
+            if ensemble_preds.shape[1] == 1:
+                ensemble_preds = ensemble_preds.squeeze(axis=1)
         else:
-            sample_sub.iloc[:, 1:] = ensemble_preds
+            stacked = np.stack(preds_list, axis=0)
+            ensemble_preds = stacked.mean(axis=0)
+
+        # Validate and assign predictions to sample submission
+        expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
+
+        if ensemble_preds.ndim == 1:
+            if len(ensemble_preds) != n_test:
+                print(f"   Final row count mismatch: {len(ensemble_preds)} vs {n_test}")
+                return False
+            sample_sub.iloc[:, 1] = ensemble_preds
+        else:
+            if ensemble_preds.shape[0] != n_test:
+                print(f"   Final row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
+                return False
+
+            # Validate column count matches submission template
+            if ensemble_preds.shape[1] > expected_cols:
+                print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
+                ensemble_preds = ensemble_preds[:, :expected_cols]
+
+            if ensemble_preds.shape[1] == 1:
+                sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+            elif ensemble_preds.shape[1] == expected_cols:
+                sample_sub.iloc[:, 1:] = ensemble_preds
+            else:
+                # Fewer prediction columns than expected - pad with 0.5
+                print(f"   WARNING: Padding {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
+                padded = np.full((n_test, expected_cols), 0.5)
+                padded[:, :ensemble_preds.shape[1]] = ensemble_preds
+                sample_sub.iloc[:, 1:] = padded
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sample_sub.to_csv(output_path, index=False)

@@ -6,10 +6,12 @@ Contains methods for detecting data type, target column, and ID column.
 
 from __future__ import annotations
 
+import re
 import zipfile
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
 
 
 class DetectionMixin:
@@ -115,3 +117,115 @@ class DetectionMixin:
         except Exception:
             pass
         return "id"
+
+    def _detect_audio_labels_from_filenames(
+        self, audio_dir: Path
+    ) -> tuple[list[str], list[int], list[Path]]:
+        """Extract labels from audio filenames when no train.csv exists.
+
+        Supports patterns like:
+        - train12345_1.aiff (label=1)
+        - whale_001_0.wav (label=0)
+        - file_42.mp3 (label=42)
+
+        Args:
+            audio_dir: Directory containing audio files
+
+        Returns:
+            Tuple of (ids, labels, paths) where:
+            - ids: List of file stems
+            - labels: List of integer labels extracted from filenames
+            - paths: List of file paths
+        """
+        AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
+        LABEL_PATTERNS = [
+            r"_(\d+)\.[a-zA-Z0-9]+$",  # train123_1.aiff (most common)
+            r"_(\d+)$",  # train123_1 (no extension in stem - rare)
+        ]
+
+        audio_files = []
+        for f in audio_dir.rglob("*"):
+            if f.is_file() and f.suffix.lower() in AUDIO_EXTS:
+                audio_files.append(f)
+
+        ids: list[str] = []
+        labels: list[int] = []
+        paths: list[Path] = []
+
+        for fp in audio_files:
+            for pattern in LABEL_PATTERNS:
+                match = re.search(pattern, fp.name)
+                if match:
+                    ids.append(fp.stem)
+                    labels.append(int(match.group(1)))
+                    paths.append(fp)
+                    break
+
+        return ids, labels, paths
+
+    def create_canonical_from_audio_filenames(
+        self, audio_dir: Path, canonical_dir: Path, n_folds: int = 5
+    ) -> dict:
+        """Create canonical data artifacts from audio files with labels in filenames.
+
+        This is a fallback when no train.csv exists.
+
+        Args:
+            audio_dir: Directory containing audio files with labels in filenames
+            canonical_dir: Directory to save canonical artifacts
+            n_folds: Number of CV folds to create
+
+        Returns:
+            Dictionary with canonical data info
+        """
+        from sklearn.model_selection import StratifiedKFold
+
+        ids, labels, paths = self._detect_audio_labels_from_filenames(audio_dir)
+
+        if not ids:
+            return {"success": False, "error": "No audio files with labels found"}
+
+        # Create canonical directory
+        canonical_dir.mkdir(parents=True, exist_ok=True)
+
+        # Convert to numpy arrays
+        train_ids = np.array(ids)
+        y = np.array(labels)
+
+        # Create stratified folds
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        folds = np.zeros(len(train_ids), dtype=int)
+        for fold_idx, (_, val_idx) in enumerate(skf.split(train_ids, y)):
+            folds[val_idx] = fold_idx
+
+        # Save artifacts
+        np.save(canonical_dir / "train_ids.npy", train_ids)
+        np.save(canonical_dir / "y.npy", y)
+        np.save(canonical_dir / "folds.npy", folds)
+
+        # Save metadata
+        import json
+
+        metadata = {
+            "canonical_rows": len(train_ids),
+            "n_folds": n_folds,
+            "id_col": "id",
+            "target_col": "target",
+            "is_classification": True,
+            "num_classes": len(np.unique(y)),
+            "source": "audio_filenames",
+        }
+        with open(canonical_dir / "metadata.json", "w") as f:
+            json.dump(metadata, f, indent=2)
+
+        print(f"   [FALLBACK] Created canonical data from {len(ids)} audio files")
+        print(f"   Labels: {dict(zip(*np.unique(y, return_counts=True)))}")
+
+        return {
+            "success": True,
+            "canonical_dir": str(canonical_dir),
+            "train_ids_path": str(canonical_dir / "train_ids.npy"),
+            "y_path": str(canonical_dir / "y.npy"),
+            "folds_path": str(canonical_dir / "folds.npy"),
+            "metadata": metadata,
+        }

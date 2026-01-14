@@ -580,6 +580,30 @@ with open(CANONICAL_METADATA_PATH) as _f:
     IS_CLASSIFICATION = CANONICAL_METADATA.get("is_classification", True)
 
 print(f"[LOG:INFO] Canonical data loaded: {{CANONICAL_METADATA.get('canonical_rows', 'unknown')}} samples, {{N_FOLDS}} folds")
+
+# === CANONICAL FOLDS (USE IF AVAILABLE) ===
+# PREFERRED: Use canonical folds for OOF alignment across all models
+# FALLBACK: If canonical folds don't exist, create folds from data (StratifiedKFold)
+if CANONICAL_FOLDS_PATH.exists():
+    CANONICAL_FOLDS = np.load(CANONICAL_FOLDS_PATH)
+    CANONICAL_TRAIN_IDS = np.load(CANONICAL_TRAIN_IDS_PATH, allow_pickle=True)
+    CANONICAL_Y = np.load(CANONICAL_Y_PATH, allow_pickle=True)
+    CANONICAL_FOLDS_AVAILABLE = True
+    print(f"[CANONICAL] Loaded folds.npy: {{len(CANONICAL_FOLDS)}} samples, {{N_FOLDS}} folds")
+    # Usage example:
+    # for fold in range(N_FOLDS):
+    #     train_mask = CANONICAL_FOLDS != fold
+    #     val_mask = CANONICAL_FOLDS == fold
+    #     train_ids, val_ids = CANONICAL_TRAIN_IDS[train_mask], CANONICAL_TRAIN_IDS[val_mask]
+else:
+    # Fallback: canonical folds not available, model must create its own
+    CANONICAL_FOLDS = None
+    CANONICAL_TRAIN_IDS = None
+    CANONICAL_Y = None
+    CANONICAL_FOLDS_AVAILABLE = False
+    print(f"[WARNING] Canonical folds not found at {{CANONICAL_FOLDS_PATH}}")
+    print("[WARNING] Model will need to create folds from data (use StratifiedKFold)")
+# === END CANONICAL FOLDS ===
 '''
         # Add label files paths if available (for non-standard formats like MLSP 2013 Birds)
         if label_files:

@@ -4,13 +4,33 @@ Audio-specific constraints for audio classification/regression tasks.
 
 AUDIO_CONSTRAINTS = """## AUDIO TASK REQUIREMENTS:
 
-## ⚠️ CRITICAL: AUDIO COMPETITIONS DO NOT USE CANONICAL DATA ⚠️
+## ⚠️ CRITICAL: USE CANONICAL FOLDS IF AVAILABLE ⚠️
 
-For audio competitions, the canonical data preparation is SKIPPED. Therefore:
-- **DO NOT** use `CANONICAL_DIR` or try to load `folds.npy` - these files DO NOT EXIST
-- **DO NOT** assume `train.csv` exists - labels are often embedded in filenames
-- **DO** use sklearn's `StratifiedKFold` to generate your own CV folds
-- **DO** check if labels are in filenames (e.g., `train12345_1.aif` means label=1)
+For audio competitions, ALWAYS check if canonical folds exist FIRST:
+- **CHECK** `CANONICAL_FOLDS_AVAILABLE` flag (set in path header)
+- **DO NOT** create StratifiedKFold if canonical folds are available
+- Labels may be embedded in filenames (e.g., `train12345_1.aif` means label=1)
+
+### PRIORITY 1: Use canonical folds (if available)
+```python
+# ALWAYS check canonical folds first using the flag set in path header!
+if CANONICAL_FOLDS_AVAILABLE:
+    # Use pre-computed canonical folds for OOF alignment
+    folds = CANONICAL_FOLDS  # Already loaded in path header
+    train_ids = CANONICAL_TRAIN_IDS
+    y = CANONICAL_Y
+    print(f"[CANONICAL] Using {N_FOLDS} pre-computed folds")
+else:
+    # FALLBACK ONLY: Create folds if canonical doesn't exist
+    from sklearn.model_selection import StratifiedKFold
+    train_df = create_train_df_from_filenames(TRAIN_PATH)
+    y = train_df['target'].values
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    folds = np.zeros(len(train_df), dtype=int)
+    for fold_idx, (_, val_idx) in enumerate(skf.split(train_df, y)):
+        folds[val_idx] = fold_idx
+    train_ids = train_df['id'].values
+```
 
 ### How to handle missing train.csv (labels in filenames):
 ```python
@@ -18,23 +38,6 @@ For audio competitions, the canonical data preparation is SKIPPED. Therefore:
 # Use the injected create_train_df_from_filenames() function:
 train_df = create_train_df_from_filenames(TRAIN_PATH)  # Parses labels from filenames
 y = train_df['target'].values
-```
-
-### How to generate CV folds WITHOUT canonical data:
-```python
-from sklearn.model_selection import StratifiedKFold
-
-N_FOLDS = 5
-skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
-train_df['fold'] = -1
-for fold_idx, (_, val_idx) in enumerate(skf.split(train_df, train_df['target'])):
-    train_df.loc[train_df.index[val_idx], 'fold'] = fold_idx
-
-# Then use in CV loop:
-for fold in range(N_FOLDS):
-    train_mask = train_df['fold'] != fold
-    val_mask = train_df['fold'] == fold
-    # ... train model
 ```
 
 ### 0. Data Audit (CRITICAL - MUST DO FIRST)
@@ -234,20 +237,93 @@ def load_and_process_audio(path: Path) -> np.ndarray:
     return mel_db
 ```
 
-### 5. Faster Audio Loading with torchaudio (Preferred)
-librosa is CPU-intensive. Use torchaudio for better performance.
+### 5. Audio Loading: Use torchaudio (PRIMARY) with librosa fallback
+
+⚠️ **CRITICAL**: torchaudio is MORE ROBUST than librosa for loading various audio formats.
+Logs from librosa often show: "PySoundFile failed. Trying audioread instead."
+torchaudio handles .aiff, .wav, .mp3, .flac more reliably and is faster.
 
 ```python
-import torchaudio
-import torch
+import numpy as np
+from pathlib import Path
 
-def load_audio_fast(path: Path, target_sr: int = 22050) -> torch.Tensor:
-    waveform, sr = torchaudio.load(path)
-    # Resample if needed
-    if sr != target_sr:
-        waveform = torchaudio.functional.resample(waveform, sr, target_sr)
-    return waveform
+# Try torchaudio first (faster, more robust)
+try:
+    import torchaudio
+    AUDIO_BACKEND = "torchaudio"
+except ImportError:
+    AUDIO_BACKEND = "librosa"
+    import librosa
+
+def load_audio(path: Path | str, target_sr: int = 16000, duration: float | None = None) -> np.ndarray:
+    """
+    Load audio file using torchaudio (primary) with librosa fallback.
+
+    Args:
+        path: Path to audio file
+        target_sr: Target sample rate for resampling
+        duration: Max duration in seconds (None = full audio)
+
+    Returns:
+        np.ndarray: Audio waveform (mono, target sample rate)
+    """
+    path = Path(path)
+
+    if AUDIO_BACKEND == "torchaudio":
+        try:
+            waveform, sr = torchaudio.load(str(path))
+
+            # Convert to mono if stereo
+            if waveform.shape[0] > 1:
+                waveform = waveform.mean(dim=0, keepdim=True)
+
+            # Resample if needed
+            if sr != target_sr:
+                resampler = torchaudio.transforms.Resample(orig_freq=sr, new_freq=target_sr)
+                waveform = resampler(waveform)
+
+            # Convert to numpy
+            audio = waveform.numpy().squeeze()
+
+            # Trim to duration if specified
+            if duration is not None:
+                max_samples = int(target_sr * duration)
+                if len(audio) > max_samples:
+                    audio = audio[:max_samples]
+                elif len(audio) < max_samples:
+                    audio = np.pad(audio, (0, max_samples - len(audio)))
+
+            return audio
+
+        except Exception as e:
+            print(f"[WARNING] torchaudio failed for {path.name}: {e}")
+            # Fall through to librosa
+
+    # Fallback to librosa
+    try:
+        import librosa
+        audio, _ = librosa.load(str(path), sr=target_sr, duration=duration)
+        return audio
+    except Exception as e:
+        print(f"[WARNING] librosa also failed for {path.name}: {e}")
+        # Return silence as last resort (avoid crashing)
+        silence_samples = int(target_sr * (duration or 2.0))
+        return np.zeros(silence_samples, dtype=np.float32)
+
+# Usage example:
+# audio = load_audio("train/sample_001.aiff", target_sr=16000, duration=5.0)
 ```
+
+**Why torchaudio over librosa:**
+- **Format support**: Native support for .aiff (whale competition), .mp3, .flac without audioread
+- **Speed**: ~2-3x faster than librosa for loading
+- **Robustness**: Fewer "PySoundFile failed" errors
+- **GPU-friendly**: Returns torch tensors, easy to use with PyTorch models
+
+**Fallback chain:**
+1. torchaudio (primary)
+2. librosa (fallback)
+3. Silence (last resort - prevents crash but logs warning)
 
 ### 6. Spectrogram Caching (Reduces Training Time)
 Cache spectrograms to disk to avoid recomputation every epoch.

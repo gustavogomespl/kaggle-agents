@@ -41,16 +41,59 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
     train_path = data_files.get("train_csv") or data_files.get("train")
     test_path = data_files.get("test_csv") or data_files.get("test")
 
-    # Skip for non-tabular data (images, audio)
+    # Handle non-tabular data (images, audio)
     data_type = str(data_files.get("data_type", "")).lower()
-    if data_type in {"image", "audio"}:
+    if data_type == "image":
         print(f"   Skipping canonical data prep for {data_type} data type")
-        print("   (Image/audio competitions use different data flow)")
+        print("   (Image competitions use different data flow)")
         return {
             "canonical_data_prepared": False,
             "canonical_data_skipped_reason": f"{data_type} data type",
             "last_updated": datetime.now(),
         }
+
+    # For audio: try filename-based label extraction if no train.csv
+    if data_type == "audio":
+        train_csv_path = working_dir / "train.csv"
+        if not train_csv_path.exists():
+            print("   Audio competition without train.csv detected")
+            print("   Attempting to create canonical data from audio filenames...")
+
+            # Import detection mixin for filename-based label extraction
+            from ...mlebench.data_adapter.detection import DetectionMixin
+
+            detector = DetectionMixin()
+            train_dir = working_dir / "train"
+
+            if train_dir.exists():
+                result = detector.create_canonical_from_audio_filenames(
+                    audio_dir=train_dir,
+                    canonical_dir=working_dir / "canonical",
+                    n_folds=5,
+                )
+
+                if result.get("success"):
+                    print(f"   Created canonical data from {result['metadata']['canonical_rows']} audio files")
+                    return {
+                        "canonical_data_prepared": True,
+                        "canonical_dir": result["canonical_dir"],
+                        "canonical_train_ids_path": result["train_ids_path"],
+                        "canonical_y_path": result["y_path"],
+                        "canonical_folds_path": result["folds_path"],
+                        "canonical_metadata": result["metadata"],
+                        "canonical_data_skipped_reason": None,
+                        "last_updated": datetime.now(),
+                    }
+                else:
+                    print(f"   Failed to extract labels from filenames: {result.get('error')}")
+
+            # Fallback: skip canonical data for audio without labels
+            print("   Skipping canonical data prep for audio (no train.csv or filename labels)")
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_skipped_reason": "audio without train.csv or filename labels",
+                "last_updated": datetime.now(),
+            }
 
     # Validate paths exist
     if not train_path or not Path(train_path).exists():
@@ -111,6 +154,44 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             timeout_s=timeout_s,
             task_type=task_type,
         )
+
+        # CRITICAL: Validate canonical data is not empty
+        canonical_rows = canonical_result.get("metadata", {}).get("canonical_rows", 0)
+        if canonical_rows == 0:
+            print("\n   ⚠️ CRITICAL: canonical_rows == 0, data discovery failed!")
+            print("   Attempting fallback: scan for audio files with labels in filenames...")
+
+            # Try audio filename-based fallback
+            from ...mlebench.data_adapter.detection import DetectionMixin
+
+            detector = DetectionMixin()
+            train_dir = working_dir / "train"
+
+            if train_dir.exists():
+                fallback_result = detector.create_canonical_from_audio_filenames(
+                    audio_dir=train_dir,
+                    canonical_dir=working_dir / "canonical",
+                    n_folds=5,
+                )
+
+                if fallback_result.get("success"):
+                    print(f"   ✅ Fallback succeeded: {fallback_result['metadata']['canonical_rows']} files")
+                    return {
+                        "canonical_data_prepared": True,
+                        "canonical_dir": fallback_result["canonical_dir"],
+                        "canonical_train_ids_path": fallback_result["train_ids_path"],
+                        "canonical_y_path": fallback_result["y_path"],
+                        "canonical_folds_path": fallback_result["folds_path"],
+                        "canonical_metadata": fallback_result["metadata"],
+                        "last_updated": datetime.now(),
+                    }
+
+            print("   ❌ Fallback failed: No audio files with labels found")
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_skipped_reason": "canonical_rows=0 and no filename labels",
+                "last_updated": datetime.now(),
+            }
 
         print("\n   Canonical data artifacts created:")
         print(f"      train_ids: {canonical_result['metadata']['canonical_rows']:,} rows")
