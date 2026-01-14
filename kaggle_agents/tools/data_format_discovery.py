@@ -401,7 +401,7 @@ def detect_traditional_format(working_dir: Path) -> dict[str, str] | None:
         train_files = list(train_dir.rglob("*.*"))
         if train_files:
             extensions = {f.suffix.lower() for f in train_files[:100]}
-            media_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".wav", ".mp3", ".flac"}
+            media_extensions = {".jpg", ".jpeg", ".png", ".bmp", ".wav", ".mp3", ".flac", ".aiff", ".aif"}
             if extensions & media_extensions:
                 # For image/audio competitions, we also need a label CSV
                 # Otherwise we can't know the labels for training

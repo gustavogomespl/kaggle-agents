@@ -392,7 +392,7 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
         updates["test_data_path"] = str(test_dir)
 
     # Audio-specific detection: submission format and precomputed features
-    audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
+    audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif"}
     is_audio = detected_type == "audio" or forced_type == "audio"
 
     # Check for audio files if not already detected

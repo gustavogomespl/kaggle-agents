@@ -364,7 +364,7 @@ def read_id_mapping(
         ```
     """
     if extensions is None:
-        extensions = [".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"]
+        extensions = [".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif"]
 
     parser = RobustLabelParser()
     df = parser.parse(file_path)

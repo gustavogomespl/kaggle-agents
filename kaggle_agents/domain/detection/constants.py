@@ -6,7 +6,7 @@ Constants for domain detection.
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff", ".tif"}
 
 # Audio extensions
-AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+AUDIO_EXTS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
 
 # Text extensions
 TEXT_EXTS = {".txt", ".json"}

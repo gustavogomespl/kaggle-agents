@@ -23,7 +23,7 @@ class DetectionMixin:
             'tabular', 'image', 'audio', or 'text'
         """
         image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff"}
-        audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif"}
 
         def _dir_contains_ext(dir_path: Path, exts: set[str], limit: int = 200) -> bool:
             seen = 0

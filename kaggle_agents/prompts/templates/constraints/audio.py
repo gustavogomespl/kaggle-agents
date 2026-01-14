@@ -11,7 +11,7 @@ NEVER proceed with dummy data - fail fast if data is missing.
 ```python
 from pathlib import Path
 
-AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
+AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.aiff', '.aif'}
 
 def find_audio_files(directory: Path) -> list[Path]:
     \"\"\"Recursively find audio files with case-insensitive extension matching.\"\"\"
@@ -59,7 +59,7 @@ audio_files = list(TRAIN_PATH.glob("*.wav"))
 
 # CORRECT - recursive with case-insensitive:
 audio_files = []
-for ext in ['*.wav', '*.mp3', '*.flac', '*.ogg', '*.m4a']:
+for ext in ['*.wav', '*.mp3', '*.flac', '*.ogg', '*.m4a', '*.aiff', '*.aif']:
     audio_files.extend(TRAIN_PATH.rglob(ext))
     audio_files.extend(TRAIN_PATH.rglob(ext.upper()))  # Handle .WAV, .MP3
 ```

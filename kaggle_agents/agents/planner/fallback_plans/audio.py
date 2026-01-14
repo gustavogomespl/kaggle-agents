@@ -36,7 +36,7 @@ def create_audio_fallback_plan(
 # MANDATORY DATA AUDIT - Run this FIRST before any other processing
 from pathlib import Path
 
-AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma'}
+AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.aiff', '.aif'}
 
 def find_audio_files(directory):
     '''Recursively find audio files with case-insensitive extension matching.'''

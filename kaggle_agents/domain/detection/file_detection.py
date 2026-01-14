@@ -30,7 +30,7 @@ class FileDetectionMixin:
     ) -> tuple[DomainType, float]:
         """Heuristic detection from local files when no LLM is available."""
         image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"}
-        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
         text_exts = {".txt", ".json"}
         tabular_exts = {".csv", ".parquet"}
 

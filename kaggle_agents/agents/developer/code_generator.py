@@ -150,7 +150,7 @@ class CodeGeneratorMixin:
             "audio_data",
         ]
         # Extensions to look for
-        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
         image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
         # Check if train path exists

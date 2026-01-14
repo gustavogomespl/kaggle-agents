@@ -153,7 +153,7 @@ class DeveloperUtilsMixin:
 
         # 3. CRITICAL PATH BUILDING GUIDANCE
         if found_dirs:
-            audio_exts = {".wav", ".mp3", ".flac", ".ogg"}
+            audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".aiff", ".aif"}
             image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
             has_audio = any(

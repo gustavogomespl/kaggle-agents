@@ -71,7 +71,7 @@ class KaggleAPIClient:
         # Classify by dominant extension
         if dominant_ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff"]:
             return "image", metadata
-        if dominant_ext in [".wav", ".mp3", ".flac", ".ogg", ".m4a"]:
+        if dominant_ext in [".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"]:
             return "audio", metadata
         if dominant_ext in [".txt", ".json"]:
             return "text", metadata

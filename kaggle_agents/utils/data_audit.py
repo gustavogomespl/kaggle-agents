@@ -44,7 +44,7 @@ class AudioAuditResult:
 
 
 # Supported audio file extensions (case-insensitive)
-AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif"}
 
 
 def find_audio_files(

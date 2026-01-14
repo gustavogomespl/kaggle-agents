@@ -294,7 +294,7 @@ class MLEBenchDataAdapter(
 
         # If no standard train dir found, check non-standard directories for audio/image data
         if info.train_path is None:
-            audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+            audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
             image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
             for dir_name in nonstandard_data_dirs:
                 data_dir = public_dir / dir_name

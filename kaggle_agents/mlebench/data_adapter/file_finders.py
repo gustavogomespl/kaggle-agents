@@ -99,7 +99,7 @@ class FileFinderMixin:
         Returns:
             Path to audio source directory, or None
         """
-        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a"}
+        audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
 
         # Common audio source directory patterns
         audio_dir_patterns = [
@@ -188,7 +188,9 @@ class FileFinderMixin:
                 ".wav",
                 ".mp3",
                 ".flac",
-                ".ogg",  # Audio
+                ".ogg",
+                ".aiff",
+                ".aif",  # Audio
                 ".png",
                 ".jpg",
                 ".jpeg",
