@@ -219,6 +219,44 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                             updates["test_rec_ids"] = test_rec_ids
                             updates["cv_folds_used"] = True
                             print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
+
+                            # Map rec_ids to filenames if id_mapping is available
+                            if "id_mapping" in precomputed_features_info.features_found:
+                                from ...utils.label_parser import read_id_mapping
+
+                                id_mapping_path = precomputed_features_info.features_found["id_mapping"]
+                                audio_source = data_files.get("audio_source", "")
+                                audio_dir = Path(audio_source) if audio_source else None
+
+                                try:
+                                    mapping_df = read_id_mapping(
+                                        id_mapping_path,
+                                        id_col="rec_id",
+                                        filename_col="filename",
+                                        audio_dir=audio_dir,
+                                        resolve_extensions=True,
+                                    )
+
+                                    # Create rec_id -> filename dict
+                                    id_to_filename = dict(zip(
+                                        mapping_df["rec_id"].astype(str),
+                                        mapping_df["filename"]
+                                    ))
+
+                                    # Map train/test IDs to filenames
+                                    train_filenames = [id_to_filename.get(str(rid)) for rid in train_rec_ids]
+                                    test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
+
+                                    # Filter out None values (unmapped IDs)
+                                    train_filenames = [f for f in train_filenames if f]
+                                    test_filenames = [f for f in test_filenames if f]
+
+                                    if train_filenames or test_filenames:
+                                        updates["train_rec_ids"] = train_filenames
+                                        updates["test_rec_ids"] = test_filenames
+                                        print(f"   ID mapping applied: {len(train_filenames)} train, {len(test_filenames)} test filenames")
+                                except Exception as e:
+                                    print(f"   Warning: Failed to apply ID mapping: {e}")
                 except Exception as e:
                     print(f"   Warning: Failed to parse CVfolds file: {e}")
 

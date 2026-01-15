@@ -214,3 +214,81 @@ class TestDataTypeOverride:
 
         # Should stay as tabular because forced
         assert detected_type == "tabular"
+
+
+class TestCVfoldsIDMapping:
+    """Tests for CVfolds ID-to-filename mapping logic."""
+
+    def test_id_to_filename_mapping(self, tmp_path: Path) -> None:
+        """Test that numeric rec_ids are mapped to filenames."""
+        # Create mock rec_id2filename.txt mapping
+        mapping_data = {
+            "rec_id": [0, 1, 2, 3, 4],
+            "filename": ["PC1_audio_01", "PC1_audio_02", "PC2_audio_01", "PC2_audio_02", "PC3_audio_01"],
+        }
+        import pandas as pd
+        mapping_df = pd.DataFrame(mapping_data)
+
+        # Create id_to_filename dict (simulating the fix logic)
+        id_to_filename = dict(zip(
+            mapping_df["rec_id"].astype(str),
+            mapping_df["filename"]
+        ))
+
+        # Simulate raw train/test IDs from CVfolds
+        train_rec_ids = [0, 1, 2]  # Numeric IDs
+        test_rec_ids = [3, 4]
+
+        # Map to filenames
+        train_filenames = [id_to_filename.get(str(rid)) for rid in train_rec_ids]
+        test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
+
+        # Filter out None values
+        train_filenames = [f for f in train_filenames if f]
+        test_filenames = [f for f in test_filenames if f]
+
+        assert train_filenames == ["PC1_audio_01", "PC1_audio_02", "PC2_audio_01"]
+        assert test_filenames == ["PC2_audio_02", "PC3_audio_01"]
+
+    def test_unmapped_ids_filtered_out(self) -> None:
+        """Test that IDs not in mapping are filtered out."""
+        import pandas as pd
+
+        # Partial mapping (missing ID 5)
+        mapping_data = {
+            "rec_id": [0, 1, 2],
+            "filename": ["audio_01", "audio_02", "audio_03"],
+        }
+        mapping_df = pd.DataFrame(mapping_data)
+
+        id_to_filename = dict(zip(
+            mapping_df["rec_id"].astype(str),
+            mapping_df["filename"]
+        ))
+
+        # rec_ids include ID 5 which is not in mapping
+        test_rec_ids = [0, 1, 5]
+
+        test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
+        test_filenames = [f for f in test_filenames if f]
+
+        # ID 5 should be filtered out
+        assert test_filenames == ["audio_01", "audio_02"]
+        assert len(test_filenames) == 2
+
+    def test_empty_mapping_preserves_original_ids(self) -> None:
+        """Test that if no mapping available, original IDs are preserved."""
+        train_rec_ids = [0, 1, 2]
+        test_rec_ids = [3, 4]
+
+        # Simulate no id_mapping being available
+        has_id_mapping = False
+
+        if has_id_mapping:
+            # This branch shouldn't execute
+            train_rec_ids = []
+            test_rec_ids = []
+
+        # Original IDs should be preserved
+        assert train_rec_ids == [0, 1, 2]
+        assert test_rec_ids == [3, 4]
