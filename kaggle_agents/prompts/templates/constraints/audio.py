@@ -507,8 +507,19 @@ Id,Probability
 
 Code for LONG format (MLSP pattern: Id = rec_id * 100 + species_id):
 ```python
-# predictions shape: (num_samples, num_classes)
-# test_rec_ids: list of test record IDs
+# STEP 1: Get test recording IDs from CVfolds (CANONICAL SOURCE)
+# TEST_REC_IDS is auto-injected from CVfolds*.txt - ALWAYS use it if available!
+if 'TEST_REC_IDS' in dir() and TEST_REC_IDS:
+    test_rec_ids = TEST_REC_IDS  # From CVfolds - CANONICAL
+    print(f"[CVfolds] Using {len(test_rec_ids)} test recording IDs")
+else:
+    # FALLBACK: Infer from sample_submission (less reliable!)
+    sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+    unique_ids = sorted(sample_sub['Id'].apply(lambda x: x // 100).unique())
+    test_rec_ids = unique_ids
+    print(f"[WARNING] TEST_REC_IDS not found, inferred {len(test_rec_ids)} IDs from submission")
+
+# predictions shape: (len(test_rec_ids), num_classes)
 submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 
 # Create mapping from submission ID to prediction
@@ -588,11 +599,21 @@ the ensemble creates RANDOM submissions despite having a well-trained model.
 # Audio file extensions constant
 AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.aif', '.aiff', '.m4a'}
 
-# STEP 1: Get test IDs from sample_submission (CANONICAL ORDER)
+# STEP 1: Get test IDs - PREFER CVfolds injection over sample_submission inference!
+# TEST_REC_IDS is auto-injected from CVfolds*.txt if available
+if 'TEST_REC_IDS' in dir() and TEST_REC_IDS:
+    test_ids = TEST_REC_IDS  # From CVfolds - CANONICAL SOURCE
+    n_test = len(test_ids)
+    print(f"[CVfolds] Using {n_test} test recording IDs from CVfolds")
+else:
+    # FALLBACK: Get from sample_submission (may be less reliable for some formats)
+    sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+    test_ids = sample_sub.iloc[:, 0].values  # First column is ID
+    n_test = len(test_ids)
+    print(f"[FALLBACK] Inferred {n_test} test IDs from sample_submission")
+
 sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
-test_ids = sample_sub.iloc[:, 0].values  # First column is ID
 ID_COL = sample_sub.columns[0]
-n_test = len(test_ids)
 
 # STEP 2: Create ID-to-path mapping for test files
 test_path_map = {f.stem: f for f in TEST_PATH.rglob('*') if f.suffix.lower() in AUDIO_EXTS}

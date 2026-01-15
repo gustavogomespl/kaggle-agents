@@ -790,6 +790,49 @@ print("="*60)
         if audio_source_path:
             path_header += f'\n# Audio source directory\nAUDIO_SOURCE_DIR = Path("{audio_source_path}")\n'
 
+        # Inject CVfolds train/test split if available
+        # This is CRITICAL for competitions like MLSP 2013 Birds where train/test is defined in CVfolds_*.txt
+        test_rec_ids = state.get("test_rec_ids", []) if state else []
+        train_rec_ids = state.get("train_rec_ids", []) if state else []
+        cv_folds_used = state.get("cv_folds_used", False) if state else False
+
+        if cv_folds_used and test_rec_ids:
+            # For large ID lists (>100 items), save to files to avoid bloating generated code
+            if len(test_rec_ids) > 100 or len(train_rec_ids) > 100:
+                # Save IDs to models directory for loading
+                import numpy as np
+                models_dir.mkdir(parents=True, exist_ok=True)
+                np.save(models_dir / "cvfolds_train_ids.npy", np.array(train_rec_ids))
+                np.save(models_dir / "cvfolds_test_ids.npy", np.array(test_rec_ids))
+                path_header += f'''
+# === CVfolds TRAIN/TEST SPLIT (AUTO-INJECTED - DO NOT OVERRIDE) ===
+# These IDs come from CVfolds*.txt file - ALWAYS use these!
+# DO NOT infer test count from sample_submission row count!
+_cvfolds_train_path = MODELS_DIR / "cvfolds_train_ids.npy"
+_cvfolds_test_path = MODELS_DIR / "cvfolds_test_ids.npy"
+TRAIN_REC_IDS = np.load(_cvfolds_train_path, allow_pickle=True).tolist() if _cvfolds_train_path.exists() else []
+TEST_REC_IDS = np.load(_cvfolds_test_path, allow_pickle=True).tolist() if _cvfolds_test_path.exists() else []
+N_TRAIN = {len(train_rec_ids)}
+N_TEST = {len(test_rec_ids)}
+
+print(f"[CVfolds] Train: {{N_TRAIN}} recordings, Test: {{N_TEST}} recordings")
+# === END CVfolds ===
+'''
+            else:
+                # Small lists can be inlined safely
+                path_header += f'''
+# === CVfolds TRAIN/TEST SPLIT (AUTO-INJECTED - DO NOT OVERRIDE) ===
+# These IDs come from CVfolds*.txt file - ALWAYS use these!
+# DO NOT infer test count from sample_submission row count!
+TRAIN_REC_IDS = {train_rec_ids}
+TEST_REC_IDS = {test_rec_ids}
+N_TRAIN = {len(train_rec_ids)}
+N_TEST = {len(test_rec_ids)}
+
+print(f"[CVfolds] Train: {{N_TRAIN}} recordings, Test: {{N_TEST}} recordings")
+# === END CVfolds ===
+'''
+
         # Inject smart file locator for audio/image competitions
         # This handles missing extensions (e.g., MLSP 2013 Birds where IDs lack .wav extension)
         if data_type in ("audio", "image"):

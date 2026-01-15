@@ -196,11 +196,15 @@ class EnsembleAgent:
         sample_submission_path: Path,
         output_path: Path,
         models_dir: Path | None = None,
+        expected_n_test: int | None = None,
     ) -> bool:
         """Create a simple average ensemble directly from saved predictions.
 
         Uses ID-based merging when shapes don't match to handle models trained
         on different subsets of data.
+
+        Args:
+            expected_n_test: If provided (from CVfolds), validates test count matches.
         """
         if not sample_submission_path.exists():
             print("   Sample submission not found")
@@ -208,6 +212,16 @@ class EnsembleAgent:
 
         sample_sub = read_csv_auto(sample_submission_path)
         n_test = len(sample_sub)
+
+        # Validate test count against CVfolds expectation if available
+        if expected_n_test is not None and expected_n_test > 0:
+            n_cols = len(sample_sub.columns) - 1  # Exclude ID column
+            # Check if n_test matches expected directly OR is a multiple (MLSP long format)
+            is_direct_match = (n_test == expected_n_test)
+            is_mlsp_format = (n_cols == 1 and n_test % expected_n_test == 0)  # Long format: multiple rows per sample
+            if not is_direct_match and not is_mlsp_format:
+                print(f"   WARNING: sample_submission has {n_test} rows, CVfolds expects {expected_n_test}")
+                print(f"   (This may be normal for multi-label formats with {n_test // expected_n_test} classes per sample)")
         preds_dict: dict[str, np.ndarray] = {}
         ids_dict: dict[str, np.ndarray | None] = {}
 
@@ -923,7 +937,11 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
             output_path = working_dir / "submission.csv"
 
-            if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path):
+            # Get expected test count from CVfolds (if available) for validation
+            test_rec_ids = state.get("test_rec_ids", []) if isinstance(state, dict) else []
+            expected_n_test = len(test_rec_ids) if test_rec_ids else None
+
+            if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test):
                 return {"ensemble_created": True, "n_models": len(prediction_pairs)}
             return {"ensemble_skipped": True, "skip_reason": "ensemble_creation_failed"}
 
