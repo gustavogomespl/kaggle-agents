@@ -291,9 +291,14 @@ class MLEBenchRunner:
 
             # Set competition info
             description = self.data_adapter.read_description(data_info)
+            # Configurable description limit (default 8000 to preserve format details)
+            try:
+                max_desc_len = int(os.getenv("KAGGLE_AGENTS_MAX_DESC_LENGTH", "8000"))
+            except ValueError:
+                max_desc_len = 8000  # Fallback for malformed env var
             state["competition_info"] = CompetitionInfo(
                 name=competition_id,
-                description=description[:2000] if description else "",
+                description=description[:max_desc_len] if description else "",
                 evaluation_metric=evaluation_metric,
                 problem_type=problem_type,
             )

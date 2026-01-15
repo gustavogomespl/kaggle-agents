@@ -36,6 +36,11 @@ IMMUTABLE_PATH_VARS = [
     "SUBMISSION_PATH",
     "AUDIO_SOURCE_DIR",
     "LABEL_FILES",
+    # Image competition paths (separate directory and CSV)
+    "TRAIN_IMG_DIR",
+    "TRAIN_CSV_PATH",
+    "TEST_IMG_DIR",
+    "TEST_CSV_PATH",
     # Canonical data contract paths
     "CANONICAL_DIR",
     "CANONICAL_TRAIN_IDS_PATH",
@@ -549,9 +554,45 @@ import pandas as pd
 import numpy as np
 import json
 
-TRAIN_PATH = Path("{resolved_train_path}")
+'''
+        # Data-type aware path injection
+        if data_type == "image":
+            # For image competitions: inject BOTH directory paths AND CSV paths
+            # TRAIN_IMG_DIR = directory containing images
+            # TRAIN_CSV_PATH = CSV file with image IDs and labels
+            # TRAIN_PATH = points to CSV for pd.read_csv() compatibility
+
+            # Resolve CSV paths at Python runtime (not in generated code)
+            # This fixes the bug where empty strings created Path("") or Path("None")
+            resolved_train_csv = train_csv_path if train_csv_path else str(working_dir / "train.csv")
+            resolved_test_csv = test_csv_path if test_csv_path else ""
+
+            # Build TEST_CSV_PATH line - only set if we have a valid path
+            if resolved_test_csv:
+                test_csv_line = f'TEST_CSV_PATH = Path("{resolved_test_csv}")'
+            else:
+                test_csv_line = "TEST_CSV_PATH = None  # No test CSV available"
+
+            path_header += f'''# === IMAGE COMPETITION PATHS ===
+# TRAIN_IMG_DIR: Directory containing training images
+# TRAIN_CSV_PATH: CSV file with image IDs and labels (use for pd.read_csv())
+TRAIN_IMG_DIR = Path("{resolved_train_path}")
+TRAIN_CSV_PATH = Path("{resolved_train_csv}")
+TEST_IMG_DIR = Path("{resolved_test_path}")
+{test_csv_line}
+
+# COMPATIBILITY: TRAIN_PATH points to CSV for pd.read_csv() calls
+# Use TRAIN_IMG_DIR when you need the image directory
+TRAIN_PATH = TRAIN_CSV_PATH if TRAIN_CSV_PATH.exists() else Path("{working_dir}/train.csv")
+TEST_PATH = TEST_CSV_PATH if TEST_CSV_PATH and TEST_CSV_PATH.exists() else TEST_IMG_DIR
+'''
+        else:
+            # For tabular/audio: original behavior
+            path_header += f'''TRAIN_PATH = Path("{resolved_train_path}")
 TEST_PATH = Path("{resolved_test_path}")
-SAMPLE_SUBMISSION_PATH = Path("{sample_submission_path}")
+'''
+
+        path_header += f'''SAMPLE_SUBMISSION_PATH = Path("{sample_submission_path}")
 MODELS_DIR = Path("{models_dir}")
 OUTPUT_DIR = Path("{working_dir}")
 SUBMISSION_PATH = OUTPUT_DIR / "submission.csv"

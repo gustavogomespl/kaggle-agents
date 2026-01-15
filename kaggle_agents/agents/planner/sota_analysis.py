@@ -206,12 +206,14 @@ def format_sota_details(solutions: list[SOTASolution]) -> str:
         # Estimate complexity based on code patterns
         complexity = estimate_complexity(sol)
 
-        # Get code snippet (truncated to 1500 chars as per user preference)
+        # Get code snippet (truncated to 4000 chars to preserve hyperparameters)
+        # Increased from 1500 to capture augmentation pipelines, learning rate schedules, etc.
+        CODE_SNIPPET_LIMIT = 4000
         code_snippet = ""
         if sol.code_snippets:
-            code_snippet = sol.code_snippets[0][:1500]
-            if len(sol.code_snippets[0]) > 1500:
-                code_snippet += "\n... (truncated)"
+            code_snippet = sol.code_snippets[0][:CODE_SNIPPET_LIMIT]
+            if len(sol.code_snippets[0]) > CODE_SNIPPET_LIMIT:
+                code_snippet += "\n... (truncated - see full solution for complete implementation)"
 
         details.append(f"""
 ### Candidate {i}: {sol.title}

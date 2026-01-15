@@ -44,13 +44,34 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
     # Handle non-tabular data (images, audio)
     data_type = str(data_files.get("data_type", "")).lower()
     if data_type == "image":
-        print(f"   Skipping canonical data prep for {data_type} data type")
-        print("   (Image competitions use different data flow)")
-        return {
-            "canonical_data_prepared": False,
-            "canonical_data_skipped_reason": f"{data_type} data type",
-            "last_updated": datetime.now(),
-        }
+        # For IMAGE competitions: Try to create canonical data from train.csv
+        # Image competitions typically have train.csv with columns [image_id, label1, label2, ...]
+        train_csv_path = data_files.get("train_csv")
+        if not train_csv_path:
+            # Also check workspace for train.csv
+            train_csv_path = working_dir / "train.csv"
+            if not train_csv_path.exists():
+                train_csv_path = None
+
+        if train_csv_path and Path(train_csv_path).exists():
+            print(f"   Image competition with train.csv detected: {train_csv_path}")
+            print("   Creating canonical data from train.csv labels...")
+            # Use train.csv for canonical data (contains image IDs and labels)
+            train_path = str(train_csv_path)
+            # test_path: use test.csv if exists, otherwise use sample_submission for schema
+            test_csv_path = data_files.get("test_csv")
+            if not test_csv_path or not Path(test_csv_path).exists():
+                test_csv_path = data_files.get("sample_submission")
+            test_path = str(test_csv_path) if test_csv_path else str(train_csv_path)
+            # Continue with normal canonical data preparation below
+        else:
+            print(f"   Skipping canonical data prep for {data_type} data type")
+            print("   (No train.csv found - image competitions without labels CSV)")
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_skipped_reason": f"{data_type} data type - no train.csv",
+                "last_updated": datetime.now(),
+            }
 
     # For audio: try filename-based label extraction if no train.csv
     if data_type == "audio":
@@ -63,7 +84,15 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             from ...mlebench.data_adapter.detection import DetectionMixin
 
             detector = DetectionMixin()
-            train_dir = working_dir / "train"
+
+            # Use actual train path from data_files if available (e.g., train2/ for whale competition)
+            train_path_from_state = data_files.get("train")
+            if train_path_from_state and Path(train_path_from_state).exists():
+                train_dir = Path(train_path_from_state)
+                if train_dir.name != "train":
+                    print(f"   Using non-standard train directory: {train_dir.name}/")
+            else:
+                train_dir = working_dir / "train"
 
             if train_dir.exists():
                 result = detector.create_canonical_from_audio_filenames(

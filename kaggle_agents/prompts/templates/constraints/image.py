@@ -83,8 +83,62 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = model.to(device)
 ```
 
-### 5. Albumentations
-- `IAASharpen` is removed, use `Sharpen`
+### 5. Albumentations v2.x API Changes (CRITICAL)
+Several transform APIs changed in Albumentations 2.0+. Use the NEW syntax:
+
+**RandomResizedCrop** (most common error):
+```python
+# WRONG (v1.x) - causes ValidationError "Input should be a valid tuple":
+A.RandomResizedCrop(512, 512, scale=(0.8, 1.0))
+
+# CORRECT (v2.x):
+A.RandomResizedCrop(size=(512, 512), scale=(0.8, 1.0))
+```
+
+**CenterCrop / RandomCrop**:
+```python
+# WRONG (v1.x):
+A.CenterCrop(224, 224)
+A.RandomCrop(256, 256)
+
+# CORRECT (v2.x):
+A.CenterCrop(height=224, width=224)
+A.RandomCrop(height=256, width=256)
+```
+
+**Resize**:
+```python
+# Both work, but named params are preferred:
+A.Resize(512, 512)  # Still works
+A.Resize(height=512, width=512)  # Preferred
+```
+
+**Removed/Renamed transforms**:
+- `IAASharpen` -> `Sharpen`
+- `IAAEmboss` -> `Emboss`
+- `IAAAdditiveGaussianNoise` -> `GaussNoise`
+- `IAAAffine` -> `Affine`
+- `IAAPiecewiseAffine` -> `PiecewiseAffine`
+- `IAASuperpixels` -> REMOVED (no replacement)
+
+**Safe v2.x augmentation pipeline example**:
+```python
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+
+train_transform = A.Compose([
+    A.RandomResizedCrop(size=(512, 512), scale=(0.8, 1.0)),
+    A.HorizontalFlip(p=0.5),
+    A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.1, rotate_limit=15, p=0.5),
+    A.OneOf([
+        A.GaussNoise(var_limit=(10.0, 50.0)),
+        A.GaussianBlur(blur_limit=(3, 7)),
+    ], p=0.3),
+    A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ToTensorV2(),
+])
+```
+
 - Ensure input is RGB (3 channels) for color transforms
 
 ### 6. Keras/TensorFlow Deadline Callback

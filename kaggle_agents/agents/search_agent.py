@@ -147,6 +147,12 @@ class SearchAgent:
             min_votes=self.config.search.min_votes,
         )
 
+        # 2b. Fallback if no notebooks found (old competitions, niche domains)
+        if not sota_solutions:
+            print("   WARNING: No notebooks found for this competition")
+            print("   Generating fallback SOTA guidance from domain heuristics...")
+            sota_solutions = self._generate_fallback_sota(state)
+
         # 3. Rank and filter solutions
         ranked_solutions = self._rank_solutions(sota_solutions, state)
 
@@ -355,6 +361,65 @@ Return ONLY valid JSON, no explanation or markdown."""
         except Exception as e:
             print(f"      ⚠️ Code analysis failed: {e}")
             return {}
+
+    def _generate_fallback_sota(self, state: KaggleState) -> list[SOTASolution]:
+        """
+        Generate synthetic SOTA solution when search returns empty.
+
+        Used for older competitions without indexed notebooks or niche domains.
+
+        Args:
+            state: Current state with competition info
+
+        Returns:
+            List with a single fallback SOTASolution
+        """
+        domain = state.get("domain_detected", "tabular")
+
+        # Normalize domain aliases
+        domain_aliases = {
+            "computer_vision": "image",
+            "nlp": "text",
+            "natural_language": "text",
+        }
+        domain = domain_aliases.get(domain, domain)
+
+        # Domain-specific model defaults
+        domain_models = {
+            "audio": ["mel_spectrogram + CNN", "wav2vec2", "AST (Audio Spectrogram Transformer)"],
+            "image": ["EfficientNet-B4", "ResNet-200D", "ConvNeXt"],
+            "tabular": ["LightGBM", "XGBoost", "CatBoost"],
+            "text": ["RoBERTa-large", "DeBERTa-v3", "DistilBERT"],
+            "time_series": ["LightGBM", "LSTM", "N-BEATS"],
+        }
+
+        # Domain-specific feature engineering defaults
+        domain_features = {
+            "audio": ["Mel spectrograms", "MFCCs", "Chromagram", "Temporal features"],
+            "image": ["ImageNet pretrained features", "Augmentation (flip, rotate, crop)"],
+            "tabular": ["Target encoding", "Feature interactions", "Aggregations"],
+            "text": ["Tokenization", "Subword embeddings", "Attention masks"],
+            "time_series": ["Lag features", "Rolling statistics", "Fourier features"],
+        }
+
+        fallback = SOTASolution(
+            source="fallback/domain-heuristics",
+            title=f"Domain-based baseline for {domain}",
+            score=0.0,
+            votes=0,
+            code_snippets=[],
+            strategies=[
+                f"Standard {domain} pipeline",
+                "Start with baseline model, iterate on features",
+                "Use cross-validation for robust evaluation",
+            ],
+            models_used=domain_models.get(domain, ["Baseline model"]),
+            feature_engineering=domain_features.get(domain, ["Standard preprocessing"]),
+            ensemble_approach="Weighted averaging of top models",
+        )
+
+        print(f"   Created fallback SOTA with {len(fallback.models_used)} model suggestions")
+        return [fallback]
 
     def _print_summary(self, solutions: list[SOTASolution]) -> None:
         """
