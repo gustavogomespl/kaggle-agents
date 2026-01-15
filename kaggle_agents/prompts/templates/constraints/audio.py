@@ -551,4 +551,89 @@ if PRECOMPUTED_FEATURES_PATH.exists():
 ```
 
 This can save significant time on feature extraction.
+
+### 13. TRAIN_PATH vs TRAIN.CSV (CRITICAL - AUDIO COMPETITIONS)
+
+**IMPORTANT**: In audio competitions, `TRAIN_PATH` is a DIRECTORY containing audio files, NOT a CSV file!
+
+```python
+# WRONG - Will cause IsADirectoryError:
+train_df = pd.read_csv(TRAIN_PATH)  # ERROR! TRAIN_PATH is a directory!
+
+# CORRECT - Use filename-based label parsing:
+train_df = create_train_df_from_filenames(TRAIN_PATH)  # Parses labels from filenames
+# Returns DataFrame with columns: id, path, target
+
+# OR if canonical data exists:
+train_ids = np.load(CANONICAL_TRAIN_IDS_PATH, allow_pickle=True)
+y = np.load(CANONICAL_Y_PATH)
+```
+
+**Path constants explained:**
+- `TRAIN_PATH`: Directory containing training audio files (e.g., `/data/train/`)
+- `TEST_PATH`: Directory containing test audio files (e.g., `/data/test/`)
+- `SAMPLE_SUBMISSION_PATH`: CSV file with submission format
+- `CANONICAL_DIR`: Directory with pre-processed canonical data (folds, IDs, labels)
+
+### 14. TEST PREDICTION ALIGNMENT (CRITICAL - PREVENTS score=0.50 BUG)
+
+**THE #1 CAUSE OF RANDOM PREDICTIONS (score=0.50) IS ID MISALIGNMENT!**
+
+When test predictions are saved in a different order than `sample_submission.csv` expects,
+the ensemble creates RANDOM submissions despite having a well-trained model.
+
+**MANDATORY PATTERN for audio models:**
+
+```python
+# Audio file extensions constant
+AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.aif', '.aiff', '.m4a'}
+
+# STEP 1: Get test IDs from sample_submission (CANONICAL ORDER)
+sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+test_ids = sample_sub.iloc[:, 0].values  # First column is ID
+ID_COL = sample_sub.columns[0]
+n_test = len(test_ids)
+
+# STEP 2: Create ID-to-path mapping for test files
+test_path_map = {f.stem: f for f in TEST_PATH.rglob('*') if f.suffix.lower() in AUDIO_EXTS}
+
+# STEP 3: Load test files in SAMPLE_SUBMISSION ORDER
+test_paths = []
+for test_id in test_ids:
+    test_id_str = str(test_id).replace('.aif', '').replace('.aiff', '').replace('.wav', '')
+    path = test_path_map.get(test_id_str) or test_path_map.get(test_id)
+    test_paths.append(path)
+
+# STEP 4: Generate predictions in SAME ORDER as test_ids
+test_preds = np.zeros(n_test)
+for i, path in enumerate(test_paths):
+    if path:
+        test_preds[i] = model.predict(load_audio(path))
+
+# STEP 5: Save test_ids alongside predictions (CRITICAL!)
+np.save(MODELS_DIR / f'test_{COMPONENT_NAME}.npy', test_preds)
+np.save(MODELS_DIR / f'test_ids_{COMPONENT_NAME}.npy', test_ids)
+print(f'[LOG:INFO] Saved test predictions and IDs: {n_test} samples')
+
+# STEP 6: Create submission using ID mapping (NOT row order!)
+pred_map = dict(zip(test_ids, test_preds))
+sample_sub[sample_sub.columns[1]] = sample_sub[ID_COL].map(pred_map)
+assert sample_sub[sample_sub.columns[1]].notna().all(), 'Missing predictions!'
+sample_sub.to_csv(SUBMISSION_PATH, index=False)
+```
+
+**WHY this matters:**
+- Test files loaded via `glob()` return in FILESYSTEM ORDER (arbitrary)
+- `sample_submission.csv` has its own ORDER (often alphabetical or by recording date)
+- If predictions are assigned by row position instead of ID, they're SHUFFLED
+- Result: Good validation AUC, but MLE-bench score = 0.50 (random chance)
+
+**VERIFICATION (add to end of script):**
+```python
+# Verify test predictions vary (not constant)
+test_preds = np.load(MODELS_DIR / f'test_{COMPONENT_NAME}.npy')
+if np.std(test_preds) < 1e-6:
+    raise ValueError('CRITICAL: Test predictions are constant! Check ID alignment.')
+print(f'[VERIFY] Test preds: min={test_preds.min():.4f}, max={test_preds.max():.4f}, std={test_preds.std():.4f}')
+```
 """

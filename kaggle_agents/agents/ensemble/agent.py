@@ -236,10 +236,15 @@ class EnsembleAgent:
         preds_list = list(preds_dict.values())
 
         if len(preds_list) == 1:
+            name = names[0]
             ensemble_preds = preds_list[0]
             if ensemble_preds.shape[0] != n_test:
                 print(f"   Row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
                 return False
+
+            # CRITICAL: Warn if no test_ids file - assuming alignment is risky!
+            if ids_dict.get(name) is None:
+                print(f"   WARNING: No test_ids_{name}.npy - assuming alignment with sample_submission (risk of score=0.50)")
 
             # Validate column count matches submission template
             expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
@@ -307,10 +312,10 @@ class EnsembleAgent:
                     if matched > 0:
                         models_contributed += 1
                 elif len(preds) == n_test:
-                    # Assume aligned order
+                    # Assume aligned order - RISKY! May cause ID misalignment
                     cols_to_copy = min(preds.shape[1], n_cols)
                     merged[:, model_idx, :cols_to_copy] = preds[:, :cols_to_copy]
-                    print(f"      {name}: Assumed aligned ({len(preds)} rows)")
+                    print(f"      {name}: Assumed aligned ({len(preds)} rows) - no test_ids file (risk of score=0.50)")
                     models_contributed += 1
                 else:
                     print(f"      {name}: SKIPPED (shape {preds.shape}, no IDs)")
@@ -340,6 +345,16 @@ class EnsembleAgent:
         else:
             stacked = np.stack(preds_list, axis=0)
             ensemble_preds = stacked.mean(axis=0)
+
+        # CRITICAL: Check for constant/near-constant predictions (ID alignment bug indicator)
+        pred_std = np.std(ensemble_preds)
+
+        if pred_std < 1e-6:
+            print("   ERROR: Predictions are constant (std<1e-6) - likely test ID misalignment! Check test_ids_*.npy files.")
+        elif pred_std < 0.01:
+            print(f"   WARNING: Very low variance (std={pred_std:.6f}) - possible ID alignment issue or broken model.")
+        else:
+            print(f"   Predictions: min={ensemble_preds.min():.4f}, max={ensemble_preds.max():.4f}, std={pred_std:.4f}")
 
         # Validate and assign predictions to sample submission
         expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
