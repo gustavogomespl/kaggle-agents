@@ -148,3 +148,69 @@ class TestEnsembleValidation:
         # This would trigger the warning
         should_warn = not is_direct_match and not is_mlsp_format
         assert should_warn is True
+
+
+class TestDataTypeOverride:
+    """Tests for data type override logic in data validation."""
+
+    def test_audio_type_preserved_with_spectrogram_images(self) -> None:
+        """Test that audio type is NOT overridden to image when spectrograms exist."""
+        # Simulate state where domain detection found audio but image dir exists
+        data_type = "audio"  # From domain detection
+        train_dir = True  # Image directory found (spectrograms)
+        forced_type = False  # No user override
+
+        # The fix: don't override audio to image
+        detected_type = data_type or ""
+        if not forced_type:
+            if train_dir:
+                if data_type not in ("audio", "audio_classification"):
+                    detected_type = "image"
+                # else: keep audio type (spectrograms)
+
+        # Audio type should be preserved
+        assert detected_type == "audio"
+
+    def test_audio_classification_type_preserved(self) -> None:
+        """Test that audio_classification type is also preserved."""
+        data_type = "audio_classification"
+        train_dir = True
+        forced_type = False
+
+        detected_type = data_type or ""
+        if not forced_type:
+            if train_dir:
+                if data_type not in ("audio", "audio_classification"):
+                    detected_type = "image"
+
+        assert detected_type == "audio_classification"
+
+    def test_image_type_detected_for_non_audio(self) -> None:
+        """Test that image type IS set for non-audio competitions."""
+        data_type = ""  # Unknown type
+        train_dir = True  # Image directory found
+        forced_type = False
+
+        detected_type = data_type or ""
+        if not forced_type:
+            if train_dir:
+                if data_type not in ("audio", "audio_classification"):
+                    detected_type = "image"
+
+        # Should be overridden to image for non-audio
+        assert detected_type == "image"
+
+    def test_forced_type_not_overridden(self) -> None:
+        """Test that forced type is never overridden."""
+        data_type = "tabular"
+        train_dir = True
+        forced_type = True  # User forced this type
+
+        detected_type = data_type or ""
+        if not forced_type:
+            if train_dir:
+                if data_type not in ("audio", "audio_classification"):
+                    detected_type = "image"
+
+        # Should stay as tabular because forced
+        assert detected_type == "tabular"

@@ -116,7 +116,11 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
     detected_type = data_type or ""
     if not forced_type:
         if train_dir or test_dir:
-            detected_type = "image"
+            # Don't override audio to image - audio competitions may have spectrogram PNGs
+            if data_type not in ("audio", "audio_classification"):
+                detected_type = "image"
+            else:
+                print(f"   Keeping audio type despite image directory (spectrograms)")
         elif has_train_csv and data_type in {"", "tabular"}:
             detected_type = "tabular"
 
