@@ -698,6 +698,52 @@ def parse_id_mapping_file(mapping_path):
                 id_map[rec_id] = filename
     return id_map
 """
+            # === PRE-LOAD LABELS IMMEDIATELY (fail fast if broken) ===
+            # This forces the LLM to use pre-loaded data instead of generating its own parsing code
+            path_header += '''
+# ============================================================
+# PRE-LOADED LABELS (from LABEL_FILES using parse_label_file)
+# ============================================================
+def _load_labels_from_files():
+    """Load labels from LABEL_FILES using the injected parser.
+
+    Returns tuple: (rec_ids, labels_df, n_classes)
+    """
+    labels_df = None
+    for lf in LABEL_FILES:
+        if lf.exists() and 'label' in str(lf).lower():
+            try:
+                labels_df = parse_label_file(lf)
+                print(f"[INFO] Loaded labels from {lf.name}")
+                break
+            except ValueError as e:
+                print(f"[WARNING] Could not parse {lf.name}: {e}")
+                continue
+
+    if labels_df is None or len(labels_df) == 0:
+        raise ValueError(f"No labels found! LABEL_FILES={LABEL_FILES}")
+
+    rec_ids = labels_df['rec_id'].unique().tolist()
+    unique_labels = sorted(labels_df['label'].unique())
+    n_classes = len(unique_labels)
+
+    print(f"[INFO] Labels: {len(rec_ids)} recordings, {n_classes} classes")
+    return rec_ids, labels_df, n_classes
+
+# === PRE-LOAD LABELS NOW (fail fast if broken) ===
+print("="*60)
+print("PRE-LOADING LABELS FROM LABEL_FILES...")
+print("="*60)
+_PRELOADED_REC_IDS, _PRELOADED_LABELS_DF, _PRELOADED_N_CLASSES = _load_labels_from_files()
+print(f"Loaded {len(_PRELOADED_REC_IDS)} recording IDs, {_PRELOADED_N_CLASSES} classes")
+print("="*60)
+# ============================================================
+# USE THESE VARIABLES INSTEAD OF PARSING FILES YOURSELF:
+#   _PRELOADED_REC_IDS: List of recording IDs
+#   _PRELOADED_LABELS_DF: DataFrame with columns ['rec_id', 'label'] (long format)
+#   _PRELOADED_N_CLASSES: Number of unique classes
+# ============================================================
+'''
 
         # Add audio source path if available
         if audio_source_path:

@@ -134,11 +134,14 @@ if 'parse_id_mapping_file' in dir():
             break
 ```
 
-NEVER USE THIS PATTERN (fails on variable-width rows):
-```python
-# WRONG - crashes with "Expected 2 fields, saw 3":
-labels_df = pd.read_csv(label_file, header=None, names=['rec_id', 'label'])
-```
+### Pre-Loaded Labels (AUDIO COMPETITIONS)
+
+When LABEL_FILES is defined, labels are PRE-LOADED as global variables at script start:
+- `_PRELOADED_REC_IDS`: List of recording IDs
+- `_PRELOADED_LABELS_DF`: DataFrame with ['rec_id', 'label'] columns (long format)
+- `_PRELOADED_N_CLASSES`: Number of unique classes
+
+Use these variables directly instead of parsing files yourself.
 
 ### 3.5. Filename-Based Label Parsing
 Some audio competitions embed labels directly in filenames instead of a CSV.
