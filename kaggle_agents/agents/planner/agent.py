@@ -125,6 +125,10 @@ class PlannerAgent:
                 "is_debug_iteration": True,
                 "debug_target": debug_result.get("debug_target"),
                 "debug_hints": debug_result.get("debug_hints", []),
+                # Reset PiML debug chain state for new component
+                "debug_escalate": False,
+                "debug_attempt": 0,
+                "debug_history": [],
                 "last_updated": datetime.now(),
             }
 
@@ -173,6 +177,10 @@ class PlannerAgent:
                 "current_plan_index": eureka_result["current_plan_index"],
                 "evolutionary_generation": eureka_result["evolutionary_generation"],
                 "optimization_strategy": eureka_result["optimization_strategy"],
+                # Reset PiML debug chain state for new component
+                "debug_escalate": False,
+                "debug_attempt": 0,
+                "debug_history": [],
                 "last_updated": datetime.now(),
             }
 
@@ -192,6 +200,10 @@ class PlannerAgent:
         return {
             "ablation_plan": validated_plan,
             "optimization_strategy": "ablation_driven",
+            # Reset PiML debug chain state for new component
+            "debug_escalate": False,
+            "debug_attempt": 0,
+            "debug_history": [],
             "last_updated": datetime.now(),
         }
 

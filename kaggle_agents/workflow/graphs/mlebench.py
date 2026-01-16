@@ -29,7 +29,11 @@ from ..nodes import (
     iteration_control_node,
     performance_evaluation_node,
 )
+from ..nodes import debug_node
+from ..nodes import ablation_validation_node, set_ablation_baseline_node
 from ..routing import (
+    route_after_ablation_validation,
+    route_after_debug,
     route_after_developer,
     route_after_iteration_control,
     route_after_meta_evaluator,
@@ -68,6 +72,9 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("search", search_agent_node)
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
+    workflow.add_node("debug", debug_node)  # PiML Debug Chain
+    workflow.add_node("set_baseline", set_ablation_baseline_node)  # MLE-STAR A/B Baseline
+    workflow.add_node("ablation_validation", ablation_validation_node)  # MLE-STAR A/B Validation
     workflow.add_node("robustness", robustness_agent_node)
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("submission", submission_agent_node)
@@ -94,16 +101,38 @@ def create_mlebench_workflow() -> StateGraph:
     # Search → Planner
     workflow.add_edge("search", "planner")
 
-    # Planner → Developer
-    workflow.add_edge("planner", "developer")
+    # Planner → Set Baseline → Developer (MLE-STAR A/B Testing)
+    workflow.add_edge("planner", "set_baseline")
+    workflow.add_edge("set_baseline", "developer")
 
-    # Developer → Conditional (more components or done?)
+    # Developer → Conditional (more components, debug, or done?)
     workflow.add_conditional_edges(
         "developer",
         route_after_developer,
         {
             "iterate": "developer",
-            "end": "robustness",
+            "debug": "debug",  # PiML Debug Chain
+            "end": "ablation_validation",  # MLE-STAR A/B Validation
+        },
+    )
+
+    # Debug → Conditional (retry developer or escalate to planner?)
+    workflow.add_conditional_edges(
+        "debug",
+        route_after_debug,
+        {
+            "retry_developer": "developer",
+            "escalate_planner": "planner",
+        },
+    )
+
+    # Ablation Validation → Conditional (accept or reject change?)
+    workflow.add_conditional_edges(
+        "ablation_validation",
+        route_after_ablation_validation,
+        {
+            "accept": "robustness",  # Change improved score, continue
+            "reject": "developer",  # Change regressed, retry with baseline
         },
     )
 

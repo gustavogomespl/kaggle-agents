@@ -69,15 +69,17 @@ def should_retry_component(state: KaggleState) -> Literal["retry", "next"]:
     return "next"
 
 
-def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
+def route_after_developer(state: KaggleState) -> Literal["iterate", "debug", "end"]:
     """
     Route after developer agent completes.
 
-    Simplified routing logic - only stops for:
-    1. Explicit skip_remaining_components flag
-    2. Medal achievement (MLE-bench success)
-    3. Critical errors (data download failed, auth issues)
-    4. All components implemented
+    Routing logic:
+    1. On error → route to debug node (PiML Debug Chain)
+    2. Explicit skip_remaining_components flag → end
+    3. Medal achievement (MLE-bench success) → end
+    4. Critical errors (data download failed, auth issues) → end
+    5. All components implemented → end
+    6. Otherwise → iterate (continue implementing components)
 
     Target score checking is delegated to iteration_control to allow
     multiple refinement iterations with meta-evaluator insights.
@@ -86,7 +88,9 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
         state: Current state
 
     Returns:
-        "iterate" to continue implementing components, or "end" if done
+        "iterate" to continue implementing components,
+        "debug" to route to debug node for error handling, or
+        "end" if done
     """
     # Explicit early-stop flag (e.g., set by DeveloperAgent)
     if state.get("skip_remaining_components"):
@@ -110,6 +114,22 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
             if "Data download failed" in error or "authentication failed" in error.lower():
                 print("\n⚠️ Critical error detected, stopping workflow")
                 return "end"
+
+    # PiML Debug Chain: Route to debug node on developer errors
+    # Skip if already escalating from debug (debug_escalate=True means we came from debug→planner→developer)
+    development_results = state.get("development_results", [])
+    debug_escalate = state.get("debug_escalate", False)
+
+    if development_results and not debug_escalate:
+        last_result = development_results[-1]
+        if not last_result.success:
+            # Always route to debug node on developer failure
+            # Debug node handles: retry guidance OR escalation to planner (when max attempts reached)
+            debug_attempt = state.get("debug_attempt", 0)
+            print(f"\n🔧 Developer error detected - routing to debug chain (attempt {debug_attempt + 1}/3)")
+            return "debug"
+
+    # Note: debug_escalate is reset by the debug node or ablation node, not here
 
     ablation_plan = state.get("ablation_plan", [])
     current_component_index = state.get("current_component_index", 0)
@@ -344,6 +364,78 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
 
     print("   ✅ No refinement needed")
     return "end"
+
+
+def route_after_debug(state: KaggleState) -> Literal["retry_developer", "escalate_planner"]:
+    """
+    Route after debug node - retry developer or escalate to planner.
+
+    PiML Debug Chain: After max debug attempts, escalate to planner
+    with diagnostic summary for alternative approach.
+
+    Args:
+        state: Current state
+
+    Returns:
+        "retry_developer" to retry with fix guidance, or
+        "escalate_planner" if max attempts reached
+    """
+    debug_escalate = state.get("debug_escalate", False)
+
+    if debug_escalate:
+        print("\n🔄 Debug Chain: Escalating to planner for new approach")
+        diagnosis = state.get("debug_diagnosis", "")
+        if diagnosis:
+            print(f"   Diagnosis: {diagnosis[:200]}...")
+        return "escalate_planner"
+
+    print("\n🔧 Debug Chain: Retrying developer with fix guidance")
+    return "retry_developer"
+
+
+def route_after_ablation_validation(state: KaggleState) -> Literal["accept", "reject"]:
+    """
+    Route after ablation validation - accept or reject the change.
+
+    MLE-STAR A/B Testing: Only accept changes that improve the score
+    by at least epsilon. Rejections revert to baseline and retry.
+
+    Args:
+        state: Current state
+
+    Returns:
+        "accept" if change improved score by epsilon, or
+        "reject" if change regressed or didn't improve enough
+    """
+    ablation_accepted = state.get("ablation_accepted")
+    ablation_reason = state.get("ablation_validation_reason", "")
+    ablation_rejection_count = state.get("ablation_rejection_count", 0)
+
+    # Limit rejections to prevent infinite loops
+    max_rejections = 3
+
+    if ablation_accepted is True:
+        print("\n✅ Ablation Validation: Change ACCEPTED")
+        if ablation_reason:
+            print(f"   Reason: {ablation_reason}")
+        return "accept"
+
+    if ablation_accepted is False:
+        # Check rejection count to prevent infinite loops
+        if ablation_rejection_count >= max_rejections:
+            print(f"\n⚠️ Ablation Validation: Max rejections reached ({max_rejections})")
+            print("   Accepting current state to prevent infinite loop")
+            return "accept"
+
+        print(f"\n❌ Ablation Validation: Change REJECTED ({ablation_rejection_count + 1}/{max_rejections})")
+        if ablation_reason:
+            print(f"   Reason: {ablation_reason}")
+        print("   Reverting to baseline and retrying...")
+        return "reject"
+
+    # Default: accept (e.g., no baseline available for comparison)
+    print("\n⚠️ Ablation Validation: No comparison available, accepting by default")
+    return "accept"
 
 
 def route_after_meta_evaluator(state: KaggleState) -> Literal["sota_search", "curriculum", "continue"]:

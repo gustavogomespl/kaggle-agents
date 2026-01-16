@@ -195,6 +195,26 @@ class KaggleState(TypedDict):
     last_self_evaluation: SelfEvaluation | None
 
     # ========================================================================
+    # DEBUG CHAIN (PiML)
+    # Specialized debugging with 3-attempt loop before escalation
+    # ========================================================================
+    debug_attempt: int  # Current debug attempt (0-3)
+    debug_escalate: bool  # True when max attempts reached, escalate to planner
+    debug_diagnosis: str | None  # Error summary for planner when escalating
+    debug_guidance: str | None  # Fix guidance for developer
+    debug_history: list[dict[str, Any]]  # History of debug attempts
+
+    # ========================================================================
+    # ABLATION VALIDATION (MLE-STAR)
+    # A/B testing for change validation
+    # ========================================================================
+    ablation_baseline_code: str | None  # Baseline code for A/B comparison
+    ablation_baseline_score: float | None  # Baseline score for A/B comparison
+    ablation_accepted: bool | None  # True if change improved score
+    ablation_validation_reason: str | None  # Reason for acceptance/rejection
+    ablation_rejection_count: int  # Counter for loop protection (max 3 rejections)
+
+    # ========================================================================
     # METADATA
     # ========================================================================
     # Metadata
@@ -343,6 +363,18 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         # Quiet-STaR: Self-Evaluation
         self_evaluations=[],
         last_self_evaluation=None,
+        # Debug Chain (PiML)
+        debug_attempt=0,
+        debug_escalate=False,
+        debug_diagnosis=None,
+        debug_guidance=None,
+        debug_history=[],
+        # Ablation Validation (MLE-STAR)
+        ablation_baseline_code=None,
+        ablation_baseline_score=None,
+        ablation_accepted=None,
+        ablation_validation_reason=None,
+        ablation_rejection_count=0,
         # Metadata
         workflow_start_time=now,
         last_updated=now,

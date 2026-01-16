@@ -1,8 +1,10 @@
 """Ensemble agent for model stacking and blending."""
 
+from __future__ import annotations
+
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -38,6 +40,348 @@ class EnsembleAgent:
     def __init__(self):
         """Initialize ensemble agent."""
         pass
+
+    # =========================================================================
+    # MLE-STAR: Multi-Strategy Ensemble Selection
+    # Try multiple ensemble strategies and select best by OOF score
+    # =========================================================================
+
+    def _generate_ensemble_candidates(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        y_true: np.ndarray,
+        problem_type: str,
+        metric_name: str,
+        minimize: bool = False,
+    ) -> tuple[str, float, np.ndarray, dict[str, float] | None]:
+        """
+        MLE-STAR Multi-Strategy Ensemble: Try multiple strategies, select best by OOF.
+
+        Evaluates 4 strategies:
+        1. Simple Average
+        2. Weighted Average (by individual OOF scores)
+        3. Stacking with Logistic/Ridge Regression
+        4. Rank Average (robust to scale differences)
+
+        Args:
+            prediction_pairs: Dict mapping model name to (oof_path, test_path)
+            y_true: Ground truth labels
+            problem_type: "classification" or "regression"
+            metric_name: Name of the evaluation metric
+            minimize: True if lower score is better
+
+        Returns:
+            Tuple of (best_strategy_name, best_oof_score, best_test_preds, best_weights)
+        """
+        from sklearn.linear_model import LogisticRegression, Ridge
+        from sklearn.metrics import log_loss, mean_squared_error, roc_auc_score
+
+        print("\n   🎯 MLE-STAR Multi-Strategy Ensemble Evaluation")
+        print("   " + "-" * 50)
+
+        candidates = []
+        names = list(prediction_pairs.keys())
+        n_models = len(names)
+
+        if n_models < 1:
+            print("   No models available for ensemble")
+            return ("none", 0.0, np.array([]), None)
+
+        # Load OOF and test predictions
+        oof_list = []
+        test_list = []
+        valid_names = []
+
+        for name, (oof_path, test_path) in prediction_pairs.items():
+            try:
+                oof = np.load(oof_path)
+                test = np.load(test_path)
+                if oof.ndim == 1:
+                    oof = oof.reshape(-1, 1)
+                if test.ndim == 1:
+                    test = test.reshape(-1, 1)
+                oof_list.append(oof)
+                test_list.append(test)
+                valid_names.append(name)
+            except Exception as e:
+                print(f"   WARNING: Failed to load {name}: {e}")
+
+        if len(oof_list) < 1:
+            print("   No valid OOF predictions loaded")
+            return ("none", 0.0, np.array([]), None)
+
+        # Validate shapes before stacking - filter to compatible arrays
+        # Group by PAIRED shapes (oof_shape, test_shape) to find largest compatible group
+        # This avoids discarding all models when OOF and test modal shapes come from different model sets
+        oof_shapes = [arr.shape for arr in oof_list]
+        test_shapes = [arr.shape for arr in test_list]
+
+        # Group models by their paired (oof_shape, test_shape)
+        shape_pair_to_indices: dict[tuple[tuple[int, ...], tuple[int, ...]], list[int]] = {}
+        for i, (oof_shape, test_shape) in enumerate(zip(oof_shapes, test_shapes)):
+            pair = (oof_shape, test_shape)
+            if pair not in shape_pair_to_indices:
+                shape_pair_to_indices[pair] = []
+            shape_pair_to_indices[pair].append(i)
+
+        # Find the largest compatible group (most models with same paired shapes)
+        largest_group_pair = max(shape_pair_to_indices.keys(), key=lambda p: len(shape_pair_to_indices[p]))
+        compatible_indices = shape_pair_to_indices[largest_group_pair]
+
+        if len(compatible_indices) < len(oof_list):
+            print(f"   WARNING: Shape mismatch detected. Keeping {len(compatible_indices)}/{len(oof_list)} compatible models.")
+            print(f"   Selected pair: OOF {largest_group_pair[0]}, test {largest_group_pair[1]}")
+            print(f"   All shape pairs: {list(shape_pair_to_indices.keys())}")
+            oof_list = [oof_list[i] for i in compatible_indices]
+            test_list = [test_list[i] for i in compatible_indices]
+            valid_names = [valid_names[i] for i in compatible_indices]
+
+        if len(oof_list) < 1:
+            print("   No compatible predictions after shape filtering")
+            return ("none", 0.0, np.array([]), None)
+
+        # Stack predictions
+        oof_stack = np.stack(oof_list, axis=0)  # (n_models, n_samples, n_classes)
+        test_stack = np.stack(test_list, axis=0)
+
+        def compute_score(preds: np.ndarray) -> float:
+            """
+            Compute OOF score for predictions using the competition metric.
+
+            Supports common metrics for both classification and regression.
+            Returns score normalized for maximization (higher = better).
+            """
+            from sklearn.metrics import (
+                accuracy_score,
+                f1_score,
+                mean_absolute_error,
+                mean_absolute_percentage_error,
+                precision_score,
+                r2_score,
+                recall_score,
+            )
+
+            try:
+                metric_lower = metric_name.lower().replace("_", "").replace("-", "")
+
+                if problem_type == "classification":
+                    # Prepare predictions
+                    preds_clipped = np.clip(preds, 1e-15, 1 - 1e-15)
+                    is_multiclass = preds_clipped.ndim > 1 and preds_clipped.shape[1] > 1
+
+                    if is_multiclass:
+                        preds_norm = preds_clipped / preds_clipped.sum(axis=1, keepdims=True)
+                        y_pred_class = np.argmax(preds_norm, axis=1)
+                        # For binary, get positive class probability
+                        if preds_norm.shape[1] == 2:
+                            preds_proba = preds_norm[:, 1]
+                        else:
+                            preds_proba = preds_norm
+                    else:
+                        # Single column or 1D: treat as binary positive class probability
+                        preds_proba = preds_clipped.ravel() if preds_clipped.ndim > 1 else preds_clipped
+                        y_pred_class = (preds_proba > 0.5).astype(int)
+                        preds_norm = None  # Explicitly mark as not available
+
+                    # Compute metric based on metric_name
+                    if metric_lower in ["auc", "rocauc", "roc_auc", "auroc"]:
+                        if is_multiclass and preds_clipped.shape[1] > 2:
+                            score = roc_auc_score(y_true, preds_norm, multi_class="ovr", average="weighted")
+                        else:
+                            score = roc_auc_score(y_true, preds_proba)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["logloss", "log_loss", "crossentropy", "binarycrossentropy"]:
+                        # Use preds_norm for multiclass, preds_proba for binary
+                        score = log_loss(y_true, preds_norm if is_multiclass else preds_proba)
+                        return -score  # Negate: lower log_loss is better
+
+                    elif metric_lower in ["accuracy", "acc"]:
+                        score = accuracy_score(y_true, y_pred_class)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["f1", "f1score", "f1macro"]:
+                        avg = "binary" if len(np.unique(y_true)) == 2 else "macro"
+                        score = f1_score(y_true, y_pred_class, average=avg, zero_division=0)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["f1micro"]:
+                        score = f1_score(y_true, y_pred_class, average="micro", zero_division=0)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["f1weighted"]:
+                        score = f1_score(y_true, y_pred_class, average="weighted", zero_division=0)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["precision", "prec"]:
+                        avg = "binary" if len(np.unique(y_true)) == 2 else "macro"
+                        score = precision_score(y_true, y_pred_class, average=avg, zero_division=0)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["recall", "rec", "sensitivity"]:
+                        avg = "binary" if len(np.unique(y_true)) == 2 else "macro"
+                        score = recall_score(y_true, y_pred_class, average=avg, zero_division=0)
+                        return score  # Higher is better
+
+                    else:
+                        # Default to log_loss for unknown classification metrics
+                        score = log_loss(y_true, preds_norm if is_multiclass else preds_proba)
+                        return -score  # Negate: lower is better
+
+                else:  # Regression
+                    preds_flat = preds.ravel() if preds.ndim > 1 else preds
+
+                    if metric_lower in ["rmse", "rootmeansquarederror"]:
+                        score = np.sqrt(mean_squared_error(y_true, preds_flat))
+                        return -score  # Negate: lower is better
+
+                    elif metric_lower in ["mse", "meansquarederror"]:
+                        score = mean_squared_error(y_true, preds_flat)
+                        return -score  # Negate: lower is better
+
+                    elif metric_lower in ["mae", "meanabsoluteerror", "l1"]:
+                        score = mean_absolute_error(y_true, preds_flat)
+                        return -score  # Negate: lower is better
+
+                    elif metric_lower in ["mape", "meanabsolutepercentageerror"]:
+                        score = mean_absolute_percentage_error(y_true, preds_flat)
+                        return -score  # Negate: lower is better
+
+                    elif metric_lower in ["r2", "rsquared", "r2score"]:
+                        score = r2_score(y_true, preds_flat)
+                        return score  # Higher is better
+
+                    elif metric_lower in ["rmsle", "rootmeansquaredlogerror"]:
+                        # Clip to avoid log of negative
+                        preds_pos = np.clip(preds_flat, 1e-15, None)
+                        y_pos = np.clip(y_true, 1e-15, None)
+                        score = np.sqrt(mean_squared_error(np.log1p(y_pos), np.log1p(preds_pos)))
+                        return -score  # Negate: lower is better
+
+                    else:
+                        # Default to RMSE for unknown regression metrics
+                        score = np.sqrt(mean_squared_error(y_true, preds_flat))
+                        return -score  # Negate: lower is better
+
+            except Exception as e:
+                print(f"      Score computation error: {e}")
+                return float("-inf")
+
+        # ---------------------------------------------------------------
+        # Strategy 1: Simple Average
+        # ---------------------------------------------------------------
+        try:
+            avg_oof = np.mean(oof_stack, axis=0)
+            avg_test = np.mean(test_stack, axis=0)
+            avg_score = compute_score(avg_oof)
+            candidates.append(("simple_avg", avg_score, avg_test, None))
+            print(f"   1. Simple Average:      score = {avg_score:.6f}")
+        except Exception as e:
+            print(f"   1. Simple Average:      FAILED ({e})")
+
+        # ---------------------------------------------------------------
+        # Strategy 2: Weighted Average (by individual OOF scores)
+        # ---------------------------------------------------------------
+        try:
+            individual_scores = []
+            for i in range(len(oof_list)):
+                ind_score = compute_score(oof_list[i])
+                individual_scores.append(ind_score)
+
+            # Convert scores to weights (higher score = higher weight)
+            scores_arr = np.array(individual_scores)
+            # Shift scores to be positive
+            min_score = scores_arr.min()
+            shifted = scores_arr - min_score + 1e-6
+            weights = shifted / shifted.sum()
+
+            weighted_oof = np.average(oof_stack, axis=0, weights=weights)
+            weighted_test = np.average(test_stack, axis=0, weights=weights)
+            weighted_score = compute_score(weighted_oof)
+            weights_dict = dict(zip(valid_names, weights.tolist()))
+            candidates.append(("weighted_avg", weighted_score, weighted_test, weights_dict))
+            print(f"   2. Weighted Average:    score = {weighted_score:.6f}")
+            print(f"      Weights: {', '.join(f'{n}={w:.3f}' for n, w in weights_dict.items())}")
+        except Exception as e:
+            print(f"   2. Weighted Average:    FAILED ({e})")
+
+        # ---------------------------------------------------------------
+        # Strategy 3: Stacking with Meta-Learner
+        # Uses cross-validation to avoid data leakage in OOF score
+        # ---------------------------------------------------------------
+        try:
+            from sklearn.model_selection import cross_val_predict
+
+            # Reshape for stacking: (n_samples, n_models * n_classes)
+            n_samples = oof_stack.shape[1]
+            meta_X = oof_stack.transpose(1, 0, 2).reshape(n_samples, -1)
+            meta_X_test = test_stack.transpose(1, 0, 2).reshape(test_stack.shape[1], -1)
+
+            if problem_type == "classification":
+                meta_model = LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")
+                # Use CV to get unbiased OOF predictions (avoids data leakage)
+                stacked_oof = cross_val_predict(
+                    meta_model, meta_X, y_true, cv=5, method="predict_proba", n_jobs=-1
+                )
+                # Fit on full data for test predictions
+                meta_model.fit(meta_X, y_true)
+                stacked_test = meta_model.predict_proba(meta_X_test)
+            else:
+                meta_model = Ridge(alpha=1.0)
+                # Use CV to get unbiased OOF predictions (avoids data leakage)
+                stacked_oof = cross_val_predict(
+                    meta_model, meta_X, y_true, cv=5, n_jobs=-1
+                )
+                # Fit on full data for test predictions
+                meta_model.fit(meta_X, y_true)
+                stacked_test = meta_model.predict(meta_X_test)
+
+            stacked_score = compute_score(stacked_oof)
+            candidates.append(("stacking", stacked_score, stacked_test, None))
+            print(f"   3. Stacking (CV):       score = {stacked_score:.6f}")
+        except Exception as e:
+            print(f"   3. Stacking (CV):       FAILED ({e})")
+
+        # ---------------------------------------------------------------
+        # Strategy 4: Rank Average (robust to scale differences)
+        # ---------------------------------------------------------------
+        try:
+            def rank_predictions(preds: np.ndarray) -> np.ndarray:
+                """Convert predictions to ranks (percentiles)."""
+                if preds.ndim == 1:
+                    return rankdata(preds) / len(preds)
+                else:
+                    return np.apply_along_axis(lambda x: rankdata(x) / len(x), axis=0, arr=preds)
+
+            ranked_oof_list = [rank_predictions(oof) for oof in oof_list]
+            ranked_test_list = [rank_predictions(test) for test in test_list]
+
+            ranked_oof_stack = np.stack(ranked_oof_list, axis=0)
+            ranked_test_stack = np.stack(ranked_test_list, axis=0)
+
+            rank_avg_oof = np.mean(ranked_oof_stack, axis=0)
+            rank_avg_test = np.mean(ranked_test_stack, axis=0)
+            rank_score = compute_score(rank_avg_oof)
+            candidates.append(("rank_avg", rank_score, rank_avg_test, None))
+            print(f"   4. Rank Average:        score = {rank_score:.6f}")
+        except Exception as e:
+            print(f"   4. Rank Average:        FAILED ({e})")
+
+        # ---------------------------------------------------------------
+        # Select Best Strategy
+        # ---------------------------------------------------------------
+        if not candidates:
+            print("   WARNING: All strategies failed!")
+            return ("none", 0.0, np.array([]), None)
+
+        # Sort by score (higher is better since we negated minimization metrics)
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        best = candidates[0]
+
+        print("   " + "-" * 50)
+        print(f"   ✅ Best Strategy: {best[0]} (score = {best[1]:.6f})")
+
+        return best
 
     # Delegate to module functions (for backward compatibility with method calls)
     def _find_prediction_pairs(self, models_dir: Path) -> dict[str, tuple[Path, Path]]:
@@ -264,7 +608,12 @@ class EnsembleAgent:
             expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
             if ensemble_preds.shape[1] > expected_cols:
                 print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                ensemble_preds = ensemble_preds[:, :expected_cols]
+                # Binary classification: predict_proba returns [P(class0), P(class1)]
+                # Kaggle expects P(positive class) = column 1, not column 0
+                if ensemble_preds.shape[1] == 2 and expected_cols == 1:
+                    ensemble_preds = ensemble_preds[:, 1:2]  # Positive class probability
+                else:
+                    ensemble_preds = ensemble_preds[:, :expected_cols]
 
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
@@ -386,7 +735,12 @@ class EnsembleAgent:
             # Validate column count matches submission template
             if ensemble_preds.shape[1] > expected_cols:
                 print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                ensemble_preds = ensemble_preds[:, :expected_cols]
+                # Binary classification: predict_proba returns [P(class0), P(class1)]
+                # Kaggle expects P(positive class) = column 1, not column 0
+                if ensemble_preds.shape[1] == 2 and expected_cols == 1:
+                    ensemble_preds = ensemble_preds[:, 1:2]  # Positive class probability
+                else:
+                    ensemble_preds = ensemble_preds[:, :expected_cols]
 
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
@@ -899,10 +1253,8 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         """Create ensemble from trained models.
 
         This is the main entry point for the ensemble agent.
-        The full implementation is in the original ensemble_agent.py file.
+        Uses MLE-STAR multi-strategy ensemble when y_true is available.
         """
-        # Import the full __call__ implementation
-        # For now, delegate to a simplified version
         print("\n" + "=" * 60)
         print("ENSEMBLE AGENT: Creating Model Ensemble")
         print("=" * 60)
@@ -933,7 +1285,6 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                 print("   No prediction pairs found, skipping ensemble")
                 return {"ensemble_skipped": True, "skip_reason": "no_prediction_pairs"}
 
-            # Create simple average ensemble
             sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
             output_path = working_dir / "submission.csv"
 
@@ -941,8 +1292,104 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             test_rec_ids = state.get("test_rec_ids", []) if isinstance(state, dict) else []
             expected_n_test = len(test_rec_ids) if test_rec_ids else None
 
+            # =========================================================
+            # MLE-STAR: Try multi-strategy ensemble if y_true available
+            # =========================================================
+            y_true = None
+            problem_type = "classification"
+            metric_name = ""
+
+            # Try to load y_true from canonical or models directory
+            y_true_paths = [
+                models_dir / "y_train.npy",
+                models_dir / "canonical" / "y_train.npy",
+                working_dir / "canonical" / "y_train.npy",
+            ]
+            for y_path in y_true_paths:
+                if y_path.exists():
+                    try:
+                        y_true = np.load(y_path, allow_pickle=True)
+                        print(f"   Loaded y_true from {y_path.name} ({len(y_true)} samples)")
+                        break
+                    except Exception:
+                        pass
+
+            # Get problem type and metric from state
+            if isinstance(state, dict):
+                comp_info = state.get("competition_info", {})
+                if isinstance(comp_info, dict):
+                    problem_type = comp_info.get("problem_type", "classification")
+                    metric_name = comp_info.get("evaluation_metric", "")
+                else:
+                    problem_type = getattr(comp_info, "problem_type", "classification")
+                    metric_name = getattr(comp_info, "evaluation_metric", "")
+
+            # Use multi-strategy ensemble if we have y_true and multiple models
+            best_strategy = None
+            ensemble_weights = {}
+
+            if y_true is not None and len(prediction_pairs) >= 2:
+                print("\n   Using MLE-STAR Multi-Strategy Ensemble Selection...")
+                minimize = is_metric_minimization(metric_name)
+
+                try:
+                    strategy_name, oof_score, test_preds, weights = self._generate_ensemble_candidates(
+                        prediction_pairs, y_true, problem_type, metric_name, minimize
+                    )
+
+                    if strategy_name != "none" and test_preds is not None and len(test_preds) > 0:
+                        best_strategy = strategy_name
+                        if weights:
+                            ensemble_weights = weights
+
+                        # Write multi-strategy ensemble predictions to submission
+                        if sample_path.exists():
+                            sample_sub = read_csv_auto(sample_path)
+                            n_test = len(sample_sub)
+
+                            # Align predictions with sample submission
+                            if test_preds.shape[0] == n_test:
+                                expected_cols = len(sample_sub.columns) - 1
+                                if test_preds.ndim == 1:
+                                    sample_sub.iloc[:, 1] = test_preds
+                                elif test_preds.shape[1] == expected_cols:
+                                    sample_sub.iloc[:, 1:] = test_preds
+                                elif test_preds.shape[1] > expected_cols:
+                                    # Binary classification: predict_proba returns [P(class0), P(class1)]
+                                    # Kaggle expects P(positive class) = column 1, not column 0
+                                    if test_preds.shape[1] == 2 and expected_cols == 1:
+                                        sample_sub.iloc[:, 1] = test_preds[:, 1]  # Positive class probability
+                                    else:
+                                        # Multi-class: take first expected_cols columns
+                                        sample_sub.iloc[:, 1:] = test_preds[:, :expected_cols]
+                                else:
+                                    # Pad with 0.5
+                                    padded = np.full((n_test, expected_cols), 0.5)
+                                    padded[:, :test_preds.shape[1]] = test_preds
+                                    sample_sub.iloc[:, 1:] = padded
+
+                                output_path.parent.mkdir(parents=True, exist_ok=True)
+                                sample_sub.to_csv(output_path, index=False)
+                                print(f"\n   ✅ Multi-strategy ensemble saved: {best_strategy}")
+                                return {
+                                    "ensemble_created": True,
+                                    "n_models": len(prediction_pairs),
+                                    "ensemble_strategy": best_strategy,
+                                    "ensemble_weights": ensemble_weights,
+                                    "ensemble_oof_score": oof_score,
+                                }
+                except Exception as e:
+                    print(f"   WARNING: Multi-strategy ensemble failed: {e}")
+                    print("   Falling back to simple average ensemble...")
+
+            # Fallback to simple average ensemble
             if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test):
-                return {"ensemble_created": True, "n_models": len(prediction_pairs)}
+                return {
+                    "ensemble_created": True,
+                    "n_models": len(prediction_pairs),
+                    "ensemble_strategy": "simple_avg",
+                    "ensemble_weights": {},
+                }
             return {"ensemble_skipped": True, "skip_reason": "ensemble_creation_failed"}
 
         except Exception as e:
