@@ -134,14 +134,42 @@ if 'parse_id_mapping_file' in dir():
             break
 ```
 
-### Pre-Loaded Labels (AUDIO COMPETITIONS)
+### ⚠️ CRITICAL: PRE-LOADED LABELS (DO NOT RE-PARSE FILES) ⚠️
 
-When LABEL_FILES is defined, labels are PRE-LOADED as global variables at script start:
-- `_PRELOADED_REC_IDS`: List of recording IDs
-- `_PRELOADED_LABELS_DF`: DataFrame with ['rec_id', 'label'] columns (long format)
-- `_PRELOADED_N_CLASSES`: Number of unique classes
+Labels are **ALREADY LOADED** as global variables at script start (lines 1-150).
+The following variables are available **IMMEDIATELY** - no file parsing required:
 
-Use these variables directly instead of parsing files yourself.
+- `_PRELOADED_REC_IDS`: List[str] of ALL recording IDs
+- `_PRELOADED_LABELS_DF`: DataFrame with columns ['rec_id', 'label'] (long format, one row per label)
+- `_PRELOADED_N_CLASSES`: int - Total number of unique classes
+
+### ❌ FORBIDDEN PATTERNS (WILL CAUSE FileNotFoundError):
+```python
+# NEVER DO THIS - these files don't exist or are already parsed:
+pd.read_csv("rec_labels_train.txt")        # FileNotFoundError!
+pd.read_csv("train_labels.txt")            # FileNotFoundError!
+pd.read_csv(some_path, header=None)        # Wrong! Files have headers!
+labels_df = pd.read_csv(TRAIN_LABELS_PATH) # WRONG! Use pre-loaded instead!
+```
+
+### ✅ REQUIRED PATTERN (ALWAYS USE THIS):
+```python
+# CORRECT - Use the pre-loaded variables:
+labels_df = _PRELOADED_LABELS_DF           # Already parsed!
+rec_ids = _PRELOADED_REC_IDS               # Already extracted!
+n_classes = _PRELOADED_N_CLASSES           # Already counted!
+
+# Convert to multi-label binary matrix if needed:
+from sklearn.preprocessing import MultiLabelBinarizer
+mlb = MultiLabelBinarizer()
+y = mlb.fit_transform(
+    labels_df.groupby('rec_id')['label'].apply(list)
+)
+```
+
+**WHY THIS MATTERS**: The injected `parse_label_file()` handles variable-width multi-label
+formats (e.g., MLSP 2013 Birds where each row can have 1-19 labels). Hardcoding file paths
+or using `pd.read_csv()` directly will FAIL on these formats.
 
 ### 3.5. Filename-Based Label Parsing
 Some audio competitions embed labels directly in filenames instead of a CSV.
@@ -473,6 +501,34 @@ for epoch in range(EPOCHS):
         break
     # ... training code ...
 ```
+
+### 10.5. MODEL SAVING (CRITICAL - PREVENTS FileNotFoundError)
+
+ALWAYS save the model **unconditionally** at the END of training, not just when it improves.
+This prevents FileNotFoundError when inference expects a model file that was never saved.
+
+```python
+# ❌ WRONG: Only save when score improves (may never save if labels are wrong!)
+if val_auc > best_auc:
+    torch.save(model.state_dict(), MODELS_DIR / f"best_model_fold_{fold}.pth")
+    best_auc = val_auc
+
+# ✅ CORRECT: Always save at end of training (MANDATORY)
+# At END of each fold's training loop:
+model_path = MODELS_DIR / f"model_{COMPONENT_NAME}_fold_{fold}.pth"
+torch.save(model.state_dict(), model_path)
+print(f"[SAVE] Model saved to {model_path}")
+
+# For inference, load the saved model with error handling:
+if model_path.exists():
+    model.load_state_dict(torch.load(model_path))
+else:
+    raise FileNotFoundError(f"Model not found: {model_path}. Did training complete?")
+```
+
+**Why this matters:** If label parsing is broken (wrong file format, missing labels, etc.),
+the model never improves → "best model" is never saved → inference crashes with FileNotFoundError.
+Always save unconditionally to prevent this cascading failure.
 
 ### 11. SUBMISSION FORMAT (CRITICAL)
 

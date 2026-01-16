@@ -412,6 +412,137 @@ class CodeGeneratorMixin:
 
         return rewritten, rewrite_count
 
+    def _validate_audio_label_usage(
+        self: DeveloperAgent,
+        code: str,
+        data_type: str,
+    ) -> list[str]:
+        """
+        Validate that audio competition code uses pre-loaded labels correctly.
+
+        Checks for common LLM mistakes:
+        1. Hardcoded label file paths that don't exist
+        2. Using pd.read_csv() on label files instead of _PRELOADED_LABELS_DF
+        3. Using header=None on files that have headers
+
+        Args:
+            code: The generated code to validate
+            data_type: Competition data type (audio, image, etc.)
+
+        Returns:
+            List of warning messages (empty if no issues)
+        """
+        warnings = []
+
+        # Only validate for audio competitions
+        if data_type not in ("audio", "audio_classification"):
+            return warnings
+
+        # Check for hardcoded paths that don't exist
+        bad_paths = [
+            "rec_labels_train.txt",
+            "train_labels.txt",
+            "labels_train.txt",
+            "train_label.txt",
+        ]
+        for bad_path in bad_paths:
+            if bad_path in code:
+                warnings.append(
+                    f"⚠️ Hardcoded path '{bad_path}' detected - this file likely doesn't exist! "
+                    "Use _PRELOADED_LABELS_DF instead."
+                )
+
+        # Check if pre-loaded labels are being ignored
+        has_label_parsing = any(
+            pattern in code.lower()
+            for pattern in ["pd.read_csv", "read_csv", "open("]
+        )
+        uses_preloaded = "_PRELOADED_LABELS_DF" in code
+
+        if has_label_parsing and not uses_preloaded:
+            # Check if the label parsing is happening after the header
+            marker_idx = code.find("# === END PATH CONSTANTS ===")
+            if marker_idx != -1:
+                code_after_header = code[marker_idx:]
+                label_file_patterns = [
+                    "rec_labels",
+                    "train_labels",
+                    "label",
+                ]
+                for pattern in label_file_patterns:
+                    if pattern in code_after_header.lower() and "read_csv" in code_after_header:
+                        warnings.append(
+                            "⚠️ LLM is re-parsing label files instead of using _PRELOADED_LABELS_DF. "
+                            "This may cause FileNotFoundError or parsing errors."
+                        )
+                        break
+
+        return warnings
+
+    def _strip_label_reparsing(
+        self: DeveloperAgent,
+        code: str,
+        path_header_end_marker: str = "# === END PATH CONSTANTS ===",
+    ) -> tuple[str, int]:
+        """
+        Strip LLM-generated label file parsing that conflicts with pre-loaded labels.
+
+        The LLM often ignores _PRELOADED_LABELS_DF and re-parses label files,
+        causing FileNotFoundError or parsing errors. This function enforces the
+        use of pre-loaded labels by stripping the conflicting code.
+
+        Args:
+            code: The full generated code
+            path_header_end_marker: Marker indicating end of injected path header
+
+        Returns:
+            Tuple of (modified code, number of statements stripped)
+        """
+        marker_idx = code.find(path_header_end_marker)
+        if marker_idx == -1:
+            return code, 0
+
+        header = code[: marker_idx + len(path_header_end_marker)]
+        code_after_header = code[marker_idx + len(path_header_end_marker) :]
+
+        # Patterns to strip - LLM re-parsing label files instead of using _PRELOADED_LABELS_DF
+        # Using negative lookbehind (?<![a-zA-Z]) to avoid "unlabeled" but match LABEL_FILE, rec_labels_train
+        # IMPORTANT: Match both singular AND plural forms (label/labels, rec_label/rec_labels)
+        # Real filenames: rec_labels_train.txt, train_labels.txt, LABEL_FILE, etc.
+        patterns = [
+            # Strip pd.read_csv on label/labels files (case-insensitive)
+            # (?<![a-zA-Z]) ensures we don't match "unlabeled" but DO match "LABEL_FILE", "rec_labels"
+            (
+                r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))",
+                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
+            ),
+            # Strip pd.read_csv with header=None on rec_labels files
+            (
+                r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])rec_labels?[^)]*header\s*=\s*None[^)]*\))",
+                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
+            ),
+            # Strip pd.read_csv on train_labels files
+            (
+                r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])train_labels?[^)]*\))",
+                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
+            ),
+            # Strip open() calls on label files (singular and plural)
+            (
+                r"([\t ]*with\s+open\([^)]*(?<![a-zA-Z])(?:labels?|rec_labels?|train_labels?)[^)]*\)[^:]*:)",
+                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
+            ),
+        ]
+
+        strip_count = 0
+        for pattern, replacement in patterns:
+            matches = re.findall(pattern, code_after_header, re.IGNORECASE)
+            strip_count += len(matches)
+            code_after_header = re.sub(
+                pattern, replacement, code_after_header, flags=re.IGNORECASE
+            )
+
+        return header + code_after_header, strip_count
+
     def _generate_code(
         self: DeveloperAgent,
         component: AblationComponent,
@@ -699,7 +830,13 @@ def parse_label_file(label_path, hidden_marker='?'):
         for label in parts[1:]:
             label = label.strip()
             if label and label != hidden_marker:
-                rows.append({'rec_id': rec_id, 'label': label})
+                # Try to cast label to int for MultiLabelBinarizer compatibility
+                # MLSP-2013-Birds and similar competitions use integer class IDs
+                try:
+                    label_val = int(label)
+                except ValueError:
+                    label_val = label  # Keep as string if not numeric
+                rows.append({'rec_id': rec_id, 'label': label_val})
 
     # FAIL LOUDLY instead of returning empty DataFrame
     if not rows:
@@ -789,6 +926,16 @@ print("="*60)
         # Add audio source path if available
         if audio_source_path:
             path_header += f'\n# Audio source directory\nAUDIO_SOURCE_DIR = Path("{audio_source_path}")\n'
+
+        # CANONICAL_DIR fallback - only for audio competitions when NO canonical data exists
+        # This prevents NameError when LLM-generated code references CANONICAL_DIR
+        # IMPORTANT: Do NOT override if has_canonical=True (would break canonical contract)
+        if data_type in ("audio", "audio_classification") and not has_canonical:
+            path_header += f'''
+# CANONICAL_DIR fallback (no canonical data detected - creating empty directory)
+CANONICAL_DIR = MODELS_DIR / "canonical"
+CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+'''
 
         # Inject CVfolds train/test split if available
         # This is CRITICAL for competitions like MLSP 2013 Birds where train/test is defined in CVfolds_*.txt
@@ -1088,5 +1235,20 @@ def create_submission_ids(rec_ids, num_classes={num_classes}):
         if base_dir_rewrites > 0:
             print(f"⚠️  BASE_DIR REWRITTEN: Replaced {base_dir_rewrites} BASE_DIR reference(s) with correct path constants")
             print("   BASE_DIR is not defined. Use TRAIN_PATH, TEST_PATH, SAMPLE_SUBMISSION_PATH, or OUTPUT_DIR.")
+
+        # Validate audio label usage - warn if LLM is re-parsing files instead of using pre-loaded labels
+        audio_warnings = self._validate_audio_label_usage(full_code, data_type)
+        for warning in audio_warnings:
+            print(warning)
+            print("   HINT: Use _PRELOADED_LABELS_DF, _PRELOADED_REC_IDS, _PRELOADED_N_CLASSES instead.")
+
+        # Strip label re-parsing for audio competitions - ENFORCE usage of pre-loaded labels
+        # This is stronger than warnings because LLMs often ignore prompt instructions
+        if data_type in ("audio", "audio_classification"):
+            full_code, strip_count = self._strip_label_reparsing(full_code)
+            if strip_count > 0:
+                print(f"⚠️  STRIPPED {strip_count} label re-parsing statement(s)")
+                print("   LLM code tried to re-parse label files instead of using _PRELOADED_LABELS_DF.")
+                print("   The stripped code has been commented out to prevent FileNotFoundError.")
 
         return full_code

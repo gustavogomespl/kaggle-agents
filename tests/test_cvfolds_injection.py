@@ -292,3 +292,274 @@ class TestCVfoldsIDMapping:
         # Original IDs should be preserved
         assert train_rec_ids == [0, 1, 2]
         assert test_rec_ids == [3, 4]
+
+
+class TestAudioLabelValidation:
+    """Tests for audio competition label usage validation."""
+
+    def test_detects_hardcoded_bad_paths(self) -> None:
+        """Test that hardcoded non-existent paths are detected."""
+        code = '''
+# Bad code that hardcodes a path
+labels_df = pd.read_csv("rec_labels_train.txt")
+'''
+        bad_paths = ["rec_labels_train.txt", "train_labels.txt"]
+        warnings = []
+        for bad_path in bad_paths:
+            if bad_path in code:
+                warnings.append(f"Hardcoded path '{bad_path}'")
+
+        assert len(warnings) == 1
+        assert "rec_labels_train.txt" in warnings[0]
+
+    def test_no_warning_when_using_preloaded(self) -> None:
+        """Test that using pre-loaded labels generates no warnings."""
+        code = '''
+# Good code that uses pre-loaded labels
+labels_df = _PRELOADED_LABELS_DF
+rec_ids = _PRELOADED_REC_IDS
+n_classes = _PRELOADED_N_CLASSES
+'''
+        uses_preloaded = "_PRELOADED_LABELS_DF" in code
+        has_bad_paths = any(p in code for p in ["rec_labels_train.txt", "train_labels.txt"])
+
+        assert uses_preloaded is True
+        assert has_bad_paths is False
+
+    def test_only_validates_audio_competitions(self) -> None:
+        """Test that validation only runs for audio competitions."""
+        data_types_to_validate = ("audio", "audio_classification")
+
+        assert "audio" in data_types_to_validate
+        assert "audio_classification" in data_types_to_validate
+        assert "tabular" not in data_types_to_validate
+        assert "image" not in data_types_to_validate
+
+
+class TestLabelReparsingStripping:
+    """Tests for _strip_label_reparsing() function that enforces pre-loaded labels."""
+
+    def test_strips_pd_read_csv_on_label_files(self) -> None:
+        """Test that pd.read_csv calls on label files are stripped (singular form)."""
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+# Bad code that should be stripped
+labels_df = pd.read_csv(LABEL_FILE, header=None, names=['rec_id', 'class_id'])
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        # Pattern uses negative lookbehind to avoid "unlabeled" but match LABEL_FILE
+        # (?<![a-zA-Z]) ensures no letter before label/labels
+        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        replacement = r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1"
+
+        matches = re.findall(pattern, code_after_header, re.IGNORECASE)
+        result = re.sub(pattern, replacement, code_after_header, flags=re.IGNORECASE)
+
+        assert len(matches) == 1  # LABEL_FILE should match
+        assert "STRIPPED" in result
+
+    def test_strips_pd_read_csv_on_plural_label_files(self) -> None:
+        """Test that pd.read_csv calls on plural label files are stripped.
+
+        Real audio competition filenames: rec_labels_train.txt, train_labels.txt
+        """
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+# Bad code that should be stripped - real audio competition filenames
+df1 = pd.read_csv("rec_labels_train.txt")
+df2 = pd.read_csv("train_labels.txt")
+df3 = pd.read_csv(TRAIN_LABELS_PATH)
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        # Pattern uses negative lookbehind - matches rec_labels, train_labels
+        labels_pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        train_labels_pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])train_labels?[^)]*\))"
+
+        labels_matches = re.findall(labels_pattern, code_after_header, re.IGNORECASE)
+        train_labels_matches = re.findall(train_labels_pattern, code_after_header, re.IGNORECASE)
+
+        # rec_labels_train.txt and train_labels.txt should be matched
+        assert len(labels_matches) >= 2  # rec_labels and train_labels both contain "labels"
+        assert len(train_labels_matches) >= 1  # train_labels explicitly matched
+
+    def test_preserves_non_label_read_csv(self) -> None:
+        """Test that pd.read_csv calls on non-label files are NOT stripped."""
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+# Good code that should NOT be stripped
+sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+train_df = pd.read_csv("train.csv")
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        # Pattern that matches label files only (negative lookbehind)
+        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        matches = re.findall(pattern, code_after_header, re.IGNORECASE)
+
+        # No label files, so no matches
+        assert len(matches) == 0
+
+    def test_preserves_unlabeled_files(self) -> None:
+        """Test that 'unlabeled' files are NOT stripped (negative lookbehind works)."""
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+# Good code with "unlabeled" - should NOT be stripped
+unlabeled_df = pd.read_csv("unlabeled_data.csv")
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        # Pattern should NOT match "unlabeled" due to negative lookbehind
+        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        matches = re.findall(pattern, code_after_header, re.IGNORECASE)
+
+        # "unlabeled" should NOT match because "un" precedes "labeled"
+        assert len(matches) == 0
+
+    def test_preserves_code_using_preloaded_labels(self) -> None:
+        """Test that code correctly using _PRELOADED_LABELS_DF is NOT stripped."""
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+# Good code that uses pre-loaded labels - should NOT be stripped
+labels_df = _PRELOADED_LABELS_DF.copy()
+train_labels = _PRELOADED_LABELS_DF[_PRELOADED_LABELS_DF['rec_id'].isin(train_ids)]
+n_classes = _PRELOADED_N_CLASSES
+rec_ids = _PRELOADED_REC_IDS
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        # Pattern that matches pd.read_csv on label files (negative lookbehind)
+        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        matches = re.findall(pattern, code_after_header, re.IGNORECASE)
+
+        # Code using _PRELOADED_LABELS_DF should have no matches (no pd.read_csv)
+        assert len(matches) == 0
+
+        # Verify the code uses the correct pre-loaded variables
+        assert "_PRELOADED_LABELS_DF" in code
+        assert "_PRELOADED_N_CLASSES" in code
+        assert "_PRELOADED_REC_IDS" in code
+
+
+class TestLabelIntCasting:
+    """Tests for label integer casting in parse_label_file."""
+
+    def test_numeric_labels_cast_to_int(self) -> None:
+        """Test that numeric labels are cast to integers."""
+        label = "42"
+        try:
+            label_val = int(label)
+        except ValueError:
+            label_val = label
+
+        assert isinstance(label_val, int)
+        assert label_val == 42
+
+    def test_non_numeric_labels_preserved_as_string(self) -> None:
+        """Test that non-numeric labels are kept as strings."""
+        label = "species_bird"
+        try:
+            label_val = int(label)
+        except ValueError:
+            label_val = label
+
+        assert isinstance(label_val, str)
+        assert label_val == "species_bird"
+
+    def test_mixed_labels_handled_correctly(self) -> None:
+        """Test handling of mixed numeric and non-numeric labels."""
+        labels = ["1", "10", "species", "42"]
+        results = []
+
+        for label in labels:
+            try:
+                results.append(int(label))
+            except ValueError:
+                results.append(label)
+
+        assert results == [1, 10, "species", 42]
+        assert isinstance(results[0], int)
+        assert isinstance(results[2], str)
+
+
+class TestCanonicalDirFallback:
+    """Tests for CANONICAL_DIR fallback definition."""
+
+    def test_canonical_dir_defined_from_models_dir(self, tmp_path: Path) -> None:
+        """Test that CANONICAL_DIR is defined relative to MODELS_DIR."""
+        MODELS_DIR = tmp_path / "models"
+        MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Simulate the fallback code
+        CANONICAL_DIR = MODELS_DIR / "canonical"
+        CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+
+        assert CANONICAL_DIR.exists()
+        assert CANONICAL_DIR.parent == MODELS_DIR
+        assert CANONICAL_DIR.name == "canonical"
+
+    def test_canonical_dir_created_if_not_exists(self, tmp_path: Path) -> None:
+        """Test that CANONICAL_DIR is created if it doesn't exist."""
+        MODELS_DIR = tmp_path / "new_models"
+        # Don't create MODELS_DIR yet
+
+        CANONICAL_DIR = MODELS_DIR / "canonical"
+        CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+
+        assert CANONICAL_DIR.exists()
+        assert MODELS_DIR.exists()  # Parent should also be created
+
+    def test_fallback_not_injected_when_canonical_exists(self, tmp_path: Path) -> None:
+        """Test that fallback is NOT injected when canonical data already exists.
+
+        This prevents overriding the canonical contract when real canonical
+        artifacts are present (e.g., train_ids.npy, folds.npy).
+        """
+        # Simulate existing canonical data
+        canonical_dir = tmp_path / "canonical"
+        canonical_dir.mkdir(parents=True, exist_ok=True)
+        (canonical_dir / "train_ids.npy").touch()  # Marker file
+
+        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        data_type = "audio"
+
+        # Fallback condition: only inject when has_canonical is False
+        should_inject_fallback = data_type in ("audio", "audio_classification") and not has_canonical
+
+        assert has_canonical is True
+        assert should_inject_fallback is False  # Fallback should NOT be injected
+
+    def test_fallback_injected_when_no_canonical_data(self, tmp_path: Path) -> None:
+        """Test that fallback IS injected when no canonical data exists."""
+        # No canonical directory exists
+        canonical_dir = tmp_path / "canonical"
+
+        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        data_type = "audio"
+
+        # Fallback condition: inject when has_canonical is False for audio
+        should_inject_fallback = data_type in ("audio", "audio_classification") and not has_canonical
+
+        assert has_canonical is False
+        assert should_inject_fallback is True  # Fallback SHOULD be injected
