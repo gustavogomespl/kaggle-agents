@@ -927,14 +927,62 @@ print("="*60)
         if audio_source_path:
             path_header += f'\n# Audio source directory\nAUDIO_SOURCE_DIR = Path("{audio_source_path}")\n'
 
-        # CANONICAL_DIR fallback - only for audio competitions when NO canonical data exists
-        # This prevents NameError when LLM-generated code references CANONICAL_DIR
+        # CANONICAL_DIR fallback with DYNAMIC FOLDS GENERATION
+        # This prevents both NameError (undefined CANONICAL_DIR) and FileNotFoundError (missing folds.npy)
         # IMPORTANT: Do NOT override if has_canonical=True (would break canonical contract)
         if data_type in ("audio", "audio_classification") and not has_canonical:
-            path_header += f'''
-# CANONICAL_DIR fallback (no canonical data detected - creating empty directory)
+            path_header += '''
+# === CANONICAL_DIR FALLBACK (Dynamic Folds) ===
+# Canonical data NOT available - folds must be generated locally
 CANONICAL_DIR = MODELS_DIR / "canonical"
 CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+CANONICAL_FOLDS_AVAILABLE = False  # FLAG: Tells LLM to generate folds
+
+def ensure_folds(n_samples, n_folds=5, random_state=42, stratify_labels=None):
+    """Generate or load folds. Use this instead of direct np.load(folds.npy)!
+
+    Args:
+        n_samples: Number of samples to create folds for
+        n_folds: Number of folds (default 5)
+        random_state: Random seed for reproducibility
+        stratify_labels: Optional labels for stratified split (1D array)
+
+    Returns:
+        np.array of fold assignments (shape: n_samples)
+    """
+    folds_path = CANONICAL_DIR / "folds.npy"
+    if folds_path.exists():
+        loaded_folds = np.load(folds_path)
+        if len(loaded_folds) == n_samples:
+            print(f"[INFO] Loaded existing folds from {folds_path}")
+            return loaded_folds
+        else:
+            print(f"[WARNING] Existing folds have wrong size ({len(loaded_folds)} vs {n_samples})")
+
+    # Generate folds locally
+    print(f"[INFO] Generating {n_folds}-fold split for {n_samples} samples...")
+
+    if stratify_labels is not None and len(np.unique(stratify_labels)) > 1:
+        from sklearn.model_selection import StratifiedKFold
+        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        split_iter = kf.split(range(n_samples), stratify_labels)
+    else:
+        from sklearn.model_selection import KFold
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        split_iter = kf.split(range(n_samples))
+
+    folds = np.zeros(n_samples, dtype=int)
+    for fold_idx, (_, val_idx) in enumerate(split_iter):
+        folds[val_idx] = fold_idx
+
+    # Save for consistency across components
+    np.save(folds_path, folds)
+    print(f"[INFO] Saved generated folds to {folds_path}")
+    return folds
+
+print("[WARNING] Canonical data not available. Use ensure_folds(n_samples) to generate folds.")
+print("          DO NOT call np.load(CANONICAL_DIR / 'folds.npy') directly!")
+# === END CANONICAL FALLBACK ===
 '''
 
         # Inject CVfolds train/test split if available
@@ -1094,6 +1142,71 @@ def build_id_to_path_map(id_list, base_dir, extensions=None, verbose=True):
 
 
 print("[INFO] smart_locate_file() available - use for loading audio/image by ID")
+'''
+
+        # Inject rec_id to audio path mapping for audio competitions WITH label files
+        # This is CRITICAL for competitions like MLSP-2013-Birds where:
+        # - rec_ids are numeric (0, 1, 2...)
+        # - but filenames are like "PC1_20100705_050000_0010.wav"
+        # - rec_id2filename.txt maps between them
+        # NOTE: Only inject when label_files exist, because _PRELOADED_REC_IDS is defined there
+        if data_type in ("audio", "audio_classification") and audio_source_path and label_files:
+            # Check for rec_id2filename.txt mapping file
+            audio_parent = Path(audio_source_path).parent
+            audio_mapping_files = list(audio_parent.glob("*id2filename*.txt"))
+            if audio_mapping_files:
+                mapping_file = audio_mapping_files[0]
+                path_header += f'''
+# === REC_ID TO AUDIO PATH MAPPING (AUTO-INJECTED) ===
+# This maps numeric rec_ids (0, 1, 2...) to actual audio file paths
+# CRITICAL: Use _PRELOADED_ID_TO_PATH instead of creating your own mapping!
+_ID_MAPPING_FILE = Path("{mapping_file}")
+_ID_TO_FILENAME = parse_id_mapping_file(_ID_MAPPING_FILE) if _ID_MAPPING_FILE.exists() else {{}}
+
+def _resolve_audio_paths(rec_ids, audio_dir, id_to_filename):
+    """Resolve rec_ids to full audio file paths using mapping.
+
+    Args:
+        rec_ids: List of recording IDs (int or str)
+        audio_dir: Directory containing audio files
+        id_to_filename: Dict mapping rec_id → base filename (without extension)
+
+    Returns:
+        Dict mapping rec_id (as string) → full audio path
+    """
+    id_to_path = {{}}
+    for rec_id in rec_ids:
+        rec_id_str = str(rec_id)
+        # Step 1: Map rec_id → filename (e.g., 0 → "PC1_20100705_050000_0010")
+        filename = id_to_filename.get(rec_id_str, rec_id_str)
+        # Step 2: Locate file with extension (e.g., "PC1_...0010" → "PC1_...0010.wav")
+        path = smart_locate_file(audio_dir, filename)
+        if path:
+            id_to_path[rec_id_str] = path
+    return id_to_path
+
+# Pre-resolve audio paths for training IDs
+_PRELOADED_ID_TO_PATH = _resolve_audio_paths(
+    _PRELOADED_REC_IDS,
+    AUDIO_SOURCE_DIR,
+    _ID_TO_FILENAME
+)
+print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_PRELOADED_REC_IDS)}} audio paths")
+# === END REC_ID MAPPING ===
+'''
+            else:
+                # No mapping file - use direct ID-based path resolution
+                path_header += f'''
+# === REC_ID TO AUDIO PATH MAPPING (DIRECT - no mapping file found) ===
+# Trying direct ID-based path resolution
+_PRELOADED_ID_TO_PATH = {{}}
+for rec_id in _PRELOADED_REC_IDS:
+    rec_id_str = str(rec_id)
+    path = smart_locate_file(AUDIO_SOURCE_DIR, rec_id_str)
+    if path:
+        _PRELOADED_ID_TO_PATH[rec_id_str] = path
+print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_PRELOADED_REC_IDS)}} audio paths (direct)")
+# === END REC_ID MAPPING ===
 '''
 
         # For audio competitions without label files, inject filename-based label parser

@@ -171,6 +171,48 @@ y = mlb.fit_transform(
 formats (e.g., MLSP 2013 Birds where each row can have 1-19 labels). Hardcoding file paths
 or using `pd.read_csv()` directly will FAIL on these formats.
 
+### ⚠️ CRITICAL: USE PRE-RESOLVED AUDIO PATHS ⚠️
+
+Audio file paths are **ALREADY RESOLVED** as global variables. DO NOT create your own mapping!
+
+**Available variables:**
+- `_PRELOADED_ID_TO_PATH`: Dict[str, str] mapping rec_id → full audio file path
+- `_PRELOADED_REC_IDS`: List[str] of all recording IDs
+- `AUDIO_SOURCE_DIR`: Directory containing audio files
+
+**WHY THIS IS NEEDED:**
+For competitions like MLSP-2013-Birds:
+- rec_ids are numeric (0, 1, 2...)
+- but audio files are named like "PC1_20100705_050000_0010.wav"
+- `rec_id2filename.txt` maps between them (0 → "PC1_20100705...")
+- The mapping is already loaded and resolved for you!
+
+### ❌ FORBIDDEN AUDIO PATH PATTERNS:
+```python
+# NEVER DO THIS - will result in "Found 0 training samples":
+id_to_path = {f.stem: f for f in AUDIO_DIR.rglob("*.wav")}  # WRONG! Keys won't match rec_ids
+audio_path = AUDIO_DIR / f"{rec_id}.wav"  # WRONG! Filename isn't just rec_id
+train_df['audio_path'] = train_df['rec_id'].map(id_to_path)  # WRONG! Use pre-resolved map!
+```
+
+### ✅ REQUIRED AUDIO PATH PATTERN:
+```python
+# CORRECT - Use the pre-resolved mapping:
+for rec_id in _PRELOADED_REC_IDS:
+    rec_id_str = str(rec_id)  # Keys are strings!
+    audio_path = _PRELOADED_ID_TO_PATH.get(rec_id_str)
+    if audio_path:
+        audio = load_audio(audio_path)
+        # ... process audio ...
+
+# OR in a DataFrame:
+train_df['audio_path'] = train_df['rec_id'].astype(str).map(_PRELOADED_ID_TO_PATH)
+train_df = train_df[train_df['audio_path'].notna()]  # Filter rows with resolved paths
+print(f"Found {len(train_df)} training samples with valid audio")
+```
+
+**KEY DETAIL:** Dictionary keys are STRINGS, not integers. Always use `str(rec_id)` when looking up!
+
 ### 3.5. Filename-Based Label Parsing
 Some audio competitions embed labels directly in filenames instead of a CSV.
 Examples:
@@ -371,6 +413,45 @@ def get_cached_mel(audio_path: Path) -> np.ndarray:
     mel = load_and_process_audio(audio_path)
     np.save(cache_path, mel)
     return mel
+```
+
+### 6.5. TENSOR TYPE CONVERSION (CRITICAL - PREVENTS RuntimeError)
+
+PyTorch models expect float32 tensors. Image transforms may produce float64 (double).
+ALWAYS convert to float32 before model forward pass to avoid this error:
+```
+RuntimeError: Input type (torch.cuda.DoubleTensor) and weight type (torch.cuda.FloatTensor) should be the same
+```
+
+**REQUIRED FIX:**
+```python
+# In Dataset __getitem__ - AFTER all transforms:
+def __getitem__(self, idx):
+    # ... load and transform image/spectrogram ...
+    img = self.transform(img)
+    img = img.float()  # CRITICAL: Convert to float32!
+    return img, label
+
+# OR in training loop - AFTER moving to device:
+for images, labels in dataloader:
+    images = images.to(device).float()  # Ensure float32
+    labels = labels.to(device).float()
+    outputs = model(images)
+```
+
+**Common causes of DoubleTensor:**
+- `np.float64` arrays converted to tensors without explicit dtype
+- `transforms.ToTensor()` on float64 numpy arrays
+- Manual division/normalization: `img / 255.0` produces float64
+
+**Prevention (BEST):**
+```python
+# When creating numpy arrays, specify float32:
+mel_db = mel_db.astype(np.float32)
+
+# When normalizing, use float32:
+img = (img - img.min()) / (img.max() - img.min() + 1e-6)
+img = img.astype(np.float32)  # Explicit cast
 ```
 
 ### 7. Model Selection (Lighter is Better for Time Limits)

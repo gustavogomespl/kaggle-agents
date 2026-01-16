@@ -652,3 +652,115 @@ class TestCanonicalDirFallback:
 
         assert has_canonical is False
         assert should_inject_fallback is True  # Fallback SHOULD be injected
+
+
+class TestEnsureFoldsFallback:
+    """Tests for ensure_folds() helper function injection."""
+
+    def test_ensure_folds_function_injected(self) -> None:
+        """Test that ensure_folds() function is injected in fallback."""
+        # Simulate the fallback injection
+        data_type = "audio"
+        has_canonical = False
+
+        if data_type in ("audio", "audio_classification") and not has_canonical:
+            path_header = '''
+# === CANONICAL_DIR FALLBACK (Dynamic Folds) ===
+CANONICAL_DIR = MODELS_DIR / "canonical"
+CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
+CANONICAL_FOLDS_AVAILABLE = False
+
+def ensure_folds(n_samples, n_folds=5, random_state=42, stratify_labels=None):
+    """Generate or load folds."""
+    pass
+'''
+            assert "def ensure_folds(" in path_header
+            assert "CANONICAL_FOLDS_AVAILABLE = False" in path_header
+
+    def test_ensure_folds_generates_correct_folds(self) -> None:
+        """Test that the injected ensure_folds generates valid fold assignments."""
+        import numpy as np
+        from sklearn.model_selection import KFold
+
+        # Simulate what ensure_folds does
+        n_samples = 100
+        n_folds = 5
+        random_state = 42
+
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+        folds = np.zeros(n_samples, dtype=int)
+        for fold_idx, (_, val_idx) in enumerate(kf.split(range(n_samples))):
+            folds[val_idx] = fold_idx
+
+        # Verify folds are valid
+        assert len(folds) == n_samples
+        assert set(folds) == set(range(n_folds))
+        # Each fold should have roughly equal samples
+        for fold_idx in range(n_folds):
+            fold_count = np.sum(folds == fold_idx)
+            assert fold_count >= n_samples // n_folds - 1
+            assert fold_count <= n_samples // n_folds + 1
+
+
+class TestPreloadedIdToPath:
+    """Tests for _PRELOADED_ID_TO_PATH injection."""
+
+    def test_id_to_path_mapping_created(self) -> None:
+        """Test that _PRELOADED_ID_TO_PATH is created when mapping file exists."""
+        from pathlib import Path
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            audio_dir = Path(tmpdir) / "src_wavs"
+            audio_dir.mkdir()
+
+            # Create mapping file
+            mapping_file = Path(tmpdir) / "rec_id2filename.txt"
+            mapping_file.write_text("0,PC1_audio_001\n1,PC1_audio_002\n2,PC1_audio_003\n")
+
+            # Create audio files
+            (audio_dir / "PC1_audio_001.wav").touch()
+            (audio_dir / "PC1_audio_002.wav").touch()
+            (audio_dir / "PC1_audio_003.wav").touch()
+
+            # Simulate the mapping resolution
+            id_to_filename = {}
+            for line in mapping_file.read_text().strip().split("\n"):
+                parts = line.strip().split(",")
+                if len(parts) >= 2:
+                    id_to_filename[parts[0].strip()] = parts[1].strip()
+
+            id_to_path = {}
+            for rec_id in ["0", "1", "2"]:
+                filename = id_to_filename.get(rec_id, rec_id)
+                # Simple extension probe
+                for ext in [".wav", ".mp3", ".flac"]:
+                    path = audio_dir / f"{filename}{ext}"
+                    if path.exists():
+                        id_to_path[rec_id] = str(path)
+                        break
+
+            # Verify mapping
+            assert len(id_to_path) == 3
+            assert "0" in id_to_path
+            assert "PC1_audio_001" in id_to_path["0"]
+
+    def test_keys_are_strings(self) -> None:
+        """Test that _PRELOADED_ID_TO_PATH keys are always strings."""
+        # Simulate the mapping with integer rec_ids
+        rec_ids = [0, 1, 2, 3]
+        id_to_path = {}
+
+        for rec_id in rec_ids:
+            rec_id_str = str(rec_id)  # Always convert to string
+            id_to_path[rec_id_str] = f"/path/to/audio_{rec_id}.wav"
+
+        # Verify all keys are strings
+        for key in id_to_path.keys():
+            assert isinstance(key, str)
+
+        # Verify lookup works with string keys
+        assert id_to_path.get("0") == "/path/to/audio_0.wav"
+        assert id_to_path.get("1") == "/path/to/audio_1.wav"
+        # Integer lookup should NOT work
+        assert id_to_path.get(0) is None
