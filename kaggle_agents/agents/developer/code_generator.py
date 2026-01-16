@@ -485,18 +485,18 @@ class CodeGeneratorMixin:
         path_header_end_marker: str = "# === END PATH CONSTANTS ===",
     ) -> tuple[str, int]:
         """
-        Strip LLM-generated label file parsing that conflicts with pre-loaded labels.
+        Replace LLM-generated label file parsing with pre-loaded label variables.
 
         The LLM often ignores _PRELOADED_LABELS_DF and re-parses label files,
         causing FileNotFoundError or parsing errors. This function enforces the
-        use of pre-loaded labels by stripping the conflicting code.
+        use of pre-loaded labels by REPLACING (not just commenting) the bad code.
 
         Args:
             code: The full generated code
             path_header_end_marker: Marker indicating end of injected path header
 
         Returns:
-            Tuple of (modified code, number of statements stripped)
+            Tuple of (modified code, number of statements replaced)
         """
         marker_idx = code.find(path_header_end_marker)
         if marker_idx == -1:
@@ -505,43 +505,43 @@ class CodeGeneratorMixin:
         header = code[: marker_idx + len(path_header_end_marker)]
         code_after_header = code[marker_idx + len(path_header_end_marker) :]
 
-        # Patterns to strip - LLM re-parsing label files instead of using _PRELOADED_LABELS_DF
+        replace_count = 0
+
+        def make_replacement(match: re.Match) -> str:
+            """Extract variable name and create proper replacement assignment."""
+            nonlocal replace_count
+            full_match = match.group(0)
+            indent = match.group(1)  # Preserve original indentation
+
+            # Extract variable name from "varname = pd.read_csv(...)"
+            var_match = re.match(r"[\t ]*(\w+)\s*=", full_match)
+            if var_match:
+                var_name = var_match.group(1)
+                replace_count += 1
+                # Return proper assignment with same indentation
+                return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED: was pd.read_csv on label file"
+            # Fallback: just return original if we can't extract var name
+            return full_match
+
+        # Single comprehensive pattern to match all label file parsing
         # Using negative lookbehind (?<![a-zA-Z]) to avoid "unlabeled" but match LABEL_FILE, rec_labels_train
-        # IMPORTANT: Match both singular AND plural forms (label/labels, rec_label/rec_labels)
-        # Real filenames: rec_labels_train.txt, train_labels.txt, LABEL_FILE, etc.
-        patterns = [
-            # Strip pd.read_csv on label/labels files (case-insensitive)
-            # (?<![a-zA-Z]) ensures we don't match "unlabeled" but DO match "LABEL_FILE", "rec_labels"
-            (
-                r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))",
-                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
-            ),
-            # Strip pd.read_csv with header=None on rec_labels files
-            (
-                r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])rec_labels?[^)]*header\s*=\s*None[^)]*\))",
-                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
-            ),
-            # Strip pd.read_csv on train_labels files
-            (
-                r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])train_labels?[^)]*\))",
-                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
-            ),
-            # Strip open() calls on label files (singular and plural)
-            (
-                r"([\t ]*with\s+open\([^)]*(?<![a-zA-Z])(?:labels?|rec_labels?|train_labels?)[^)]*\)[^:]*:)",
-                r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1",
-            ),
-        ]
+        # Matches: label, labels, rec_label, rec_labels, train_label, train_labels (case-insensitive)
+        # Group 1: indentation, Group 2: full assignment statement
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
 
-        strip_count = 0
-        for pattern, replacement in patterns:
-            matches = re.findall(pattern, code_after_header, re.IGNORECASE)
-            strip_count += len(matches)
-            code_after_header = re.sub(
-                pattern, replacement, code_after_header, flags=re.IGNORECASE
-            )
+        code_after_header = re.sub(
+            pattern,
+            make_replacement,
+            code_after_header,
+            flags=re.IGNORECASE,
+        )
 
-        return header + code_after_header, strip_count
+        # Note: We intentionally don't handle 'with open()' blocks here because:
+        # 1. They're rare for label files (pd.read_csv is the common pattern)
+        # 2. Properly removing a with block requires removing the indented body too
+        # 3. The validation warnings will catch any remaining issues
+
+        return header + code_after_header, replace_count
 
     def _generate_code(
         self: DeveloperAgent,
@@ -1242,13 +1242,13 @@ def create_submission_ids(rec_ids, num_classes={num_classes}):
             print(warning)
             print("   HINT: Use _PRELOADED_LABELS_DF, _PRELOADED_REC_IDS, _PRELOADED_N_CLASSES instead.")
 
-        # Strip label re-parsing for audio competitions - ENFORCE usage of pre-loaded labels
+        # Replace label re-parsing for audio competitions - ENFORCE usage of pre-loaded labels
         # This is stronger than warnings because LLMs often ignore prompt instructions
         if data_type in ("audio", "audio_classification"):
-            full_code, strip_count = self._strip_label_reparsing(full_code)
-            if strip_count > 0:
-                print(f"⚠️  STRIPPED {strip_count} label re-parsing statement(s)")
+            full_code, replace_count = self._strip_label_reparsing(full_code)
+            if replace_count > 0:
+                print(f"⚠️  REPLACED {replace_count} label re-parsing statement(s)")
                 print("   LLM code tried to re-parse label files instead of using _PRELOADED_LABELS_DF.")
-                print("   The stripped code has been commented out to prevent FileNotFoundError.")
+                print("   Replaced with: varname = _PRELOADED_LABELS_DF.copy()")
 
         return full_code

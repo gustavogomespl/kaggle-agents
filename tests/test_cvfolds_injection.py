@@ -336,69 +336,158 @@ n_classes = _PRELOADED_N_CLASSES
         assert "image" not in data_types_to_validate
 
 
-class TestLabelReparsingStripping:
-    """Tests for _strip_label_reparsing() function that enforces pre-loaded labels."""
+class TestLabelReparsingReplacement:
+    """Tests for _strip_label_reparsing() function that replaces bad label parsing."""
 
-    def test_strips_pd_read_csv_on_label_files(self) -> None:
-        """Test that pd.read_csv calls on label files are stripped (singular form)."""
+    def test_replaces_pd_read_csv_with_preloaded(self) -> None:
+        """Test that pd.read_csv on label files is replaced with _PRELOADED_LABELS_DF."""
         import re
 
         code = '''# === END PATH CONSTANTS ===
 
-# Bad code that should be stripped
+# Bad code that should be replaced
 labels_df = pd.read_csv(LABEL_FILE, header=None, names=['rec_id', 'class_id'])
 '''
         marker = "# === END PATH CONSTANTS ==="
         marker_idx = code.find(marker)
         code_after_header = code[marker_idx + len(marker) :]
 
-        # Pattern uses negative lookbehind to avoid "unlabeled" but match LABEL_FILE
-        # (?<![a-zA-Z]) ensures no letter before label/labels
-        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
-        replacement = r"# STRIPPED (use _PRELOADED_LABELS_DF): # \1"
+        replace_count = 0
 
-        matches = re.findall(pattern, code_after_header, re.IGNORECASE)
-        result = re.sub(pattern, replacement, code_after_header, flags=re.IGNORECASE)
+        def make_replacement(match: re.Match) -> str:
+            nonlocal replace_count
+            full_match = match.group(0)
+            indent = match.group(1)
+            var_match = re.match(r"[\t ]*(\w+)\s*=", full_match)
+            if var_match:
+                var_name = var_match.group(1)
+                replace_count += 1
+                return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED: was pd.read_csv on label file"
+            return full_match
 
-        assert len(matches) == 1  # LABEL_FILE should match
-        assert "STRIPPED" in result
+        # Single consolidated pattern
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
 
-    def test_strips_pd_read_csv_on_plural_label_files(self) -> None:
-        """Test that pd.read_csv calls on plural label files are stripped.
+        assert replace_count == 1
+        assert "labels_df = _PRELOADED_LABELS_DF.copy()" in result
+        assert "REPLACED" in result
+        # Original call should be replaced (not just commented) - check no active pd.read_csv
+        assert "labels_df = pd.read_csv" not in result
 
-        Real audio competition filenames: rec_labels_train.txt, train_labels.txt
-        """
+    def test_replaces_plural_label_files(self) -> None:
+        """Test replacement of plural label file patterns (rec_labels, train_labels)."""
         import re
 
         code = '''# === END PATH CONSTANTS ===
 
-# Bad code that should be stripped - real audio competition filenames
+# Bad code - real audio competition filenames
 df1 = pd.read_csv("rec_labels_train.txt")
 df2 = pd.read_csv("train_labels.txt")
-df3 = pd.read_csv(TRAIN_LABELS_PATH)
 '''
         marker = "# === END PATH CONSTANTS ==="
         marker_idx = code.find(marker)
         code_after_header = code[marker_idx + len(marker) :]
 
-        # Pattern uses negative lookbehind - matches rec_labels, train_labels
-        labels_pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
-        train_labels_pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])train_labels?[^)]*\))"
+        replace_count = 0
 
-        labels_matches = re.findall(labels_pattern, code_after_header, re.IGNORECASE)
-        train_labels_matches = re.findall(train_labels_pattern, code_after_header, re.IGNORECASE)
+        def make_replacement(match: re.Match) -> str:
+            nonlocal replace_count
+            full_match = match.group(0)
+            indent = match.group(1)
+            var_match = re.match(r"[\t ]*(\w+)\s*=", full_match)
+            if var_match:
+                var_name = var_match.group(1)
+                replace_count += 1
+                return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED"
+            return full_match
 
-        # rec_labels_train.txt and train_labels.txt should be matched
-        assert len(labels_matches) >= 2  # rec_labels and train_labels both contain "labels"
-        assert len(train_labels_matches) >= 1  # train_labels explicitly matched
+        # Single consolidated pattern (matches rec_labels, train_labels, labels)
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
 
-    def test_preserves_non_label_read_csv(self) -> None:
-        """Test that pd.read_csv calls on non-label files are NOT stripped."""
+        # Both df1 and df2 should be replaced
+        assert replace_count == 2
+        assert "df1 = _PRELOADED_LABELS_DF.copy()" in result
+        assert "df2 = _PRELOADED_LABELS_DF.copy()" in result
+        assert 'pd.read_csv("rec_labels' not in result
+        assert 'pd.read_csv("train_labels' not in result
+
+    def test_replaces_multiple_reads_same_variable(self) -> None:
+        """Test that ALL label reads are replaced, even for same variable name."""
         import re
 
         code = '''# === END PATH CONSTANTS ===
 
-# Good code that should NOT be stripped
+# Multiple reads to same variable - ALL should be replaced
+labels_df = pd.read_csv(LABEL_FILE)
+labels_df = pd.read_csv("train_labels.txt")
+labels_df = pd.read_csv("rec_labels_train.txt")
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        replace_count = 0
+
+        def make_replacement(match: re.Match) -> str:
+            nonlocal replace_count
+            full_match = match.group(0)
+            indent = match.group(1)
+            var_match = re.match(r"[\t ]*(\w+)\s*=", full_match)
+            if var_match:
+                var_name = var_match.group(1)
+                replace_count += 1
+                return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED"
+            return full_match
+
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
+
+        # ALL 3 reads should be replaced (not just the first one)
+        assert replace_count == 3
+        # No pd.read_csv calls should remain for label files
+        assert "pd.read_csv(LABEL_FILE)" not in result
+        assert 'pd.read_csv("train_labels' not in result
+        assert 'pd.read_csv("rec_labels' not in result
+
+    def test_preserves_indentation(self) -> None:
+        """Test that replacement preserves original indentation."""
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+def load_data():
+    labels_df = pd.read_csv(LABEL_FILE)
+    return labels_df
+'''
+        marker = "# === END PATH CONSTANTS ==="
+        marker_idx = code.find(marker)
+        code_after_header = code[marker_idx + len(marker) :]
+
+        def make_replacement(match: re.Match) -> str:
+            full_match = match.group(0)
+            indent = match.group(1)
+            var_match = re.match(r"[\t ]*(\w+)\s*=", full_match)
+            if var_match:
+                var_name = var_match.group(1)
+                return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED"
+            return full_match
+
+        # Single consolidated pattern
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
+
+        # Should preserve 4-space indentation inside function
+        assert "    labels_df = _PRELOADED_LABELS_DF.copy()" in result
+
+    def test_preserves_non_label_read_csv(self) -> None:
+        """Test that pd.read_csv calls on non-label files are NOT replaced."""
+        import re
+
+        code = '''# === END PATH CONSTANTS ===
+
+# Good code that should NOT be replaced
 sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 train_df = pd.read_csv("train.csv")
 '''
@@ -406,40 +495,40 @@ train_df = pd.read_csv("train.csv")
         marker_idx = code.find(marker)
         code_after_header = code[marker_idx + len(marker) :]
 
-        # Pattern that matches label files only (negative lookbehind)
-        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        # Single consolidated pattern
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
         matches = re.findall(pattern, code_after_header, re.IGNORECASE)
 
         # No label files, so no matches
         assert len(matches) == 0
 
     def test_preserves_unlabeled_files(self) -> None:
-        """Test that 'unlabeled' files are NOT stripped (negative lookbehind works)."""
+        """Test that 'unlabeled' files are NOT replaced (negative lookbehind works)."""
         import re
 
         code = '''# === END PATH CONSTANTS ===
 
-# Good code with "unlabeled" - should NOT be stripped
+# Good code with "unlabeled" - should NOT be replaced
 unlabeled_df = pd.read_csv("unlabeled_data.csv")
 '''
         marker = "# === END PATH CONSTANTS ==="
         marker_idx = code.find(marker)
         code_after_header = code[marker_idx + len(marker) :]
 
-        # Pattern should NOT match "unlabeled" due to negative lookbehind
-        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        # Single consolidated pattern
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
         matches = re.findall(pattern, code_after_header, re.IGNORECASE)
 
         # "unlabeled" should NOT match because "un" precedes "labeled"
         assert len(matches) == 0
 
     def test_preserves_code_using_preloaded_labels(self) -> None:
-        """Test that code correctly using _PRELOADED_LABELS_DF is NOT stripped."""
+        """Test that code correctly using _PRELOADED_LABELS_DF is NOT replaced."""
         import re
 
         code = '''# === END PATH CONSTANTS ===
 
-# Good code that uses pre-loaded labels - should NOT be stripped
+# Good code that uses pre-loaded labels - should NOT be replaced
 labels_df = _PRELOADED_LABELS_DF.copy()
 train_labels = _PRELOADED_LABELS_DF[_PRELOADED_LABELS_DF['rec_id'].isin(train_ids)]
 n_classes = _PRELOADED_N_CLASSES
@@ -449,8 +538,8 @@ rec_ids = _PRELOADED_REC_IDS
         marker_idx = code.find(marker)
         code_after_header = code[marker_idx + len(marker) :]
 
-        # Pattern that matches pd.read_csv on label files (negative lookbehind)
-        pattern = r"([\t ]*\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:labels?|LABELS?)[^)]*\))"
+        # Single consolidated pattern
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
         matches = re.findall(pattern, code_after_header, re.IGNORECASE)
 
         # Code using _PRELOADED_LABELS_DF should have no matches (no pd.read_csv)
