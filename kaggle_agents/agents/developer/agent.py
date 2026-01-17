@@ -484,10 +484,32 @@ class DeveloperAgent(
 
             # Additionally, check for random/broken predictions if OOF exists
             oof_file = working_dir / "models" / f"oof_{component.name}.npy"
+            test_file = working_dir / "models" / f"test_{component.name}.npy"
             if oof_file.exists():
                 try:
                     import numpy as np
                     oof_preds = np.load(oof_file)
+
+                    # SHAPE VALIDATION: Check output shape matches expected num_classes
+                    # This prevents ensemble failures due to shape mismatches
+                    expected_classes = None
+                    submission_format = state.get("submission_format_info", {})
+                    if isinstance(submission_format, dict):
+                        expected_classes = submission_format.get("num_classes")
+
+                    if expected_classes and expected_classes > 1 and oof_preds.ndim == 2:
+                        actual_classes = oof_preds.shape[1]
+                        if actual_classes != expected_classes:
+                            print(f"   ⚠️ OUTPUT SHAPE MISMATCH: Got {actual_classes} classes, expected {expected_classes}")
+                            print(f"      This will cause ensemble failures!")
+                            if run_mode == "mlebench":
+                                result.success = False
+                                if not hasattr(result, 'errors') or result.errors is None:
+                                    result.errors = []
+                                result.errors.append(f"Shape mismatch: {actual_classes} vs {expected_classes} classes")
+                    elif expected_classes and expected_classes > 1 and oof_preds.ndim == 1:
+                        print(f"   ⚠️ OUTPUT SHAPE MISMATCH: Got 1D array, expected 2D with {expected_classes} classes")
+                        print(f"      Multi-label/multi-class requires 2D predictions!")
 
                     # CRITICAL FIX: Check for empty OOF rows (unfilled predictions)
                     # This can cause random-chance MLE-bench scores (0.50 AUC)

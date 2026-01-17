@@ -1462,6 +1462,23 @@ def create_mlsp_submission(test_rec_ids, predictions, sample_sub_path=None):
     matched = sample_sub['Probability'].notna().sum()
     print(f"Matched {{matched}}/{{len(sample_sub)}} submission IDs")
     return sample_sub
+
+# ========================================================================
+# MANDATORY: Call create_mlsp_submission() at the END of your script!
+# ========================================================================
+# Example usage:
+#   submission = create_mlsp_submission(TEST_REC_IDS, predictions)
+#   submission.to_csv(SUBMISSION_PATH, index=False)
+#
+# predictions MUST be shape (len(TEST_REC_IDS), NUM_CLASSES)
+# DO NOT create your own submission logic - use this helper!
+# ========================================================================
+print(f"[MLSP HELPERS] Available functions:")
+print(f"  - extract_librosa_features(audio_path) -> 37 features")
+print(f"  - load_mlsp_labels(label_file) -> rec_ids, labels")
+print(f"  - create_mlsp_submission(test_rec_ids, predictions) -> submission DataFrame")
+print(f"  - NUM_CLASSES = {num_classes}")
+print(f"  - TEST_REC_IDS = {{len(TEST_REC_IDS)}} test recordings")
 '''
 
         path_header += "\n# === END PATH CONSTANTS ===\n"
