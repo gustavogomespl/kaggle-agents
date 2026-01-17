@@ -72,6 +72,59 @@ print(f"Extensions: {set(f.suffix.lower() for f in audio_files[:100])}")
 print(f"Sample: {audio_files[0] if audio_files else 'NONE'}")
 ```
 
+### SMALL DATASET PATTERN (CRITICAL)
+
+**IMPORTANT**: For competitions with < 1000 training samples:
+- ❌ **DO NOT USE**: CNNs, ResNets, Transformers, Spectrograms + Deep Learning
+- ✅ **USE INSTEAD**: RandomForest/XGBoost/LightGBM with Binary Relevance
+- ✅ **USE INSTEAD**: Simple librosa features (MFCCs, spectral stats, temporal stats)
+
+**If you see these injected helpers, USE THEM:**
+- `extract_librosa_features()` - Extracts 37 statistical features from audio
+- `load__labels()` - Parses  multi-label format correctly
+- `create__submission()` - Creates submission with Id = rec_id * 100 + species_id
+
+```python
+# Binary Relevance with RandomForest (works for small datasets!)
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.preprocessing import StandardScaler
+
+# 1. Load labels using injected helper
+rec_ids, labels = load__labels()  # Shape: (n_samples, 19)
+
+# 2. Get train/test split from CVfolds
+folds = np.array([fold_map.get(rid, -1) for rid in rec_ids])
+train_mask = (folds == 0)  # : fold=0 is train
+test_mask = (folds == 1)   # : fold=1 is test
+
+# 3. Extract features using injected helper
+X = np.array([extract_librosa_features(_PRELOADED_ID_TO_PATH.get(str(rid)))
+              for rid in rec_ids if _PRELOADED_ID_TO_PATH.get(str(rid))])
+X_train, y_train = X[train_mask], labels[train_mask]
+X_test = X[test_mask]
+test_rec_ids = rec_ids[test_mask]
+
+# 4. Train one classifier per species (Binary Relevance)
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+predictions = np.zeros((len(X_test), NUM_CLASSES))
+for cls in range(NUM_CLASSES):
+    if y_train[:, cls].sum() < 2:
+        predictions[:, cls] = 0.05  # Default for rare classes
+        continue
+    clf = RandomForestClassifier(n_estimators=300, max_depth=20, n_jobs=-1, random_state=42)
+    clf.fit(X_train_scaled, y_train[:, cls])
+    proba = clf.predict_proba(X_test_scaled)
+    predictions[:, cls] = proba[:, 1] if proba.shape[1] == 2 else y_train[:, cls].mean()
+
+# 5. Create submission using injected helper
+submission = create__submission(test_rec_ids, predictions, SAMPLE_SUBMISSION_PATH)
+submission.to_csv(SUBMISSION_PATH, index=False)
+print(f"[] Submission saved: {len(submission)} rows, variance={predictions.std():.4f}")
+```
+
 ### 1. Path Constants (CRITICAL)
 NEVER redefine TRAIN_PATH, TEST_PATH, MODELS_DIR, OUTPUT_DIR, or AUDIO_SOURCE_DIR.
 These are auto-injected with correct values at the top of the file.
@@ -168,7 +221,7 @@ y = mlb.fit_transform(
 ```
 
 **WHY THIS MATTERS**: The injected `parse_label_file()` handles variable-width multi-label
-formats (e.g., MLSP 2013 Birds where each row can have 1-19 labels). Hardcoding file paths
+formats (e.g.,  where each row can have 1-19 labels). Hardcoding file paths
 or using `pd.read_csv()` directly will FAIL on these formats.
 
 ### ⚠️ CRITICAL: USE PRE-RESOLVED AUDIO PATHS ⚠️
@@ -181,7 +234,7 @@ Audio file paths are **ALREADY RESOLVED** as global variables. DO NOT create you
 - `AUDIO_SOURCE_DIR`: Directory containing audio files
 
 **WHY THIS IS NEEDED:**
-For competitions like MLSP-2013-Birds:
+For competitions like: 
 - rec_ids are numeric (0, 1, 2...)
 - but audio files are named like "PC1_20100705_050000_0010.wav"
 - `rec_id2filename.txt` maps between them (0 → "PC1_20100705...")
@@ -477,9 +530,9 @@ criterion = nn.BCEWithLogitsLoss()  # Input: logits, Target: 0/1 for each class
 criterion = nn.CrossEntropyLoss()  # Target: class index
 ```
 
-### 8b. MLSP-STYLE MULTI-LABEL AUDIO CLASSIFICATION (CRITICAL)
+### 8b. -STYLE MULTI-LABEL AUDIO CLASSIFICATION (CRITICAL)
 
-For competitions with multiple species per recording (e.g., MLSP 2013 Birds), the label
+For competitions with multiple species per recording , the label
 format uses TWO-LEVEL DELIMITERS that standard CSV parsers cannot handle:
 
 **Label file format:**
@@ -491,14 +544,14 @@ rec_id;label1,label2,label3   (semicolon separates ID from labels, comma separat
 
 **CORRECT parsing approach:**
 ```python
-from kaggle_agents.utils.label_parser import parse_mlsp_multilabel
+from kaggle_agents.utils.label_parser import parse__multilabel
 
 # Parse multi-label format (rec_id;label1,label2,label3 OR rec_id,label1,label2,label3)
-rec_ids, y = parse_mlsp_multilabel(
+rec_ids, y = parse__multilabel(
     label_path,
     outer_delimiter=";",   # Separates rec_id from labels
     inner_delimiter=",",   # Separates individual label indices
-    num_classes=19,        # MLSP has 19 species (auto-detected if not set)
+    num_classes=19,        #  has 19 species (auto-detected if not set)
     hidden_marker="?",     # Marker for hidden test labels
 )
 print(f"Detected {y.shape[1]} target columns")  # Should be 19, NOT 1
@@ -519,23 +572,23 @@ criterion = nn.BCEWithLogitsLoss()
 # CrossEntropyLoss expects exactly one class per sample
 ```
 
-**Evaluation metric (micro-AUC for MLSP):**
+**Evaluation metric (micro-AUC for ):**
 ```python
 from sklearn.metrics import roc_auc_score
 
 # Micro-AUC: evaluate all predictions as a single flattened array
-# This is the official metric for MLSP 2013 Birds
+# This is the official metric for 
 micro_auc = roc_auc_score(y_true, y_pred, average='micro')
 
 # DO NOT use average='macro' - that weights each species equally
-# which is NOT how MLSP 2013 Birds is evaluated
+# which is NOT how  is evaluated
 print(f"Micro-AUC: {micro_auc:.4f}")
 ```
 
 **Output layer (CRITICAL):**
 ```python
 # Multi-label: output N logits (one per species), NO softmax in the model
-self.fc = nn.Linear(hidden_dim, 19)  # 19 species for MLSP
+self.fc = nn.Linear(hidden_dim, 19)  # 19 species for 
 
 # At inference: apply sigmoid to get independent probabilities
 predictions = torch.sigmoid(logits)  # Shape: (batch, 19), values 0-1
@@ -544,7 +597,7 @@ predictions = torch.sigmoid(logits)  # Shape: (batch, 19), values 0-1
 ```
 
 **Common errors and fixes:**
-- "1 target column detected" → Label file parsed incorrectly, use parse_mlsp_multilabel()
+- "1 target column detected" → Label file parsed incorrectly, use parse__multilabel()
 - "AUC = 0.5" (random baseline) → Wrong loss function or label alignment issue
 - "Predictions sum to 1" → Using softmax instead of sigmoid for multi-label
 
@@ -632,7 +685,7 @@ for i, col in enumerate(target_cols):
 submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
 ```
 
-**LONG FORMAT (MLSP 2013 style) - One row per (sample, class) pair:**
+**LONG FORMAT ( 2013 style) - One row per (sample, class) pair:**
 ```csv
 Id,Probability
 100,0.5    # rec_id=1, species_id=0 → Id=1*100+0=100
@@ -642,7 +695,7 @@ Id,Probability
 200,0.5    # rec_id=2, species_id=0 → Id=2*100+0=200
 ```
 
-Code for LONG format (MLSP pattern: Id = rec_id * 100 + species_id):
+Code for LONG format ( pattern: Id = rec_id * 100 + species_id):
 ```python
 # STEP 1: Get test recording IDs from CVfolds (CANONICAL SOURCE)
 # TEST_REC_IDS is auto-injected from CVfolds*.txt - ALWAYS use it if available!
@@ -663,7 +716,7 @@ submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 pred_map = {}
 for i, rec_id in enumerate(test_rec_ids):
     for species_id in range(NUM_CLASSES):
-        submission_id = rec_id * 100 + species_id  # MLSP ID pattern
+        submission_id = rec_id * 100 + species_id  #  ID pattern
         pred_map[submission_id] = predictions[i, species_id]
 
 # Apply mapping to submission
@@ -677,7 +730,7 @@ submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
 **HOW TO DETECT FORMAT:**
 1. Count columns: >2 columns = WIDE, exactly 2 columns = LONG
 2. For LONG, check ID pattern:
-   - If IDs are like 100, 101, ..., 118, 200, 201, ... → MLSP pattern (Id = rec_id * 100 + class_id)
+   - If IDs are like 100, 101, ..., 118, 200, 201, ... →  pattern (Id = rec_id * 100 + class_id)
    - If IDs have underscore (e.g., "1_0", "1_1") → underscore pattern
 3. Use submission_format_info from state if available
 

@@ -1318,6 +1318,129 @@ def create_submission_ids(rec_ids, num_classes={num_classes}):
         for cls in range(num_classes):
             ids.append(rec_id * 100 + cls)
     return ids
+
+# This dataset is too small for deep learning - use simple features!
+def extract_librosa_features(audio_path, sr=22050, duration=10.0):
+    """Extract 37 statistical features from audio file for MLSP-style competitions."""
+    try:
+        import librosa
+    except ImportError:
+        import subprocess
+        subprocess.run(["pip", "install", "librosa", "-q"], check=True)
+        import librosa
+
+    try:
+        if audio_path is None:
+            return np.zeros(37, dtype=np.float32)
+        y, sr = librosa.load(str(audio_path), sr=sr, duration=duration)
+    except Exception as e:
+        print(f"[WARN] Failed to load audio {{audio_path}}: {{e}}")
+        return np.zeros(37, dtype=np.float32)
+
+    feat = []
+    # Basic stats (3)
+    feat.extend([np.mean(y), np.std(y), np.max(np.abs(y))])
+    # ZCR (2)
+    zcr = librosa.feature.zero_crossing_rate(y)[0]
+    feat.extend([np.mean(zcr), np.std(zcr)])
+    # RMS (2)
+    rms = librosa.feature.rms(y=y)[0]
+    feat.extend([np.mean(rms), np.std(rms)])
+    # Spectral centroid (2)
+    spec_cent = librosa.feature.spectral_centroid(y=y, sr=sr)[0]
+    feat.extend([np.mean(spec_cent), np.std(spec_cent)])
+    # Spectral bandwidth (2)
+    spec_bw = librosa.feature.spectral_bandwidth(y=y, sr=sr)[0]
+    feat.extend([np.mean(spec_bw), np.std(spec_bw)])
+    # MFCCs (26 = 13 * 2)
+    mfccs = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    for mfcc in mfccs:
+        feat.extend([np.mean(mfcc), np.std(mfcc)])
+
+    return np.array(feat, dtype=np.float32)
+
+print("Librosa feature extractor injected (37 features)")
+
+def load_mlsp_labels(label_file=None, hidden_marker='?'):
+    """Load MLSP multi-label format: rec_id,class1,class2,... or rec_id,?"""
+    if label_file is None:
+        label_file = LABEL_FILES[0] if 'LABEL_FILES' in dir() and LABEL_FILES else None
+    if label_file is None:
+        raise FileNotFoundError("No label file found in LABEL_FILES")
+
+    with open(label_file, encoding='utf-8', errors='replace') as f:
+        lines = f.readlines()
+
+    # Skip header if present
+    if lines and lines[0].strip() and not lines[0].strip()[0].isdigit():
+        lines = lines[1:]
+
+    rec_ids = []
+    all_labels = []
+    max_label = 0
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(',')
+        try:
+            rec_id = int(parts[0])
+        except ValueError:
+            continue
+
+        rec_ids.append(rec_id)
+        if len(parts) > 1 and parts[1] != hidden_marker:
+            labels_for_row = []
+            for lbl in parts[1:]:
+                if lbl and lbl != hidden_marker:
+                    try:
+                        l = int(lbl)
+                        labels_for_row.append(l)
+                        max_label = max(max_label, l)
+                    except ValueError:
+                        pass
+            all_labels.append(labels_for_row)
+        else:
+            all_labels.append([])
+
+    # Create binary label matrix
+    num_classes_detected = max_label + 1 if max_label >= 0 else {num_classes}
+    num_classes_final = max(num_classes_detected, {num_classes})
+    labels = np.zeros((len(rec_ids), num_classes_final), dtype=np.float32)
+    for i, lbls in enumerate(all_labels):
+        for lbl in lbls:
+            if lbl < num_classes_final:
+                labels[i, lbl] = 1.0
+
+    print(f"[MLSP] Loaded {{len(rec_ids)}} recordings, {{labels.shape[1]}} classes")
+    return np.array(rec_ids), labels
+
+# === MLSP SUBMISSION CREATION ===
+def create_mlsp_submission(test_rec_ids, predictions, sample_sub_path=None):
+    """Create MLSP format submission: Id = rec_id * 100 + species_id"""
+    if sample_sub_path is None:
+        sample_sub_path = SAMPLE_SUBMISSION_PATH
+    sample_sub = pd.read_csv(sample_sub_path)
+
+    pred_map = {{}}
+    num_classes = predictions.shape[1] if predictions.ndim > 1 else {num_classes}
+    for i, rec_id in enumerate(test_rec_ids):
+        for species_id in range(num_classes):
+            submission_id = int(rec_id) * 100 + species_id
+            if predictions.ndim > 1:
+                pred_map[submission_id] = float(predictions[i, species_id])
+            else:
+                pred_map[submission_id] = float(predictions[i])
+
+    sample_sub['Probability'] = sample_sub['Id'].map(pred_map)
+
+    # Fill missing with default probability
+    sample_sub['Probability'] = sample_sub['Probability'].fillna(0.05)
+
+    matched = sample_sub['Probability'].notna().sum()
+    print(f"Matched {{matched}}/{{len(sample_sub)}} submission IDs")
+    return sample_sub
 '''
 
         path_header += "\n# === END PATH CONSTANTS ===\n"
