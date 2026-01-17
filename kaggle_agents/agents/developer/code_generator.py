@@ -716,6 +716,27 @@ TEST_IMG_DIR = Path("{resolved_test_path}")
 # Use TRAIN_IMG_DIR when you need the image directory
 TRAIN_PATH = TRAIN_CSV_PATH if TRAIN_CSV_PATH.exists() else Path("{working_dir}/train.csv")
 TEST_PATH = TEST_CSV_PATH if TEST_CSV_PATH and TEST_CSV_PATH.exists() else TEST_IMG_DIR
+
+# === IMAGE PATH VERIFICATION (AUTO-INJECTED) ===
+# Automatically find valid image directories if initial paths don't exist
+def _verify_image_dir(base_dir, candidates):
+    """Find valid image directory from candidates."""
+    for suffix in candidates:
+        path = base_dir / suffix if suffix else base_dir
+        if path.exists() and any(path.glob("*.*")):
+            return path
+    return base_dir
+
+# Verify and fix image directories if needed
+_output_dir = Path("{working_dir}")
+if not TRAIN_IMG_DIR.exists() or not any(TRAIN_IMG_DIR.glob("*.*")):
+    TRAIN_IMG_DIR = _verify_image_dir(_output_dir, ["train", "jpeg/train", "images/train", "train_images", ""])
+    print(f"[PATH FIX] TRAIN_IMG_DIR resolved to: {{TRAIN_IMG_DIR}}")
+
+if not TEST_IMG_DIR.exists() or not any(TEST_IMG_DIR.glob("*.*")):
+    TEST_IMG_DIR = _verify_image_dir(_output_dir, ["test", "jpeg/test", "images/test", "test_images", ""])
+    print(f"[PATH FIX] TEST_IMG_DIR resolved to: {{TEST_IMG_DIR}}")
+# === END IMAGE PATH VERIFICATION ===
 '''
         else:
             # For tabular/audio: original behavior

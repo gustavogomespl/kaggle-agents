@@ -491,24 +491,33 @@ class DeveloperAgent(
 
                     # CRITICAL FIX: Check for empty OOF rows (unfilled predictions)
                     # This can cause random-chance MLE-bench scores (0.50 AUC)
-                    # NOTE: Only check multiclass problems where OOF is a probability distribution
-                    # For binary/regression, zero is a legitimate prediction value
-                    if problem_type == "multiclass" and oof_preds.ndim > 1:
+                    empty_rows = 0
+
+                    if oof_preds.ndim > 1:
                         # Multiclass OOF should be probability distributions summing to ~1
                         # Rows summing to 0 are definitely unfilled
                         empty_rows = int(np.sum(oof_preds.sum(axis=1) == 0))
+                    elif problem_type in ("binary_classification", "classification") and oof_preds.ndim == 1:
+                        # Binary classification: many exact zeros suggest unfilled folds
+                        # Use a stricter threshold since 0 CAN be a valid probability
+                        exact_zeros = int(np.sum(oof_preds == 0))
+                        zero_pct = exact_zeros / len(oof_preds) * 100
+                        # Only flag if > 20% are exactly 0.0 (real models rarely predict exactly 0)
+                        if zero_pct > 20:
+                            empty_rows = exact_zeros
+                            print(f"   ⚠️ Binary classification: {exact_zeros} ({zero_pct:.2f}%) predictions are exactly 0.0")
 
-                        if empty_rows > 0:
-                            empty_pct = empty_rows / oof_preds.shape[0] * 100
-                            print(f"   ⚠️ Empty OOF rows detected: {empty_rows} ({empty_pct:.2f}%)")
+                    if empty_rows > 0:
+                        empty_pct = empty_rows / oof_preds.shape[0] * 100
+                        print(f"   ⚠️ Empty OOF rows detected: {empty_rows} ({empty_pct:.2f}%)")
 
-                            # In MLE-bench mode, block submissions with >1% empty rows
-                            if run_mode == "mlebench" and empty_pct > 1.0:
-                                print(f"   ❌ BLOCKING: Too many empty OOF rows ({empty_pct:.2f}% > 1.0%) - would cause random-chance MLE-bench score")
-                                result.success = False
-                                if not hasattr(result, 'errors') or result.errors is None:
-                                    result.errors = []
-                                result.errors.append(f"Empty OOF rows: {empty_rows} ({empty_pct:.2f}%) - blocking submission")
+                        # In MLE-bench mode, block submissions with >1% empty rows
+                        if run_mode == "mlebench" and empty_pct > 1.0:
+                            print(f"   ❌ BLOCKING: Too many empty OOF rows ({empty_pct:.2f}% > 1.0%) - would cause random-chance MLE-bench score")
+                            result.success = False
+                            if not hasattr(result, 'errors') or result.errors is None:
+                                result.errors = []
+                            result.errors.append(f"Empty OOF rows: {empty_rows} ({empty_pct:.2f}%) - blocking submission")
 
                     is_quality_ok, quality_issues = validate_prediction_quality(
                         oof_preds, problem_type=problem_type

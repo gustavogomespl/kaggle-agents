@@ -615,6 +615,8 @@ def build_model_component_instructions(
             "  ",
             "  # STEP 4: Create submission using ID mapping (NOT row order!)",
             "  pred_map = dict(zip(CANONICAL_TEST_IDS, test_preds))",
+            "  # CRITICAL: Cast target column to float BEFORE assignment (prevents FutureWarning/errors)",
+            "  sample_sub[sample_sub.columns[1]] = sample_sub[sample_sub.columns[1]].astype(np.float32)",
             "  sample_sub[sample_sub.columns[1]] = sample_sub[ID_COL].map(pred_map)",
             "  ",
             "  # STEP 5: Validate before saving",
