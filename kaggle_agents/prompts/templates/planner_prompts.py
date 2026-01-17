@@ -439,27 +439,45 @@ CRITICAL: These require PIXEL-WISE classification/regression!
     "audio_classification": """
 For audio classification competitions (bird call detection, speech recognition, sound event detection):
 
-## CRITICAL: CHECK SUBMISSION FORMAT FIRST
+## CRITICAL STRATEGY: HANDCRAFTED FEATURES > DEEP LEARNING
+For datasets with < 50k samples or noisy labels (like MLSP 2013), explicit feature extraction outperforms CNNs!
+
+### PRIORITY 1: Feature Extraction + Tree Models (Random Forest/XGBoost)
+DO NOT start with EfficientNet/ResNet. Instead, implement this pipeline:
+1. Load audio with `librosa` (sr=22050)
+2. Extract statistical features per file (mean, std, max):
+   - MFCCs (n_mfcc=13)
+   - Spectral Centroid & Bandwidth
+   - Zero Crossing Rate (ZCR)
+   - RMS Energy
+3. Flatten to a tabular format (X = [n_samples, n_features])
+4. Train RandomForestClassifier (n_estimators=300) or XGBoost per class (Binary Relevance for multi-label).
+
+### SUBMISSION FORMAT
 Audio competitions use TWO main submission formats - WRONG FORMAT = SCORE 0!
 
-### WIDE FORMAT (BirdCLEF style):
+#### WIDE FORMAT (BirdCLEF style):
 ```csv
 row_id,species_0,species_1,...,species_N
 audio_0001,0.1,0.2,...,0.05
 ```
-- One row per audio sample
-- One column per class (probability)
-- Use: `submission[col] = predictions[:, i]`
+- One row per audio sample, one column per class
 
-### LONG FORMAT (MLSP 2013 style):
+#### LONG FORMAT (MLSP 2013 style) - CRITICAL!
 ```csv
 Id,Probability
 100,0.1    # Id = rec_id * 100 + species_id
 101,0.2
 ```
-- One row per (sample, class) pair
-- Id encodes BOTH rec_id AND class_id
-- Use: `submission_id = rec_id * multiplier + class_id`
+Formula: `Submission_Id = rec_id * 100 + class_id`
+You MUST create the submission file by iterating:
+```python
+pred_map = {}
+for i, rec_id in enumerate(test_rec_ids):
+    for class_id in range(num_classes):
+        sub_id = rec_id * 100 + class_id
+        pred_map[sub_id] = predictions[i, class_id]
+```
 
 ## CHECK STATE FOR SUBMISSION FORMAT:
 The `submission_format_info` in state tells you exactly which format to use!
