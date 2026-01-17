@@ -731,6 +731,53 @@ COMPONENT_NAME = "{component.name.replace(" ", "_").lower()}"
 
 # Create models directory
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# === CANONICAL TEST IDS (AUTO-INJECTED - CRITICAL FOR SUBMISSION ALIGNMENT) ===
+# ALWAYS use this order for test predictions, NOT glob/filesystem order!
+# This PREVENTS the score=0.50 bug caused by ID misalignment
+_sample_sub_for_ids = pd.read_csv(SAMPLE_SUBMISSION_PATH)
+CANONICAL_TEST_IDS = _sample_sub_for_ids.iloc[:, 0].values
+print(f"[INFO] CANONICAL_TEST_IDS loaded: {{len(CANONICAL_TEST_IDS)}} test samples")
+print(f"[INFO] First 3 IDs: {{list(CANONICAL_TEST_IDS[:3])}}, Last 3: {{list(CANONICAL_TEST_IDS[-3:])}}")
+
+def validate_submission_alignment(pred_ids, canonical_ids=CANONICAL_TEST_IDS):
+    """Verify prediction IDs match canonical order from sample_submission.
+
+    CRITICAL: Call this before saving submission to catch alignment bugs!
+    Misaligned IDs cause score=0.50 (random chance) despite good validation scores.
+
+    Args:
+        pred_ids: Array/list of IDs in the order predictions were generated
+        canonical_ids: Expected ID order from sample_submission (default: CANONICAL_TEST_IDS)
+
+    Returns:
+        bool: True if aligned, False if misaligned
+    """
+    pred_id_set = set(str(p) for p in pred_ids)
+    canonical_set = set(str(c) for c in canonical_ids)
+
+    missing = canonical_set - pred_id_set
+    extra = pred_id_set - canonical_set
+
+    if missing:
+        print(f"[CRITICAL] Missing {{len(missing)}} IDs from predictions: {{list(missing)[:5]}}")
+    if extra:
+        print(f"[WARNING] Extra {{len(extra)}} IDs in predictions (not in sample_submission): {{list(extra)[:5]}}")
+
+    # Check order match (first 10 elements)
+    pred_list = [str(p) for p in list(pred_ids)[:10]]
+    canonical_list = [str(c) for c in list(canonical_ids)[:10]]
+
+    if pred_list != canonical_list:
+        print("[CRITICAL] Prediction order does NOT match sample_submission!")
+        print(f"  Your predictions order: {{pred_list}}")
+        print(f"  Expected (canonical):   {{canonical_list}}")
+        print("[FIX] Load test files in CANONICAL_TEST_IDS order, not glob() order!")
+        return False
+
+    print("[OK] Submission alignment validated - prediction order matches sample_submission")
+    return True
+# === END CANONICAL TEST IDS ===
 '''
         # Add canonical data paths if available
         if has_canonical:

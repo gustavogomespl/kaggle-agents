@@ -30,7 +30,7 @@ from .meta_model import (
 from .prediction_pairs import find_prediction_pairs, validate_prediction_artifacts_contract
 from .scoring import compute_oof_score, filter_by_score_threshold, score_predictions
 from .stacking import load_cv_folds, stack_from_prediction_pairs
-from .submission import safe_restore_submission, validate_and_align_submission
+from .submission import safe_restore_submission, validate_and_align_submission, validate_test_id_alignment
 from .utils import class_orders_match, encode_labels
 
 
@@ -1287,6 +1287,21 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
 
             sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
             output_path = working_dir / "submission.csv"
+
+            # =========================================================
+            # CRITICAL: Validate test ID alignment before creating submission
+            # This prevents the score=0.50 bug from misaligned predictions
+            # =========================================================
+            print("\n   🔍 Validating test ID alignment...")
+            is_aligned, alignment_warnings = validate_test_id_alignment(
+                models_dir, sample_path, model_names=list(prediction_pairs.keys())
+            )
+            if alignment_warnings:
+                print(alignment_warnings)
+            if not is_aligned:
+                print("   ⚠️  TEST ID ALIGNMENT ISSUES DETECTED!")
+                print("   This may cause score=0.50 due to prediction/ID misalignment.")
+                print("   Fix: Ensure test files are loaded in CANONICAL_TEST_IDS order, not glob() order.")
 
             # Get expected test count from CVfolds (if available) for validation
             test_rec_ids = state.get("test_rec_ids", []) if isinstance(state, dict) else []

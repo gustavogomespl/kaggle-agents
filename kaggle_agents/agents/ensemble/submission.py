@@ -2,8 +2,105 @@
 
 import shutil
 from pathlib import Path
+from typing import Optional
 
+import numpy as np
 import pandas as pd
+
+
+def validate_test_id_alignment(
+    models_dir: Path,
+    sample_submission_path: Path,
+    model_names: Optional[list[str]] = None,
+) -> tuple[bool, str]:
+    """
+    Validate that saved test predictions align with sample_submission ID order.
+
+    This prevents the score=0.50 bug caused by loading test files via glob()
+    in filesystem order instead of sample_submission order.
+
+    Args:
+        models_dir: Directory containing test_ids_{name}.npy files
+        sample_submission_path: Path to sample_submission.csv
+        model_names: Optional list of model names to check (if None, checks all)
+
+    Returns:
+        Tuple of (is_aligned, warning_message)
+    """
+    warnings = []
+
+    # Load canonical test IDs from sample_submission
+    try:
+        sample_sub = pd.read_csv(sample_submission_path)
+        canonical_ids = sample_sub.iloc[:, 0].astype(str).values
+    except Exception as e:
+        return False, f"Failed to read sample_submission: {e}"
+
+    # Find all test_ids files
+    if model_names:
+        id_files = [models_dir / f"test_ids_{name}.npy" for name in model_names]
+        id_files = [f for f in id_files if f.exists()]
+    else:
+        id_files = list(models_dir.glob("test_ids_*.npy"))
+
+    if not id_files:
+        warnings.append(
+            "🚨 NO test_ids_*.npy files found! "
+            "If test files were loaded via glob(), predictions may be MISALIGNED (score=0.50 bug)!"
+        )
+        return False, "\n".join(warnings)
+
+    # Check each model's test IDs
+    all_aligned = True
+    for id_file in id_files:
+        model_name = id_file.stem.replace("test_ids_", "")
+        try:
+            saved_ids = np.load(id_file, allow_pickle=True).astype(str)
+
+            # Check if same set of IDs
+            saved_set = set(saved_ids)
+            canonical_set = set(canonical_ids)
+
+            missing = canonical_set - saved_set
+            extra = saved_set - canonical_set
+
+            if missing:
+                warnings.append(
+                    f"   ❌ {model_name}: Missing {len(missing)} IDs from predictions"
+                )
+                all_aligned = False
+            if extra:
+                warnings.append(
+                    f"   ⚠️  {model_name}: {len(extra)} extra IDs in predictions"
+                )
+
+            # Check if same order (critical for alignment)
+            if len(saved_ids) == len(canonical_ids):
+                if not np.array_equal(saved_ids[:10], canonical_ids[:10]):
+                    warnings.append(
+                        f"   🚨 {model_name}: ID ORDER MISMATCH (first 10 differ)! "
+                        f"Predictions: {saved_ids[:3]}... vs Canonical: {canonical_ids[:3]}..."
+                    )
+                    all_aligned = False
+                elif not np.array_equal(saved_ids, canonical_ids):
+                    warnings.append(
+                        f"   ⚠️  {model_name}: ID order differs from sample_submission"
+                    )
+                    all_aligned = False
+                else:
+                    print(f"   ✅ {model_name}: Test IDs aligned with sample_submission")
+            else:
+                warnings.append(
+                    f"   ❌ {model_name}: ID count mismatch - {len(saved_ids)} vs {len(canonical_ids)}"
+                )
+                all_aligned = False
+
+        except Exception as e:
+            warnings.append(f"   ❌ {model_name}: Failed to load test_ids: {e}")
+            all_aligned = False
+
+    warning_msg = "\n".join(warnings) if warnings else ""
+    return all_aligned, warning_msg
 
 
 def validate_and_align_submission(
