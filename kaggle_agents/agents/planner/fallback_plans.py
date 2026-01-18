@@ -579,51 +579,25 @@ def create_audio_fallback_plan(
     sota_analysis: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """
-    Create fallback plan for audio competitions (mel-spectrograms + CNNs).
+    Create fallback plan for audio competitions.
 
-    Converts audio to spectrograms, then uses image models.
+    REDIRECTS to fallback_plans/audio.py which has the improved version
+    with handcrafted_features_rf (RandomForest + librosa) as the priority approach.
 
     Args:
         domain: Competition domain (audio_classification, audio_regression)
         sota_analysis: SOTA analysis results
 
     Returns:
-        List of component dictionaries (4 components: 1 preprocessing + 2 models + 1 ensemble)
+        List of component dictionaries (6 components including handcrafted_features_rf)
     """
-    return [
-        {
-            "name": "mel_spectrogram_preprocessing",
-            "component_type": "preprocessing",
-            "description": "Convert audio files to mel-spectrograms using librosa. Save as PNG images for CNN input.",
-            "estimated_impact": 0.20,
-            "rationale": "Mel-spectrograms are the standard time-frequency representation for audio. Convert audio problem to computer vision problem, enabling use of powerful pre-trained image models.",
-            "code_outline": "Use librosa.feature.melspectrogram(y=audio, sr=22050, n_mels=128), convert to dB scale with librosa.power_to_db(), normalize to [0, 255], save as 3-channel PNG to spectrograms/ directory",
-        },
-        {
-            "name": "efficientnet_audio",
-            "component_type": "model",
-            "description": "EfficientNet-B0 trained on mel-spectrogram images. Transfer learning from ImageNet.",
-            "estimated_impact": 0.25,
-            "rationale": "CNNs excel at recognizing patterns in spectrograms (frequency bands, temporal patterns). EfficientNet provides excellent accuracy with computational efficiency.",
-            "code_outline": "Load mel-spectrogram images with PyTorch DataLoader, torchvision.models.efficientnet_b0(pretrained=True), replace classifier, train with data augmentation on spectrograms",
-        },
-        {
-            "name": "resnet_audio",
-            "component_type": "model",
-            "description": "ResNet50 for architectural diversity in ensemble.",
-            "estimated_impact": 0.20,
-            "rationale": "ResNet learns different features than EfficientNet due to different architecture (residual connections). Ensemble benefits from this diversity.",
-            "code_outline": "Similar pipeline to EfficientNet but with torchvision.models.resnet50(pretrained=True)",
-        },
-        {
-            "name": "audio_ensemble",
-            "component_type": "ensemble",
-            "description": "Weighted average of EfficientNet and ResNet predictions.",
-            "estimated_impact": 0.12,
-            "rationale": "Ensemble reduces overfitting to specific architecture biases and improves generalization.",
-            "code_outline": "Load OOF predictions, compute weights by CV score, weighted average for test predictions",
-        },
-    ]
+    # Import from the modular audio.py which has the improved version
+    # NOTE: Use absolute import because fallback_plans.py shadows fallback_plans/ directory
+    from kaggle_agents.agents.planner.fallback_plans.audio import (
+        create_audio_fallback_plan as audio_fallback,
+    )
+
+    return audio_fallback(domain, sota_analysis)
 
 
 def create_diversified_fallback_plan(
