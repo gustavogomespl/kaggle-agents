@@ -48,6 +48,41 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
             break
 
     if not train_path or not train_path.exists():
+        domain = state.get("domain_detected", "")
+        train_rec_ids = state.get("train_rec_ids", [])
+        test_rec_ids = state.get("test_rec_ids", [])
+        submission_format = state.get("submission_format_info", {}) or {}
+        if "audio" in str(domain).lower() and train_rec_ids:
+            n_train_samples = len(train_rec_ids)
+            n_test_samples = len(test_rec_ids)
+            n_classes = submission_format.get("num_classes")
+            insights = DataInsights(
+                n_train_samples=n_train_samples,
+                n_test_samples=n_test_samples,
+                n_features=0,
+                n_classes=n_classes,
+                target_distribution={},
+                is_imbalanced=False,
+                imbalance_ratio=None,
+                numeric_features=[],
+                categorical_features=[],
+                datetime_features=[],
+                text_features=[],
+                missing_value_cols={},
+                high_cardinality_cols=[],
+                constant_cols=[],
+                highly_correlated_pairs=[],
+            )
+            print("\n   📊 Audio EDA Summary:")
+            print(f"      Train samples: {n_train_samples:,}")
+            print(f"      Test samples: {n_test_samples:,}")
+            if n_classes:
+                print(f"      Classes: {n_classes}")
+            return {
+                "data_insights": insights,
+                "last_updated": datetime.now(),
+            }
+
         print("   ⚠️ No train.csv found. Skipping EDA.")
         return {"last_updated": datetime.now()}
 

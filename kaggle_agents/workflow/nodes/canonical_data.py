@@ -6,9 +6,11 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from ...core.state import KaggleState
 from ...core.state.contracts import CanonicalDataContract
+from ...utils.csv_utils import read_csv_auto
 from ...utils.data_contract import prepare_canonical_data
 
 
@@ -78,6 +80,138 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
         train_csv_path = working_dir / "train.csv"
         if not train_csv_path.exists():
             print("   Audio competition without train.csv detected")
+            # Try MLSP-style labels + CVfolds before filename heuristics
+            label_files = [Path(lf) for lf in data_files.get("label_files", []) if lf]
+            label_path = None
+            cvfolds_path = None
+            for lf in label_files:
+                name = lf.name.lower()
+                if "rec_labels" in name and label_path is None:
+                    label_path = lf
+                if "cvfolds" in name and cvfolds_path is None:
+                    cvfolds_path = lf
+
+            if label_path and cvfolds_path and label_path.exists() and cvfolds_path.exists():
+                print("   Detected MLSP-style label + CVfolds files, building canonical data...")
+                try:
+                    from ...utils.label_parser import parse_mlsp_multilabel
+
+                    rec_ids, labels = parse_mlsp_multilabel(label_path)
+                    if len(rec_ids) == 0:
+                        raise ValueError("Parsed 0 rec_ids from MLSP label file")
+
+                    cv_df = read_csv_auto(cvfolds_path)
+                    if len(cv_df.columns) < 2:
+                        raise ValueError("CVfolds file has fewer than 2 columns")
+
+                    id_col = cv_df.columns[0]
+                    fold_col = cv_df.columns[1]
+                    id_series = pd.to_numeric(cv_df[id_col], errors="coerce")
+                    fold_series = pd.to_numeric(cv_df[fold_col], errors="coerce")
+                    fold_lookup = {
+                        int(rid): int(fold)
+                        for rid, fold in zip(id_series, fold_series)
+                        if pd.notna(rid) and pd.notna(fold)
+                    }
+
+                    fold_values = np.array([fold_lookup.get(int(rid), -1) for rid in rec_ids])
+                    unique_folds = set(fold_values.tolist())
+                    if {0, 1}.issubset(unique_folds):
+                        train_fold = 0
+                        test_fold = 1
+                        print("   CVfolds semantics: 0=train, 1=test")
+                    elif {1, 2}.issubset(unique_folds):
+                        train_fold = 1
+                        test_fold = 2
+                        print("   CVfolds semantics: 1=train, 2=test")
+                    else:
+                        sorted_folds = sorted(f for f in unique_folds if f >= 0)
+                        if len(sorted_folds) < 2:
+                            raise ValueError("CVfolds values do not define a train/test split")
+                        train_fold = sorted_folds[0]
+                        test_fold = sorted_folds[-1]
+                        print(f"   CVfolds semantics inferred: {train_fold}=train, {test_fold}=test")
+
+                    has_labels = labels.sum(axis=1) > 0
+                    train_mask = (fold_values == train_fold) & has_labels
+                    test_mask = fold_values == test_fold
+
+                    train_ids = rec_ids[train_mask]
+                    test_ids = rec_ids[test_mask]
+                    y_train = labels[train_mask]
+
+                    if len(train_ids) < 2:
+                        raise ValueError("Not enough training samples after filtering")
+
+                    n_folds = min(5, max(2, len(train_ids)))
+                    stratify_vals = y_train.sum(axis=1)
+                    use_stratified = len(np.unique(stratify_vals)) > 1
+
+                    fold_assignments = np.zeros(len(train_ids), dtype=int)
+                    if use_stratified:
+                        from sklearn.model_selection import StratifiedKFold
+
+                        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+                        for fold, (_, val_idx) in enumerate(kf.split(train_ids, stratify_vals)):
+                            fold_assignments[val_idx] = fold
+                    else:
+                        from sklearn.model_selection import KFold
+
+                        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+                        for fold, (_, val_idx) in enumerate(kf.split(train_ids)):
+                            fold_assignments[val_idx] = fold
+
+                    canonical_dir = working_dir / "canonical"
+                    canonical_dir.mkdir(parents=True, exist_ok=True)
+                    np.save(canonical_dir / "train_ids.npy", train_ids)
+                    np.save(canonical_dir / "y.npy", y_train)
+                    np.save(canonical_dir / "folds.npy", fold_assignments)
+                    with open(canonical_dir / "feature_cols.json", "w") as f:
+                        json.dump([], f)
+
+                    metadata = {
+                        "original_rows": int(len(rec_ids)),
+                        "canonical_rows": int(len(train_ids)),
+                        "n_folds": int(n_folds),
+                        "cv_strategy": "stratified_kfold" if use_stratified else "kfold",
+                        "id_col": "rec_id",
+                        "id_is_synthetic": False,
+                        "target_col": "label",
+                        "n_features": 0,
+                        "group_col": None,
+                        "is_classification": True,
+                        "n_classes": int(labels.shape[1]),
+                        "canonical_version": "1.3",
+                        "task_type": "multilabel_classification",
+                        "is_seq2seq": False,
+                        "source_col": None,
+                        "class_col": None,
+                        "seq2seq_group_col": None,
+                        "target_dtype": str(y_train.dtype),
+                        "sampled": False,
+                        "n_test": int(len(test_ids)),
+                    }
+
+                    with open(canonical_dir / "metadata.json", "w") as f:
+                        json.dump(metadata, f, indent=2)
+
+                    print(f"   Created MLSP canonical data: {len(train_ids)} train, {len(test_ids)} test")
+                    return {
+                        "canonical_data_prepared": True,
+                        "canonical_dir": str(canonical_dir),
+                        "canonical_train_ids_path": str(canonical_dir / "train_ids.npy"),
+                        "canonical_y_path": str(canonical_dir / "y.npy"),
+                        "canonical_folds_path": str(canonical_dir / "folds.npy"),
+                        "canonical_metadata": metadata,
+                        "canonical_data_skipped_reason": None,
+                        "train_rec_ids": train_ids.tolist(),
+                        "test_rec_ids": test_ids.tolist(),
+                        "cv_folds_used": True,
+                        "last_updated": datetime.now(),
+                    }
+                except Exception as e:
+                    print(f"   MLSP canonical data prep failed: {e}")
+
             print("   Attempting to create canonical data from audio filenames...")
 
             # Import detection mixin for filename-based label extraction

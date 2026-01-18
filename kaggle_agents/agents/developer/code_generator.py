@@ -1289,6 +1289,20 @@ print("[INFO] smart_locate_file() available - use for loading audio/image by ID"
             # Check for rec_id2filename.txt mapping file
             audio_parent = Path(audio_source_path).parent
             audio_mapping_files = list(audio_parent.glob("*id2filename*.txt"))
+            path_header += '''
+# === REC_ID LIST UTILS (AUTO-INJECTED) ===
+def _merge_rec_ids(primary, extra):
+    """Merge ID lists while preserving order and uniqueness."""
+    seen = set()
+    merged = []
+    for rid in list(primary) + list(extra):
+        rid_str = str(rid)
+        if rid_str not in seen:
+            seen.add(rid_str)
+            merged.append(rid)
+    return merged
+# === END REC_ID LIST UTILS ===
+'''
             if audio_mapping_files:
                 mapping_file = audio_mapping_files[0]
                 path_header += f'''
@@ -1320,13 +1334,17 @@ def _resolve_audio_paths(rec_ids, audio_dir, id_to_filename):
             id_to_path[rec_id_str] = path
     return id_to_path
 
-# Pre-resolve audio paths for training IDs
-_PRELOADED_ID_TO_PATH = _resolve_audio_paths(
+# Pre-resolve audio paths for train + test IDs (if available)
+_REC_IDS_FOR_PATHS = _merge_rec_ids(
     _PRELOADED_REC_IDS,
+    TEST_REC_IDS if 'TEST_REC_IDS' in globals() else []
+)
+_PRELOADED_ID_TO_PATH = _resolve_audio_paths(
+    _REC_IDS_FOR_PATHS,
     AUDIO_SOURCE_DIR,
     _ID_TO_FILENAME
 )
-print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_PRELOADED_REC_IDS)}} audio paths")
+print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_REC_IDS_FOR_PATHS)}} audio paths")
 # === END REC_ID MAPPING ===
 '''
             else:
@@ -1334,13 +1352,17 @@ print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_PRELOADED_REC_IDS)
                 path_header += f'''
 # === REC_ID TO AUDIO PATH MAPPING (DIRECT - no mapping file found) ===
 # Trying direct ID-based path resolution
+_REC_IDS_FOR_PATHS = _merge_rec_ids(
+    _PRELOADED_REC_IDS,
+    TEST_REC_IDS if 'TEST_REC_IDS' in globals() else []
+)
 _PRELOADED_ID_TO_PATH = {{}}
-for rec_id in _PRELOADED_REC_IDS:
+for rec_id in _REC_IDS_FOR_PATHS:
     rec_id_str = str(rec_id)
     path = smart_locate_file(AUDIO_SOURCE_DIR, rec_id_str)
     if path:
         _PRELOADED_ID_TO_PATH[rec_id_str] = path
-print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_PRELOADED_REC_IDS)}} audio paths (direct)")
+print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_REC_IDS_FOR_PATHS)}} audio paths (direct)")
 # === END REC_ID MAPPING ===
 '''
 
@@ -1382,11 +1404,18 @@ def create_train_df_from_filenames(audio_dir, label_pattern=r'_(\\d+)\\.'):
 '''
 
         # Inject submission format hint for multi-label/multi-class competitions
-        submission_format = data_files.get("submission_format_info", {})
+        state_submission_format = (state or {}).get("submission_format_info", {})
+        submission_format = state_submission_format or data_files.get("submission_format_info", {})
         if submission_format:
             num_classes = submission_format.get("num_classes", 1)
             id_pattern = submission_format.get("id_pattern", "")
             if num_classes > 1 or id_pattern:
+                if submission_format.get("format_type") == "long":
+                    path_header += """
+# NOTE: Long-format submission detected.
+# CANONICAL_TEST_IDS are submission row IDs (e.g., rec_id * 100 + class_id).
+# Use TEST_REC_IDS (from CVfolds) when loading test audio files.
+"""
                 path_header += f'''
 # === SUBMISSION FORMAT (AUTO-DETECTED) ===
 # num_classes: {num_classes}

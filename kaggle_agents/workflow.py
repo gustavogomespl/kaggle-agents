@@ -37,6 +37,7 @@ from .tools.data_format_discovery import (
     detect_traditional_format,
 )
 from .tools.kaggle_api import KaggleAPIClient
+from .utils.csv_utils import read_csv_auto
 from .utils.data_audit import (
     AuditFailedError,
     audit_audio_competition,
@@ -44,6 +45,7 @@ from .utils.data_audit import (
 )
 from .utils.data_contract import prepare_canonical_data
 from .utils.precomputed_features import (
+    PrecomputedFeaturesInfo,
     detect_precomputed_features,
 )
 from .utils.submission_format import (
@@ -422,16 +424,103 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
             if submission_format_info.num_classes:
                 print(f"   Num classes: {submission_format_info.num_classes}")
 
-        # Detect precomputed features
-        data_dir = working_dir
-        # Check common data subdirectories
-        for subdir in ["essential_data", "data", "features", "prepared"]:
+        label_files = [Path(lf) for lf in data_files.get("label_files", []) if lf]
+
+        def _merge_feature_infos(infos: list[PrecomputedFeaturesInfo]) -> PrecomputedFeaturesInfo:
+            merged = PrecomputedFeaturesInfo()
+            for info in infos:
+                for key, path in info.features_found.items():
+                    if key not in merged.features_found:
+                        merged.features_found[key] = path
+                        if key in info.feature_shapes:
+                            merged.feature_shapes[key] = info.feature_shapes[key]
+                        if key in info.feature_columns:
+                            merged.feature_columns[key] = info.feature_columns[key]
+                merged.warnings.extend(info.warnings)
+            merged.total_features = 0
+            for key, shape in merged.feature_shapes.items():
+                if len(shape) >= 2 and key not in ("cv_folds", "id_mapping"):
+                    merged.total_features += shape[1]
+            return merged
+
+        def _looks_numeric_ids(ids: list[Any]) -> bool:
+            if not ids:
+                return False
+            for rid in ids[:20]:
+                rid_str = str(rid)
+                if not rid_str.isdigit():
+                    return False
+            return True
+
+        def _parse_cvfolds(cv_path: Path) -> tuple[list[Any], list[Any], str] | None:
+            cv_df = read_csv_auto(cv_path)
+            if len(cv_df.columns) < 2:
+                return None
+            id_col = cv_df.columns[0]
+            fold_col = cv_df.columns[1]
+            id_series = pd.to_numeric(cv_df[id_col], errors="coerce")
+            use_numeric_ids = id_series.notna().all()
+            id_values = id_series.astype(int) if use_numeric_ids else cv_df[id_col].astype(str)
+            fold_series = pd.to_numeric(cv_df[fold_col], errors="coerce")
+            unique_folds = set(fold_series.dropna().unique())
+            train_mask = None
+            test_mask = None
+            semantics = ""
+            if {0, 1}.issubset(unique_folds):
+                train_mask = fold_series == 0
+                test_mask = fold_series == 1
+                semantics = "0=train, 1=test"
+            elif {1, 2}.issubset(unique_folds):
+                train_mask = fold_series == 1
+                test_mask = fold_series == 2
+                semantics = "1=train, 2=test"
+            elif unique_folds:
+                sorted_folds = sorted(unique_folds)
+                if len(sorted_folds) >= 2:
+                    train_fold = sorted_folds[0]
+                    test_fold = sorted_folds[-1]
+                    train_mask = fold_series == train_fold
+                    test_mask = fold_series == test_fold
+                    semantics = f"{train_fold}=train, {test_fold}=test (inferred)"
+            if train_mask is None or test_mask is None:
+                return None
+            train_ids = id_values[train_mask].tolist()
+            test_ids = id_values[test_mask].tolist()
+            return train_ids, test_ids, semantics
+
+        # Detect precomputed features across multiple roots
+        candidate_dirs: list[Path] = []
+        for subdir in ["essential_data", "supplemental_data", "data", "features", "prepared"]:
             candidate = working_dir / subdir
             if candidate.exists():
-                data_dir = candidate
-                break
+                candidate_dirs.append(candidate)
+        for lf in label_files:
+            if lf.exists():
+                candidate_dirs.append(lf.parent)
+        audio_source = data_files.get("audio_source") or ""
+        if audio_source:
+            candidate_dirs.append(Path(audio_source).parent)
+        if not candidate_dirs:
+            candidate_dirs = [working_dir]
 
-        precomputed_features_info = detect_precomputed_features(data_dir)
+        seen_dirs: set[Path] = set()
+        search_dirs: list[Path] = []
+        for candidate in candidate_dirs:
+            resolved = candidate.resolve() if candidate.exists() else candidate
+            if resolved in seen_dirs:
+                continue
+            seen_dirs.add(resolved)
+            search_dirs.append(candidate)
+
+        feature_infos: list[PrecomputedFeaturesInfo] = []
+        for data_dir in search_dirs:
+            info = detect_precomputed_features(data_dir)
+            if info.has_features():
+                feature_infos.append(info)
+
+        precomputed_features_info = (
+            _merge_feature_infos(feature_infos) if feature_infos else PrecomputedFeaturesInfo()
+        )
         if precomputed_features_info.has_features():
             updates["precomputed_features_info"] = precomputed_features_info.to_dict()
             print(f"   Precomputed features found: {len(precomputed_features_info.features_found)}")
@@ -441,73 +530,71 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                     shape_str = f" {precomputed_features_info.feature_shapes[ft]}"
                 print(f"     - {ft}: {path.name}{shape_str}")
 
-            # CVfolds: Extract train/test split if CVfolds file found
-            if "cv_folds" in precomputed_features_info.features_found:
-                cv_folds_path = precomputed_features_info.features_found["cv_folds"]
+        # CVfolds: Extract train/test split
+        cv_folds_path = precomputed_features_info.features_found.get("cv_folds")
+        if not cv_folds_path:
+            for lf in label_files:
+                if "cvfolds" in lf.name.lower():
+                    cv_folds_path = lf
+                    break
+        if cv_folds_path and Path(cv_folds_path).exists():
+            try:
+                parsed = _parse_cvfolds(Path(cv_folds_path))
+                if parsed:
+                    train_rec_ids, test_rec_ids, semantics = parsed
+                    updates["train_rec_ids"] = train_rec_ids
+                    updates["test_rec_ids"] = test_rec_ids
+                    updates["cv_folds_used"] = True
+                    updates["cv_folds_path"] = str(cv_folds_path)
+                    print(f"   CVfolds semantics: {semantics}")
+                    print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
+            except Exception as e:
+                print(f"   Warning: Failed to parse CVfolds file: {e}")
+
+        # ID mapping hint (keep numeric rec_ids for label alignment)
+        id_mapping_path = precomputed_features_info.features_found.get("id_mapping")
+        if not id_mapping_path:
+            for lf in label_files:
+                name = lf.name.lower()
+                if "id2filename" in name or "2filename" in name:
+                    id_mapping_path = lf
+                    break
+
+        train_rec_ids = updates.get("train_rec_ids", [])
+        test_rec_ids = updates.get("test_rec_ids", [])
+        if id_mapping_path and (train_rec_ids or test_rec_ids):
+            if _looks_numeric_ids(train_rec_ids or test_rec_ids):
+                updates["id_mapping_path"] = str(id_mapping_path)
+                print("   ID mapping available; keeping numeric rec_ids for label alignment")
+            else:
+                from .utils.label_parser import read_id_mapping
+
+                audio_dir = Path(audio_source) if audio_source else None
                 try:
-                    cv_df = pd.read_csv(cv_folds_path)
-                    if len(cv_df.columns) >= 2:
-                        id_col = cv_df.columns[0]
-                        fold_col = cv_df.columns[1]
-
-                        # Auto-detect fold semantics based on unique values
-                        unique_folds = set(cv_df[fold_col].unique())
-                        if unique_folds == {0, 1}:
-                            # MLSP-style: fold=0 is train, fold=1 is test
-                            train_rec_ids = cv_df[cv_df[fold_col] == 0][id_col].tolist()
-                            test_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
-                            print(f"   CVfolds semantics: 0=train, 1=test")
-                        else:
-                            # Standard semantics: fold=1 is train, fold=2 is test
-                            train_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
-                            test_rec_ids = cv_df[cv_df[fold_col] == 2][id_col].tolist()
-                            print(f"   CVfolds semantics: 1=train, 2=test")
-
-                        if train_rec_ids or test_rec_ids:
-                            updates["train_rec_ids"] = train_rec_ids
-                            updates["test_rec_ids"] = test_rec_ids
-                            updates["cv_folds_used"] = True
-                            print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
-
-                            # Map rec_ids to filenames if id_mapping is available
-                            if "id_mapping" in precomputed_features_info.features_found:
-                                from .utils.label_parser import read_id_mapping
-
-                                id_mapping_path = precomputed_features_info.features_found["id_mapping"]
-                                audio_source = data_files.get("audio_source", "")
-                                audio_dir = Path(audio_source) if audio_source else None
-
-                                try:
-                                    mapping_df = read_id_mapping(
-                                        id_mapping_path,
-                                        id_col="rec_id",
-                                        filename_col="filename",
-                                        audio_dir=audio_dir,
-                                        resolve_extensions=True,
-                                    )
-
-                                    # Create rec_id -> filename dict
-                                    id_to_filename = dict(zip(
-                                        mapping_df["rec_id"].astype(str),
-                                        mapping_df["filename"]
-                                    ))
-
-                                    # Map train/test IDs to filenames
-                                    train_filenames = [id_to_filename.get(str(rid)) for rid in train_rec_ids]
-                                    test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
-
-                                    # Filter out None values (unmapped IDs)
-                                    train_filenames = [f for f in train_filenames if f]
-                                    test_filenames = [f for f in test_filenames if f]
-
-                                    if train_filenames or test_filenames:
-                                        updates["train_rec_ids"] = train_filenames
-                                        updates["test_rec_ids"] = test_filenames
-                                        print(f"   ID mapping applied: {len(train_filenames)} train, {len(test_filenames)} test filenames")
-                                except Exception as e:
-                                    print(f"   Warning: Failed to apply ID mapping: {e}")
+                    mapping_df = read_id_mapping(
+                        id_mapping_path,
+                        id_col="rec_id",
+                        filename_col="filename",
+                        audio_dir=audio_dir,
+                        resolve_extensions=True,
+                    )
+                    id_to_filename = dict(zip(
+                        mapping_df["rec_id"].astype(str),
+                        mapping_df["filename"]
+                    ))
+                    train_filenames = [id_to_filename.get(str(rid)) for rid in train_rec_ids]
+                    test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
+                    train_filenames = [f for f in train_filenames if f]
+                    test_filenames = [f for f in test_filenames if f]
+                    if train_filenames or test_filenames:
+                        updates["train_rec_ids"] = train_filenames
+                        updates["test_rec_ids"] = test_filenames
+                        print(
+                            "   ID mapping applied: "
+                            f"{len(train_filenames)} train, {len(test_filenames)} test filenames"
+                        )
                 except Exception as e:
-                    print(f"   Warning: Failed to parse CVfolds file: {e}")
+                    print(f"   Warning: Failed to apply ID mapping: {e}")
 
         print("   ---------------------------------")
 
@@ -782,16 +869,220 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
     train_path = data_files.get("train_csv") or data_files.get("train")
     test_path = data_files.get("test_csv") or data_files.get("test")
 
-    # Skip for non-tabular data (images, audio)
+    # Handle non-tabular data (images, audio)
     data_type = str(data_files.get("data_type", "")).lower()
-    if data_type in {"image", "audio"}:
-        print(f"   Skipping canonical data prep for {data_type} data type")
-        print("   (Image/audio competitions use different data flow)")
-        return {
-            "canonical_data_prepared": False,
-            "canonical_data_skipped_reason": f"{data_type} data type",
-            "last_updated": datetime.now(),
-        }
+    if data_type == "image":
+        # For IMAGE competitions: Try to create canonical data from train.csv
+        # Image competitions typically have train.csv with columns [image_id, label1, label2, ...]
+        train_csv_path = data_files.get("train_csv")
+        if not train_csv_path:
+            # Also check workspace for train.csv
+            train_csv_path = working_dir / "train.csv"
+            if not train_csv_path.exists():
+                train_csv_path = None
+
+        if train_csv_path and Path(train_csv_path).exists():
+            print(f"   Image competition with train.csv detected: {train_csv_path}")
+            print("   Creating canonical data from train.csv labels...")
+            # Use train.csv for canonical data (contains image IDs and labels)
+            train_path = str(train_csv_path)
+            # test_path: use test.csv if exists, otherwise use sample_submission for schema
+            test_csv_path = data_files.get("test_csv")
+            if not test_csv_path or not Path(test_csv_path).exists():
+                test_csv_path = data_files.get("sample_submission")
+            test_path = str(test_csv_path) if test_csv_path else str(train_csv_path)
+            # Continue with normal canonical data preparation below
+        else:
+            print(f"   Skipping canonical data prep for {data_type} data type")
+            print("   (No train.csv found - image competitions without labels CSV)")
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_skipped_reason": f"{data_type} data type - no train.csv",
+                "last_updated": datetime.now(),
+            }
+
+    # For audio: try filename-based label extraction if no train.csv
+    if data_type == "audio":
+        train_csv_path = working_dir / "train.csv"
+        if not train_csv_path.exists():
+            print("   Audio competition without train.csv detected")
+            # Try MLSP-style labels + CVfolds before filename heuristics
+            label_files = [Path(lf) for lf in data_files.get("label_files", []) if lf]
+            label_path = None
+            cvfolds_path = None
+            for lf in label_files:
+                name = lf.name.lower()
+                if "rec_labels" in name and label_path is None:
+                    label_path = lf
+                if "cvfolds" in name and cvfolds_path is None:
+                    cvfolds_path = lf
+
+            if label_path and cvfolds_path and label_path.exists() and cvfolds_path.exists():
+                print("   Detected MLSP-style label + CVfolds files, building canonical data...")
+                try:
+                    from .utils.label_parser import parse_mlsp_multilabel
+
+                    rec_ids, labels = parse_mlsp_multilabel(label_path)
+                    if len(rec_ids) == 0:
+                        raise ValueError("Parsed 0 rec_ids from MLSP label file")
+
+                    cv_df = read_csv_auto(cvfolds_path)
+                    if len(cv_df.columns) < 2:
+                        raise ValueError("CVfolds file has fewer than 2 columns")
+
+                    id_col = cv_df.columns[0]
+                    fold_col = cv_df.columns[1]
+                    id_series = pd.to_numeric(cv_df[id_col], errors="coerce")
+                    fold_series = pd.to_numeric(cv_df[fold_col], errors="coerce")
+                    fold_lookup = {
+                        int(rid): int(fold)
+                        for rid, fold in zip(id_series, fold_series)
+                        if pd.notna(rid) and pd.notna(fold)
+                    }
+
+                    fold_values = np.array([fold_lookup.get(int(rid), -1) for rid in rec_ids])
+                    unique_folds = set(fold_values.tolist())
+                    if {0, 1}.issubset(unique_folds):
+                        train_fold = 0
+                        test_fold = 1
+                        print("   CVfolds semantics: 0=train, 1=test")
+                    elif {1, 2}.issubset(unique_folds):
+                        train_fold = 1
+                        test_fold = 2
+                        print("   CVfolds semantics: 1=train, 2=test")
+                    else:
+                        sorted_folds = sorted(f for f in unique_folds if f >= 0)
+                        if len(sorted_folds) < 2:
+                            raise ValueError("CVfolds values do not define a train/test split")
+                        train_fold = sorted_folds[0]
+                        test_fold = sorted_folds[-1]
+                        print(f"   CVfolds semantics inferred: {train_fold}=train, {test_fold}=test")
+
+                    has_labels = labels.sum(axis=1) > 0
+                    train_mask = (fold_values == train_fold) & has_labels
+                    test_mask = fold_values == test_fold
+
+                    train_ids = rec_ids[train_mask]
+                    test_ids = rec_ids[test_mask]
+                    y_train = labels[train_mask]
+
+                    if len(train_ids) < 2:
+                        raise ValueError("Not enough training samples after filtering")
+
+                    n_folds = min(5, max(2, len(train_ids)))
+                    stratify_vals = y_train.sum(axis=1)
+                    use_stratified = len(np.unique(stratify_vals)) > 1
+
+                    fold_assignments = np.zeros(len(train_ids), dtype=int)
+                    if use_stratified:
+                        from sklearn.model_selection import StratifiedKFold
+
+                        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+                        for fold, (_, val_idx) in enumerate(kf.split(train_ids, stratify_vals)):
+                            fold_assignments[val_idx] = fold
+                    else:
+                        from sklearn.model_selection import KFold
+
+                        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+                        for fold, (_, val_idx) in enumerate(kf.split(train_ids)):
+                            fold_assignments[val_idx] = fold
+
+                    canonical_dir = working_dir / "canonical"
+                    canonical_dir.mkdir(parents=True, exist_ok=True)
+                    np.save(canonical_dir / "train_ids.npy", train_ids)
+                    np.save(canonical_dir / "y.npy", y_train)
+                    np.save(canonical_dir / "folds.npy", fold_assignments)
+                    with open(canonical_dir / "feature_cols.json", "w") as f:
+                        json.dump([], f)
+
+                    metadata = {
+                        "original_rows": int(len(rec_ids)),
+                        "canonical_rows": int(len(train_ids)),
+                        "n_folds": int(n_folds),
+                        "cv_strategy": "stratified_kfold" if use_stratified else "kfold",
+                        "id_col": "rec_id",
+                        "id_is_synthetic": False,
+                        "target_col": "label",
+                        "n_features": 0,
+                        "group_col": None,
+                        "is_classification": True,
+                        "n_classes": int(labels.shape[1]),
+                        "canonical_version": "1.3",
+                        "task_type": "multilabel_classification",
+                        "is_seq2seq": False,
+                        "source_col": None,
+                        "class_col": None,
+                        "seq2seq_group_col": None,
+                        "target_dtype": str(y_train.dtype),
+                        "sampled": False,
+                        "n_test": int(len(test_ids)),
+                    }
+
+                    with open(canonical_dir / "metadata.json", "w") as f:
+                        json.dump(metadata, f, indent=2)
+
+                    print(f"   Created MLSP canonical data: {len(train_ids)} train, {len(test_ids)} test")
+                    return {
+                        "canonical_data_prepared": True,
+                        "canonical_dir": str(canonical_dir),
+                        "canonical_train_ids_path": str(canonical_dir / "train_ids.npy"),
+                        "canonical_y_path": str(canonical_dir / "y.npy"),
+                        "canonical_folds_path": str(canonical_dir / "folds.npy"),
+                        "canonical_metadata": metadata,
+                        "canonical_data_skipped_reason": None,
+                        "train_rec_ids": train_ids.tolist(),
+                        "test_rec_ids": test_ids.tolist(),
+                        "cv_folds_used": True,
+                        "last_updated": datetime.now(),
+                    }
+                except Exception as e:
+                    print(f"   MLSP canonical data prep failed: {e}")
+
+            print("   Attempting to create canonical data from audio filenames...")
+
+            # Import detection mixin for filename-based label extraction
+            from .mlebench.data_adapter.detection import DetectionMixin
+
+            detector = DetectionMixin()
+
+            # Use actual train path from data_files if available (e.g., train2/ for whale competition)
+            train_path_from_state = data_files.get("train")
+            if train_path_from_state and Path(train_path_from_state).exists():
+                train_dir = Path(train_path_from_state)
+                if train_dir.name != "train":
+                    print(f"   Using non-standard train directory: {train_dir.name}/")
+            else:
+                train_dir = working_dir / "train"
+
+            if train_dir.exists():
+                result = detector.create_canonical_from_audio_filenames(
+                    audio_dir=train_dir,
+                    canonical_dir=working_dir / "canonical",
+                    n_folds=5,
+                )
+
+                if result.get("success"):
+                    print(f"   Created canonical data from {result['metadata']['canonical_rows']} audio files")
+                    return {
+                        "canonical_data_prepared": True,
+                        "canonical_dir": result["canonical_dir"],
+                        "canonical_train_ids_path": result["train_ids_path"],
+                        "canonical_y_path": result["y_path"],
+                        "canonical_folds_path": result["folds_path"],
+                        "canonical_metadata": result["metadata"],
+                        "canonical_data_skipped_reason": None,
+                        "last_updated": datetime.now(),
+                    }
+                else:
+                    print(f"   Failed to extract labels from filenames: {result.get('error')}")
+
+            # Fallback: skip canonical data for audio without labels
+            print("   Skipping canonical data prep for audio (no train.csv or filename labels)")
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_skipped_reason": "audio without train.csv or filename labels",
+                "last_updated": datetime.now(),
+            }
 
     # Validate paths exist
     if not train_path or not Path(train_path).exists():
