@@ -271,4 +271,110 @@ If you cannot compute the metric (e.g., inference-only component), state it clea
 ```python
 print("Final Validation Performance: N/A (inference-only, no ground truth)")
 ```
+
+### 11. PYTORCH 2.6+ SAFE MODEL LOADING (CRITICAL)
+PyTorch 2.6+ changed `weights_only` default from `False` to `True`, causing:
+`_pickle.UnpicklingError: Weights only load failed`
+
+**Use this safe loading pattern:**
+```python
+import torch
+import pickle
+
+def safe_load_model(model_path, device='cpu'):
+    '''Load PyTorch model with fallback for older checkpoints.'''
+    try:
+        # Preferred: weights_only=True (secure)
+        checkpoint = torch.load(model_path, map_location=device, weights_only=True)
+    except (pickle.UnpicklingError, RuntimeError) as e:
+        print(f"[WARNING] Secure load failed: {e}")
+        print("[INFO] Falling back to weights_only=False (legacy mode)")
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+    return checkpoint
+
+# Usage:
+checkpoint = safe_load_model(model_path, device)
+if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+    model.load_state_dict(checkpoint['state_dict'])
+elif isinstance(checkpoint, dict):
+    model.load_state_dict(checkpoint)
+else:
+    model = checkpoint  # Full model object
+```
+
+**ALWAYS use this pattern when loading models in inference/ensemble components.**
+
+### 12. MEDICAL IMAGING CROSS-VALIDATION (PREVENTS PATIENT LEAKAGE)
+For medical datasets with patient_id column, ALWAYS use GroupKFold to prevent data leakage:
+
+```python
+from sklearn.model_selection import StratifiedGroupKFold, StratifiedKFold
+
+# Check for patient column (expanded list for various dataset conventions)
+patient_cols = [c for c in train_df.columns if c.lower() in
+                ['patient_id', 'patientid', 'subject_id', 'study_id', 'patient',
+                 'patient_num', 'subject', 'case_id', 'sid', 'person_id', 'individual_id']]
+
+if patient_cols:
+    print(f"[CV] Using GroupKFold on '{patient_cols[0]}' to prevent patient leakage")
+    groups = train_df[patient_cols[0]].values
+    cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
+    for fold, (train_idx, val_idx) in enumerate(cv.split(X, y, groups)):
+        # Same patients NEVER appear in both train and val
+        pass
+else:
+    # Fallback to StratifiedKFold for non-medical data
+    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+```
+
+**Why this matters:**
+- Patient leakage can inflate validation AUC from 0.85 to 0.98
+- But LB score stays at 0.60 because test patients are unseen
+- GroupKFold ensures validation is realistic
+
+### 13. CLASS IMBALANCE HANDLING (CRITICAL FOR RARE EVENTS)
+For binary classification with imbalanced classes (<10% positive rate):
+
+```python
+# Calculate class weight
+pos_count = (train_df['target'] == 1).sum()
+neg_count = (train_df['target'] == 0).sum()
+pos_weight = neg_count / pos_count
+print(f"[INFO] Class ratio: 1:{pos_weight:.1f} (pos:{pos_count}, neg:{neg_count})")
+
+# Apply weight to loss function
+criterion = nn.BCEWithLogitsLoss(
+    pos_weight=torch.tensor([pos_weight]).to(device)
+)
+```
+
+**For extreme imbalance (>1:50), consider Focal Loss:**
+```python
+import torch.nn.functional as F
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        BCE_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
+        return F_loss.mean()
+```
+
+**Image Resolution for Medical Imaging:**
+- Natural images (ImageNet): 224-256 is sufficient
+- Medical imaging (X-rays, dermoscopy): Use 384-512
+- Fine structures (catheters, lesion borders): Use 512+
+```python
+# For medical imaging, use higher resolution:
+train_transform = transforms.Compose([
+    transforms.Resize((384, 384)),  # NOT 224! Fine details matter
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+```
 """

@@ -718,24 +718,91 @@ TRAIN_PATH = TRAIN_CSV_PATH if TRAIN_CSV_PATH.exists() else Path("{working_dir}/
 TEST_PATH = TEST_CSV_PATH if TEST_CSV_PATH and TEST_CSV_PATH.exists() else TEST_IMG_DIR
 
 # === IMAGE PATH VERIFICATION (AUTO-INJECTED) ===
-# Automatically find valid image directories if initial paths don't exist
-def _verify_image_dir(base_dir, candidates):
-    """Find valid image directory from candidates."""
+# Shared image extensions (reused by _verify_image_dir and audit)
+_IMG_EXTS = {{'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.dcm', '.dicom', '.webp'}}
+# Split keywords to prevent cross-contamination (train picking test or vice versa)
+_TRAIN_KEYWORDS = {{'train', 'training', 'tr'}}
+_TEST_KEYWORDS = {{'test', 'testing', 'val', 'validation', 'eval', 'inference'}}
+
+def _verify_image_dir(base_dir, candidates, split_name='train'):
+    """Find valid image directory from candidates with split-aware recursive fallback.
+
+    Args:
+        base_dir: Root directory to search
+        candidates: List of candidate subdirectory suffixes
+        split_name: 'train' or 'test' - used to filter recursive fallback results
+    """
+    # First try direct candidates (these are trusted)
     for suffix in candidates:
         path = base_dir / suffix if suffix else base_dir
         if path.exists() and any(path.glob("*.*")):
             return path
+
+    # Recursive fallback: find directory with images MATCHING the split name
+    print(f"[PATH DISCOVERY] Searching recursively for '{{split_name}}' split in {{base_dir}}...")
+
+    # Determine which keywords to match and which to avoid
+    if split_name == 'train':
+        match_keywords = _TRAIN_KEYWORDS
+        avoid_keywords = _TEST_KEYWORDS
+    else:
+        match_keywords = _TEST_KEYWORDS
+        avoid_keywords = _TRAIN_KEYWORDS
+
+    # First pass: find directories matching the split name
+    for subdir in sorted(base_dir.rglob("*")):
+        if subdir.is_dir():
+            dir_name_lower = subdir.name.lower()
+            # Check if directory name matches expected split
+            if any(kw in dir_name_lower for kw in match_keywords):
+                # Verify it's not the opposite split (e.g., "train_test" folder)
+                if any(kw in dir_name_lower for kw in avoid_keywords):
+                    continue
+                sample_files = list(subdir.glob("*"))[:20]
+                if any(f.suffix.lower() in _IMG_EXTS for f in sample_files if f.is_file()):
+                    print(f"[PATH DISCOVERY] Found '{{split_name}}' images in: {{subdir}}")
+                    return subdir
+
+    # Second pass: if no split-specific dir found, warn and return base_dir
+    # DO NOT pick a random image directory - this prevents data leakage
+    print(f"[WARNING] No directory matching '{{split_name}}' split found in {{base_dir}}")
+    print(f"[WARNING] Returning base_dir to avoid potential train/test cross-contamination")
     return base_dir
+
+def _count_images(directory, max_count=50000):
+    """Count images in directory with performance limit."""
+    count = 0
+    for f in directory.rglob("*"):
+        if f.is_file() and f.suffix.lower() in _IMG_EXTS:
+            count += 1
+            if count >= max_count:
+                return f"{{count}}+"  # Indicate there are more
+    return str(count)
 
 # Verify and fix image directories if needed
 _output_dir = Path("{working_dir}")
+_expanded_train_candidates = ["train", "jpeg/train", "images/train", "train_images", "train/train", "jpeg", "images", ""]
+_expanded_test_candidates = ["test", "jpeg/test", "images/test", "test_images", "test/test", "jpeg", "images", ""]
+
 if not TRAIN_IMG_DIR.exists() or not any(TRAIN_IMG_DIR.glob("*.*")):
-    TRAIN_IMG_DIR = _verify_image_dir(_output_dir, ["train", "jpeg/train", "images/train", "train_images", ""])
+    TRAIN_IMG_DIR = _verify_image_dir(_output_dir, _expanded_train_candidates, split_name='train')
     print(f"[PATH FIX] TRAIN_IMG_DIR resolved to: {{TRAIN_IMG_DIR}}")
 
 if not TEST_IMG_DIR.exists() or not any(TEST_IMG_DIR.glob("*.*")):
-    TEST_IMG_DIR = _verify_image_dir(_output_dir, ["test", "jpeg/test", "images/test", "test_images", ""])
+    TEST_IMG_DIR = _verify_image_dir(_output_dir, _expanded_test_candidates, split_name='test')
     print(f"[PATH FIX] TEST_IMG_DIR resolved to: {{TEST_IMG_DIR}}")
+
+# === AUDIT: Count images found (with performance limit) ===
+_train_img_count = _count_images(TRAIN_IMG_DIR)
+_test_img_count = _count_images(TEST_IMG_DIR)
+print(f"[AUDIT] TRAIN_IMG_DIR={{TRAIN_IMG_DIR}}, images found={{_train_img_count}}")
+print(f"[AUDIT] TEST_IMG_DIR={{TEST_IMG_DIR}}, images found={{_test_img_count}}")
+
+if _train_img_count == "0":
+    print(f"[CRITICAL] No train images found! Directory tree of {{_output_dir}}:")
+    for _p in sorted(_output_dir.rglob("*"))[:30]:
+        if _p.is_dir():
+            print(f"  [DIR] {{_p}}")
 # === END IMAGE PATH VERIFICATION ===
 '''
         else:
