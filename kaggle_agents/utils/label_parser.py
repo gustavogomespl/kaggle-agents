@@ -558,3 +558,71 @@ def parse_mlsp_multilabel(
                 label_matrix[i, label] = 1.0
 
     return np.array(rec_ids), label_matrix
+
+
+def extract_train_test_split_from_labels(
+    label_files: list[Path],
+    verbose: bool = True,
+) -> dict[str, any] | None:
+    """
+    Extract train/test split from MLSP-style label files.
+
+    Labels with rows (has_labels=True) are considered training samples.
+    Labels without rows (has_labels=False) are considered test samples.
+
+    Args:
+        label_files: List of label file paths to check
+        verbose: Whether to print status messages
+
+    Returns:
+        Dictionary with train_rec_ids, test_rec_ids, train_test_ids_source
+        or None if no valid split found
+
+    Example:
+        >>> from pathlib import Path
+        >>> files = [Path("rec_labels_train.txt"), Path("rec_labels_test_hidden.txt")]
+        >>> result = extract_train_test_split_from_labels(files)
+        >>> if result:
+        ...     train_ids = result["train_rec_ids"]
+        ...     test_ids = result["test_rec_ids"]
+    """
+    import numpy as np
+
+    # Find rec_labels file (handles MLSP-style hidden '?' rows)
+    label_path = None
+    for lf in label_files:
+        if "rec_labels" in lf.name.lower():
+            label_path = lf
+            break
+
+    if not label_path or not label_path.exists():
+        return None
+
+    try:
+        rec_ids, labels = parse_mlsp_multilabel(label_path)
+
+        if len(rec_ids) == 0:
+            return None
+
+        # Samples with any labels are train, others are test
+        has_labels = labels.sum(axis=1) > 0
+        train_ids = rec_ids[has_labels].tolist()
+        test_ids = rec_ids[~has_labels].tolist()
+
+        if not train_ids or not test_ids:
+            return None
+
+        if verbose:
+            print(f"   Labels split: {len(train_ids)} train, {len(test_ids)} test")
+
+        return {
+            "train_rec_ids": train_ids,
+            "test_rec_ids": test_ids,
+            "train_test_ids_source": "labels",
+            "cv_folds_used": False,
+        }
+
+    except Exception as e:
+        if verbose:
+            print(f"   Warning: Failed to parse label split: {e}")
+        return None

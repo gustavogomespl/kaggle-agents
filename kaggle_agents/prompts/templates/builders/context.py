@@ -451,13 +451,15 @@ def _build_audio_context(state: dict[str, Any]) -> str:
 
         lines.append("")
 
-    # Extract CVfolds info for train/test split
-    if state.get("cv_folds_used"):
-        train_rec_ids = state.get("train_rec_ids", [])
-        test_rec_ids = state.get("test_rec_ids", [])
-        lines.append("### Train/Test Split (CVfolds)")
-        lines.append(f"- **Train samples:** {len(train_rec_ids)} rec_ids (fold=1)")
-        lines.append(f"- **Test samples:** {len(test_rec_ids)} rec_ids (fold=2)")
+    # Extract train/test split info (labels or CVfolds)
+    train_rec_ids = state.get("train_rec_ids", [])
+    test_rec_ids = state.get("test_rec_ids", [])
+    train_test_source = state.get("train_test_ids_source") or ("cvfolds" if state.get("cv_folds_used") else "")
+    if train_rec_ids and test_rec_ids:
+        source_label = train_test_source or "state"
+        lines.append(f"### Train/Test Split ({source_label})")
+        lines.append(f"- **Train samples:** {len(train_rec_ids)} rec_ids")
+        lines.append(f"- **Test samples:** {len(test_rec_ids)} rec_ids")
         lines.append("- **Use these rec_ids for filtering, do NOT infer from sample_submission.csv**")
         lines.append("")
 

@@ -92,10 +92,14 @@ from sklearn.preprocessing import StandardScaler
 # 1. Load labels using injected helper
 rec_ids, labels = load__labels()  # Shape: (n_samples, 19)
 
-# 2. Get train/test split from CVfolds
-folds = np.array([fold_map.get(rid, -1) for rid in rec_ids])
-train_mask = (folds == 0)  # : fold=0 is train
-test_mask = (folds == 1)   # : fold=1 is test
+# 2. Get train/test split from injected IDs (preferred) or CVfolds
+if 'TRAIN_REC_IDS' in globals() and 'TEST_REC_IDS' in globals() and TRAIN_REC_IDS and TEST_REC_IDS:
+    train_mask = np.isin(rec_ids, TRAIN_REC_IDS)
+    test_mask = np.isin(rec_ids, TEST_REC_IDS)
+else:
+    folds = np.array([fold_map.get(rid, -1) for rid in rec_ids])
+    train_mask = (folds == 0)  # fold=0 is train
+    test_mask = (folds == 1)   # fold=1 is test
 
 # 3. Extract features using injected helper
 X = np.array([extract_librosa_features(_PRELOADED_ID_TO_PATH.get(str(rid)))

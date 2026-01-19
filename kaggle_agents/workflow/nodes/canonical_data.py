@@ -108,58 +108,55 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                     fold_col = cv_df.columns[1]
                     id_series = pd.to_numeric(cv_df[id_col], errors="coerce")
                     fold_series = pd.to_numeric(cv_df[fold_col], errors="coerce")
-                    fold_lookup = {
-                        int(rid): int(fold)
-                        for rid, fold in zip(id_series, fold_series)
-                        if pd.notna(rid) and pd.notna(fold)
-                    }
-
-                    fold_values = np.array([fold_lookup.get(int(rid), -1) for rid in rec_ids])
-                    unique_folds = set(fold_values.tolist())
-                    if {0, 1}.issubset(unique_folds):
-                        train_fold = 0
-                        test_fold = 1
-                        print("   CVfolds semantics: 0=train, 1=test")
-                    elif {1, 2}.issubset(unique_folds):
-                        train_fold = 1
-                        test_fold = 2
-                        print("   CVfolds semantics: 1=train, 2=test")
-                    else:
-                        sorted_folds = sorted(f for f in unique_folds if f >= 0)
-                        if len(sorted_folds) < 2:
-                            raise ValueError("CVfolds values do not define a train/test split")
-                        train_fold = sorted_folds[0]
-                        test_fold = sorted_folds[-1]
-                        print(f"   CVfolds semantics inferred: {train_fold}=train, {test_fold}=test")
+                    fold_lookup = {}
+                    for rid, fold in zip(id_series, fold_series):
+                        if pd.isna(rid) or pd.isna(fold):
+                            continue
+                        rid_str = str(int(rid)).strip()
+                        fold_lookup[rid_str] = int(fold)
 
                     has_labels = labels.sum(axis=1) > 0
-                    train_mask = (fold_values == train_fold) & has_labels
-                    test_mask = fold_values == test_fold
-
-                    train_ids = rec_ids[train_mask]
-                    test_ids = rec_ids[test_mask]
-                    y_train = labels[train_mask]
+                    train_ids = rec_ids[has_labels]
+                    test_ids = rec_ids[~has_labels]
+                    y_train = labels[has_labels]
 
                     if len(train_ids) < 2:
                         raise ValueError("Not enough training samples after filtering")
 
-                    n_folds = min(5, max(2, len(train_ids)))
-                    stratify_vals = y_train.sum(axis=1)
-                    use_stratified = len(np.unique(stratify_vals)) > 1
+                    # Use CVfolds for CV assignment if it has >2 unique folds
+                    fold_values = np.array([
+                        fold_lookup.get(str(int(rid)), -1) for rid in train_ids
+                    ])
+                    unique_folds = sorted({f for f in fold_values.tolist() if f >= 0})
 
-                    fold_assignments = np.zeros(len(train_ids), dtype=int)
-                    if use_stratified:
-                        from sklearn.model_selection import StratifiedKFold
+                    use_cvfolds = len(unique_folds) >= 3
+                    if use_cvfolds:
+                        fold_map = {val: idx for idx, val in enumerate(unique_folds)}
+                        fold_assignments = np.array([fold_map.get(f, -1) for f in fold_values], dtype=int)
+                        if (fold_assignments < 0).any():
+                            use_cvfolds = False
 
-                        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-                        for fold, (_, val_idx) in enumerate(kf.split(train_ids, stratify_vals)):
-                            fold_assignments[val_idx] = fold
+                    if use_cvfolds:
+                        n_folds = len(unique_folds)
+                        use_stratified = False
+                        print(f"   CVfolds: Using {n_folds} pre-defined folds for CV")
                     else:
-                        from sklearn.model_selection import KFold
+                        n_folds = min(5, max(2, len(train_ids)))
+                        stratify_vals = y_train.sum(axis=1)
+                        use_stratified = len(np.unique(stratify_vals)) > 1
+                        fold_assignments = np.zeros(len(train_ids), dtype=int)
+                        if use_stratified:
+                            from sklearn.model_selection import StratifiedKFold
 
-                        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
-                        for fold, (_, val_idx) in enumerate(kf.split(train_ids)):
-                            fold_assignments[val_idx] = fold
+                            kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+                            for fold, (_, val_idx) in enumerate(kf.split(train_ids, stratify_vals)):
+                                fold_assignments[val_idx] = fold
+                        else:
+                            from sklearn.model_selection import KFold
+
+                            kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+                            for fold, (_, val_idx) in enumerate(kf.split(train_ids)):
+                                fold_assignments[val_idx] = fold
 
                     canonical_dir = working_dir / "canonical"
                     canonical_dir.mkdir(parents=True, exist_ok=True)
@@ -169,11 +166,16 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                     with open(canonical_dir / "feature_cols.json", "w") as f:
                         json.dump([], f)
 
+                    cv_folds_source = "cvfolds" if use_cvfolds else "generated"
+                    train_test_ids_source = "labels"
                     metadata = {
                         "original_rows": int(len(rec_ids)),
                         "canonical_rows": int(len(train_ids)),
                         "n_folds": int(n_folds),
                         "cv_strategy": "stratified_kfold" if use_stratified else "kfold",
+                        "cv_folds_source": cv_folds_source,
+                        "cv_folds_used": bool(use_cvfolds),
+                        "train_test_ids_source": train_test_ids_source,
                         "id_col": "rec_id",
                         "id_is_synthetic": False,
                         "target_col": "label",
@@ -206,7 +208,9 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                         "canonical_data_skipped_reason": None,
                         "train_rec_ids": train_ids.tolist(),
                         "test_rec_ids": test_ids.tolist(),
-                        "cv_folds_used": True,
+                        "cv_folds_used": bool(use_cvfolds),
+                        "cv_folds_source": cv_folds_source,
+                        "train_test_ids_source": train_test_ids_source,
                         "last_updated": datetime.now(),
                     }
                 except Exception as e:

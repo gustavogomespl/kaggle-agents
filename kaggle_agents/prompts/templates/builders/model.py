@@ -1037,14 +1037,16 @@ def _build_audio_domain_instructions(state: dict) -> list[str]:
                 "    ```",
             ])
 
-    # CVfolds train/test split
+    # Train/test split (labels or CVfolds)
     train_ids = state.get("train_rec_ids", [])
     test_ids = state.get("test_rec_ids", [])
     n_train = len(train_ids)
+    train_test_source = state.get("train_test_ids_source") or ("cvfolds" if state.get("cv_folds_used") else "")
 
-    if state.get("cv_folds_used"):
+    if train_ids and test_ids:
+        source_label = train_test_source or "state"
         instructions.extend([
-            "\n📊 TRAIN/TEST SPLIT (FROM CVfolds - DO NOT INFER FROM sample_submission):",
+            f"\n📊 TRAIN/TEST SPLIT (FROM {source_label.upper()} - DO NOT INFER FROM sample_submission):",
             f"  - Train samples: {n_train} rec_ids (use train_rec_ids from state)",
             f"  - Test samples: {len(test_ids)} rec_ids (use test_rec_ids from state)",
             "  - Filter audio files by rec_id membership in these lists",

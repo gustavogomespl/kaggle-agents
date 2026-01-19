@@ -1026,7 +1026,20 @@ def _load_labels_from_files():
     for lf in LABEL_FILES:
         if lf.exists() and 'label' in str(lf).lower():
             try:
-                labels_df = parse_label_file(lf)
+                # Prefer MLSP parser for rec_labels* files (handles hidden '?' rows)
+                if "rec_labels" in lf.name.lower():
+                    from kaggle_agents.utils.label_parser import parse_mlsp_multilabel
+                    rec_ids, label_matrix = parse_mlsp_multilabel(lf)
+                    rows = []
+                    for i, rec_id in enumerate(rec_ids):
+                        label_indices = np.where(label_matrix[i] > 0)[0]
+                        for lbl in label_indices:
+                            rows.append({"rec_id": rec_id, "label": int(lbl)})
+                    labels_df = pd.DataFrame(rows)
+                    if labels_df.empty:
+                        raise ValueError("parse_mlsp_multilabel returned no label rows")
+                else:
+                    labels_df = parse_label_file(lf)
                 print(f"[INFO] Loaded labels from {lf.name}")
                 break
             except ValueError as e:
@@ -1120,47 +1133,53 @@ print("          DO NOT call np.load(CANONICAL_DIR / 'folds.npy') directly!")
 # === END CANONICAL FALLBACK ===
 '''
 
-        # Inject CVfolds train/test split if available
-        # This is CRITICAL for competitions like MLSP 2013 Birds where train/test is defined in CVfolds_*.txt
+        # Inject train/test split if available (labels or CVfolds)
+        # This is CRITICAL for competitions like MLSP 2013 Birds where train/test is not in train.csv
         test_rec_ids = state.get("test_rec_ids", []) if state else []
         train_rec_ids = state.get("train_rec_ids", []) if state else []
         cv_folds_used = state.get("cv_folds_used", False) if state else False
+        train_test_source = (state or {}).get("train_test_ids_source") or ("cvfolds" if cv_folds_used else "")
 
-        if cv_folds_used and test_rec_ids:
+        if train_rec_ids and test_rec_ids:
+            source_label = train_test_source or "unknown"
             # For large ID lists (>100 items), save to files to avoid bloating generated code
             if len(test_rec_ids) > 100 or len(train_rec_ids) > 100:
                 # Save IDs to models directory for loading
                 import numpy as np
                 models_dir.mkdir(parents=True, exist_ok=True)
-                np.save(models_dir / "cvfolds_train_ids.npy", np.array(train_rec_ids))
-                np.save(models_dir / "cvfolds_test_ids.npy", np.array(test_rec_ids))
+                np.save(models_dir / "train_rec_ids.npy", np.array(train_rec_ids))
+                np.save(models_dir / "test_rec_ids.npy", np.array(test_rec_ids))
                 path_header += f'''
-# === CVfolds TRAIN/TEST SPLIT (AUTO-INJECTED - DO NOT OVERRIDE) ===
-# These IDs come from CVfolds*.txt file - ALWAYS use these!
-# DO NOT infer test count from sample_submission row count!
-_cvfolds_train_path = MODELS_DIR / "cvfolds_train_ids.npy"
-_cvfolds_test_path = MODELS_DIR / "cvfolds_test_ids.npy"
-TRAIN_REC_IDS = np.load(_cvfolds_train_path, allow_pickle=True).tolist() if _cvfolds_train_path.exists() else []
-TEST_REC_IDS = np.load(_cvfolds_test_path, allow_pickle=True).tolist() if _cvfolds_test_path.exists() else []
+# === TRAIN/TEST SPLIT (AUTO-INJECTED - DO NOT OVERRIDE) ===
+# Source: {source_label}
+# ALWAYS use these IDs for audio loading and submission alignment!
+# DO NOT infer test count from sample_submission row count.
+_train_rec_ids_path = MODELS_DIR / "train_rec_ids.npy"
+_test_rec_ids_path = MODELS_DIR / "test_rec_ids.npy"
+TRAIN_REC_IDS = np.load(_train_rec_ids_path, allow_pickle=True).tolist() if _train_rec_ids_path.exists() else []
+TEST_REC_IDS = np.load(_test_rec_ids_path, allow_pickle=True).tolist() if _test_rec_ids_path.exists() else []
 N_TRAIN = {len(train_rec_ids)}
 N_TEST = {len(test_rec_ids)}
+TRAIN_TEST_SOURCE = "{source_label}"
 
-print(f"[CVfolds] Train: {{N_TRAIN}} recordings, Test: {{N_TEST}} recordings")
-# === END CVfolds ===
+print(f"[TRAIN/TEST] Train: {{N_TRAIN}} recordings, Test: {{N_TEST}} recordings (source={{TRAIN_TEST_SOURCE}})")
+# === END TRAIN/TEST SPLIT ===
 '''
             else:
                 # Small lists can be inlined safely
                 path_header += f'''
-# === CVfolds TRAIN/TEST SPLIT (AUTO-INJECTED - DO NOT OVERRIDE) ===
-# These IDs come from CVfolds*.txt file - ALWAYS use these!
-# DO NOT infer test count from sample_submission row count!
+# === TRAIN/TEST SPLIT (AUTO-INJECTED - DO NOT OVERRIDE) ===
+# Source: {source_label}
+# ALWAYS use these IDs for audio loading and submission alignment!
+# DO NOT infer test count from sample_submission row count.
 TRAIN_REC_IDS = {train_rec_ids}
 TEST_REC_IDS = {test_rec_ids}
 N_TRAIN = {len(train_rec_ids)}
 N_TEST = {len(test_rec_ids)}
+TRAIN_TEST_SOURCE = "{source_label}"
 
-print(f"[CVfolds] Train: {{N_TRAIN}} recordings, Test: {{N_TEST}} recordings")
-# === END CVfolds ===
+print(f"[TRAIN/TEST] Train: {{N_TRAIN}} recordings, Test: {{N_TEST}} recordings (source={{TRAIN_TEST_SOURCE}})")
+# === END TRAIN/TEST SPLIT ===
 '''
 
         # Inject smart file locator for audio/image competitions
@@ -1336,7 +1355,10 @@ def _resolve_audio_paths(rec_ids, audio_dir, id_to_filename):
 
 # Pre-resolve audio paths for train + test IDs (if available)
 _REC_IDS_FOR_PATHS = _merge_rec_ids(
-    _PRELOADED_REC_IDS,
+    _merge_rec_ids(
+        _PRELOADED_REC_IDS,
+        TRAIN_REC_IDS if 'TRAIN_REC_IDS' in globals() else []
+    ),
     TEST_REC_IDS if 'TEST_REC_IDS' in globals() else []
 )
 _PRELOADED_ID_TO_PATH = _resolve_audio_paths(
@@ -1353,7 +1375,10 @@ print(f"[INFO] Resolved {{len(_PRELOADED_ID_TO_PATH)}}/{{len(_REC_IDS_FOR_PATHS)
 # === REC_ID TO AUDIO PATH MAPPING (DIRECT - no mapping file found) ===
 # Trying direct ID-based path resolution
 _REC_IDS_FOR_PATHS = _merge_rec_ids(
-    _PRELOADED_REC_IDS,
+    _merge_rec_ids(
+        _PRELOADED_REC_IDS,
+        TRAIN_REC_IDS if 'TRAIN_REC_IDS' in globals() else []
+    ),
     TEST_REC_IDS if 'TEST_REC_IDS' in globals() else []
 )
 _PRELOADED_ID_TO_PATH = {{}}
@@ -1411,10 +1436,12 @@ def create_train_df_from_filenames(audio_dir, label_pattern=r'_(\\d+)\\.'):
             id_pattern = submission_format.get("id_pattern", "")
             if num_classes > 1 or id_pattern:
                 if submission_format.get("format_type") == "long":
-                    path_header += """
+                    path_header += f"""
 # NOTE: Long-format submission detected.
 # CANONICAL_TEST_IDS are submission row IDs (e.g., rec_id * 100 + class_id).
-# Use TEST_REC_IDS (from CVfolds) when loading test audio files.
+# Use TEST_REC_IDS (from labels/CVfolds) when loading test audio files.
+NUM_CLASSES = int(CANONICAL_METADATA.get("n_classes", {num_classes})) if 'CANONICAL_METADATA' in globals() else {num_classes}
+print(f"[INFO] NUM_CLASSES set to {{NUM_CLASSES}} for long-format submission")
 """
                 path_header += f'''
 # === SUBMISSION FORMAT (AUTO-DETECTED) ===

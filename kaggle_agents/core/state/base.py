@@ -52,6 +52,13 @@ class KaggleState(TypedDict):
     target_col: str
     data_files: dict[str, Any]
 
+    # Audio/CV Folds - Train/Test Split
+    train_rec_ids: list[int]  # Recording IDs for training
+    test_rec_ids: list[int]  # Recording IDs for testing
+    cv_folds_used: bool  # True if CVfolds file was used for split
+    cv_folds_path: str | None  # Path to CVfolds file
+    train_test_ids_source: str | None  # "labels" or "cvfolds" - source of train/test split
+
     # Expected row counts (for OOF alignment across models)
     expected_train_rows: int | None  # Expected rows in train set
     expected_test_rows: int | None   # Expected rows in test set
@@ -267,6 +274,12 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         sample_submission_path="",
         target_col="",
         data_files={},
+        # Audio/CV Folds - Train/Test Split
+        train_rec_ids=[],
+        test_rec_ids=[],
+        cv_folds_used=False,
+        cv_folds_path=None,
+        train_test_ids_source=None,
         # Expected row counts
         expected_train_rows=None,
         expected_test_rows=None,

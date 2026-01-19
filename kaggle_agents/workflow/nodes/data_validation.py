@@ -176,6 +176,15 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
 
         label_files = [Path(lf) for lf in data_files.get("label_files", []) if lf]
 
+        # Extract train/test split from labels (shared helper)
+        label_split_set = False
+        from ...utils.label_parser import extract_train_test_split_from_labels
+
+        label_split = extract_train_test_split_from_labels(label_files, verbose=True)
+        if label_split:
+            updates.update(label_split)
+            label_split_set = True
+
         def _merge_feature_infos(infos: list[PrecomputedFeaturesInfo]) -> PrecomputedFeaturesInfo:
             merged = PrecomputedFeaturesInfo()
             for info in infos:
@@ -289,15 +298,19 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                     break
         if cv_folds_path and Path(cv_folds_path).exists():
             try:
-                parsed = _parse_cvfolds(Path(cv_folds_path))
-                if parsed:
-                    train_rec_ids, test_rec_ids, semantics = parsed
-                    updates["train_rec_ids"] = train_rec_ids
-                    updates["test_rec_ids"] = test_rec_ids
-                    updates["cv_folds_used"] = True
-                    updates["cv_folds_path"] = str(cv_folds_path)
-                    print(f"   CVfolds semantics: {semantics}")
-                    print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
+                updates["cv_folds_path"] = str(cv_folds_path)
+                if not label_split_set:
+                    parsed = _parse_cvfolds(Path(cv_folds_path))
+                    if parsed:
+                        train_rec_ids, test_rec_ids, semantics = parsed
+                        updates["train_rec_ids"] = train_rec_ids
+                        updates["test_rec_ids"] = test_rec_ids
+                        updates["cv_folds_used"] = True
+                        updates["train_test_ids_source"] = "cvfolds"
+                        print(f"   CVfolds semantics: {semantics}")
+                        print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
+                else:
+                    print("   CVfolds found; keeping label-based train/test split")
             except Exception as e:
                 print(f"   Warning: Failed to parse CVfolds file: {e}")
 

@@ -486,9 +486,10 @@ The `submission_format_info` in state tells you exactly which format to use!
 Many audio competitions provide precomputed features (histogram_features.txt, location_features.txt).
 Check `precomputed_features_info` in state - use these instead of re-extracting!
 
-## CVfolds FOR TRAIN/TEST SPLIT
-If `cv_folds_used` is True in state, use `train_rec_ids` and `test_rec_ids` from state.
-Do NOT infer train/test from sample_submission.csv!
+## TRAIN/TEST SPLIT (CRITICAL)
+If `train_rec_ids` and `test_rec_ids` are present in state (from labels or CVfolds),
+you MUST use them. Do NOT infer train/test from sample_submission.csv!
+`train_test_ids_source` indicates the source (labels vs cvfolds).
 
 ## MULTI-LABEL CLASSIFICATION
 Most audio competitions are multi-label:
@@ -516,7 +517,7 @@ For audio regression competitions:
 Check `precomputed_features_info` in state for available features.
 
 ## Train/Test Split
-If `cv_folds_used` is True, use `train_rec_ids` and `test_rec_ids` from state.
+If `train_rec_ids` and `test_rec_ids` exist in state, use them (ignore sample_submission).
 """,
 }
 
