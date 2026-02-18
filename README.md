@@ -4,6 +4,10 @@
 
 Autonomous agent system for Kaggle competitions using LangGraph, DSPy, and concepts from Google's MLE Star framework (https://www.arxiv.org/abs/2506.15692).
 
+#Colab notebooks example
+
+Example for MLE Bench evaluation use (https://colab.research.google.com/drive/1AluH6I7vniCIo-ULCBRJJlco7K7tdFk_?usp=sharing#scrollTo=081AGrB8PYJD)
+
 ## Quickstart
 
 1) Install in dev mode:
