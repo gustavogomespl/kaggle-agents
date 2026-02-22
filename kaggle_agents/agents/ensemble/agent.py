@@ -32,6 +32,22 @@ from .submission import safe_restore_submission, validate_and_align_submission
 from .utils import class_orders_match, encode_labels
 
 
+def _truncate_pred_cols(preds: np.ndarray, expected_cols: int) -> np.ndarray:
+    """Truncate prediction columns to match submission format.
+
+    For binary classification where models produce 2 columns [P(class=0), P(class=1)]
+    but submission expects 1 column, selects column 1 (positive class).
+    This follows the scikit-learn convention and matches stacking.py behavior.
+    """
+    if preds.ndim != 2 or preds.shape[1] <= expected_cols:
+        return preds
+    if preds.shape[1] == 2 and expected_cols == 1:
+        # Binary classification: select positive class (column 1)
+        return preds[:, 1:]
+    # General case: take last expected_cols columns
+    return preds[:, -expected_cols:]
+
+
 class EnsembleAgent:
     """Agent responsible for creating model ensembles."""
 
@@ -264,7 +280,7 @@ class EnsembleAgent:
             expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
             if ensemble_preds.shape[1] > expected_cols:
                 print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                ensemble_preds = ensemble_preds[:, :expected_cols]
+                ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
 
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
@@ -310,7 +326,7 @@ class EnsembleAgent:
 
                 # Truncate prediction columns if needed
                 if preds.shape[1] > n_cols:
-                    preds = preds[:, :n_cols]
+                    preds = _truncate_pred_cols(preds, n_cols)
 
                 if model_ids is not None and len(model_ids) == len(preds):
                     # Use ID-based mapping
@@ -386,7 +402,7 @@ class EnsembleAgent:
             # Validate column count matches submission template
             if ensemble_preds.shape[1] > expected_cols:
                 print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                ensemble_preds = ensemble_preds[:, :expected_cols]
+                ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
 
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
