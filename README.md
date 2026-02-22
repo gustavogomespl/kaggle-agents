@@ -39,16 +39,6 @@ This downloads data, plans, generates code, validates, and creates `submission.c
 - Adjust `max_iterations` if you want fewer iterations to reduce cost.
 - To use auto-submit set `KAGGLE_AUTO_SUBMIT=true` and ensure you have `kaggle.json` or environment variables configured.
 
-## Minimal Structure
-- `kaggle_agents/main.py`: CLI entry point.
-- `kaggle_agents/workflow.py`: LangGraph orchestration.
-- Agents: planner, developer, robustness, submission, reporting.
-
-## Best Practices
-- Use the generated `submission.csv` in the competition directory.
-- Keep `sample_submission.csv` as a template to avoid column/id errors.
-- Avoid callbacks/early_stopping if the XGBoost/LightGBM version is unknown; prefer moderate hyperparameters and pipelines with OneHotEncoder.
-
 ## License
 
 MIT License - use as you want.
