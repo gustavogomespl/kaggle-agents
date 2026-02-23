@@ -788,6 +788,8 @@ class DeveloperAgent(
                     else:
                         state_updates["baseline_cv_score"] = baseline_candidate
                         print(f"Updated baseline CV score: {baseline_candidate:.4f}")
+                        # Also update current_performance_score for the performance evaluator
+                        state_updates["current_performance_score"] = baseline_candidate
 
         if result.success and component.component_type in {"model", "ensemble"}:
             submission_path = working_dir / "submission.csv"

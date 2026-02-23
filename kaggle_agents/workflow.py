@@ -902,6 +902,14 @@ def iteration_control_node(state: KaggleState) -> dict[str, Any]:
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
     best_score = state.get("best_score", 0.0)
+    # Fallback: when no Kaggle submission has occurred (best_score == 0),
+    # use the best available CV score from component development
+    if best_score == 0.0:
+        best_score = (
+            state.get("best_single_model_score")
+            or state.get("baseline_cv_score")
+            or 0.0
+        )
     target_percentile = state.get("target_percentile", 20.0)
 
     # Increment iteration
@@ -956,6 +964,14 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     print("=" * 60)
 
     current_score = state.get("best_score", 0.0)
+    # Fallback: when no Kaggle submission has occurred (best_score == 0),
+    # use the best available CV score from component development
+    if current_score == 0.0:
+        current_score = (
+            state.get("best_single_model_score")
+            or state.get("baseline_cv_score")
+            or 0.0
+        )
     # Dynamic target_score from state (set by MLE-bench or config), fallback to top 20% threshold
     target_score = state.get("target_score")
     if target_score is None:
