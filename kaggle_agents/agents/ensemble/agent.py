@@ -213,6 +213,8 @@ class EnsembleAgent:
         output_path: Path,
         models_dir: Path | None = None,
         expected_n_test: int | None = None,
+        problem_type: str = "",
+        metric_name: str = "",
     ) -> bool:
         """Create a simple average ensemble directly from saved predictions.
 
@@ -281,6 +283,9 @@ class EnsembleAgent:
             if ensemble_preds.shape[1] > expected_cols:
                 print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
                 ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
+
+            from .submission import format_ensemble_predictions
+            ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
 
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
@@ -403,6 +408,9 @@ class EnsembleAgent:
             if ensemble_preds.shape[1] > expected_cols:
                 print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
                 ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
+
+            from .submission import format_ensemble_predictions
+            ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
 
             if ensemble_preds.shape[1] == 1:
                 sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
@@ -957,7 +965,7 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             test_rec_ids = state.get("test_rec_ids", []) if isinstance(state, dict) else []
             expected_n_test = len(test_rec_ids) if test_rec_ids else None
 
-            if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test):
+            if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test, problem_type=problem_type, metric_name=metric_name):
                 return {"ensemble_created": True, "n_models": len(prediction_pairs)}
             return {"ensemble_skipped": True, "skip_reason": "ensemble_creation_failed"}
 

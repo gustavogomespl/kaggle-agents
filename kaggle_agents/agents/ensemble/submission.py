@@ -4,6 +4,43 @@ import shutil
 from pathlib import Path
 
 import pandas as pd
+import numpy as np
+
+
+def format_ensemble_predictions(
+    preds: np.ndarray,
+    sample_sub: pd.DataFrame,
+    problem_type: str,
+    metric_name: str | None = None
+) -> np.ndarray:
+    """Format predictions for submission based on metric and problem type.
+    Converts probabilities to class labels when the metric or sample sub expects integers.
+    """
+    if not problem_type or "class" not in problem_type.lower():
+        return preds
+
+    metric_lower = (metric_name or "").lower()
+    prob_metrics = ("logloss", "log_loss", "log loss", "cross_entropy", "brier", "auc", "roc", "prc", "average_precision")
+    label_metrics = ("accuracy", "f1", "precision", "recall", "kappa", "qwk", "quadratic_weighted_kappa", "mcc")
+    expects_prob = any(m in metric_lower for m in prob_metrics)
+    expects_label = any(m in metric_lower for m in label_metrics)
+
+    sample_suggests_label = False
+    if sample_sub.shape[1] >= 2:
+        sample_vals = sample_sub.iloc[:, 1]
+        if pd.api.types.is_numeric_dtype(sample_vals):
+            svals = sample_vals.to_numpy()
+            if svals.size and np.allclose(svals, np.round(svals)):
+                sample_suggests_label = True
+
+    if expects_label or (sample_suggests_label and not expects_prob):
+        preds_array = np.asarray(preds)
+        if preds_array.ndim == 1 or preds_array.shape[1] == 1:
+            return (preds_array >= 0.5).astype(int)
+        else:
+            return np.argmax(preds_array, axis=1)
+
+    return preds
 
 
 def validate_and_align_submission(

@@ -679,12 +679,20 @@ Common causes:
                 submission_id = result.get("id")
                 print("✅ Uploaded successfully via API!")
 
-            # Wait a bit for processing
-            print("\n⏳ Waiting for score (30s)...")
-            time.sleep(30)
-
-            # Fetch score
-            public_score, percentile = self._fetch_score(competition_name)
+            # Poll for score with retries
+            print("\n⏳ Waiting for score...")
+            public_score = None
+            percentile = None
+            poll_timeout = 120
+            poll_interval = 15
+            elapsed = 0
+            while elapsed < poll_timeout:
+                time.sleep(poll_interval)
+                elapsed += poll_interval
+                public_score, percentile = self._fetch_score(competition_name)
+                if public_score is not None:
+                    break
+                print(f"   Score not ready yet ({elapsed}s/{poll_timeout}s)...")
 
             if public_score is not None:
                 print(f"\n📊 Public Score: {public_score:.4f}")
@@ -745,10 +753,25 @@ Common causes:
             if not submissions:
                 return None, None
 
-            # Get latest submission
+            # Get latest submission - handle both dict and raw Kaggle objects
             latest = submissions[0]
 
-            public_score = latest.get("publicScore")
+            if isinstance(latest, dict):
+                raw_score = latest.get("publicScore")
+            elif hasattr(latest, "publicScore"):
+                raw_score = latest.publicScore
+            else:
+                return None, None
+
+            # Normalize score: skip None, empty, "None" strings
+            if raw_score is None or raw_score in ("", "None"):
+                return None, None
+
+            try:
+                public_score = float(raw_score)
+            except (ValueError, TypeError):
+                return None, None
+
             percentile = self._calculate_percentile(competition_name, public_score)
 
             return public_score, percentile

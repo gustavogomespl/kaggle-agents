@@ -1867,6 +1867,8 @@ class EnsembleAgent:
         prediction_pairs: dict[str, tuple[Path, Path]],
         sample_submission_path: Path,
         output_path: Path,
+        problem_type: str = "",
+        metric_name: str = "",
     ) -> bool:
         """Create a simple average ensemble directly from saved predictions."""
         if not sample_submission_path.exists():
@@ -1908,8 +1910,11 @@ class EnsembleAgent:
                 )
                 return False
 
-            if ensemble_preds.shape[1] == 1:
-                sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+            from .ensemble.submission import format_ensemble_predictions
+            ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
+
+            if ensemble_preds.ndim == 1 or ensemble_preds.shape[1] == 1:
+                sample_sub.iloc[:, 1] = ensemble_preds[:, 0] if ensemble_preds.ndim == 2 else ensemble_preds
             else:
                 if ensemble_preds.shape[1] != (len(sample_sub.columns) - 1):
                     print(
@@ -1962,8 +1967,11 @@ class EnsembleAgent:
                     )
                     return False
 
-                if ensemble_preds.shape[1] == 1:
-                    sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+                from .ensemble.submission import format_ensemble_predictions
+                ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
+
+                if ensemble_preds.ndim == 1 or ensemble_preds.shape[1] == 1:
+                    sample_sub.iloc[:, 1] = ensemble_preds[:, 0] if ensemble_preds.ndim == 2 else ensemble_preds
                 else:
                     if ensemble_preds.shape[1] != (len(sample_sub.columns) - 1):
                         print(
@@ -1987,8 +1995,11 @@ class EnsembleAgent:
             )
             return False
 
-        if ensemble_preds.shape[1] == 1:
-            sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
+        from .ensemble.submission import format_ensemble_predictions
+        ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
+
+        if ensemble_preds.ndim == 1 or ensemble_preds.shape[1] == 1:
+            sample_sub.iloc[:, 1] = ensemble_preds[:, 0] if ensemble_preds.ndim == 2 else ensemble_preds
         else:
             if ensemble_preds.shape[1] != (len(sample_sub.columns) - 1):
                 print(
@@ -3216,7 +3227,7 @@ Return a JSON object:
                             else working_dir / "sample_submission.csv"
                         )
                         if self._ensemble_from_predictions(
-                            prediction_pairs, sample_path, output_path
+                            prediction_pairs, sample_path, output_path, problem_type, metric_name
                         ):
                             ensemble_oof_score = None
                             if baseline_score_val is not None:
@@ -3516,7 +3527,15 @@ Return a JSON object:
                     # Save submission
                     if sample_sub_path.exists():
                         sub_df = pd.read_csv(sample_sub_path)
-                        sub_df.iloc[:, 1] = final_preds
+                        
+                        from .ensemble.submission import format_ensemble_predictions
+                        final_preds = format_ensemble_predictions(final_preds, sub_df, problem_type, metric_name)
+                        
+                        if final_preds.ndim == 1 or final_preds.shape[1] == 1:
+                            sub_df.iloc[:, 1] = final_preds[:, 0] if final_preds.ndim == 2 else final_preds
+                        else:
+                            sub_df.iloc[:, 1:] = final_preds
+                            
                         submission_path = working_dir / "submission.csv"
                         sub_df.to_csv(submission_path, index=False)
                         print(f"  ✅ Saved ensemble submission to {submission_path}")
@@ -3561,8 +3580,12 @@ Return a JSON object:
                         # Save submission
                         if sample_sub_path.exists():
                             sub_df = pd.read_csv(sample_sub_path)
-                            if final_preds.ndim == 1:
-                                sub_df.iloc[:, 1] = final_preds
+                            
+                            from .ensemble.submission import format_ensemble_predictions
+                            final_preds = format_ensemble_predictions(final_preds, sub_df, problem_type, metric_name)
+                            
+                            if final_preds.ndim == 1 or final_preds.shape[1] == 1:
+                                sub_df.iloc[:, 1] = final_preds[:, 0] if final_preds.ndim == 2 else final_preds
                             else:
                                 sub_df.iloc[:, 1:] = final_preds
 

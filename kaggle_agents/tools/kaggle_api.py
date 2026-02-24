@@ -372,13 +372,13 @@ class KaggleAPIClient:
                     {
                         "date": str(sub.date) if hasattr(sub, "date") else "N/A",
                         "description": sub.description if hasattr(sub, "description") else "",
-                        "status": sub.status if hasattr(sub, "status") else "unknown",
+                        "status": str(sub.status).split(".")[-1].lower() if hasattr(sub, "status") and sub.status is not None else "unknown",
                         "publicScore": float(sub.publicScore)
-                        if hasattr(sub, "publicScore") and sub.publicScore
-                        else 0.0,
+                        if hasattr(sub, "publicScore") and sub.publicScore not in (None, "", "None")
+                        else None,
                         "privateScore": float(sub.privateScore)
-                        if hasattr(sub, "privateScore") and sub.privateScore
-                        else 0.0,
+                        if hasattr(sub, "privateScore") and sub.privateScore not in (None, "", "None")
+                        else None,
                         "fileName": sub.fileName if hasattr(sub, "fileName") else "",
                     }
                 )
