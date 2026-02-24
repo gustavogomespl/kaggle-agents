@@ -54,6 +54,43 @@ class KaggleOrchestrator:
         self.config = get_config()
         self.console = Console()
 
+    def _resolve_metric(self, competition_name: str, evaluation_metric: str) -> str:
+        """Resolve evaluation metric, auto-detecting from Kaggle API if needed.
+
+        Args:
+            competition_name: Competition name
+            evaluation_metric: Current metric value ("auto", "unknown", or explicit)
+
+        Returns:
+            Resolved metric name
+        """
+        if evaluation_metric not in ("auto", "unknown"):
+            return evaluation_metric
+
+        try:
+            from ..tools.kaggle_api import KaggleAPIClient
+
+            client = KaggleAPIClient()
+            info = client.get_competition_info(competition_name)
+            detected = info.get("evaluation", "unknown")
+
+            if detected and detected != "unknown":
+                console.print(
+                    f"[green]Auto-detected metric:[/green] [bold]{detected}[/bold]"
+                )
+                return detected
+
+            console.print(
+                "[yellow]Could not detect metric from Kaggle API, using 'accuracy' as fallback[/yellow]"
+            )
+            return "accuracy"
+
+        except Exception as e:
+            console.print(
+                f"[yellow]Metric auto-detection failed ({e!s}), using 'accuracy' as fallback[/yellow]"
+            )
+            return "accuracy"
+
     def solve_competition(
         self,
         competition_name: str,
@@ -78,6 +115,9 @@ class KaggleOrchestrator:
             WorkflowResults with execution summary
         """
         start_time = time.time()
+
+        # Auto-detect metric from Kaggle API when not explicitly provided
+        evaluation_metric = self._resolve_metric(competition_name, evaluation_metric)
 
         # Setup
         working_dir = str(get_competition_dir(competition_name))

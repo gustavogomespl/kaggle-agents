@@ -42,6 +42,8 @@ class SubmissionAgent:
         self.config = get_config()
         self.kaggle_api = KaggleApi()
 
+        self._current_metric_name = ""
+
         # Try to authenticate
         try:
             self.kaggle_api.authenticate()
@@ -66,6 +68,7 @@ class SubmissionAgent:
         working_dir = Path(state["working_directory"])
         competition_name = state["competition_info"].name
         metric_name = state["competition_info"].evaluation_metric
+        self._current_metric_name = metric_name
         sample_submission_path = (
             state.get("sample_submission_path") or working_dir / "sample_submission.csv"
         )
@@ -600,6 +603,8 @@ Common causes:
         Returns:
             SubmissionResult
         """
+        working_dir = Path(state["working_directory"])
+
         # Check if authenticated
         if not self.authenticated:
             print("⚠️  Kaggle API not authenticated")
@@ -772,7 +777,9 @@ Common causes:
             except (ValueError, TypeError):
                 return None, None
 
-            percentile = self._calculate_percentile(competition_name, public_score)
+            percentile = self._calculate_percentile(
+                competition_name, public_score, metric_name=self._current_metric_name
+            )
 
             return public_score, percentile
 
@@ -780,17 +787,22 @@ Common causes:
             print(f"⚠️  Could not fetch score: {e!s}")
             return None, None
 
-    def _calculate_percentile(self, competition_name: str, score: float) -> float | None:
+    def _calculate_percentile(
+        self, competition_name: str, score: float, metric_name: str = ""
+    ) -> float | None:
         """
         Calculate percentile rank on leaderboard.
 
         Args:
             competition_name: Competition name
             score: Public score
+            metric_name: Evaluation metric name (used to determine direction)
 
         Returns:
-            Percentile (0-100)
+            Percentile (0-100, lower is better — 1% = top 1%)
         """
+        from ..core.config import is_metric_minimization
+
         try:
             # Get leaderboard
             leaderboard = self.kaggle_api.competition_leaderboard_view(competition_name)
@@ -798,8 +810,22 @@ Common causes:
             if not leaderboard:
                 return None
 
+            minimize = is_metric_minimization(metric_name) if metric_name else False
+
             # Count submissions better than ours
-            better_count = sum(1 for entry in leaderboard if entry["score"] > score)
+            if minimize:
+                # Lower is better: entries with score < ours are better
+                better_count = sum(
+                    1 for entry in leaderboard
+                    if float(entry.score if hasattr(entry, "score") else entry["score"]) < score
+                )
+            else:
+                # Higher is better: entries with score > ours are better
+                better_count = sum(
+                    1 for entry in leaderboard
+                    if float(entry.score if hasattr(entry, "score") else entry["score"]) > score
+                )
+
             total_count = len(leaderboard)
 
             return (better_count / total_count) * 100

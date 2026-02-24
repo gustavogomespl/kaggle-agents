@@ -48,7 +48,7 @@ def start_competition(
     competition_name: str,
     description: str | None = None,
     problem_type: str = "binary_classification",
-    evaluation_metric: str = "accuracy",
+    evaluation_metric: str = "auto",
     max_iterations: int = 3,
 ):
     """
@@ -180,7 +180,7 @@ def main():
             "regression",
         ],
     )
-    start_parser.add_argument("--metric", "-m", help="Evaluation metric", default="accuracy")
+    start_parser.add_argument("--metric", "-m", help="Evaluation metric (default: auto-detect from Kaggle API)", default="auto")
     start_parser.add_argument(
         "--max-iterations",
         "-i",
