@@ -8,6 +8,8 @@ Autonomous agent system for Kaggle competitions using LangGraph, DSPy, and conce
 
 Example for MLE Bench evaluation use (https://colab.research.google.com/drive/1AluH6I7vniCIo-ULCBRJJlco7K7tdFk_?usp=sharing#scrollTo=081AGrB8PYJD)
 
+Example for Kaggle competition use (https://colab.research.google.com/drive/14INytAtGtAQ5935yEj27cJi4zwsFTbkJ#scrollTo=run_workflow)
+
 ## Quickstart
 
 1) Install in dev mode:
@@ -28,11 +30,11 @@ export KAGGLE_KEY="..."
 
 3) Run automation via CLI:
 ```bash
-python -m kaggle_agents.main playground-series-s5e11 --max-iterations 2
+python -m notebooks/kaggle_eval.py --competition playground-series-s5e11 --max-iterations 2
 ```
 This downloads data, plans, generates code, validates, and creates `submission.csv` in the competition directory.
 
-4) Notebook example: check `kaggle_agents_colab.ipynb` for Colab usage.
+4) Notebook example: check the links for Colab usage.
 
 ## Configuration Notes
 - Python 3.11+.
