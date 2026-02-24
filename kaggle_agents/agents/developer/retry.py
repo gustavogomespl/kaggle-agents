@@ -26,7 +26,7 @@ from ...prompts.templates.developer_prompts import (
     HARD_CONSTRAINTS,
     format_error_info,
 )
-from ...utils.llm_utils import get_text_content
+from ...utils.llm_utils import get_text_content, invoke_with_retry
 from .code_generator import get_dynamic_temperature
 
 
@@ -35,6 +35,25 @@ if TYPE_CHECKING:
 
     from ...optimization import PreferenceCollector
     from ...tools.code_executor import CodeExecutor, ExecutionResult
+
+_CATEGORICAL_ENCODING_HINT = (
+    "\n\n## Encoding Hint (auto-detected from error):\n"
+    "The error indicates string/categorical columns that the model cannot consume directly. "
+    "Before fitting ANY model, convert every object/category column:\n"
+    "  for col in df.select_dtypes(include=['object', 'category']).columns:\n"
+    "      df[col] = df[col].astype('category').cat.codes\n"
+    "Apply this to BOTH train and test DataFrames BEFORE any model.fit() call."
+)
+
+_CATEGORICAL_ERROR_PATTERNS = ("could not convert string", "invalid literal")
+
+
+def _maybe_add_encoding_hint(error_text: str) -> str:
+    """Append a categorical-encoding hint if the error matches known patterns."""
+    error_lower = error_text.lower()
+    if any(pattern in error_lower for pattern in _CATEGORICAL_ERROR_PATTERNS):
+        return error_text + _CATEGORICAL_ENCODING_HINT
+    return error_text
 
 
 class RetryMixin:
@@ -398,7 +417,7 @@ class RetryMixin:
                 HumanMessage(content=prompt),
             ]
 
-            response = self.llm.invoke(messages)
+            response = invoke_with_retry(self.llm, messages)
             return get_text_content(response.content).strip()
         except Exception as e:
             return f"Meta-feedback unavailable: {e!s}"
@@ -445,6 +464,9 @@ class RetryMixin:
             developer_guidance = refinement_guidance.get("developer_guidance", "")
             if developer_guidance:
                 error_text = f"{error_text}\n\n## Meta-Evaluator Strategy:\n{developer_guidance}"
+
+        # Inject categorical encoding hint when applicable
+        error_text = _maybe_add_encoding_hint(error_text)
 
         # Get dynamic temperature based on attempt number
         fix_temperature = get_dynamic_temperature(
@@ -498,7 +520,7 @@ Output Dir: {paths.get('output_dir', '.')}"""
                     temperature=fix_temperature,
                     max_tokens=self.config.llm.max_tokens,
                 )
-                response = fix_llm.invoke(messages)
+                response = invoke_with_retry(fix_llm, messages)
                 fixed_code = self._extract_code_from_response(
                     get_text_content(response.content)
                 )
@@ -558,6 +580,12 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 meta_feedback = (meta_feedback or "") + meta_eval_context
                 print("   🧠 Injected Meta-Evaluator guidance into debug context")
 
+        # Inject categorical encoding hint based on the initial error
+        initial_errors = " ".join(exec_result.errors) if exec_result.errors else exec_result.stderr
+        if any(p in initial_errors.lower() for p in _CATEGORICAL_ERROR_PATTERNS):
+            meta_feedback = (meta_feedback or "") + _CATEGORICAL_ENCODING_HINT
+            print("   🔤 Injected categorical encoding hint into debug context")
+
         # Get debug temperature (higher for creative problem-solving)
         debug_temperature = get_dynamic_temperature(
             context="debug",
@@ -614,7 +642,13 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 HumanMessage(content=prompt),
             ]
 
-            response = debug_llm.invoke(messages)
+            try:
+                response = invoke_with_retry(debug_llm, messages)
+            except Exception as e:
+                print(f"   ⚠️ Debug LLM call failed after retries: {e}. Returning current code.")
+                if original_timeout is not None:
+                    self.executor.timeout = original_timeout
+                return code, exec_result, False
             debugged_code = self._extract_code_from_response(get_text_content(response.content))
 
             test_result = self.executor.execute(
