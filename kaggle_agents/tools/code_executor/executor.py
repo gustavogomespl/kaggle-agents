@@ -17,7 +17,12 @@ from queue import Empty, Queue
 
 from .dataclasses import ExecutionResult
 from .error_parser import ErrorParserMixin
-from .process import kill_process_tree, set_resource_limits, start_new_process_group
+from .process import (
+    build_subprocess_env,
+    kill_process_tree,
+    set_resource_limits,
+    start_new_process_group,
+)
 from .sanitizer import CodeSanitizerMixin
 from .submission import SubmissionValidationMixin
 
@@ -98,6 +103,11 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
             with open(script_file, "w", encoding="utf-8") as f:
                 f.write(code)
 
+            # Keep common credential discovery paths away from the real user
+            # home. This reduces accidental exposure but is not an OS sandbox.
+            generated_home = working_path / ".agent_home"
+            generated_home.mkdir(parents=True, exist_ok=True)
+
             # Execute in subprocess with REAL-TIME STREAMING
             start_time = time.time()
 
@@ -118,6 +128,7 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffered
+                env=build_subprocess_env(home_dir=generated_home),
                 preexec_fn=preexec_setup if platform.system() != "Windows" else None,
                 start_new_session=True if platform.system() != "Windows" else False,
             )
