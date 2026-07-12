@@ -55,6 +55,19 @@ from .validation import (
 )
 
 
+def determine_planning_mode(state: KaggleState) -> tuple[bool, bool]:
+    """Return ``(is_targeted_refinement, use_eureka)`` for the current turn."""
+    current_iteration = state.get("current_iteration", 0)
+    is_refinement = current_iteration > 0 or bool(state.get("force_refinement", False))
+    crossover_guidance = state.get("crossover_guidance", {})
+    evolutionary_generation = state.get("evolutionary_generation", 0)
+    explicit_eureka = bool(state.get("force_eureka_planning", False))
+    use_eureka = explicit_eureka or (
+        not is_refinement and (bool(crossover_guidance) or evolutionary_generation > 0)
+    )
+    return is_refinement, use_eureka
+
+
 class PlannerAgent:
     """
     Agent responsible for creating ablation plans.
@@ -105,14 +118,10 @@ class PlannerAgent:
         Returns:
             State updates with ablation plan
         """
-        # Check if this is a refinement iteration
-        current_iteration = state.get("current_iteration", 0)
-        is_refinement = current_iteration > 1
-
-        # Check if Eureka mode should be used
-        crossover_guidance = state.get("crossover_guidance", {})
-        evolutionary_generation = state.get("evolutionary_generation", 0)
-        use_eureka = bool(crossover_guidance) or evolutionary_generation > 0 or is_refinement
+        # The first completed cycle increments current_iteration from 0 to 1,
+        # so > 0 (not > 1) is the real refinement boundary. Guardrail recovery
+        # can also request an immediate targeted refinement in the same cycle.
+        is_refinement, use_eureka = determine_planning_mode(state)
 
         # Check for debug loop trigger from Meta-Evaluator
         debug_result = handle_debug_loop_trigger(state)
@@ -120,11 +129,17 @@ class PlannerAgent:
             print("\n" + "=" * 60)
             print("= PLANNER AGENT: DEBUG LOOP (Inner Loop Refinement)")
             print("=" * 60)
+            debug_plan, plan_hashes = self._finalize_plan(
+                debug_result["ablation_plan"], state
+            )
             return {
-                "ablation_plan": debug_result["ablation_plan"],
+                "ablation_plan": debug_plan,
                 "is_debug_iteration": True,
                 "debug_target": debug_result.get("debug_target"),
                 "debug_hints": debug_result.get("debug_hints", []),
+                "previous_plan_hashes": plan_hashes,
+                "force_refinement": False,
+                "force_eureka_planning": False,
                 "last_updated": datetime.now(),
             }
 
@@ -163,6 +178,7 @@ class PlannerAgent:
 
             # Validate the selected plan
             validated_plan = self._validate_plan(eureka_result["ablation_plan"], state=state)
+            validated_plan, plan_hashes = self._finalize_plan(validated_plan, state)
 
             # Print summary
             self._print_summary(validated_plan)
@@ -173,6 +189,9 @@ class PlannerAgent:
                 "current_plan_index": eureka_result["current_plan_index"],
                 "evolutionary_generation": eureka_result["evolutionary_generation"],
                 "optimization_strategy": eureka_result["optimization_strategy"],
+                "previous_plan_hashes": plan_hashes,
+                "force_refinement": False,
+                "force_eureka_planning": False,
                 "last_updated": datetime.now(),
             }
 
@@ -185,6 +204,7 @@ class PlannerAgent:
 
         # 3. Validate and enhance plan
         validated_plan = self._validate_plan(ablation_plan, state=state)
+        validated_plan, plan_hashes = self._finalize_plan(validated_plan, state)
 
         # 4. Print summary
         self._print_summary(validated_plan)
@@ -192,6 +212,9 @@ class PlannerAgent:
         return {
             "ablation_plan": validated_plan,
             "optimization_strategy": "ablation_driven",
+            "previous_plan_hashes": plan_hashes,
+            "force_refinement": False,
+            "force_eureka_planning": False,
             "last_updated": datetime.now(),
         }
 
@@ -450,6 +473,29 @@ Return a JSON array with up to {max_components} components. Each component must 
             coerce_components_fn=self._coerce_components,
             is_image_competition_without_features_fn=is_image_competition_without_features,
         )
+
+    def _finalize_plan(
+        self,
+        plan: list[AblationComponent],
+        state: KaggleState,
+    ) -> tuple[list[AblationComponent], list[int]]:
+        """Apply system ablations and record the plan that will actually run."""
+        finalized = list(plan)
+        toggles = getattr(self.config, "ablation_toggles", None)
+        if toggles and toggles.disable_ensemble:
+            removed = sum(1 for component in finalized if component.component_type == "ensemble")
+            finalized = [
+                component for component in finalized if component.component_type != "ensemble"
+            ]
+            if removed:
+                print(f"  ABLATION: removed {removed} ensemble component(s) from plan")
+
+        signature = hash(
+            tuple(sorted((component.name, component.component_type) for component in finalized))
+        )
+        previous = list(state.get("previous_plan_hashes", []) or [])
+        previous.append(signature)
+        return finalized, previous[-10:]
 
     def _create_fallback_plan(
         self,

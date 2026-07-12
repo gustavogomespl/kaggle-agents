@@ -151,13 +151,13 @@ class GuidanceMixin:
         current_iteration = state.get("current_iteration", 0)
         run_mode = str(state.get("run_mode", "")).lower()
         objective = str(state.get("objective", "")).lower()
-        mlebench_grade = state.get("mlebench_grade")
-
-        current_score = state.get("current_performance_score", 0.0)
-        if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
-            score = mlebench_grade.get("score")
-            if isinstance(score, (int, float)):
-                current_score = float(score)
+        current_score = state.get("current_performance_score")
+        if not isinstance(current_score, (int, float)):
+            current_score = state.get("best_single_model_score")
+        if not isinstance(current_score, (int, float)):
+            current_score = state.get("baseline_cv_score")
+        if not isinstance(current_score, (int, float)):
+            current_score = 0.0
 
         target_score = state.get("target_score")
         if target_score is None:
@@ -176,8 +176,8 @@ class GuidanceMixin:
 - run_mode: {run_mode or "kaggle"}
 - objective: {objective or "top20"}
 
-## Current Performance
-- Score: {current_score:.4f}
+## Current CV/OOF Performance
+- CV/OOF score: {current_score:.4f}
 - Target: {target_score:.4f}
 - Gap: {target_score - current_score:.4f}
 
@@ -191,22 +191,6 @@ class GuidanceMixin:
 
 ## Error Patterns
 {chr(10).join("- " + p for p in failure_analysis["error_patterns"])}
-"""
-
-        if isinstance(mlebench_grade, dict):
-            medals = []
-            if mlebench_grade.get("gold_medal"):
-                medals.append("Gold")
-            if mlebench_grade.get("silver_medal"):
-                medals.append("Silver")
-            if mlebench_grade.get("bronze_medal"):
-                medals.append("Bronze")
-            context += f"""
-## MLE-bench Grading
-- valid_submission: {bool(mlebench_grade.get("valid_submission", False))}
-- score: {mlebench_grade.get("score")}
-- above_median: {bool(mlebench_grade.get("above_median", False))}
-- medals: {", ".join(medals) if medals else "None"}
 """
 
         # FULL CODE AND PERFORMANCE ANALYSIS

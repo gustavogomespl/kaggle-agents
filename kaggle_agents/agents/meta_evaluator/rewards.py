@@ -6,9 +6,10 @@ Contains methods for calculating RL reward signals (CodeRL+ pattern).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Any
 
-from ...core.config import calculate_score_improvement
+from ...core.config import calculate_score_improvement, is_metric_minimization
 
 
 if TYPE_CHECKING:
@@ -28,7 +29,7 @@ class RewardsMixin:
 
         Implements multi-faceted reward:
         - Functional correctness (execution success)
-        - Performance (Kaggle score)
+        - Performance (cross-validation/OOF score)
         - Code quality (execution semantics)
 
         Args:
@@ -41,17 +42,33 @@ class RewardsMixin:
         print("\n   💰 Calculating reward signals...")
 
         dev_results = state.get("development_results", [])
-        submissions = state.get("submissions", [])
-        # Prefer MLE-bench grading when available (enables medal-oriented rewards).
-        mlebench_grade = state.get("mlebench_grade")
-        current_score = state.get("current_performance_score", 0.0)
-        if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
-            score = mlebench_grade.get("score")
-            if isinstance(score, (int, float)):
-                current_score = float(score)
-        best_score = state.get("best_score", 0.0)
+        competition_info = state.get("competition_info")
+        metric_name = competition_info.evaluation_metric if competition_info else ""
         run_mode = str(state.get("run_mode", "")).lower()
         objective = str(state.get("objective", "")).lower()
+
+        def _numeric(value: Any) -> float | None:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return None
+            return numeric if math.isfinite(numeric) else None
+
+        # MLE-bench test-set scores are intentionally unavailable during the
+        # workflow. Rewards are based exclusively on CV/OOF state.
+        current_score = _numeric(state.get("current_performance_score"))
+        if current_score is None:
+            current_score = _numeric(state.get("best_single_model_score"))
+        if current_score is None:
+            current_score = _numeric(state.get("baseline_cv_score"))
+        if current_score is None:
+            current_score = 0.0
+
+        best_score = _numeric(state.get("baseline_cv_score"))
+        if best_score is None:
+            best_score = _numeric(state.get("best_single_model_score"))
+        if best_score is None:
+            best_score = current_score
 
         # Reward 1: Functional Correctness (binary)
         total_components = len(dev_results)
@@ -59,51 +76,25 @@ class RewardsMixin:
         r_functional = successful_components / total_components if total_components > 0 else 0.0
 
         # Reward 2: Performance (continuous, normalized 0-1)
-        # Try to get dynamic target from state (e.g. from leaderboard), else default
-        target_score = state.get("target_score")
-        if target_score is None:
-            target_score = 1.0
-        elif isinstance(target_score, str):
-            try:
-                target_score = float(target_score)
-            except (ValueError, TypeError):
-                target_score = 1.0
-        elif not isinstance(target_score, (int, float)):
-            target_score = 1.0
-
-        # Medal-aware shaping (MLE-bench objective)
-        r_medal = 0.0
-        if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
-            if mlebench_grade.get("gold_medal"):
-                r_medal = 1.0
-            elif mlebench_grade.get("silver_medal"):
-                r_medal = 0.8
-            elif mlebench_grade.get("bronze_medal"):
-                r_medal = 0.6
-            elif mlebench_grade.get("above_median"):
-                r_medal = 0.4
-
-        # Ensure current_score is numeric
-        if isinstance(current_score, str):
-            try:
-                current_score = float(current_score)
-            except (ValueError, TypeError):
-                current_score = 0.0
-
-        score_component = (
-            min(float(current_score) / float(target_score), 1.0) if float(target_score) > 0 else 0.0
-        )
-        if run_mode == "mlebench" or "medal" in objective:
-            # Blend medal attainment with raw score; medal dominates to keep the objective explicit.
-            r_performance = min(0.7 * r_medal + 0.3 * score_component, 1.0)
+        target_score = _numeric(state.get("target_score"))
+        if target_score is not None:
+            if is_metric_minimization(metric_name):
+                if current_score <= target_score:
+                    r_performance = 1.0
+                elif current_score > 0 and target_score >= 0:
+                    r_performance = min(target_score / current_score, 1.0)
+                else:
+                    r_performance = 0.0
+            elif target_score > 0:
+                r_performance = max(0.0, min(current_score / target_score, 1.0))
+            else:
+                r_performance = 0.0
+        elif is_metric_minimization(metric_name):
+            r_performance = 1.0 / (1.0 + max(current_score, 0.0))
         else:
-            r_performance = score_component
+            r_performance = max(0.0, min(current_score, 1.0))
 
         # Reward 3: Improvement (delta from previous best)
-        # Get evaluation metric to handle both minimize and maximize metrics correctly
-        competition_info = state.get("competition_info")
-        metric_name = competition_info.evaluation_metric if competition_info else ""
-
         # Calculate improvement considering metric direction (positive = better)
         score_improvement = calculate_score_improvement(current_score, best_score, metric_name)
         r_improvement = max(0.0, min(score_improvement * 10, 1.0))  # Scale to 0-1
@@ -123,26 +114,27 @@ class RewardsMixin:
         )
         r_diversity = min(unique_types / 3.0, 1.0)  # Target: at least 3 different types working
 
-        # Reward 6: Robustness/Overfitting Penalty
-        # Penalize if Public LB score is much lower than Validation score
-        validation_score = state.get("overall_validation_score", 0.0)
-        public_score = 0.0
-        if submissions:
-            public_score = submissions[-1].public_score or 0.0
+        # Reward 6: independent validation robustness. Public/private
+        # leaderboard feedback is unavailable during an MLE-bench workflow.
+        validation_score = state.get("overall_validation_score")
+        robustness_abstained = bool(state.get("robustness_abstained", False))
 
-        # If we have both scores, check gap. If gap > 0.1, heavy penalty.
-        gap = abs(validation_score - public_score)
-        r_robustness = (
-            1.0 - min(gap * 5, 1.0) if (validation_score > 0 and public_score > 0) else 1.0
-        )
+        if robustness_abstained:
+            # This term is removed and the remaining weights are renormalized
+            # below. An ablation must not masquerade as a perfect validation.
+            r_robustness = 0.0
+        elif isinstance(validation_score, (int, float)):
+            r_robustness = max(0.0, min(float(validation_score), 1.0))
+        else:
+            r_robustness = 1.0
 
         # Combined reward (weighted)
         # Performance-focused weights: prioritize score improvement for aggressive optimization.
-        # MLE-bench mode: speed and medal attainment matter more.
+        # MLE-bench mode: prioritize held-out CV/OOF performance.
         if run_mode == "mlebench" or "medal" in objective:
             weights = {
                 "functional": 0.15,      # Reduced: working code is baseline
-                "performance": 0.50,     # Increased: medal achievement is key
+                "performance": 0.50,     # Held-out CV/OOF quality is key
                 "improvement": 0.10,     # Increased: reward progress
                 "semantics": 0.10,       # Reduced slightly
                 "diversity": 0.05,       # Reduced: focus on what works
@@ -159,14 +151,21 @@ class RewardsMixin:
                 "robustness": 0.05,      # Reduced from 0.10
             }
 
-        r_combined = (
-            weights["functional"] * r_functional
-            + weights["performance"] * r_performance
-            + weights["improvement"] * r_improvement
-            + weights["semantics"] * r_semantics
-            + weights["diversity"] * r_diversity
-            + weights["robustness"] * r_robustness
-        )
+        reward_values = {
+            "functional": r_functional,
+            "performance": r_performance,
+            "improvement": r_improvement,
+            "semantics": r_semantics,
+            "diversity": r_diversity,
+            "robustness": r_robustness,
+        }
+        active_weights = dict(weights)
+        if robustness_abstained:
+            active_weights.pop("robustness", None)
+        active_weight_total = sum(active_weights.values()) or 1.0
+        r_combined = sum(
+            weight * reward_values[name] for name, weight in active_weights.items()
+        ) / active_weight_total
 
         rewards = {
             "r_functional": r_functional,
@@ -175,7 +174,6 @@ class RewardsMixin:
             "r_semantics": r_semantics,
             "r_diversity": r_diversity,
             "r_robustness": r_robustness,
-            "r_medal": r_medal,
             "r_combined": r_combined,
         }
 

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from ...core.config import get_config, get_llm_for_role
 from ...optimization import create_training_collector
+from ...utils.telemetry import make_event
 from .analysis import AnalysisMixin
 from .detection import DetectionMixin
 from .eureka import EurekaMixin
@@ -81,6 +82,36 @@ class MetaEvaluatorAgent(
         current_iteration = state.get("current_iteration", 0)
         print(f"\n📊 Iteration: {current_iteration}")
 
+        # Ablation toggle: meta-evaluation disabled -> no guidance, no recovery
+        # routes (stagnation/SOTA-search/curriculum never trigger)
+        toggles = getattr(self.config, "ablation_toggles", None)
+        if toggles and toggles.disable_meta_evaluator:
+            print("\n   ABLATION: Meta-Evaluator disabled - skipping analysis")
+            return {
+                # Clear every signal consumed by downstream recovery routing;
+                # LangGraph otherwise retains values from the previous turn.
+                "failure_analysis": {},
+                "reward_signals": {},
+                "refinement_guidance": {},
+                "crossover_guidance": {},
+                "stagnation_detection": {},
+                "trigger_debug_loop": False,
+                "debug_target_model": None,
+                "debug_hints": [],
+                "performance_gap": None,
+                "curriculum_subtasks": [],
+                "needs_subtask_resolution": False,
+                "telemetry_events": [
+                    make_event(
+                        "ablation",
+                        "meta_evaluator_skipped",
+                        iteration=current_iteration,
+                        component="meta_evaluator",
+                    )
+                ],
+                "last_updated": datetime.now(),
+            }
+
         # Analyze component performance
         failure_analysis = self._analyze_failures(state)
 
@@ -118,6 +149,28 @@ class MetaEvaluatorAgent(
             }
             print(f"\n   ⚠️  TRIGGERING DEBUG LOOP for {debug_loop_trigger.get('worst_model')}")
 
+        # Telemetry: meta-evaluation outcome for this iteration
+        events = [
+            make_event(
+                "meta_evaluator",
+                "evaluated",
+                iteration=current_iteration,
+                stagnated=bool(stagnation_detection.get("stagnated")),
+                trigger_sota_search=bool(stagnation_detection.get("trigger_sota_search")),
+                trigger_debug_loop=bool(debug_loop_trigger.get("trigger_debug")),
+                rewards=reward_signals,
+            )
+        ]
+        if stagnation_detection.get("trigger_sota_search"):
+            events.append(
+                make_event(
+                    "recovery",
+                    "sota_search_triggered",
+                    iteration=current_iteration,
+                    reason=stagnation_detection.get("reason", "stagnation"),
+                )
+            )
+
         result = {
             "failure_analysis": failure_analysis,
             "reward_signals": reward_signals,
@@ -125,6 +178,7 @@ class MetaEvaluatorAgent(
             "crossover_guidance": crossover_guidance,  # Eureka: for planner
             "stagnation_detection": stagnation_detection,  # For SOTA search trigger
             "iteration_memory": [iteration_memory],  # Append to list
+            "telemetry_events": events,
             "last_updated": datetime.now(),
         }
         result.update(debug_updates)  # Add debug loop trigger if applicable
