@@ -57,6 +57,13 @@ class ReportingAgent:
         """Gather context from state for the report."""
         competition_info = state.get("competition_info")
         best_score = state.get("best_score", 0.0)
+        if not isinstance(best_score, (int, float)) or best_score == 0.0:
+            best_score = (
+                state.get("current_performance_score")
+                or state.get("best_single_model_score")
+                or state.get("baseline_cv_score")
+                or 0.0
+            )
         submissions = state.get("submissions", [])
         dev_results = state.get("development_results", [])
 
@@ -87,7 +94,7 @@ Metric: {competition_info.evaluation_metric if competition_info else "Unknown"}
 Metric Direction: {"Minimize" if is_minimization else "Maximize"}
 
 # Performance
-Best Score: {best_sub.public_score if best_sub else best_score}
+Best {'Public LB' if best_sub else 'Internal CV/OOF'} Score: {best_sub.public_score if best_sub else best_score}
 Best Public LB Score: {best_sub.public_score if best_sub else "N/A"}
 Best Percentile: {best_sub.percentile if best_sub else "N/A"}%
 

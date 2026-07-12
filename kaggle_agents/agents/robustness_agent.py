@@ -15,6 +15,7 @@ import pandas as pd
 from ..core.config import get_config
 from ..core.state import KaggleState, ValidationResult
 from ..utils.llm_utils import get_text_content
+from ..utils.telemetry import make_event
 
 
 # ==================== Hyperparameter Validation Prompt ====================
@@ -112,15 +113,61 @@ class RobustnessAgent:
             State updates with validation results
         """
         print("\n" + "=" * 60)
-        print("=  ROBUSTNESS AGENT: Validating Code")
+        print("=  ROBUSTNESS AGENT: Validating Code")
         print("=" * 60)
+
+        # Ablation toggle: guardrails disabled -> pass-through (measures the
+        # contribution of the 7 validation modules to final score/validity)
+        toggles = getattr(self.config, "ablation_toggles", None)
+        if toggles and toggles.disable_robustness:
+            print("\n   ABLATION: Robustness guardrails disabled - skipping validation")
+            return {
+                # Abstention is deliberately distinct from a perfect score. The
+                # workflow gate allows the candidate through, while reward
+                # aggregation removes the robustness term for this run.
+                "overall_validation_score": None,
+                "robustness_passed": True,
+                "robustness_abstained": True,
+                "robustness_failure_details": {},
+                "telemetry_events": [
+                    make_event(
+                        "ablation",
+                        "robustness_skipped",
+                        iteration=state.get("current_iteration", 0),
+                        component="robustness",
+                    )
+                ],
+                "last_updated": datetime.now(),
+            }
 
         # Get development results
         dev_results = state.get("development_results", [])
 
         if not dev_results:
-            print("  No development results to validate")
-            return {}
+            print("  No development results to validate")
+            issue = "No development results available for robustness validation"
+            return {
+                "overall_validation_score": 0.0,
+                "robustness_passed": False,
+                "robustness_abstained": False,
+                "robustness_failure_details": {
+                    "failed_modules": ["development"],
+                    "issues": [issue],
+                    "suggestions": ["Generate at least one executable component before submission"],
+                },
+                "critical_issues": [issue],
+                "telemetry_events": [
+                    make_event(
+                        "guardrails",
+                        "validation_completed",
+                        iteration=state.get("current_iteration", 0),
+                        overall_score=0.0,
+                        passed=False,
+                        modules={"development": {"passed": False, "issues": 1}},
+                    )
+                ],
+                "last_updated": datetime.now(),
+            }
 
         # Initialize LLM (supports OpenAI and Anthropic)
         from ..core.config import get_llm
@@ -176,18 +223,46 @@ class RobustnessAgent:
 
         print(f"\n= Overall Validation Score: {overall_score:.1%}")
 
-        # Determine if passed
+        # Determine if passed. A failed validation module is a real gate, not a
+        # warning hidden by a high average from unrelated modules.
         min_score = self.config.validation.min_validation_score
-        passed = overall_score >= min_score
+        failed_results = [result for result in validation_results if not result.passed]
+        passed = overall_score >= min_score and not failed_results
+
+        failure_details = {
+            "failed_modules": [result.module for result in failed_results],
+            "issues": [issue for result in failed_results for issue in result.issues],
+            "suggestions": [
+                suggestion for result in failed_results for suggestion in result.suggestions
+            ],
+        }
 
         if passed:
-            print(f" Validation PASSED (threshold: {min_score:.1%})")
+            print(f" Validation PASSED (threshold: {min_score:.1%})")
         else:
             print(f"L Validation FAILED (threshold: {min_score:.1%})")
+
+        # Telemetry: per-module outcome for this iteration (guardrail interventions)
+        guardrail_event = make_event(
+            "guardrails",
+            "validation_completed",
+            iteration=state.get("current_iteration", 0),
+            overall_score=round(overall_score, 4),
+            passed=passed,
+            modules={
+                r.module: {"passed": r.passed, "issues": len(r.issues)}
+                for r in validation_results
+            },
+        )
 
         return {
             "validation_results": validation_results,
             "overall_validation_score": overall_score,
+            "robustness_passed": passed,
+            "robustness_abstained": False,
+            "robustness_failure_details": failure_details,
+            "critical_issues": failure_details["issues"] if not passed else [],
+            "telemetry_events": [guardrail_event],
             "last_updated": datetime.now(),
         }
 
@@ -578,7 +653,7 @@ IMPORTANT:
 
     def _print_validation(self, result: ValidationResult):
         """Print validation result."""
-        status = "" if result.passed else "L"
+        status = "" if result.passed else "L"
         print(f"\n{status} {result.module.upper()}: {result.score:.1%}")
 
         if result.issues:

@@ -7,10 +7,7 @@ and score-based iteration decisions.
 
 from __future__ import annotations
 
-import json
 import os
-import shutil
-import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -18,7 +15,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from kaggle.api.kaggle_api_extended import KaggleApi
 
 from ..core.config import compare_scores, get_config
 from ..core.state import KaggleState, SubmissionResult
@@ -37,19 +33,34 @@ class SubmissionAgent:
     - Score-based iteration decisions
     """
 
+    _TERMINAL_FAILURE_STATUSES = frozenset(
+        {"error", "failed", "failure", "cancelled", "canceled", "invalid", "rejected"}
+    )
+
     def __init__(self):
         """Initialize the submission agent."""
         self.config = get_config()
-        self.kaggle_api = KaggleApi()
-
+        self.kaggle_api: Any | None = None
+        self.authenticated = False
         self._current_metric_name = ""
 
-        # Try to authenticate
+    def _ensure_kaggle_api(self) -> bool:
+        """Initialize and authenticate Kaggle lazily when an upload needs it."""
+        if self.kaggle_api is not None:
+            return self.authenticated
+
         try:
+            # Kaggle's package can raise SystemExit while importing when credentials
+            # are absent, so both import and authentication must stay inside this guard.
+            from kaggle.api.kaggle_api_extended import KaggleApi  # noqa: PLC0415
+
+            self.kaggle_api = KaggleApi()
             self.kaggle_api.authenticate()
             self.authenticated = True
-        except Exception:
+        except (Exception, SystemExit):
+            self.kaggle_api = None
             self.authenticated = False
+        return self.authenticated
 
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -123,71 +134,36 @@ class SubmissionAgent:
 
         print("✅ Validation passed")
 
-        mlebench_grade: dict[str, Any] | None = None
-
-        # In MLE-bench mode (or when explicitly enabled), grade locally so downstream
-        # feedback/rewards can optimize for medals without needing Kaggle API.
+        # In MLE-bench mode, validate and return the artifact without uploading it.
+        # The runner performs the sole test-set grading pass after this workflow ends.
         mlebench_mode = str(state.get("run_mode", "")).lower() == "mlebench" or os.getenv(
             "MLEBENCH_MODE", ""
         ).lower() in {"1", "true", "yes"}
         if mlebench_mode:
-            grading = self._grade_with_mlebench(
-                competition_name=competition_name,
-                submission_path=submission_path,
+            cv_score = state.get("current_performance_score")
+            if not isinstance(cv_score, (int, float)):
+                cv_score = state.get("best_single_model_score")
+            if not isinstance(cv_score, (int, float)):
+                cv_score = state.get("baseline_cv_score")
+
+            print("✅ MLE-bench artifact ready; final grading deferred to the runner")
+            submission_result = SubmissionResult(
+                submission_id=None,
+                public_score=None,
+                private_score=None,
+                percentile=None,
+                cv_score=float(cv_score) if isinstance(cv_score, (int, float)) else None,
+                file_path=str(submission_path),
+                valid=True,
+                error=None,
+                submitted_at=datetime.now(),
             )
-            mlebench_grade = grading
-
-            # Surface grading in state for meta-evaluator feedback/reward signals
-            score = grading.get("score")
-            valid = bool(grading.get("valid_submission", False))
-
-            if valid and isinstance(score, (int, float)):
-                print(
-                    f"✅ MLE-bench grade: score={float(score):.5f} "
-                    f"medal={'gold' if grading.get('gold_medal') else 'silver' if grading.get('silver_medal') else 'bronze' if grading.get('bronze_medal') else 'none'}"
-                )
-                # Save temporal version (Success Memory)
-                versioned_path = (
-                    working_dir
-                    / f"submission_iter_{state.get('current_iteration', 0)}_score_{float(score):.4f}.csv"
-                )
-                try:
-                    import shutil
-
-                    shutil.copy2(submission_path, versioned_path)
-                    print(f"✅ Saved temporal backup: {versioned_path.name}")
-                except Exception as e:
-                    print(f"⚠️ Failed to save temporal backup: {e}")
-                    versioned_path = None
-
-                submission_result = SubmissionResult(
-                    submission_id=None,
-                    public_score=float(score),
-                    private_score=None,
-                    percentile=None,
-                    cv_score=None,
-                    file_path=str(versioned_path) if versioned_path else None,
-                    valid=True,
-                    error=None,
-                    submitted_at=datetime.now(),
-                )
-                updated_best = compare_scores(
-                    state.get("best_score", 0.0) or 0.0,
-                    float(score),
-                    metric_name,
-                )
-                return {
-                    "submissions": [submission_result],
-                    "best_score": updated_best,
-                    "current_performance_score": float(score),
-                    "mlebench_grade": grading,
-                    "submission_validation_error": None,
-                    "retry_submission_count": 0,
-                    "last_updated": datetime.now(),
-                }
-
-            print(f"⚠️  MLE-bench grading failed: {grading.get('error', 'unknown error')}")
-            # Fall back to the usual Kaggle upload path if possible.
+            return {
+                "submissions": [submission_result],
+                "submission_validation_error": None,
+                "retry_submission_count": 0,
+                "last_updated": datetime.now(),
+            }
 
         # Upload to Kaggle
         submission_result = self._upload_to_kaggle(
@@ -224,62 +200,7 @@ class SubmissionAgent:
             "submission_validation_error": None,
             "retry_submission_count": 0,
             "last_updated": datetime.now(),
-            **({"mlebench_grade": mlebench_grade} if mlebench_grade is not None else {}),
         }
-
-    def _grade_with_mlebench(
-        self,
-        competition_name: str,
-        submission_path: Path,
-    ) -> dict[str, Any]:
-        """
-        Grade a submission with the local `mlebench grade-sample` CLI.
-
-        Returns a dict compatible with MLE-bench output, e.g.:
-        {valid_submission, score, gold_medal, silver_medal, bronze_medal, above_median, error}
-        """
-        if shutil.which("mlebench") is None:
-            return {
-                "valid_submission": False,
-                "error": "mlebench CLI not found in PATH",
-            }
-
-        try:
-            result = subprocess.run(
-                ["mlebench", "grade-sample", str(submission_path), competition_name],
-                check=False, capture_output=True,
-                text=True,
-                timeout=60,
-            )
-
-            output = (result.stdout or "") + (result.stderr or "")
-
-            # Extract the first JSON object from output (mlebench prints extra lines)
-            json_start = output.find("{")
-            json_end = output.rfind("}") + 1
-            if json_start >= 0 and json_end > json_start:
-                try:
-                    parsed = json.loads(output[json_start:json_end])
-                    if isinstance(parsed, dict):
-                        return parsed
-                except json.JSONDecodeError:
-                    pass
-
-            return {
-                "valid_submission": False,
-                "error": f"Could not parse mlebench output (exit={result.returncode}): {output[:500]}",
-            }
-
-        except subprocess.TimeoutExpired:
-            return {
-                "valid_submission": False,
-                "error": "MLE-bench grading timeout (60s)",
-            }
-        except Exception as e:
-            return {
-                "valid_submission": False,
-                "error": str(e),
-            }
 
     def _find_submission_file(self, working_dir: Path) -> Path | None:
         """Find submission file in working directory."""
@@ -289,8 +210,10 @@ class SubmissionAgent:
         if submission_path.exists():
             return submission_path
 
-        # Search for any file with "submission" in name
+        # Search for a generated alternative, never the template itself.
         for file in working_dir.rglob("*submission*.csv"):
+            if file.name.lower() in {"sample_submission.csv", "sample-submission.csv"}:
+                continue
             return file
 
         return None
@@ -605,8 +528,9 @@ Common causes:
         """
         working_dir = Path(state["working_directory"])
 
-        # Check if authenticated
-        if not self.authenticated:
+        # Authentication is intentionally lazy so local/MLE-bench validation does
+        # not require Kaggle credentials or trigger package-level exits.
+        if not self._ensure_kaggle_api():
             print("⚠️  Kaggle API not authenticated")
             print("   Set KAGGLE_USERNAME and KAGGLE_KEY to enable uploads")
 
@@ -686,18 +610,9 @@ Common causes:
 
             # Poll for score with retries
             print("\n⏳ Waiting for score...")
-            public_score = None
-            percentile = None
-            poll_timeout = 120
-            poll_interval = 15
-            elapsed = 0
-            while elapsed < poll_timeout:
-                time.sleep(poll_interval)
-                elapsed += poll_interval
-                public_score, percentile = self._fetch_score(competition_name)
-                if public_score is not None:
-                    break
-                print(f"   Score not ready yet ({elapsed}s/{poll_timeout}s)...")
+            public_score, percentile, terminal_error = self._poll_for_score(
+                competition_name
+            )
 
             if public_score is not None:
                 print(f"\n📊 Public Score: {public_score:.4f}")
@@ -726,6 +641,8 @@ Common causes:
                 percentile=percentile,
                 cv_score=cv_score,
                 file_path=str(versioned_path) if versioned_path else None,
+                valid=terminal_error is None,
+                error=terminal_error,
                 submitted_at=datetime.now(),
             )
 
@@ -741,7 +658,32 @@ Common causes:
                 submitted_at=datetime.now(),
             )
 
-    def _fetch_score(self, competition_name: str) -> tuple[float | None, float | None]:
+    def _poll_for_score(
+        self,
+        competition_name: str,
+        *,
+        poll_timeout: int = 600,
+        poll_interval: int = 20,
+    ) -> tuple[float | None, float | None, str | None]:
+        """Poll until a score, timeout, or terminal submission failure."""
+        elapsed = 0
+        while elapsed < poll_timeout:
+            time.sleep(poll_interval)
+            elapsed += poll_interval
+            public_score, percentile, status = self._fetch_score(competition_name)
+            if public_score is not None:
+                return public_score, percentile, None
+            if str(status).strip().lower() in self._TERMINAL_FAILURE_STATUSES:
+                error = f"Submission ended with terminal status: {status}"
+                print(f"   ❌ {error}")
+                return None, None, error
+            print(
+                f"   Score not ready yet (status: {status}) "
+                f"({elapsed}s/{poll_timeout}s)..."
+            )
+        return None, None, None
+
+    def _fetch_score(self, competition_name: str) -> tuple[float | None, float | None, str]:
         """
         Fetch latest submission score from leaderboard.
 
@@ -749,43 +691,45 @@ Common causes:
             competition_name: Competition name
 
         Returns:
-            Tuple of (public_score, percentile)
+            Tuple of (public_score, percentile, status)
         """
         try:
             # Get recent submissions
             submissions = self.kaggle_api.competition_submissions(competition_name)
 
             if not submissions:
-                return None, None
+                return None, None, "Unknown"
 
             # Get latest submission - handle both dict and raw Kaggle objects
             latest = submissions[0]
 
             if isinstance(latest, dict):
                 raw_score = latest.get("publicScore")
+                status = latest.get("status", "Unknown")
             elif hasattr(latest, "publicScore"):
                 raw_score = latest.publicScore
+                status = getattr(latest, "status", "Unknown")
             else:
-                return None, None
+                return None, None, "Unknown"
 
             # Normalize score: skip None, empty, "None" strings
             if raw_score is None or raw_score in ("", "None"):
-                return None, None
+                return None, None, status
 
             try:
                 public_score = float(raw_score)
             except (ValueError, TypeError):
-                return None, None
+                return None, None, status
 
             percentile = self._calculate_percentile(
                 competition_name, public_score, metric_name=self._current_metric_name
             )
 
-            return public_score, percentile
+            return public_score, percentile, status
 
         except Exception as e:
             print(f"⚠️  Could not fetch score: {e!s}")
-            return None, None
+            return None, None, "FetchError"
 
     def _calculate_percentile(
         self, competition_name: str, score: float, metric_name: str = ""

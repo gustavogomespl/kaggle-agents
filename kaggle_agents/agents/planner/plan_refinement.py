@@ -39,7 +39,7 @@ def refine_ablation_plan(
     Returns:
         Refined ablation plan
     """
-    from langchain.schema import HumanMessage, SystemMessage
+    from langchain_core.messages import HumanMessage, SystemMessage
 
     from ...core.state import AblationComponent
     from ...utils.llm_utils import get_text_content
@@ -223,7 +223,9 @@ def refine_ablation_plan(
 
     # FIX: Plan diversity check - detect and avoid repeating same plan
     previous_plan_hashes = state.get("previous_plan_hashes", [])
-    plan_hash = hash(tuple(sorted(c.name for c in components)))
+    plan_hash = hash(
+        tuple(sorted((component.name, component.component_type) for component in components))
+    )
 
     max_diversity_retries = 3
     retry_count = 0
@@ -239,10 +241,26 @@ def refine_ablation_plan(
         retry_count += 1
         print(f"   [Planner] ⚠️ Plan already tried (attempt {retry_count}/{max_diversity_retries}) - trying {strategy['name']}...")
 
-        # Try to generate a different plan using fallback with new strategy hint
-        alternative_plan = create_diversified_fallback_plan_fn(
-            state, sota_analysis, strategy["focus"]
-        )
+        run_mode = str(state.get("run_mode", "")).lower()
+        fast_mode = bool(state.get("fast_mode")) or run_mode == "mlebench"
+        domain = str(state.get("domain_detected", "tabular")).lower()
+
+        # The tabular fallback has a concrete five-slot rotation. Exercise it
+        # from the live refinement path instead of only in direct unit tests.
+        if fast_mode and "tabular" in domain:
+            from .fallback_plans.tabular import create_tabular_fallback_plan
+
+            alternative_plan = create_tabular_fallback_plan(
+                domain=domain,
+                sota_analysis=sota_analysis,
+                fast_mode=True,
+                state=state,
+                stagnation_iteration=len(previous_plan_hashes) + retry_count - 1,
+            )
+        else:
+            alternative_plan = create_diversified_fallback_plan_fn(
+                state, sota_analysis, strategy["focus"]
+            )
 
         # Convert to components
         components = []
@@ -257,11 +275,9 @@ def refine_ablation_plan(
             components.append(component)
 
         components.sort(key=lambda x: x.estimated_impact, reverse=True)
-        plan_hash = hash(tuple(sorted(c.name for c in components)))
-
-    # Record this plan hash (keep last 10)
-    previous_plan_hashes.append(plan_hash)
-    state["previous_plan_hashes"] = previous_plan_hashes[-10:]
+        plan_hash = hash(
+            tuple(sorted((component.name, component.component_type) for component in components))
+        )
 
     if retry_count > 0:
         print(f"   [Planner] ✓ Found diverse plan after {retry_count} retries")
