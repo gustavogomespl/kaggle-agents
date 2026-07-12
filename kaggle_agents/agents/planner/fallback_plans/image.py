@@ -61,11 +61,17 @@ CRITICAL MEDICAL IMAGING REQUIREMENTS:
 4. **BACKBONE**: Unfreeze last 2 blocks of backbone for X-ray domain adaptation
 5. **CV**: Use GroupKFold on PatientID column to prevent patient-level leakage
 6. **BATCH SIZE**: Use 32-64 (NOT 128) to fit higher resolution images in memory
+7. **DECODE-ONCE CACHE**: BEFORE training, decode+resize/pad every image ONCE
+   to an exact 384x384 shape. Hash each full source path so equal basenames
+   across splits cannot collide. Use lossless .npy for DICOM/windowed
+   arrays and JPEG only for ordinary 8-bit images. Persist a source-to-cache
+   manifest and make the Dataset read ONLY from it (resumable: skip existing
+   files). This is what makes >10 GB datasets converge inside the time budget.
 
 Mixed precision training. Save full model to models/best_model.pth.""",
                     "estimated_impact": 0.35,
                     "rationale": "Medical imaging requires higher resolution and more training than natural images. Domain shift from ImageNet to X-rays requires backbone fine-tuning.",
-                    "code_outline": "efficientnet_b0(pretrained=True), unfreeze last 2 blocks, IMG_SIZE=384, BATCH_SIZE=32, 10-15 epochs with early stopping, GroupKFold on PatientID, save to models/best_model.pth",
+                    "code_outline": "STEP 1: decode-once cache to models/img_cache with collision-free full-path hashes, exact 384x384 padding, lossless .npy for DICOM, and a source-path manifest (resumable). STEP 2: efficientnet_b0(pretrained=True) reading from that manifest, unfreeze last 2 blocks, IMG_SIZE=384, BATCH_SIZE=32, AMP autocast+GradScaler, 10-15 epochs with early stopping, GroupKFold on PatientID, batched val/test inference, save to models/best_model.pth",
                 },
                 {
                     "name": "tta_inference_only",

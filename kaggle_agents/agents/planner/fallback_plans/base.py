@@ -145,9 +145,22 @@ def create_fallback_plan(
     if domain in AUDIO_DOMAINS or domain.startswith("audio_"):
         return create_audio_fallback_plan(domain, sota_analysis)
     # Tabular (default)
+    # Stagnation iteration = number of previous plans; rotates the fast-mode
+    # model combination so repeated fallbacks explore different model families
+    stagnation_iteration = 0
+    if state:
+        previous_plan_hashes = state.get("previous_plan_hashes", []) or []
+        stagnation_iteration = len(previous_plan_hashes)
+        if stagnation_iteration > 0:
+            print(
+                f"  [DEBUG] Stagnation iteration: {stagnation_iteration} "
+                f"(previous plans: {len(previous_plan_hashes)})"
+            )
     return create_tabular_fallback_plan(
         domain,
         sota_analysis,
         curriculum_insights,
         fast_mode=fast_mode,
+        state=state,
+        stagnation_iteration=stagnation_iteration,
     )

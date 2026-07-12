@@ -99,6 +99,7 @@ print("Final Validation Performance: 1.0")  # Audit passed
 import torchaudio
 import torch
 import numpy as np
+from hashlib import sha256
 from pathlib import Path
 from tqdm import tqdm
 
@@ -119,7 +120,9 @@ audio_files = find_audio_files(AUDIO_SOURCE_DIR if 'AUDIO_SOURCE_DIR' in dir() e
 
 # Cache spectrograms
 for audio_path in tqdm(audio_files, desc="Caching mels"):
-    cache_path = cache_dir / f'{audio_path.stem}.npy'
+    cache_key = sha256(str(audio_path.resolve()).encode()).hexdigest()
+    cache_path = cache_dir / cache_key[:2] / f'{cache_key}.npy'
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists():
         continue
     try:
@@ -135,7 +138,7 @@ for audio_path in tqdm(audio_files, desc="Caching mels"):
     except Exception as e:
         print(f"Warning: Failed to process {audio_path}: {e}")
 
-print(f"Cached {len(list(cache_dir.glob('*.npy')))} spectrograms")
+print(f"Cached {len(list(cache_dir.rglob('*.npy')))} spectrograms")
 print("Final Validation Performance: 1.0")  # Preprocessing complete
 """,
         },
