@@ -39,6 +39,7 @@ from ...prompts.templates.developer_prompts import (
 from ...tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
+from ...utils.telemetry import make_event
 
 # Re-export temperature utilities for backward compatibility
 from .code_generator import (
@@ -46,7 +47,6 @@ from .code_generator import (
 )
 from .dspy_modules import CodeFixerModule, CodeGeneratorModule
 from .grpo import GRPOMixin
-from .mlebench import MLEBenchMixin
 from .quiet_star import QuietStarMixin
 from .refinement import RefinementMixin
 from .retry import RetryMixin
@@ -57,7 +57,6 @@ from .validation import ValidationMixin
 class DeveloperAgent(
     GRPOMixin,
     QuietStarMixin,
-    MLEBenchMixin,
     ValidationMixin,
     RetryMixin,
     DeveloperUtilsMixin,
@@ -235,23 +234,39 @@ class DeveloperAgent(
             print("All components implemented!")
             return {"current_component_index": current_index}
 
-        # If a previous iteration already achieved the objective (e.g., medal in MLE-bench),
-        # allow skipping remaining planned components to save time.
+        # Respect explicit workflow-level early stopping decisions.
         if state.get("skip_remaining_components"):
             print("Skipping remaining components (skip_remaining_components=True)")
             return {"current_component_index": len(ablation_plan)}
 
         run_mode = str(state.get("run_mode", "")).lower()
-        mlebench_grade = state.get("mlebench_grade")
-        if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
-            if mlebench_grade.get("valid_submission") and mlebench_grade.get("gold_medal"):
-                print("Skipping remaining components (GOLD medal achieved)")
-                return {
-                    "skip_remaining_components": True,
-                    "current_component_index": len(ablation_plan),
-                }
-
         component = ablation_plan[current_index]
+
+        # Defense in depth for resumed/checkpointed states whose plan predates
+        # the Planner-side filter. A system ensemble ablation must not execute
+        # a Developer-generated ensemble component either.
+        toggles = getattr(self.config, "ablation_toggles", None)
+        if (
+            toggles
+            and toggles.disable_ensemble
+            and component.component_type == "ensemble"
+        ):
+            print(f"   ABLATION: skipping ensemble component {component.name}")
+            return {
+                "current_component_index": current_index + 1,
+                "code_retry_count": 0,
+                "telemetry_events": [
+                    make_event(
+                        "ablation",
+                        "developer_ensemble_component_skipped",
+                        iteration=state.get("current_iteration", 0),
+                        component="ensemble",
+                        component_name=component.name,
+                    )
+                ],
+                "last_updated": datetime.now(),
+            }
+
         print(f"\n= Implementing: {component.name} ({component.component_type})")
         print(f"Estimated Impact: {component.estimated_impact:.1%}")
 
@@ -322,7 +337,6 @@ class DeveloperAgent(
         new_cv_score: float | None = None
         primary_score: float | None = None
         primary_score_source: str | None = None
-        grading: dict[str, Any] | None = None
         force_retry = False
 
         if result.success and component.component_type == "model":
@@ -336,17 +350,9 @@ class DeveloperAgent(
                 errors=result.errors,
             )
 
-            if run_mode == "mlebench":
-                new_cv_score = self._extract_cv_score(result.stdout)
-                should_keep_component = True
-                if new_cv_score is None:
-                    print(
-                        "⚠️ No CV score found; skipping rollback in MLE-bench mode."
-                    )
-            else:
-                should_keep_component, new_cv_score = self._validate_component_improvement(
-                    component, exec_result, state
-                )
+            should_keep_component, new_cv_score = self._validate_component_improvement(
+                component, exec_result, state
+            )
 
             if not should_keep_component:
                 print("\nROLLBACK: Component did not improve score - discarding")
@@ -527,11 +533,10 @@ class DeveloperAgent(
             # === END STRICT VALIDATION ===
 
             submission_candidates = [
-                Path(state.get("sample_submission_path"))
-                if state.get("sample_submission_path")
-                else None,
                 working_dir / "submission.csv",
-                working_dir / "sample_submission.csv",
+                Path(state.get("submission_path"))
+                if state.get("submission_path")
+                else None,
             ]
             submission_path = next(
                 (p for p in submission_candidates if p is not None and p.exists() and p.is_file()),
@@ -543,7 +548,7 @@ class DeveloperAgent(
                 shutil.copy(submission_path, backup_path)
                 print(f"Backup submission saved: {backup_name}")
 
-                # Validate submission format before MLE-bench grading
+                # Validate submission structure without exposing test-set feedback.
                 sample_sub_path = (
                     Path(state.get("sample_submission_path"))
                     if state.get("sample_submission_path")
@@ -563,60 +568,12 @@ class DeveloperAgent(
                     )
                     if not is_valid:
                         print(f"   ❌ Submission validation FAILED: {validation_msg}")
-                        # Continue to MLE-bench anyway - it will also fail but gives more info
                     else:
                         print(f"   {validation_msg}")
 
-                # In MLE-bench mode, grade after each successful model component so we can
-                # stop early once the objective is reached (medal/target/above-median).
-                if run_mode == "mlebench":
-                    grading = self._grade_with_mlebench(
-                        competition_name=competition_info.name,
-                        submission_path=submission_path,
-                    )
-                    state_updates["mlebench_grade"] = grading
-                    score = (
-                        _coerce_score(grading.get("score"))
-                        if grading.get("valid_submission")
-                        else None
-                    )
-                    if score is not None:
-                        state_updates["current_performance_score"] = score
-                        print(
-                            f"✅ MLE-bench grade: score={score:.5f} "
-                            f"above_median={bool(grading.get('above_median', False))}"
-                        )
-
-                        if self._should_stop_on_mlebench_grade(
-                            grading=grading,
-                            state=state,
-                            metric_name=competition_info.evaluation_metric,
-                        ):
-                            print(
-                                "🏁 Objective reached (MLE-bench) - stopping remaining components"
-                            )
-                            state_updates["skip_remaining_components"] = True
-                            state_updates["current_component_index"] = len(ablation_plan)
-                    else:
-                        print(
-                            f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
-                        )
-
-                if run_mode == "mlebench" and isinstance(grading, dict):
-                    grade_score = (
-                        _coerce_score(grading.get("score"))
-                        if grading.get("valid_submission")
-                        else None
-                    )
-                    if grade_score is not None:
-                        primary_score = grade_score
-                        primary_score_source = "mlebench"
-
-                if primary_score is None:
-                    cv_score = _coerce_score(new_cv_score)
-                    if cv_score is not None:
-                        primary_score = cv_score
-                        primary_score_source = "cv"
+                primary_score = _coerce_score(new_cv_score)
+                if primary_score is not None:
+                    primary_score_source = "cv"
 
                 current_best_score = state.get("best_single_model_score")
                 if min_component_score is not None and not state_updates.get(
@@ -667,49 +624,22 @@ class DeveloperAgent(
 
                 is_best = False
                 if primary_score is not None:
-                    # Log score comparison for debugging MLE-bench vs CV
-                    # Format current_best_score consistently (could be None)
                     best_str = f"{current_best_score:.5f}" if current_best_score is not None else "None"
                     print(f"[SCORE COMPARISON] Current best: {best_str}, New score: {primary_score:.5f} (source: {primary_score_source})")
 
-                    # CRITICAL FIX: Skip update if MLE-bench score is random chance (0.48-0.52)
-                    # This prevents good submissions from being overwritten by broken ones
-                    # NOTE: Only apply to maximization metrics (AUC, accuracy) where 0.5 = random chance
-                    # For minimization metrics (RMSE, logloss), 0.5 could be a valid good score
-                    if run_mode == "mlebench" and primary_score_source == "mlebench":
-                        is_maximize_metric = not is_metric_minimization(metric_name)
-                        is_random_chance = is_maximize_metric and 0.48 <= primary_score <= 0.52
-                        if is_random_chance:
-                            print(f"[SCORE COMPARISON] SKIP: MLE-bench score {primary_score:.5f} is random chance for {metric_name} - preserving submission_best")
-                            # Do NOT set is_best = True - keep existing submission_best intact
-                        elif current_best_score is None:
-                            is_best = True
-                            print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
-                        else:
-                            improvement = calculate_score_improvement(
-                                primary_score, current_best_score, metric_name
-                            )
-                            print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
-                            if improvement > 0:
-                                is_best = True
-                                print(f"[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
-                            else:
-                                print(f"[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
+                    if current_best_score is None:
+                        is_best = True
+                        print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
                     else:
-                        # Non-MLE-bench mode: original logic
-                        if current_best_score is None:
+                        improvement = calculate_score_improvement(
+                            primary_score, current_best_score, metric_name
+                        )
+                        print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
+                        if improvement > 0:
                             is_best = True
-                            print("[SCORE COMPARISON] Action: UPDATE submission_best (no previous best)")
+                            print("[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
                         else:
-                            improvement = calculate_score_improvement(
-                                primary_score, current_best_score, metric_name
-                            )
-                            print(f"[SCORE COMPARISON] Improvement: {improvement:.5f}")
-                            if improvement > 0:
-                                is_best = True
-                                print(f"[SCORE COMPARISON] Action: UPDATE submission_best (score improved)")
-                            else:
-                                print(f"[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
+                            print("[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
 
                 if is_best:
                     print(f"✅ New Best Single Model! ({primary_score:.4f}, source: {primary_score_source})")
@@ -763,104 +693,23 @@ class DeveloperAgent(
                 and (primary_score is not None or new_cv_score is not None)
                 and not force_retry
             ):
-                baseline_score = primary_score if primary_score is not None else new_cv_score
-                baseline_candidate = _coerce_score(baseline_score)
+                baseline_candidate = _coerce_score(new_cv_score)
                 if baseline_candidate is not None:
-                    if run_mode == "mlebench":
-                        baseline_current = _coerce_score(state.get("baseline_cv_score"))
-                        if baseline_current is None:
-                            should_update = True
-                        else:
-                            improvement = calculate_score_improvement(
-                                baseline_candidate, baseline_current, metric_name
-                            )
-                            should_update = improvement > 0
-                        if should_update:
-                            state_updates["baseline_cv_score"] = baseline_candidate
-                            if primary_score_source == "mlebench":
-                                print(
-                                    f"Updated baseline MLE-bench score: {baseline_candidate:.4f}"
-                                )
-                            else:
-                                print(
-                                    f"Updated baseline CV score: {baseline_candidate:.4f}"
-                                )
-                    else:
+                    baseline_current = _coerce_score(state.get("baseline_cv_score"))
+                    should_update = baseline_current is None or calculate_score_improvement(
+                        baseline_candidate, baseline_current, metric_name
+                    ) > 0
+                    if should_update:
                         state_updates["baseline_cv_score"] = baseline_candidate
                         print(f"Updated baseline CV score: {baseline_candidate:.4f}")
-                        # Also update current_performance_score for the performance evaluator
                         state_updates["current_performance_score"] = baseline_candidate
 
         if result.success and component.component_type in {"model", "ensemble"}:
             submission_path = working_dir / "submission.csv"
             best_submission = working_dir / "submission_best.csv"
-            if run_mode == "mlebench":
-                baseline_score = state.get("baseline_cv_score") or state.get(
-                    "best_single_model_score"
-                )
-            else:
-                baseline_score = state.get("baseline_cv_score") or state.get(
-                    "best_single_model_score"
-                )
-
-            if run_mode == "mlebench" and grading is None and submission_path.exists():
-                # Validate submission format before MLE-bench grading (fallback path)
-                sample_sub_path = (
-                    Path(state.get("sample_submission_path"))
-                    if state.get("sample_submission_path")
-                    else working_dir / "sample_submission.csv"
-                )
-                if sample_sub_path and sample_sub_path.exists():
-                    is_valid, validation_msg = self.executor.validate_submission_format(
-                        submission_path=submission_path,
-                        sample_submission_path=sample_sub_path,
-                        component_type=component.component_type,
-                    )
-                    if not is_valid:
-                        print(f"   ❌ Submission validation FAILED: {validation_msg}")
-                    else:
-                        print(f"   {validation_msg}")
-
-                grading = self._grade_with_mlebench(
-                    competition_name=competition_info.name,
-                    submission_path=submission_path,
-                )
-                state_updates["mlebench_grade"] = grading
-                score = (
-                    _coerce_score(grading.get("score"))
-                    if isinstance(grading, dict) and grading.get("valid_submission")
-                    else None
-                )
-                if score is not None:
-                    state_updates["current_performance_score"] = score
-                    print(
-                        f"✅ MLE-bench grade: score={score:.5f} "
-                        f"above_median={bool(grading.get('above_median', False))}"
-                    )
-                    if self._should_stop_on_mlebench_grade(
-                        grading=grading,
-                        state=state,
-                        metric_name=metric_name,
-                    ):
-                        print(
-                            "🏁 Objective reached (MLE-bench) - stopping remaining components"
-                        )
-                        state_updates["skip_remaining_components"] = True
-                        state_updates["current_component_index"] = len(ablation_plan)
-                elif isinstance(grading, dict):
-                    print(
-                        f"⚠️  MLE-bench grading unavailable/invalid: {grading.get('error', 'unknown error')}"
-                    )
-
-            if primary_score is None and run_mode == "mlebench" and isinstance(grading, dict):
-                grade_score = (
-                    _coerce_score(grading.get("score"))
-                    if grading.get("valid_submission")
-                    else None
-                )
-                if grade_score is not None:
-                    primary_score = grade_score
-                    primary_score_source = "mlebench"
+            baseline_score = _coerce_score(state.get("baseline_cv_score"))
+            if baseline_score is None:
+                baseline_score = _coerce_score(state.get("best_single_model_score"))
 
             score_for_gate = primary_score
             if score_for_gate is None:
@@ -903,7 +752,8 @@ class DeveloperAgent(
                 if improvement > 0:
                     state_updates["baseline_cv_score"] = float(score_for_gate)
                     shutil.copy(submission_path, best_submission)
-                    print("Updated submission_best.csv with improved MLE-bench score")
+                    state_updates["current_performance_score"] = float(score_for_gate)
+                    print("Updated submission_best.csv with improved CV/OOF score")
 
         # Track OOF availability for ensemble (even if ablation study rejected the model)
         if result.success and component.component_type == "model":
@@ -1082,7 +932,6 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             (DevelopmentResult, attempt_records)
         """
         competition_info = state["competition_info"]
-        metric_name = competition_info.evaluation_metric
         working_dir = Path(state["working_directory"])
         domain = state.get("domain_detected", "tabular")
         attempt_records: list[CodeAttempt] = []
