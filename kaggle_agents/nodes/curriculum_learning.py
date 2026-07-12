@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage
 from ..core.config import get_llm_for_role
 from ..core.state import KaggleState
 from ..utils.llm_utils import get_text_content
+from ..utils.telemetry import make_event
 
 
 @dataclass
@@ -663,6 +664,15 @@ def curriculum_learning_node(state: KaggleState) -> dict[str, Any]:
     return {
         "curriculum_subtasks": subtask_dicts,
         "needs_subtask_resolution": len(subtasks) > 0,
+        "telemetry_events": [
+            make_event(
+                "recovery",
+                "curriculum_executed",
+                iteration=state.get("current_iteration", 0),
+                subtasks=len(subtasks),
+                failure_types=[s.failure_type for s in subtasks],
+            )
+        ],
         "last_updated": datetime.now(),
     }
 

@@ -8,6 +8,7 @@ from datetime import datetime
 from operator import add
 from typing import Annotated, Any, TypedDict
 
+from ..config import get_run_seed
 from .competition import AblationComponent, CompetitionInfo, SOTASolution
 from .learning import CandidatePlan, PreferencePair, ReasoningTrace, SelfEvaluation
 from .memory import (
@@ -38,6 +39,7 @@ class KaggleState(TypedDict):
     timeout_per_component: int | None
     enable_checkpoint_recovery: bool
     cv_folds: int | None
+    random_seed: int
     fast_mode: bool
     target_score: float | None
     current_performance_score: float
@@ -99,10 +101,21 @@ class KaggleState(TypedDict):
     sota_solutions: Annotated[list[SOTASolution], add]
     search_queries_used: Annotated[list[str], add]
 
+    # ========================================================================
+    # TELEMETRY & AUDIT (paper instrumentation)
+    # telemetry_events: append-only event log (see utils/telemetry.py)
+    # search_audit: every retrieved source + contamination-filter decision
+    # ========================================================================
+    telemetry_events: Annotated[list[dict[str, Any]], add]
+    search_audit: Annotated[list[dict[str, Any]], add]
+
     # Planning Phase
     ablation_plan: list[AblationComponent]
     current_component_index: int
     optimization_strategy: str
+    previous_plan_hashes: list[int]
+    force_refinement: bool
+    force_eureka_planning: bool
 
     # Development Phase
     development_results: Annotated[list[DevelopmentResult], add]
@@ -112,8 +125,16 @@ class KaggleState(TypedDict):
 
     # Validation Phase
     validation_results: Annotated[list[ValidationResult], add]
-    overall_validation_score: float
+    overall_validation_score: float | None
     critical_issues: Annotated[list[str], add]
+    robustness_passed: bool | None
+    robustness_abstained: bool
+    robustness_failure_details: dict[str, Any]
+    robustness_gate_action: str | None
+    robustness_recovery_count: int
+    max_robustness_recoveries: int
+    current_candidate_valid: bool
+    workflow_valid: bool
 
     # Ensemble Phase
     ensemble_strategy: str | None
@@ -172,6 +193,11 @@ class KaggleState(TypedDict):
     failure_analysis: dict[str, Any]
     refinement_guidance: dict[str, str]
     reward_signals: dict[str, float]
+    stagnation_detection: dict[str, Any]
+    trigger_debug_loop: bool
+    debug_target_model: str | None
+    debug_hints: list[str]
+    performance_gap: float | None
 
     # WEBRL: Curriculum Learning
     curriculum_subtasks: list[dict[str, Any]]  # [OPTIONAL] Only when WEBRL enabled
@@ -234,6 +260,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         timeout_per_component=None,
         enable_checkpoint_recovery=True,
         cv_folds=None,
+        random_seed=get_run_seed(),
         fast_mode=False,
         target_score=None,
         current_performance_score=0.0,
@@ -273,10 +300,16 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         # Search Phase
         sota_solutions=[],
         search_queries_used=[],
+        # Telemetry & Audit
+        telemetry_events=[],
+        search_audit=[],
         # Planning Phase
         ablation_plan=[],
         current_component_index=0,
         optimization_strategy="",
+        previous_plan_hashes=[],
+        force_refinement=False,
+        force_eureka_planning=False,
         # Development Phase
         development_results=[],
         current_code="",
@@ -284,8 +317,16 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         code_attempts=[],
         # Validation Phase
         validation_results=[],
-        overall_validation_score=0.0,
+        overall_validation_score=None,
         critical_issues=[],
+        robustness_passed=None,
+        robustness_abstained=False,
+        robustness_failure_details={},
+        robustness_gate_action=None,
+        robustness_recovery_count=0,
+        max_robustness_recoveries=1,
+        current_candidate_valid=True,
+        workflow_valid=True,
         # Ensemble Phase
         ensemble_strategy=None,
         ensemble_weights={},
@@ -327,6 +368,11 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         failure_analysis={},
         refinement_guidance={},
         reward_signals={},
+        stagnation_detection={},
+        trigger_debug_loop=False,
+        debug_target_model=None,
+        debug_hints=[],
+        performance_gap=None,
         # WEBRL: Curriculum Learning
         curriculum_subtasks=[],
         needs_subtask_resolution=False,

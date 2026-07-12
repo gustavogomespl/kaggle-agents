@@ -13,6 +13,8 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+from ...core.config import get_run_seed
+
 
 class DetectionMixin:
     """Mixin providing data type detection methods."""
@@ -193,7 +195,8 @@ class DetectionMixin:
         y = np.array(labels)
 
         # Create stratified folds
-        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        run_seed = get_run_seed()
+        skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=run_seed)
         folds = np.zeros(len(train_ids), dtype=int)
         for fold_idx, (_, val_idx) in enumerate(skf.split(train_ids, y)):
             folds[val_idx] = fold_idx
@@ -213,6 +216,7 @@ class DetectionMixin:
             "target_col": "target",
             "is_classification": True,
             "num_classes": len(np.unique(y)),
+            "random_seed": run_seed,
             "source": "audio_filenames",
         }
         with open(canonical_dir / "metadata.json", "w") as f:

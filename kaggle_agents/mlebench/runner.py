@@ -20,8 +20,9 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from ..core.config import get_config
+from ..core.config import get_config, get_run_seed
 from ..core.state import CompetitionInfo, create_initial_state
+from ..utils.telemetry import collect_run_provenance, summarize_run_telemetry
 from .data_adapter import MLEBenchDataAdapter
 
 
@@ -68,6 +69,9 @@ class MLEBenchResult:
 
     # Raw grading output
     grading_output: dict | None = None
+
+    # Run telemetry (guardrail interventions, recovery routes, search audit)
+    telemetry: dict | None = None
 
 
 class MLEBenchRunner:
@@ -313,6 +317,7 @@ class MLEBenchRunner:
 
             # MLE-bench training configuration - start aggressive like SOTA (600 epochs, patience=30)
             state["cv_folds"] = int(os.getenv("KAGGLE_AGENTS_CV_FOLDS", "5"))
+            state["random_seed"] = get_run_seed()
             state["fast_mode"] = False  # Disabled - use adaptive epoch budget instead
             state["epoch_budget"] = int(
                 os.getenv("KAGGLE_AGENTS_MAX_EPOCHS", "600")
@@ -335,6 +340,9 @@ class MLEBenchRunner:
             _log("Step 3: Running workflow")
             _log(f"  Max iterations: {max_iterations}")
             _log(f"  Timeout per component: {timeout_per_component}s")
+            toggles = getattr(get_config(), "ablation_toggles", None)
+            if toggles and toggles.disabled_components():
+                _log(f"  ABLATION active - disabled: {toggles.disabled_components()}", "WARN")
 
             from ..workflow import create_mlebench_workflow
 
@@ -367,10 +375,50 @@ class MLEBenchRunner:
             result.components_implemented = len(dev_results)
             _log(f"  Iterations: {result.iterations}, Components: {result.components_implemented}")
 
+            # Telemetry: per-run measurements for ablation/guardrail analysis
+            try:
+                telemetry = summarize_run_telemetry(final_state)
+                telemetry["provenance"] = collect_run_provenance(
+                    self.config,
+                    Path(__file__).resolve().parents[2],
+                    competition=competition_id,
+                    problem_type=problem_type,
+                    evaluation_metric=evaluation_metric,
+                    max_iterations=max_iterations,
+                    timeout_per_component=timeout_per_component,
+                    checkpoint_recovery=enable_checkpoint_recovery,
+                    cv_folds=state["cv_folds"],
+                    random_seed=state["random_seed"],
+                    epoch_budget=state["epoch_budget"],
+                    early_stopping_patience=state["early_stopping_patience"],
+                    fast_mode=state["fast_mode"],
+                )
+                # Config-based view of the toggles (event-based detection alone
+                # misses a toggle whose env var was set but never took effect)
+                toggles = getattr(get_config(), "ablation_toggles", None)
+                if toggles is not None:
+                    telemetry.setdefault("ablation", {})["disabled_components_config"] = (
+                        toggles.disabled_components()
+                    )
+                result.telemetry = telemetry
+                telemetry_path = workspace / "telemetry.json"
+                with telemetry_path.open("w", encoding="utf-8") as f:
+                    json.dump(telemetry, f, indent=2, default=str)
+                _log(f"  Telemetry written: {telemetry_path}")
+            except Exception as telemetry_err:
+                _log(f"  Telemetry write failed (non-fatal): {telemetry_err}", "WARN")
+
             # Step 4: Find and grade submission
             _log("Step 4: Grading submission")
 
-            submission_path = self._find_submission(workspace)
+            if not final_state.get("workflow_valid", True):
+                result.error = final_state.get("submission_validation_error") or final_state.get(
+                    "termination_reason", "Workflow ended with an invalid candidate"
+                )
+                _log(f"  Grading blocked by robustness gate: {result.error}", "ERROR")
+                submission_path = None
+            else:
+                submission_path = self._find_submission(workspace)
 
             if submission_path:
                 result.submission_path = str(submission_path)
@@ -392,7 +440,7 @@ class MLEBenchRunner:
                 else:
                     result.error = grading.get("error", "Invalid submission")
                     _log(f"  Invalid submission: {result.error}", "WARN")
-            else:
+            elif final_state.get("workflow_valid", True):
                 result.error = "No submission file generated"
                 _log("  No submission file found!", "ERROR")
 

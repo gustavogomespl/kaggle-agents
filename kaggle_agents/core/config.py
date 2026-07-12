@@ -41,7 +41,8 @@ class LLMConfig:
     evaluator_provider: Literal["openai", "anthropic", "gemini"] | None = field(
         default_factory=lambda: os.getenv("EVALUATOR_PROVIDER")
     )
-    temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
+    # Low default temperature reduces variance (it does not make LLM calls deterministic).
+    temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.1")))
     max_tokens: int = field(
         default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192"))
     )  # Safe default
@@ -59,6 +60,60 @@ class SearchConfig:
     embedding_model: str = "text-embedding-ada-002"
     vector_store_path: str = ".chromadb"
     search_depth: Literal["quick", "moderate", "thorough"] = "moderate"
+    # MLE-bench rule compliance: competition-specific solutions must not be used.
+    # When run_mode == "mlebench", the Search-First retrieval switches to
+    # cross-competition queries and filters out notebooks that belong to the
+    # target competition (see tools/kaggle_search.py). Setting
+    # KAGGLE_AGENTS_ALLOW_SAME_COMP_SOURCES=true disables the guard, which is
+    # NOT benchmark-legal and should only be used for regular Kaggle runs.
+    allow_same_competition_sources: bool = field(
+        default_factory=lambda: os.getenv(
+            "KAGGLE_AGENTS_ALLOW_SAME_COMP_SOURCES", "false"
+        ).lower()
+        == "true"
+    )
+
+
+@dataclass
+class AblationTogglesConfig:
+    """Component on/off switches for system-level ablation studies.
+
+    Each flag removes one architectural component so its contribution to the
+    final score can be measured (paper experiments). All components are
+    enabled by default; set the env var to "true" to ablate.
+    """
+
+    disable_search: bool = field(
+        default_factory=lambda: os.getenv("KAGGLE_AGENTS_ABLATE_SEARCH", "false").lower()
+        == "true"
+    )  # Search-First retrieval -> domain-heuristic fallback only
+    disable_robustness: bool = field(
+        default_factory=lambda: os.getenv("KAGGLE_AGENTS_ABLATE_ROBUSTNESS", "false").lower()
+        == "true"
+    )  # skip the 7 guardrail validation modules
+    disable_meta_evaluator: bool = field(
+        default_factory=lambda: os.getenv(
+            "KAGGLE_AGENTS_ABLATE_META_EVALUATOR", "false"
+        ).lower()
+        == "true"
+    )  # skip meta-evaluation (also disables SOTA-search/curriculum recovery routes)
+    disable_ensemble: bool = field(
+        default_factory=lambda: os.getenv("KAGGLE_AGENTS_ABLATE_ENSEMBLE", "false").lower()
+        == "true"
+    )  # skip ensembling (best single-model submission is kept)
+
+    def disabled_components(self) -> list[str]:
+        """Names of components currently ablated (for telemetry/reporting)."""
+        return [
+            name
+            for name, flag in (
+                ("search", self.disable_search),
+                ("robustness", self.disable_robustness),
+                ("meta_evaluator", self.disable_meta_evaluator),
+                ("ensemble", self.disable_ensemble),
+            )
+            if flag
+        ]
 
 
 @dataclass
@@ -379,6 +434,7 @@ class AgentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     ablation: AblationConfig = field(default_factory=AblationConfig)
+    ablation_toggles: AblationTogglesConfig = field(default_factory=AblationTogglesConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     dspy: DSPyConfig = field(default_factory=DSPyConfig)
     iteration: IterationConfig = field(default_factory=IterationConfig)
@@ -496,6 +552,14 @@ def reset_config() -> None:
 
 
 # ==================== Convenience Functions ====================
+
+
+def get_run_seed(default: int = 42) -> int:
+    """Return the experiment seed shared by folds, generated code, and telemetry."""
+    try:
+        return int(os.getenv("RUN_SEED", str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def get_llm(temperature: float | None = None, max_tokens: int | None = None):

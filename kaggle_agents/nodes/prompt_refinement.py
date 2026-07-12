@@ -13,6 +13,7 @@ from ..optimization.reward_model import (
     create_developer_metric,
     create_planner_metric,
 )
+from ..utils.telemetry import make_event
 
 
 class PromptRefinementDecider:
@@ -267,6 +268,21 @@ def prompt_refinement_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
+    from ..core.config import get_config
+
+    toggles = getattr(get_config(), "ablation_toggles", None)
+    if toggles and toggles.disable_meta_evaluator:
+        return {
+            "telemetry_events": [
+                make_event(
+                    "ablation",
+                    "prompt_refinement_skipped",
+                    iteration=state.get("current_iteration", 0),
+                    component="meta_evaluator",
+                )
+            ]
+        }
+
     print("\n" + "=" * 60)
     print("= PROMPT REFINEMENT: RL-based Optimization")
     print("=" * 60)
@@ -302,6 +318,16 @@ def prompt_refinement_node(state: KaggleState) -> dict[str, Any]:
 
     print("\n✅ Prompt refinement completed")
     print(f"   Results: {results}")
+
+    results["telemetry_events"] = [
+        make_event(
+            "recovery",
+            "prompt_refinement_executed",
+            iteration=state.get("current_iteration", 0),
+            planner_optimized=bool(results.get("planner_optimized")),
+            developer_optimized=bool(results.get("developer_optimized")),
+        )
+    ]
 
     return results
 
