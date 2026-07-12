@@ -1,9 +1,13 @@
 """Tests for the code executor error parsing, resource limits, and HPO validation."""
 
+import json
 import os
 import platform
 
 import pytest
+
+from kaggle_agents.tools.code_executor import CodeExecutor
+from kaggle_agents.tools.code_executor.process import build_subprocess_env
 
 
 # Feature flag constant (copied from code_executor.py)
@@ -144,6 +148,70 @@ class TestResourceLimits:
     def test_resource_limits_feature_flag_exists(self):
         """Feature flag should exist and be a boolean-like value."""
         assert isinstance(ENABLE_RESOURCE_LIMITS, bool)
+
+
+class TestGeneratedCodeEnvironment:
+    def test_secrets_are_removed_but_runtime_config_is_preserved(self):
+        env = build_subprocess_env(
+            {
+                "OPENAI_API_KEY": "secret",
+                "KAGGLE_USERNAME": "user",
+                "CUSTOM_ACCESS_TOKEN": "token",
+                "DATABASE_URL": "postgres://secret",
+                "AZURE_OPENAI_KEY": "secret",
+                "KAGGLE_CONFIG_DIR": "/real/home/.kaggle",
+                "KAGGLE_AGENTS_CV_FOLDS": "5",
+                "CUDA_VISIBLE_DEVICES": "0",
+            },
+            home_dir="/tmp/generated-home",
+        )
+
+        assert "OPENAI_API_KEY" not in env
+        assert "KAGGLE_USERNAME" not in env
+        assert "CUSTOM_ACCESS_TOKEN" not in env
+        assert "DATABASE_URL" not in env
+        assert "AZURE_OPENAI_KEY" not in env
+        assert "KAGGLE_CONFIG_DIR" not in env
+        assert env["KAGGLE_AGENTS_CV_FOLDS"] == "5"
+        assert env["CUDA_VISIBLE_DEVICES"] == "0"
+        assert env["HOME"] == "/tmp/generated-home"
+        assert env["XDG_CONFIG_HOME"] == "/tmp/generated-home/.config"
+
+    def test_explicit_trusted_override_preserves_environment(self):
+        source = {
+            "KAGGLE_AGENTS_ALLOW_GENERATED_CODE_SECRETS": "true",
+            "OPENAI_API_KEY": "secret",
+        }
+        assert build_subprocess_env(source) == source
+
+    def test_executor_uses_isolated_home_and_scrubbed_environment(
+        self, temp_data_dir, monkeypatch
+    ):
+        monkeypatch.setenv("OPENAI_API_KEY", "must-not-leak")
+        code = """
+import json
+import os
+import numpy as np
+from pathlib import Path
+
+Path("env.json").write_text(json.dumps({
+    "home": os.environ.get("HOME"),
+    "openai": os.environ.get("OPENAI_API_KEY"),
+}))
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10).execute(
+            code,
+            str(temp_data_dir),
+            expected_artifacts=["env.json"],
+            component_type="model",
+        )
+
+        assert result.success, result.stderr
+        payload = json.loads((temp_data_dir / "env.json").read_text())
+        assert payload["home"] == str(temp_data_dir / ".agent_home")
+        assert payload["openai"] is None
 
 
 class TestOptunaPruningContractValidation:
