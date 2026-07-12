@@ -1138,9 +1138,8 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
 
     Simplified routing logic - only stops for:
     1. Explicit skip_remaining_components flag
-    2. Medal achievement (MLE-bench success)
-    3. Critical errors (data download failed, auth issues)
-    4. All components implemented
+    2. Critical errors (data download failed, auth issues)
+    3. All components implemented
 
     Target score checking is delegated to iteration_control to allow
     multiple refinement iterations with meta-evaluator insights.
@@ -1155,16 +1154,6 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     if state.get("skip_remaining_components"):
         print("\n⏩ skip_remaining_components=True - Moving to validation")
         return "end"
-
-    # Check for medal achievement in MLE-bench mode (immediate success)
-    mlebench_grade = state.get("mlebench_grade")
-    run_mode = str(state.get("run_mode", "")).lower()
-
-    if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
-        if mlebench_grade.get("valid_submission"):
-            if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
-                print("\n🏅 MEDAL ACHIEVED - Moving to validation")
-                return "end"
 
     # Check for critical errors (data download failed, auth issues)
     errors = state.get("errors", [])
@@ -1262,7 +1251,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
 
     Uses adaptive iteration logic:
     1. If score gap > threshold, extend iterations
-    2. In MLE-bench mode, aggressively refines until medal/max
+    2. In MLE-bench mode, refines from CV/OOF feedback until max iterations
     3. Respects minimum iterations before early stopping
 
     Args:
@@ -1280,7 +1269,6 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     current_iteration = state.get("current_iteration", 0)
     base_max_iterations = state.get("max_iterations", iter_config.max_iterations)
     run_mode = str(state.get("run_mode", "")).lower()
-    mlebench_grade = state.get("mlebench_grade")
 
     # Calculate effective max_iterations based on score gap (adaptive)
     max_iterations = base_max_iterations
@@ -1302,32 +1290,9 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     print(f"   Needs refinement: {needs_refinement}")
     print(f"   Run mode: {run_mode}")
 
-    # Check medal status
-    has_gold = False
-    has_any_medal = False
-    if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
-        has_gold = mlebench_grade.get("gold_medal", False)
-        has_any_medal = any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"])
-
-    # Handle skip flag - in MLE-bench mode, only end if gold or max iterations reached
+    # Respect explicit early stopping without test-set feedback.
     if state.get("skip_remaining_components"):
-        if run_mode == "mlebench":
-            if has_gold:
-                print("   🥇 GOLD MEDAL ACHIEVED - Ending")
-                return "end"
-            if current_iteration >= max_iterations:
-                print(f"   ⏱️  Max iterations reached with medal ({current_iteration}/{max_iterations})")
-                return "end"
-            # Reset skip flag and continue refining for better medal
-            print(f"   🔄 Medal achieved but continuing for gold (iteration {current_iteration + 1}/{max_iterations})")
-                # Note: State update happens in iteration_control_node, not here
-        else:
-            print("   ⏩ skip_remaining_components=True - Ending")
-            return "end"
-
-    # Check for gold medal achievement (always stop on gold)
-    if has_gold:
-        print("   🥇 GOLD MEDAL ACHIEVED - Success!")
+        print("   ⏩ skip_remaining_components=True - Ending")
         return "end"
 
     # Max iterations reached
@@ -1335,7 +1300,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         print(f"   ⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
         return "end"
 
-    # MLE-bench mode: aggressively refine until medal or max_iterations
+    # MLE-bench mode: use only CV/OOF and validation guidance until budget ends.
     if run_mode == "mlebench":
         # Log refinement guidance if available
         refinement_guidance = state.get("refinement_guidance", {})
@@ -1346,7 +1311,10 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
             if refinement_guidance.get("developer_guidance"):
                 print(f"      Developer: {refinement_guidance['developer_guidance'][:80]}...")
 
-        print(f"   🔄 MLE-bench mode: Starting refinement iteration {current_iteration + 1}")
+        print(
+            "   🔄 MLE-bench mode: Starting CV/OOF-guided refinement "
+            f"iteration {current_iteration + 1}"
+        )
         return "refine"
 
     # Standard Kaggle mode: check target_score

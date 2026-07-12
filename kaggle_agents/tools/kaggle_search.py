@@ -7,6 +7,7 @@ solutions from Kaggle competitions via the official API and web scraping.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
@@ -16,10 +17,13 @@ from typing import Any
 
 import requests
 from bs4 import BeautifulSoup
-from kaggle.api.kaggle_api_extended import KaggleApi
 
 from ..core.config import get_config
 from ..core.state import SOTASolution
+from ..utils.contamination import (
+    code_references_competition,
+    is_same_competition_candidate,
+)
 
 
 @dataclass
@@ -62,8 +66,15 @@ class KaggleSearcher:
 
     def __init__(self):
         """Initialize the Kaggle searcher with API client."""
-        self.api = KaggleApi()
-        self.api.authenticate()
+        # Lazy import: the kaggle package authenticates (and may exit) at import
+        # time, which would break test collection / credential-less environments.
+        try:
+            from kaggle.api.kaggle_api_extended import KaggleApi
+
+            self.api = KaggleApi()
+            self.api.authenticate()
+        except (Exception, SystemExit) as e:
+            raise RuntimeError("Kaggle API is unavailable or credentials are not configured") from e
         self.config = get_config()
 
     @staticmethod
@@ -88,6 +99,40 @@ class KaggleSearcher:
                 if value is not None:
                     return value
         return default
+
+    @classmethod
+    def _get_kernel_competitions(cls, kernel: Any) -> list[str]:
+        """Return competition data-source refs exposed by Kaggle kernel metadata."""
+        sources = cls._get_kernel_attr(
+            kernel,
+            ["competition_data_sources", "competitionDataSources"],
+            [],
+        )
+        if isinstance(sources, str):
+            return [sources] if sources else []
+        if not isinstance(sources, (list, tuple)):
+            return []
+
+        refs: list[str] = []
+        for source in sources:
+            if isinstance(source, str):
+                ref = source
+            elif isinstance(source, dict):
+                ref = next(
+                    (
+                        str(source[key])
+                        for key in ("ref", "slug", "name", "url")
+                        if source.get(key)
+                    ),
+                    "",
+                )
+            else:
+                ref = str(
+                    cls._get_kernel_attr(source, ["ref", "slug", "name", "url"], "")
+                )
+            if ref:
+                refs.append(ref)
+        return refs
 
     def search_notebooks(
         self,
@@ -388,6 +433,235 @@ class KaggleSearcher:
         )
 
 
+# ==================== MLE-bench Contamination Guard ====================
+# MLE-bench forbids using solutions specific to the target competition.
+# Decision helpers live in utils/contamination.py (pure, unit-testable);
+# here they are applied to retrieved notebooks with a full audit trail.
+
+
+def filter_same_competition_candidates(
+    candidates: list[NotebookMetadata],
+    competition: str,
+) -> tuple[list[NotebookMetadata], list[dict]]:
+    """
+    Split candidates into (kept, audit records), filtering notebooks that look
+    like they belong to the target competition.
+
+    Every candidate produces an audit record so runs can be audited for
+    MLE-bench rule compliance.
+    """
+    kept: list[NotebookMetadata] = []
+    audit: list[dict] = []
+
+    for nb in candidates:
+        same = is_same_competition_candidate(nb.ref, nb.title, nb.competition, competition)
+        audit.append(
+            {
+                "ref": nb.ref,
+                "title": nb.title,
+                "votes": nb.total_votes,
+                "source_competitions": nb.competition,
+                "stage": "metadata",
+                "same_competition": same,
+                "filtered": same,
+                "filter_reason": "target_competition_metadata" if same else None,
+            }
+        )
+        if not same:
+            kept.append(nb)
+
+    return kept, audit
+
+
+def search_notebooks_cross_competition(
+    competition: str,
+    queries: list[str],
+    max_notebooks: int = 10,
+    min_votes: int = 5,
+) -> tuple[list[SOTASolution], list[dict]]:
+    """
+    MLE-bench-compliant retrieval: search Kaggle notebooks by task/domain
+    queries (NOT by the target competition) and filter out anything that
+    belongs to the target competition itself.
+
+    Args:
+        competition: Target competition slug (used only for exclusion)
+        queries: Cross-competition search queries (domain/task keywords)
+        max_notebooks: Maximum solutions to return
+        min_votes: Minimum votes threshold
+
+    Returns:
+        Tuple of (solutions, audit records). Audit records document every
+        candidate seen and every filter decision.
+    """
+    try:
+        searcher = KaggleSearcher()
+    except RuntimeError as e:
+        print(f"  Cross-competition search unavailable: {e}")
+        return [], [
+            {
+                "ref": None,
+                "stage": "initialization",
+                "same_competition": False,
+                "filtered": False,
+                "error": str(e),
+            }
+        ]
+
+    seen_refs: set[str] = set()
+    candidates: list[NotebookMetadata] = []
+
+    for query in queries:
+        try:
+            kernels = searcher.api.kernels_list(
+                search=query,
+                sort_by="voteCount",
+                page_size=20,
+            )
+        except Exception as e:
+            print(f"  Error searching notebooks for query '{query}': {e}")
+            continue
+
+        for kernel in kernels or []:
+            try:
+                ref = KaggleSearcher._get_kernel_attr(kernel, ["ref", "slug"])
+                if not ref or ref in seen_refs:
+                    continue
+                seen_refs.add(ref)
+
+                total_votes = KaggleSearcher._get_kernel_attr(
+                    kernel,
+                    ["total_votes", "totalVotes", "voteCount", "vote_count"],
+                    0,
+                )
+                candidates.append(
+                    NotebookMetadata(
+                        ref=ref,
+                        title=KaggleSearcher._get_kernel_attr(kernel, ["title"], ""),
+                        author=KaggleSearcher._get_kernel_attr(kernel, ["author", "owner"], ""),
+                        total_votes=int(total_votes) if total_votes is not None else 0,
+                        medal_type=KaggleSearcher._get_kernel_attr(kernel, ["medal_type", "medalType"]),
+                        language=KaggleSearcher._get_kernel_attr(kernel, ["language"], "python"),
+                        competition=" ".join(
+                            KaggleSearcher._get_kernel_competitions(kernel)
+                        ),
+                        url=f"https://www.kaggle.com/code/{ref}",
+                    )
+                )
+            except Exception as kernel_err:
+                print(f"  Skipping kernel due to parse error: {kernel_err}")
+
+    candidates = [nb for nb in candidates if nb.total_votes >= min_votes]
+    candidates.sort(key=lambda nb: nb.total_votes, reverse=True)
+
+    kept, audit = filter_same_competition_candidates(candidates, competition)
+    print(
+        f"  Contamination guard: {len(candidates)} candidates, "
+        f"{len(candidates) - len(kept)} filtered at metadata stage"
+    )
+
+    config = get_config()
+    download_dir = config.paths.cache_dir / "notebooks" / f"_cross_comp_{competition}"
+
+    solutions: list[SOTASolution] = []
+    for nb in kept:
+        if len(solutions) >= max_notebooks:
+            break
+
+        # Per-ref subdir: a shared dir would make download_notebook return the
+        # wrong file, corrupting the code_scan contamination decision below
+        nb_path = searcher.download_notebook(nb.ref, download_dir / nb.ref.replace("/", "__"))
+        if not nb_path:
+            audit.append(
+                {
+                    "ref": nb.ref,
+                    "stage": "download",
+                    "same_competition": False,
+                    "filtered": True,
+                    "filter_reason": "download_failed",
+                    "error": "download_failed",
+                }
+            )
+            continue
+
+        # Scan the complete source document first, including notebook markdown
+        # and data-source metadata. Code-only scanning misses target references
+        # written outside executable cells.
+        try:
+            source_bytes = nb_path.read_bytes()
+            source_document = source_bytes.decode("utf-8", errors="replace")
+            source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        except OSError as e:
+            audit.append(
+                {
+                    "ref": nb.ref,
+                    "title": nb.title,
+                    "stage": "source_read",
+                    "same_competition": False,
+                    "filtered": True,
+                    "filter_reason": "source_read_failed",
+                    "error": str(e),
+                }
+            )
+            continue
+
+        if nb_path.suffix == ".ipynb":
+            code_snippets = searcher.extract_code_from_notebook(nb_path)
+        else:
+            code_snippets = searcher.extract_code_from_script(nb_path)
+
+        if not code_snippets:
+            audit.append(
+                {
+                    "ref": nb.ref,
+                    "title": nb.title,
+                    "stage": "source_parse",
+                    "same_competition": False,
+                    "filtered": True,
+                    "filter_reason": "source_parse_failed_or_empty",
+                    "source_sha256": source_sha256,
+                }
+            )
+            continue
+
+        # Second-stage filter: notebook code that reads the target competition's
+        # input data is competition-specific -> discard.
+        if code_references_competition(source_document, competition):
+            audit.append(
+                {
+                    "ref": nb.ref,
+                    "title": nb.title,
+                    "stage": "code_scan",
+                    "same_competition": True,
+                    "filtered": True,
+                    "filter_reason": "target_competition_source_reference",
+                    "source_sha256": source_sha256,
+                }
+            )
+            print(f"  Contamination guard: filtered {nb.ref} (code references {competition})")
+            continue
+
+        strategies = searcher.analyze_notebook_strategies(code_snippets)
+        solutions.append(searcher.create_sota_solution(nb, code_snippets, strategies))
+        audit.append(
+            {
+                "ref": nb.ref,
+                "title": nb.title,
+                "stage": "code_scan",
+                "same_competition": False,
+                "filtered": False,
+                "filter_reason": None,
+                "source_sha256": source_sha256,
+            }
+        )
+
+        # Rate limiting
+        time.sleep(1)
+
+    print(f"  Contamination guard: {len(solutions)} cross-competition solutions retained")
+    return solutions, audit
+
+
 # ==================== Convenience Functions ====================
 
 
@@ -407,7 +681,11 @@ def search_competition_notebooks(
     Returns:
         List of SOTASolution objects
     """
-    searcher = KaggleSearcher()
+    try:
+        searcher = KaggleSearcher()
+    except RuntimeError as e:
+        print(f"Search unavailable: {e}")
+        return []
 
     # Search notebooks
     print(f"Searching notebooks for {competition}...")
@@ -426,8 +704,9 @@ def search_competition_notebooks(
     for nb in notebooks:
         print(f"  = Analyzing: {nb.title} ({nb.total_votes} votes)")
 
-        # Download notebook
-        nb_path = searcher.download_notebook(nb.ref, download_dir)
+        # Download notebook (per-ref subdir: download_notebook globs the dir and
+        # returns the first file, so a shared dir would return the wrong notebook)
+        nb_path = searcher.download_notebook(nb.ref, download_dir / nb.ref.replace("/", "__"))
         if not nb_path:
             continue
 

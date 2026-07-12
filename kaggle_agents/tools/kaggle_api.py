@@ -9,8 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from kaggle.api.kaggle_api_extended import KaggleApi
-
 
 class KaggleAPIClient:
     """Client for interacting with Kaggle API.
@@ -24,15 +22,19 @@ class KaggleAPIClient:
 
     def __init__(self):
         """Initialize Kaggle API client with authentication."""
-        self.api = KaggleApi()
         try:
+            # Import lazily: the Kaggle package authenticates at import time and
+            # may call exit(1) when credentials are unavailable.
+            from kaggle.api.kaggle_api_extended import KaggleApi  # noqa: PLC0415
+
+            self.api = KaggleApi()
             self.api.authenticate()
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             raise RuntimeError(
                 f"Kaggle API authentication failed: {e!s}\n"
                 "Ensure KAGGLE_USERNAME and KAGGLE_KEY are set, "
                 "or ~/.kaggle/kaggle.json exists with credentials."
-            )
+            ) from e
 
     def _analyze_directory(self, dir_path: Path) -> tuple[str, dict[str, Any]]:
         """Analyze directory contents to determine data type.

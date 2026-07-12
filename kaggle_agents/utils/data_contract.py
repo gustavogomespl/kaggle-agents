@@ -24,6 +24,8 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupKFold, KFold, StratifiedGroupKFold, StratifiedKFold
 
+from ..core.config import get_run_seed
+
 
 # Common group column names for preventing data leakage
 GROUP_COLUMN_CANDIDATES = [
@@ -335,6 +337,7 @@ def prepare_canonical_data(
     canonical_dir.mkdir(parents=True, exist_ok=True)
 
     print("\n   Preparing canonical data contract...")
+    run_seed = get_run_seed()
 
     # Step 1: Load training data RAW (no transformations yet)
     train_df = pd.read_csv(train_path)
@@ -381,10 +384,15 @@ def prepare_canonical_data(
     sampling_metadata = {"sampled": False, "original_rows": original_rows}
 
     if max_rows and len(train_df) > max_rows:
-        train_df, sampling_metadata = _hash_based_sample(train_df, id_col, max_rows, seed=42)
+        train_df, sampling_metadata = _hash_based_sample(
+            train_df, id_col, max_rows, seed=run_seed
+        )
         id_col = sampling_metadata.get("id_column", id_col)
         is_synthetic_id = sampling_metadata.get("id_is_synthetic", False)
-        print(f"   Sampled {len(train_df):,} rows via deterministic MD5 hash (seed=42)")
+        print(
+            f"   Sampled {len(train_df):,} rows via deterministic MD5 hash "
+            f"(seed={run_seed})"
+        )
     else:
         # Even without sampling, ensure ID column exists
         train_df, id_col, is_synthetic_id = _ensure_id_column(train_df, id_col)
@@ -457,7 +465,9 @@ def prepare_canonical_data(
         # For seq2seq tasks or when stratification is not possible, use GroupKFold
         if is_classification and n_unique is not None and n_unique <= 10:
             try:
-                kf = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=42)
+                kf = StratifiedGroupKFold(
+                    n_splits=n_folds, shuffle=True, random_state=run_seed
+                )
                 for fold, (_, val_idx) in enumerate(kf.split(train_df, y, groups)):
                     fold_assignments[val_idx] = fold
             except Exception:
@@ -470,11 +480,11 @@ def prepare_canonical_data(
             for fold, (_, val_idx) in enumerate(kf.split(train_df, groups=groups)):
                 fold_assignments[val_idx] = fold
     elif is_classification:
-        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
+        kf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=run_seed)
         for fold, (_, val_idx) in enumerate(kf.split(train_df, y)):
             fold_assignments[val_idx] = fold
     else:
-        kf = KFold(n_splits=n_folds, shuffle=True, random_state=42)
+        kf = KFold(n_splits=n_folds, shuffle=True, random_state=run_seed)
         for fold, (_, val_idx) in enumerate(kf.split(train_df)):
             fold_assignments[val_idx] = fold
 
@@ -501,6 +511,7 @@ def prepare_canonical_data(
         "original_rows": original_rows,
         "canonical_rows": len(train_df),
         "n_folds": n_folds,
+        "random_seed": run_seed,
         "cv_strategy": cv_config["strategy"],
         "id_col": id_col,
         "id_is_synthetic": is_synthetic_id,

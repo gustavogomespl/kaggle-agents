@@ -3,7 +3,9 @@
 from datetime import datetime
 from typing import Any
 
+from ...core.config import get_config
 from ...core.state import KaggleState
+from ...utils.telemetry import make_event
 
 
 def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
@@ -11,6 +13,8 @@ def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
     Automatic SOTA search triggered by stagnation or score gap detection.
 
     Searches for winning solutions and techniques when progress stalls.
+    Retrieval goes through SearchAgent.retrieve(), so the MLE-bench
+    contamination guard applies here as well.
 
     Args:
         state: Current workflow state
@@ -29,46 +33,83 @@ def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
         print("   Skipping - no SOTA search trigger")
         return {}
 
-    competition_name = state.get("competition_name", "")
+    try:
+        competition_name = state["competition_info"].name
+    except Exception:
+        competition_name = ""
     domain = state.get("domain_detected", "tabular")
     current_score = state.get("current_performance_score", 0.0)
+    current_iteration = state.get("current_iteration", 0)
 
     print(f"\n   🔍 Searching SOTA solutions for: {competition_name}")
     print(f"   📊 Current score: {current_score}")
     print(f"   🎯 Trigger reason: {stagnation.get('reason', 'unknown')}")
 
+    # Ablation toggle: Search-First disabled -> generic guidance only
+    toggles = getattr(get_config(), "ablation_toggles", None)
+    if toggles and toggles.disable_search:
+        print("   ABLATION: Search disabled - using generic stagnation guidance")
+        return {
+            "sota_search_triggered": True,
+            "refinement_guidance": {
+                **state.get("refinement_guidance", {}),
+                "sota_guidance": _generate_fallback_sota_guidance(domain, stagnation),
+            },
+            "telemetry_events": [
+                make_event(
+                    "ablation",
+                    "sota_search_skipped",
+                    iteration=current_iteration,
+                    component="search",
+                )
+            ],
+            "last_updated": datetime.now(),
+        }
+
     try:
         search_agent = SearchAgent()
 
-        # Focus search on areas that could improve the score
-        focus_areas = ["feature_engineering", "model_architecture", "ensemble_strategy"]
+        # Retrieve fresh solutions (mode-aware; contamination guard in MLE-bench)
+        solutions, _queries, audit_records, events, _k = search_agent.retrieve(
+            state, max_results=5
+        )
 
-        # If stagnation is the issue, focus on novel approaches
-        if stagnation.get("stagnated"):
-            focus_areas.insert(0, "novel_approaches")
-            focus_areas.insert(1, "hyperparameter_optimization")
-
-        # Search for solutions
-        search_results = search_agent.search_with_focus(
-            competition=competition_name,
-            domain=domain,
-            focus_areas=focus_areas,
-            max_results=5,
-        ) if hasattr(search_agent, 'search_with_focus') else {}
+        search_results = {
+            "solutions": [
+                {
+                    "title": sol.title,
+                    "approach": ", ".join(sol.models_used) or "; ".join(sol.strategies[:2]),
+                }
+                for sol in solutions
+            ]
+        }
 
         # Generate guidance from search results
         sota_guidance = _generate_sota_guidance_from_results(search_results, stagnation)
 
-        print(f"\n   ✅ SOTA search complete - found {len(search_results.get('solutions', []))} relevant solutions")
+        print(f"\n   ✅ SOTA search complete - found {len(solutions)} relevant solutions")
+
+        events.append(
+            make_event(
+                "recovery",
+                "sota_search_executed",
+                iteration=current_iteration,
+                found=len(solutions),
+                reason=stagnation.get("reason", "stagnation"),
+            )
+        )
 
         return {
+            "sota_solutions": solutions,
             "sota_search_results": search_results,
             "sota_search_triggered": True,
+            "search_audit": audit_records,
             "refinement_guidance": {
                 **state.get("refinement_guidance", {}),
                 "sota_guidance": sota_guidance,
                 "sota_triggered_by": stagnation.get("reason"),
             },
+            "telemetry_events": events,
             "last_updated": datetime.now(),
         }
 
@@ -81,6 +122,15 @@ def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
                 **state.get("refinement_guidance", {}),
                 "sota_guidance": _generate_fallback_sota_guidance(domain, stagnation),
             },
+            "telemetry_events": [
+                make_event(
+                    "recovery",
+                    "sota_search_executed",
+                    iteration=current_iteration,
+                    found=0,
+                    error=str(e)[:300],
+                )
+            ],
         }
 
 

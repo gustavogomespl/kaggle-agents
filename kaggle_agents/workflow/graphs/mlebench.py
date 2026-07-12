@@ -28,11 +28,13 @@ from ..nodes import (
     domain_detection_node,
     iteration_control_node,
     performance_evaluation_node,
+    robustness_gate_node,
 )
 from ..routing import (
     route_after_developer,
     route_after_iteration_control,
     route_after_meta_evaluator,
+    route_after_robustness_gate,
 )
 
 
@@ -69,6 +71,7 @@ def create_mlebench_workflow() -> StateGraph:
     workflow.add_node("planner", planner_agent_node)
     workflow.add_node("developer", developer_agent_node)
     workflow.add_node("robustness", robustness_agent_node)
+    workflow.add_node("robustness_gate", robustness_gate_node)
     workflow.add_node("ensemble", ensemble_agent_node)
     workflow.add_node("submission", submission_agent_node)
     workflow.add_node("performance_evaluation", performance_evaluation_node)
@@ -107,8 +110,17 @@ def create_mlebench_workflow() -> StateGraph:
         },
     )
 
-    # Robustness → Ensemble
-    workflow.add_edge("robustness", "ensemble")
+    # Robustness → explicit gate → ensemble, bounded correction, or stop
+    workflow.add_edge("robustness", "robustness_gate")
+    workflow.add_conditional_edges(
+        "robustness_gate",
+        route_after_robustness_gate,
+        {
+            "pass": "ensemble",
+            "recover": "planner",
+            "fail": "reporting",
+        },
+    )
 
     # Ensemble → Submission
     workflow.add_edge("ensemble", "submission")
@@ -125,6 +137,7 @@ def create_mlebench_workflow() -> StateGraph:
             "sota_search": "auto_sota_search",
             "curriculum": "curriculum_learning",
             "continue": "prompt_refinement",
+            "skip_recovery": "iteration_control",
         },
     )
 

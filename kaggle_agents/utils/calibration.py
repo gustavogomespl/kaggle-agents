@@ -14,6 +14,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import brier_score_loss, log_loss
 from sklearn.model_selection import KFold
 
+from ..core.config import get_run_seed
+
 
 @dataclass
 class CalibrationResult:
@@ -111,7 +113,7 @@ def _platt_scaling_binary(
             calibrated[val_mask] = calibrator.predict_proba(probs[val_mask].reshape(-1, 1))[:, 1]
     else:
         # Use KFold for OOF calibration
-        kf = KFold(n_splits=n_cv_splits, shuffle=True, random_state=42)
+        kf = KFold(n_splits=n_cv_splits, shuffle=True, random_state=get_run_seed())
         for train_idx, val_idx in kf.split(probs):
             calibrator = LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")
             calibrator.fit(probs[train_idx].reshape(-1, 1), y_true[train_idx])
@@ -149,7 +151,7 @@ def _platt_scaling_multiclass(
                 calibrator.fit(probs_c[train_mask].reshape(-1, 1), y_binary[train_mask])
                 calibrated[val_mask, c] = calibrator.predict_proba(probs_c[val_mask].reshape(-1, 1))[:, 1]
         else:
-            kf = KFold(n_splits=n_cv_splits, shuffle=True, random_state=42)
+            kf = KFold(n_splits=n_cv_splits, shuffle=True, random_state=get_run_seed())
             for train_idx, val_idx in kf.split(probs_c):
                 calibrator = LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")
                 calibrator.fit(probs_c[train_idx].reshape(-1, 1), y_binary[train_idx])
@@ -209,7 +211,7 @@ def isotonic_calibration(
                 iso.fit(probs_c[train_mask], y_binary[train_mask])
                 calibrated[val_mask, c] = iso.predict(probs_c[val_mask])
         else:
-            kf = KFold(n_splits=n_cv_splits, shuffle=True, random_state=42)
+            kf = KFold(n_splits=n_cv_splits, shuffle=True, random_state=get_run_seed())
             for train_idx, val_idx in kf.split(probs_c):
                 iso = IsotonicRegression(out_of_bounds="clip", y_min=0, y_max=1)
                 iso.fit(probs_c[train_idx], y_binary[train_idx])

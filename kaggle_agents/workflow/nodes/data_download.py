@@ -6,6 +6,7 @@ from typing import Any
 
 import pandas as pd
 
+from ...core.config import get_run_seed
 from ...core.state import KaggleState
 from ...tools.kaggle_api import KaggleAPIClient
 
@@ -68,7 +69,7 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
                     target_col=target_col,
                     output_path=folds_path,
                     n_folds=5,
-                    seed=42,
+                    seed=int(state.get("random_seed", get_run_seed())),
                 )
                 data_files["folds"] = folds_path
             except Exception as e:

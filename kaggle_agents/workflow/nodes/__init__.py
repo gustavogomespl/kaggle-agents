@@ -8,6 +8,7 @@ from .data_format import data_format_discovery_node
 from .data_validation import data_validation_node
 from .domain_detection import domain_detection_node
 from .iteration import iteration_control_node, performance_evaluation_node
+from .robustness_gate import robustness_gate_node
 from .sota_search import auto_sota_search_node
 
 
@@ -22,4 +23,5 @@ __all__ = [
     "domain_detection_node",
     "iteration_control_node",
     "performance_evaluation_node",
+    "robustness_gate_node",
 ]
