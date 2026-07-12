@@ -116,8 +116,8 @@ MLEBENCH_LITE = [
     },
     {
         "id": "tabular-playground-series-dec-2021",
-        "type": "regression",
-        "metric": "rmse",
+        "type": "multiclass_classification",
+        "metric": "accuracy",
         "size_gb": 0.7,
     },
     {
@@ -229,6 +229,11 @@ def run_evaluation(
             print(f"  Success: {result.success}", flush=True)
             print(f"  Error: {result.error}", flush=True)
 
+            # Compact telemetry (full event_log stays in the per-run telemetry.json)
+            telemetry = getattr(result, "telemetry", None)
+            if isinstance(telemetry, dict):
+                telemetry = {k: v for k, v in telemetry.items() if k != "event_log"}
+
             result_dict = {
                 "competition_id": comp_id,
                 "success": result.success,
@@ -242,6 +247,7 @@ def run_evaluation(
                 "execution_time": result.execution_time,
                 "iterations": result.iterations,
                 "components_implemented": result.components_implemented,
+                "telemetry": telemetry,
                 "error": result.error,
             }
 
@@ -290,13 +296,17 @@ def run_evaluation(
     with open(output_path / "summary.json", "w") as f:
         json.dump(summary, f, indent=2)
 
-    # Save CSV for easy reporting
+    # Save CSV for easy reporting (nested/verbose fields stay in results.json)
     csv_path = output_path / "results.csv"
-    fieldnames = sorted({k for row in all_results for k in row.keys()})
+    csv_excluded = {"telemetry", "traceback"}
+    all_results_csv = [
+        {k: v for k, v in row.items() if k not in csv_excluded} for row in all_results
+    ]
+    fieldnames = sorted({k for row in all_results_csv for k in row.keys()})
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(all_results)
+        writer.writerows(all_results_csv)
 
     # Print summary
     print("\n" + "=" * 70)
