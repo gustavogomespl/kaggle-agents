@@ -4,9 +4,10 @@ from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import log_loss, mean_absolute_error, mean_squared_error, roc_auc_score
+from sklearn.metrics import log_loss, mean_squared_error
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
 
+from ...core.config import get_run_seed
 from .scoring import score_predictions
 
 
@@ -31,6 +32,7 @@ def tune_meta_model(
         Tuple of (fitted_model, metric_name)
     """
     # Detect number of classes if not provided
+    run_seed = get_run_seed()
     if n_classes is None and problem_type == "classification":
         n_classes = len(np.unique(y))
 
@@ -40,17 +42,16 @@ def tune_meta_model(
         best_score = float("inf")
         best_C = 0.01
         # Explicit StratifiedKFold with shuffle
-        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=run_seed)
 
         for C in [0.001, 0.01, 0.1, 1.0]:
             try:
                 # Use multinomial for multiclass, auto otherwise
                 model = LogisticRegression(
                     C=C,
-                    random_state=42,
+                    random_state=run_seed,
                     max_iter=1000,
-                    solver="lbfgs",
-                    multi_class="multinomial" if is_multiclass else "auto",
+                    solver="lbfgs",  # multinomial by default (multi_class kwarg removed in sklearn>=1.7)
                     class_weight="balanced" if is_multiclass else None,
                 )
                 # cross_val_predict to get OOF predictions
@@ -71,10 +72,9 @@ def tune_meta_model(
         print(f"   Using metric: {metric_name} for {'multiclass' if is_multiclass else 'binary'} classification")
         final_model = LogisticRegression(
             C=best_C,
-            random_state=42,
+            random_state=run_seed,
             max_iter=1000,
             solver="lbfgs",
-            multi_class="multinomial" if is_multiclass else "auto",
             class_weight="balanced" if is_multiclass else None,
         )
         return final_model, metric_name
@@ -82,11 +82,11 @@ def tune_meta_model(
     # Regression
     best_score = float("inf")
     best_alpha = 1.0
-    cv = KFold(n_splits=3, shuffle=True, random_state=42)
+    cv = KFold(n_splits=3, shuffle=True, random_state=run_seed)
 
     for alpha in [0.1, 1.0, 10.0, 100.0]:
         try:
-            model = Ridge(alpha=alpha, random_state=42)
+            model = Ridge(alpha=alpha, random_state=run_seed)
             oof_preds = cross_val_predict(model, meta_X, y, cv=cv)
             mean_score = np.sqrt(mean_squared_error(y, oof_preds))
             if mean_score < best_score:
@@ -97,7 +97,7 @@ def tune_meta_model(
             continue
 
     print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
-    return Ridge(alpha=best_alpha, random_state=42), "neg_rmse"
+    return Ridge(alpha=best_alpha, random_state=run_seed), "neg_rmse"
 
 
 def diagnose_stacking_issues(
@@ -286,36 +286,13 @@ def dirichlet_weight_search(
     best_score = float("inf")
 
     # Sample weights from simplex via Dirichlet(1,1,...,1)
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(get_run_seed())
     for _ in range(n_samples):
         weights = rng.dirichlet(np.ones(n_models))
         blended = np.average(oof_stack, axis=0, weights=weights)
 
         try:
-            if problem_type == "classification":
-                blended = np.clip(blended, 1e-15, 1 - 1e-15)
-                if blended.ndim > 1 and blended.shape[1] > 1:
-                    blended = blended / blended.sum(axis=1, keepdims=True)
-                # Classification metrics
-                if metric_name in ["auc", "roc_auc"]:
-                    # Negate because we minimize, but AUC should be maximized
-                    score = -roc_auc_score(
-                        y_true, blended, multi_class="ovr", average="weighted"
-                    )
-                else:
-                    # Default: log_loss for classification
-                    score = log_loss(y_true, blended)
-            else:
-                # Regression
-                if blended.ndim > 1:
-                    blended = blended.ravel()
-                if metric_name in ["mae", "mean_absolute_error"]:
-                    score = mean_absolute_error(y_true, blended)
-                elif metric_name in ["mse", "mean_squared_error"]:
-                    score = mean_squared_error(y_true, blended)
-                else:
-                    # Default: RMSE for regression
-                    score = np.sqrt(mean_squared_error(y_true, blended))
+            score = score_predictions(blended, y_true, problem_type, metric_name)
 
             if score < best_score:
                 best_score = score

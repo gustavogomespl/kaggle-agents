@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
 
+from ...core.config import get_run_seed
 from ...utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
 from ...utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
 from ...utils.oof_validation import print_oof_summary, validate_oof_stack
@@ -45,12 +46,18 @@ def load_cv_folds(
 
     if folds_path is not None and folds_path.exists():
         try:
-            folds_df = pd.read_csv(folds_path)
-            if "fold" in folds_df.columns and len(folds_df) == n_samples:
-                return folds_df["fold"].to_numpy()
-            print("   Warning: folds.csv missing 'fold' column or length mismatch")
+            if folds_path.suffix.lower() == ".npy":
+                folds = np.asarray(np.load(folds_path)).ravel()
+                if len(folds) == n_samples:
+                    return folds
+                print("   Warning: canonical folds.npy length mismatch")
+            else:
+                folds_df = pd.read_csv(folds_path)
+                if "fold" in folds_df.columns and len(folds_df) == n_samples:
+                    return folds_df["fold"].to_numpy()
+                print("   Warning: folds.csv missing 'fold' column or length mismatch")
         except Exception as e:
-            print(f"   Warning: Failed to read folds.csv: {e}")
+            print(f"   Warning: Failed to read folds from {folds_path}: {e}")
 
     return None
 
@@ -90,6 +97,7 @@ def stack_from_prediction_pairs(
     """
     if len(prediction_pairs) < 2:
         return None, None
+    run_seed = get_run_seed()
 
     valid_pairs, results = validate_oof_stack(
         prediction_pairs,
@@ -107,7 +115,7 @@ def stack_from_prediction_pairs(
     # Filter out weak models (more than 50% worse than best)
     print("   Filtering weak models by OOF score...")
     y_true_np = np.asarray(y)
-    valid_pairs, computed_scores = filter_by_score_threshold(
+    valid_pairs, _computed_scores = filter_by_score_threshold(
         valid_pairs,
         y_true_np,
         metric_name,
@@ -127,6 +135,7 @@ def stack_from_prediction_pairs(
 
     oof_list: list[np.ndarray] = []
     test_list: list[np.ndarray] = []
+    loaded_model_names: list[str] = []
     calibration_summaries: list[dict[str, Any]] = []
 
     for name, (oof_path, test_path) in valid_pairs.items():
@@ -216,28 +225,36 @@ def stack_from_prediction_pairs(
 
         oof_list.append(oof_preds)
         test_list.append(test_preds)
+        loaded_model_names.append(name)
 
     # Validate shapes after normalization (CRITICAL: prevents inhomogeneous array errors)
     if oof_list:
         oof_shapes = {tuple(o.shape) for o in oof_list}
         test_shapes = {tuple(t.shape) for t in test_list}
-        model_names = list(valid_pairs.keys())[: len(oof_list)]
+        model_names = loaded_model_names
 
         if len(oof_shapes) > 1 or len(test_shapes) > 1:
             print("   Warning: Shape mismatch detected after normalization:")
             print(f"      OOF shapes: {oof_shapes}")
             print(f"      Test shapes: {test_shapes}")
 
-            # Find the most common shape and keep only compatible models
-            shape_counts = Counter(tuple(o.shape) for o in oof_list)
-            target_shape = shape_counts.most_common(1)[0][0]
-            print(f"      Keeping models with shape: {target_shape}")
+            # Keep the most common OOF/test shape pair. Looking only at OOF
+            # shape can retain incompatible test arrays and fail at np.stack.
+            shape_counts = Counter(
+                (tuple(o.shape), tuple(t.shape)) for o, t in zip(oof_list, test_list, strict=True)
+            )
+            target_shapes = shape_counts.most_common(1)[0][0]
+            print(f"      Keeping models with OOF/test shapes: {target_shapes}")
 
-            valid_idx = [i for i, o in enumerate(oof_list) if tuple(o.shape) == target_shape]
+            valid_idx = [
+                i
+                for i, (o, t) in enumerate(zip(oof_list, test_list, strict=True))
+                if (tuple(o.shape), tuple(t.shape)) == target_shapes
+            ]
             oof_list = [oof_list[i] for i in valid_idx]
             test_list = [test_list[i] for i in valid_idx]
-            kept_names = [model_names[i] for i in valid_idx] if len(model_names) > max(valid_idx) else []
-            print(f"      Kept {len(oof_list)} compatible models: {kept_names}")
+            model_names = [model_names[i] for i in valid_idx]
+            print(f"      Kept {len(oof_list)} compatible models: {model_names}")
 
     if len(oof_list) < 2:
         return None, None
@@ -257,34 +274,37 @@ def stack_from_prediction_pairs(
         n_features_per_model = oof_list[0].shape[1]
 
     avg_oof = np.average(oof_stack, axis=0)
-    avg_score = score_predictions(avg_oof, y_encoded, problem_type, metric_name)
+    metric_lower = (metric_name or "").lower()
+    ordinal_metric = "kappa" in metric_lower or "qwk" in metric_lower
+    score_targets = np.asarray(y) if ordinal_metric else y_encoded
+
+    avg_score = score_predictions(avg_oof, score_targets, problem_type, metric_name)
     print(f"   [META] Simple average: {avg_score:.6f}")
 
     weights_constrained, constrained_score = constrained_meta_learner(
-        oof_stack, y_encoded, problem_type, metric_name
+        oof_stack, score_targets, problem_type, metric_name
     )
     print(f"   [META] Constrained: {constrained_score:.6f}")
 
     meta_score = float("inf")
     meta_oof_preds = None
     meta_model = None
-    meta_metric_name = metric_name  # Default to passed metric
     try:
         n_classes = len(np.unique(y_encoded)) if problem_type == "classification" else None
-        meta_model, meta_metric_name = tune_meta_model(meta_X, y_encoded, problem_type, n_classes)
+        meta_model, _meta_metric_name = tune_meta_model(meta_X, y_encoded, problem_type, n_classes)
         if problem_type == "classification":
-            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=run_seed)
             meta_oof_preds = cross_val_predict(
                 meta_model, meta_X, y_encoded, cv=cv, method="predict_proba"
             )
             if binary_single_col and meta_oof_preds.ndim > 1:
                 meta_oof_preds = meta_oof_preds[:, 1]
         else:
-            cv = KFold(n_splits=3, shuffle=True, random_state=42)
+            cv = KFold(n_splits=3, shuffle=True, random_state=run_seed)
             meta_oof_preds = cross_val_predict(meta_model, meta_X, y_encoded, cv=cv)
 
         meta_score = score_predictions(
-            meta_oof_preds, y_encoded, problem_type, metric_name
+            meta_oof_preds, score_targets, problem_type, metric_name
         )
         print(f"   [META] Meta-model: {meta_score:.6f}")
 
@@ -303,18 +323,6 @@ def stack_from_prediction_pairs(
         "meta": meta_score,
     }
     best_method = min(scores, key=scores.get)
-
-    # Explicit fallback warning when meta-model is significantly worse
-    if meta_score != float("inf") and avg_score != float("inf"):
-        if meta_score > avg_score * 1.05:
-            pct_worse = (meta_score / avg_score - 1) * 100
-            print(f"   Warning: Meta-model is {pct_worse:.1f}% worse than simple average!")
-            print(f"      Meta: {meta_score:.6f} vs Avg: {avg_score:.6f}")
-            print("      -> Forcing fallback to simple average")
-            best_method = "average"
-        elif meta_score > avg_score:
-            print("   Info: Meta-model slightly worse than average, using average")
-            best_method = "average"
 
     print(f"   [META] Best method: {best_method}")
 
@@ -338,16 +346,23 @@ def stack_from_prediction_pairs(
         selected_weights = np.ones(len(oof_list)) / len(oof_list)
 
     selected_score = score_predictions(
-        selected_oof, y_encoded, problem_type, metric_name
+        selected_oof, score_targets, problem_type, metric_name
     )
 
-    if problem_type == "classification":
+    selected_array = np.asarray(selected_oof)
+    ordinal_continuous = (
+        ordinal_metric
+        and selected_array.ndim == 1
+        and (np.nanmin(selected_array) < 0 or np.nanmax(selected_array) > 1)
+    )
+
+    if problem_type == "classification" and not ordinal_continuous:
         final_test_preds = np.clip(final_test_preds, 1e-15, 1 - 1e-15)
         if final_test_preds.ndim > 1 and final_test_preds.shape[1] > 1:
             final_test_preds = final_test_preds / final_test_preds.sum(axis=1, keepdims=True)
 
     calibration_info = {}
-    if problem_type == "classification" and enable_post_calibration:
+    if problem_type == "classification" and enable_post_calibration and not ordinal_continuous:
         final_test_preds, calibration_info = post_calibrate_ensemble(
             selected_oof, final_test_preds, y_encoded, method=calibration_method
         )
@@ -369,7 +384,7 @@ def stack_from_prediction_pairs(
     audit = full_ensemble_audit(
         model_names,
         oof_stack,
-        y_encoded,
+        score_targets,
         problem_type,
         metric_name,
         weights=audit_weights,
@@ -399,6 +414,7 @@ def stack_from_prediction_pairs(
         "stacking_method": best_method,
         "weights": audit_weights.tolist() if audit_weights is not None else None,
         "oof_score": selected_score,
+        "selected_oof": selected_oof,  # for metric-aware postprocessing downstream
         "calibration": calibration_summaries,
         "audit": {
             "dominant_model": audit.dominant_model,

@@ -9,10 +9,11 @@ import pandas as pd
 from scipy.stats import rankdata
 from sklearn.model_selection import cross_val_predict
 
-from ...core.config import is_metric_minimization
+from ...core.config import get_config, is_metric_minimization
 from ...core.state import KaggleState
 from ...utils.csv_utils import read_csv_auto
 from ...utils.llm_utils import get_text_content
+from ...utils.telemetry import make_event
 from .alignment import align_oof_by_canonical_ids, load_and_align_oof, validate_oof_alignment
 from .fallback import (
     create_ensemble_with_fallback,
@@ -916,8 +917,298 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             elif "```" in content:
                 content = content.split("```")[1].split("```")[0].strip()
             return json.loads(content)
-        except:
-            return {"strategy_name": "weighted_blending", "description": "Fallback to weighted blending"}
+        except Exception:
+            return {
+                "strategy_name": "weighted_blending",
+                "description": "Fallback to weighted blending",
+            }
+
+    def _load_canonical_training_data(
+        self, state: KaggleState
+    ) -> tuple[pd.Series | None, np.ndarray | None, Path | None]:
+        """Load y / train_ids / folds path from the canonical contract (single source of truth)."""
+        contract = state.get("canonical_contract") if isinstance(state, dict) else None
+        if not isinstance(contract, dict):
+            return None, None, None
+        try:
+            y_path = contract.get("y_path")
+            if not y_path or not Path(y_path).exists():
+                return None, None, None
+            y = pd.Series(np.load(y_path, allow_pickle=True))
+
+            train_ids = None
+            train_ids_path = contract.get("train_ids_path")
+            if train_ids_path and Path(train_ids_path).exists():
+                train_ids = np.load(train_ids_path, allow_pickle=True)
+
+            folds_path = contract.get("folds_path")
+            folds_path = Path(folds_path) if folds_path else None
+            return y, train_ids, folds_path
+        except Exception as e:
+            print(f"   Canonical training data unavailable for stacking: {e}")
+            return None, None, None
+
+    @staticmethod
+    def _get_comparable_cv_score(state: KaggleState) -> tuple[float | None, str | None]:
+        """Return an internal CV score that is comparable with ensemble OOF.
+
+        Leaderboard/MLE-bench ``best_score`` is intentionally excluded: comparing
+        it with OOF mixes different datasets and can incorrectly reject an ensemble.
+        """
+        if not isinstance(state, dict):
+            return None, None
+        for field in ("best_single_model_score", "baseline_cv_score"):
+            value = state.get(field)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                score = float(value)
+                if np.isfinite(score):
+                    return score, field
+        return None, None
+
+    def _try_oof_stacking(
+        self,
+        state: KaggleState,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        models_dir: Path,
+        sample_path: Path,
+        output_path: Path,
+        problem_type: str,
+        metric_name: str,
+        current_iteration: int,
+    ) -> dict[str, Any] | None:
+        """
+        OOF-scored ensemble route: compares simple average vs constrained weights
+        vs tuned meta-model on OOF score (with base/post calibration), applies
+        metric-aware postprocessing, and never overwrites a submission that beats
+        the ensemble's OOF score.
+
+        Returns the node outcome dict on success, or None to fall back to the
+        simple-average path.
+        """
+        if len(prediction_pairs) < 2 or not sample_path.exists():
+            return None
+
+        y, train_ids, folds_path = self._load_canonical_training_data(state)
+        if y is None:
+            print("   No canonical y.npy - using simple average ensemble")
+            return None
+
+        try:
+            sample_sub = read_csv_auto(sample_path)
+        except Exception as e:
+            print(f"   Could not read sample submission ({e}) - using simple average")
+            return None
+
+        n_test = len(sample_sub)
+        expected_cols = len(sample_sub.columns) - 1
+
+        contract = (state.get("canonical_contract") if isinstance(state, dict) else None) or {}
+        is_classification = contract.get("is_classification")
+        if is_classification is None:
+            is_classification = "class" in (problem_type or "").lower()
+        norm_problem = "classification" if is_classification else "regression"
+
+        # Class order / n_targets from the submission template (source of truth)
+        expected_class_order = sample_sub.columns[1:].tolist() if expected_cols > 1 else None
+        n_targets = expected_cols
+
+        enable_calibration = os.getenv(
+            "KAGGLE_AGENTS_STACKING_CALIBRATION", "1"
+        ).lower() not in {"0", "false", "no"}
+        enable_post_calibration = os.getenv(
+            "KAGGLE_AGENTS_STACKING_POST_CALIBRATION", "1"
+        ).lower() not in {"0", "false", "no"}
+        calibration_method = os.getenv(
+            "KAGGLE_AGENTS_STACKING_CALIBRATION_METHOD", "auto"
+        ).lower()
+
+        try:
+            ensemble, final_test_preds = stack_from_prediction_pairs(
+                prediction_pairs=prediction_pairs,
+                y=y,
+                problem_type=norm_problem,
+                metric_name=metric_name,
+                models_dir=models_dir,
+                expected_class_order=expected_class_order,
+                train_ids=train_ids,
+                folds_path=folds_path,
+                enable_calibration=enable_calibration,
+                enable_post_calibration=enable_post_calibration,
+                n_targets=n_targets,
+                calibration_method=calibration_method,
+            )
+        except Exception as e:
+            print(f"   OOF stacking failed ({e}) - using simple average")
+            return None
+
+        if ensemble is None or final_test_preds is None:
+            print("   OOF stacking not applicable - using simple average")
+            return None
+
+        final_test_preds = np.asarray(final_test_preds, dtype=float)
+        if final_test_preds.ndim == 1:
+            final_test_preds = final_test_preds.reshape(-1, 1)
+        if final_test_preds.shape[0] != n_test:
+            print(
+                f"   Stacked predictions have {final_test_preds.shape[0]} rows, "
+                f"sample expects {n_test} - using simple average (ID merging)"
+            )
+            return None
+
+        n_models = len(ensemble.get("base_model_names", []))
+        strategy = f"stacking_{ensemble.get('stacking_method', 'unknown')}"
+
+        # score_predictions is lower-is-better (negated for maximize metrics);
+        # convert back to raw metric units for comparison/reporting
+        oof_internal = ensemble.get("oof_score")
+        raw_oof_score = None
+        if isinstance(oof_internal, (int, float)) and np.isfinite(oof_internal):
+            raw_oof_score = (
+                float(oof_internal)
+                if is_metric_minimization(metric_name)
+                else -float(oof_internal)
+            )
+
+        # Only compare OOF with an internal score measured on comparable CV data.
+        # Never compare it with state.best_score (leaderboard/private holdout).
+        best_existing, best_existing_source = self._get_comparable_cv_score(state)
+        if (
+            output_path.exists()
+            and raw_oof_score is not None
+            and best_existing is not None
+        ):
+            if is_metric_minimization(metric_name):
+                ensemble_better = raw_oof_score <= float(best_existing)
+            else:
+                ensemble_better = raw_oof_score >= float(best_existing)
+            if not ensemble_better:
+                print(
+                    f"   Keeping existing submission: ensemble OOF {raw_oof_score:.6f} "
+                    f"vs component CV {float(best_existing):.6f} "
+                    f"from {best_existing_source} ({metric_name})"
+                )
+                return {
+                    "ensemble_created": True,
+                    "ensemble_strategy": strategy,
+                    "n_models": n_models,
+                    "telemetry_events": [
+                        make_event(
+                            "ensemble",
+                            "kept_existing_submission",
+                            iteration=current_iteration,
+                            strategy=strategy,
+                            oof_score=raw_oof_score,
+                            best_component_cv_score=float(best_existing),
+                            cv_score_source=best_existing_source,
+                        )
+                    ],
+                }
+
+        # Format predictions (metric-aware postprocessing tuned on the ensemble OOF)
+        from .postprocessing import metric_label_kind
+        from .submission import format_ensemble_predictions
+
+        selected_oof = ensemble.get("selected_oof")
+        class_order = ensemble.get("class_order")
+        postproc_rule = "none"
+
+        if final_test_preds.shape[1] > 1 and expected_cols == 1:
+            # Multiclass probabilities -> single-label column
+            label_kind = metric_label_kind(metric_name)
+            numeric_classes = None
+            if class_order is not None and len(class_order) == final_test_preds.shape[1]:
+                try:
+                    numeric_classes = np.asarray([float(c) for c in class_order])
+                except (TypeError, ValueError):
+                    numeric_classes = None
+
+            if (
+                label_kind == "qwk"
+                and numeric_classes is not None
+                and selected_oof is not None
+                and np.asarray(selected_oof).ndim == 2
+            ):
+                # Ordinal metric: expected value over classes + OOF-tuned rounding
+                from .postprocessing import labels_from_oof_tuning
+
+                test_expect = final_test_preds @ numeric_classes
+                oof_expect = np.asarray(selected_oof) @ numeric_classes
+                labels, info = labels_from_oof_tuning(
+                    test_expect, oof_expect, np.asarray(y), metric_name
+                )
+                postproc_rule = info["rule"]
+                print(
+                    f"   [POSTPROC] {info['rule']}: OOF "
+                    f"{info['oof_score_baseline']:.4f} -> {info['oof_score_tuned']:.4f}"
+                )
+                sample_sub.iloc[:, 1] = labels
+            else:
+                idx = np.argmax(final_test_preds, axis=1)
+                if class_order is not None and len(class_order) == final_test_preds.shape[1]:
+                    # argmax gives encoded indices; map back to original labels
+                    sample_sub.iloc[:, 1] = np.asarray(class_order)[idx]
+                    postproc_rule = "argmax_class_order"
+                else:
+                    sample_sub.iloc[:, 1] = idx
+                    postproc_rule = "argmax"
+        else:
+            if final_test_preds.shape[1] > expected_cols:
+                final_test_preds = _truncate_pred_cols(final_test_preds, expected_cols)
+
+            formatted = format_ensemble_predictions(
+                final_test_preds[:, 0] if final_test_preds.shape[1] == 1 else final_test_preds,
+                sample_sub,
+                norm_problem,
+                metric_name,
+                oof_preds=selected_oof,
+                y_true=np.asarray(y),
+            )
+            formatted = np.asarray(formatted)
+            if formatted.ndim == 1:
+                formatted = formatted.reshape(-1, 1)
+
+            if formatted.shape[1] == 1:
+                sample_sub.iloc[:, 1] = formatted[:, 0]
+            elif formatted.shape[1] == expected_cols:
+                sample_sub.iloc[:, 1:] = formatted
+            else:
+                print(f"   Unexpected formatted shape {formatted.shape} - using simple average")
+                return None
+            if metric_label_kind(metric_name) is not None:
+                postproc_rule = "oof_tuned" if selected_oof is not None else "fixed_threshold"
+
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_sub.to_csv(output_path, index=False)
+        oof_display = f"{raw_oof_score:.6f}" if raw_oof_score is not None else "n/a"
+        print(
+            f"   OK: OOF-scored ensemble ({strategy}, {n_models} models, "
+            f"OOF={oof_display}) saved to {output_path.name}"
+        )
+
+        weights = ensemble.get("weights")
+        ensemble_weights = (
+            dict(zip(ensemble.get("base_model_names", []), weights, strict=False))
+            if weights
+            else {}
+        )
+
+        return {
+            "ensemble_created": True,
+            "ensemble_strategy": strategy,
+            "ensemble_weights": ensemble_weights,
+            "n_models": n_models,
+            "telemetry_events": [
+                make_event(
+                    "ensemble",
+                    "created",
+                    iteration=current_iteration,
+                    strategy=ensemble.get("stacking_method"),
+                    n_models=n_models,
+                    oof_score=raw_oof_score,
+                    postprocessing=postproc_rule,
+                )
+            ],
+        }
 
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """Create ensemble from trained models.
@@ -935,6 +1226,27 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         if isinstance(state, dict):
             errors = list(state.get("errors", []) or [])
 
+        current_iteration = (
+            state.get("current_iteration", 0) if isinstance(state, dict) else 0
+        )
+
+        # Ablation toggle: ensembling disabled -> keep best single-model submission
+        toggles = getattr(get_config(), "ablation_toggles", None)
+        if toggles and toggles.disable_ensemble:
+            print("   ABLATION: Ensemble disabled - keeping best single-model submission")
+            return {
+                "ensemble_skipped": True,
+                "skip_reason": "ablation_disabled",
+                "telemetry_events": [
+                    make_event(
+                        "ablation",
+                        "ensemble_skipped",
+                        iteration=current_iteration,
+                        component="ensemble",
+                    )
+                ],
+            }
+
         try:
             working_dir_value = (
                 state.get("working_directory", "")
@@ -949,13 +1261,36 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                 else state.sample_submission_path
             )
 
+            # Problem type / metric from state contracts (single source of truth)
+            competition_info = (
+                state.get("competition_info") if isinstance(state, dict) else None
+            )
+            problem_type = str(getattr(competition_info, "problem_type", "") or "")
+            metric_name = str(getattr(competition_info, "evaluation_metric", "") or "")
+            metric_contract = (
+                state.get("metric_contract") if isinstance(state, dict) else None
+            ) or {}
+            if isinstance(metric_contract, dict) and metric_contract.get("name"):
+                metric_name = str(metric_contract["name"])
+
             # Find prediction pairs
             prediction_pairs = self._find_prediction_pairs(models_dir)
             print(f"   Found {len(prediction_pairs)} prediction pairs")
 
             if len(prediction_pairs) < 1:
                 print("   No prediction pairs found, skipping ensemble")
-                return {"ensemble_skipped": True, "skip_reason": "no_prediction_pairs"}
+                return {
+                    "ensemble_skipped": True,
+                    "skip_reason": "no_prediction_pairs",
+                    "telemetry_events": [
+                        make_event(
+                            "ensemble",
+                            "skipped",
+                            iteration=current_iteration,
+                            reason="no_prediction_pairs",
+                        )
+                    ],
+                }
 
             # Create simple average ensemble
             sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
@@ -965,15 +1300,66 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             test_rec_ids = state.get("test_rec_ids", []) if isinstance(state, dict) else []
             expected_n_test = len(test_rec_ids) if test_rec_ids else None
 
+            # OOF-scored stacking first (average vs constrained weights vs
+            # meta-model, compared on OOF + calibration + metric-aware
+            # postprocessing); falls back to the simple average below
+            stacking_outcome = self._try_oof_stacking(
+                state=state,
+                prediction_pairs=prediction_pairs,
+                models_dir=models_dir,
+                sample_path=sample_path,
+                output_path=output_path,
+                problem_type=problem_type,
+                metric_name=metric_name,
+                current_iteration=current_iteration,
+            )
+            if stacking_outcome is not None:
+                return stacking_outcome
+
             if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test, problem_type=problem_type, metric_name=metric_name):
-                return {"ensemble_created": True, "n_models": len(prediction_pairs)}
-            return {"ensemble_skipped": True, "skip_reason": "ensemble_creation_failed"}
+                return {
+                    "ensemble_created": True,
+                    "n_models": len(prediction_pairs),
+                    "telemetry_events": [
+                        make_event(
+                            "ensemble",
+                            "created",
+                            iteration=current_iteration,
+                            n_models=len(prediction_pairs),
+                        )
+                    ],
+                }
+            return {
+                "ensemble_skipped": True,
+                "skip_reason": "ensemble_creation_failed",
+                "telemetry_events": [
+                    make_event(
+                        "ensemble",
+                        "skipped",
+                        iteration=current_iteration,
+                        reason="ensemble_creation_failed",
+                    )
+                ],
+            }
 
         except Exception as e:
             error_msg = f"Ensemble creation failed: {e!s}"
             print(f"Ensemble Agent ERROR: {error_msg}")
             errors.append(error_msg)
-            return {"errors": errors, "ensemble_skipped": True, "skip_reason": "exception"}
+            return {
+                "errors": errors,
+                "ensemble_skipped": True,
+                "skip_reason": "exception",
+                "telemetry_events": [
+                    make_event(
+                        "ensemble",
+                        "skipped",
+                        iteration=current_iteration,
+                        reason="exception",
+                        error=str(e)[:300],
+                    )
+                ],
+            }
 
 
 def ensemble_agent_node(state: KaggleState) -> dict[str, Any]:

@@ -681,9 +681,12 @@ class CodeGeneratorMixin:
         # This ensures the LLM cannot ignore the correct paths
         path_header = f'''# === PATH CONSTANTS (AUTO-INJECTED - DO NOT MODIFY) ===
 from pathlib import Path
+import os
 import pandas as pd
 import numpy as np
 import json
+
+RUN_SEED = int(os.getenv("RUN_SEED", "42"))
 
 '''
         # Data-type aware path injection
@@ -938,7 +941,7 @@ CANONICAL_DIR = MODELS_DIR / "canonical"
 CANONICAL_DIR.mkdir(parents=True, exist_ok=True)
 CANONICAL_FOLDS_AVAILABLE = False  # FLAG: Tells LLM to generate folds
 
-def ensure_folds(n_samples, n_folds=5, random_state=42, stratify_labels=None):
+def ensure_folds(n_samples, n_folds=5, random_state=None, stratify_labels=None):
     """Generate or load folds. Use this instead of direct np.load(folds.npy)!
 
     Args:
@@ -950,6 +953,8 @@ def ensure_folds(n_samples, n_folds=5, random_state=42, stratify_labels=None):
     Returns:
         np.array of fold assignments (shape: n_samples)
     """
+    if random_state is None:
+        random_state = RUN_SEED
     folds_path = CANONICAL_DIR / "folds.npy"
     if folds_path.exists():
         loaded_folds = np.load(folds_path)
@@ -1293,8 +1298,10 @@ def create_submission_ids(rec_ids, num_classes={num_classes}):
         if self.use_dspy:
             requirements_with_context = requirements
             if context.iteration_num == 0 and context.sota_patterns:
+                # 4000-char budget so the retrieved code actually seeds the
+                # initial solution (adopt-then-improve), not a 1.2k teaser
                 requirements_with_context += (
-                    "\n\n## SOTA Patterns (reference)\n" + context.sota_patterns[:1200]
+                    "\n\n## SOTA Patterns (reference)\n" + context.sota_patterns[:4000]
                 )
             if context.previous_feedback:
                 requirements_with_context += (

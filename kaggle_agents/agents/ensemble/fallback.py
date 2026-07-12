@@ -40,7 +40,7 @@ def recover_from_checkpoints(
 
     for state_file in state_files:
         try:
-            with open(state_file) as f:
+            with state_file.open() as f:
                 state = json.load(f)
 
             component_name = state.get("component_name", "unknown")
@@ -64,44 +64,27 @@ def recover_from_checkpoints(
 
             oof = np.load(partial_oof_path)
 
-            # Check for test predictions (may not exist for partial)
+            # Prefer the completed component output, then the fold-averaged
+            # partial test predictions persisted by the checkpoint contract.
             test_path = models_dir / f"test_{component_name}.npy"
             if test_path.exists():
                 test = np.load(test_path)
             else:
-                # Generate test predictions from fold models
-                test = _generate_test_from_fold_models(
-                    checkpoints_dir, component_name, state
+                partial_test_path = (
+                    checkpoints_dir / f"{component_name}_test_partial.npy"
                 )
+                if not partial_test_path.exists():
+                    print(f"      {component_name}: No partial test predictions found")
+                    continue
+                test = np.load(partial_test_path)
 
-            if test is not None:
-                recovered[component_name] = (oof, test)
-                print(f"      {component_name}: Recovered {n_completed} folds, OOF shape {oof.shape}")
+            recovered[component_name] = (oof, test)
+            print(f"      {component_name}: Recovered {n_completed} folds, OOF shape {oof.shape}")
 
         except Exception as e:
             print(f"      Error recovering from {state_file}: {e}")
 
     return recovered
-
-
-def _generate_test_from_fold_models(
-    checkpoints_dir: Path,
-    component_name: str,
-    state: dict,
-) -> np.ndarray | None:
-    """Generate test predictions by averaging fold model predictions.
-
-    Args:
-        checkpoints_dir: Directory containing fold checkpoints
-        component_name: Name of the component
-        state: Checkpoint state dictionary
-
-    Returns:
-        Test predictions array or None if not possible
-    """
-    # This would require loading test data and averaging predictions
-    # For now, return None to indicate test predictions need to be generated
-    return None
 
 
 def fallback_to_best_single_model(

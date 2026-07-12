@@ -3,18 +3,26 @@
 import shutil
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
+
+from .postprocessing import labels_from_oof_tuning
 
 
 def format_ensemble_predictions(
     preds: np.ndarray,
     sample_sub: pd.DataFrame,
     problem_type: str,
-    metric_name: str | None = None
+    metric_name: str | None = None,
+    oof_preds: np.ndarray | None = None,
+    y_true: np.ndarray | None = None,
 ) -> np.ndarray:
     """Format predictions for submission based on metric and problem type.
     Converts probabilities to class labels when the metric or sample sub expects integers.
+
+    When OOF predictions + training labels are provided, the decision rule is
+    tuned on OOF (threshold search / QWK rounding boundaries) instead of the
+    fixed 0.5 / argmax defaults.
     """
     if not problem_type or "class" not in problem_type.lower():
         return preds
@@ -36,9 +44,35 @@ def format_ensemble_predictions(
     if expects_label or (sample_suggests_label and not expects_prob):
         preds_array = np.asarray(preds)
         if preds_array.ndim == 1 or preds_array.shape[1] == 1:
-            return (preds_array >= 0.5).astype(int)
-        else:
-            return np.argmax(preds_array, axis=1)
+            flat = preds_array.ravel()
+
+            # Metric-aware decision rule tuned on OOF (falls back to 0.5)
+            if oof_preds is not None and y_true is not None:
+                try:
+                    oof_flat = np.asarray(oof_preds, dtype=float).ravel()
+                    if len(oof_flat) == len(np.asarray(y_true).ravel()):
+                        labels, info = labels_from_oof_tuning(
+                            flat, oof_flat, y_true, metric_name or "accuracy"
+                        )
+                        rule_params = {
+                            k: v for k, v in info.items() if k in ("threshold", "boundaries")
+                        }
+                        print(
+                            f"   [POSTPROC] {info['rule']}: OOF "
+                            f"{info['oof_score_baseline']:.4f} -> {info['oof_score_tuned']:.4f} "
+                            f"({rule_params})"
+                        )
+                        return labels if preds_array.ndim == 1 else labels.reshape(-1, 1)
+                except Exception as e:
+                    print(f"   [POSTPROC] OOF tuning failed, using 0.5 threshold: {e}")
+
+            binary = (flat >= 0.5).astype(int)
+            if y_true is not None:
+                classes = np.unique(np.asarray(y_true).ravel())
+                if len(classes) == 2:
+                    binary = classes[binary]
+            return binary if preds_array.ndim == 1 else binary.reshape(-1, 1)
+        return np.argmax(preds_array, axis=1)
 
     return preds
 
