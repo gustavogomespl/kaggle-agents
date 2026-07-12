@@ -7,13 +7,15 @@ These are the core requirements that every generated code must follow.
 BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 
 ### 1. Cross-Validation
+- Define `RUN_SEED = int(os.getenv("RUN_SEED", "42"))` once and use it everywhere
 - Use StratifiedKFold: `n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5"))`
-- Always `shuffle=True, random_state=42`
+- Always `shuffle=True, random_state=RUN_SEED`
 - Save OOF predictions: `np.save('models/oof_{component_name}.npy', oof_predictions)`
 
 ### 2. Output Requirements
 - Print "Final Validation Performance: {score:.6f}" at end (CRITICAL for evaluation)
-- Clamp predictions: `np.clip(predictions, 0, 1)` before saving
+- For probability metrics only, clamp probabilities to `[0, 1]` before saving
+- For regression, preserve the prediction scale (RMSLE alone requires non-negative values)
 - Match sample_submission.csv exactly: columns, IDs, shape
 
 ### 2a. PROBABILITY OUTPUT VALIDATION (CRITICAL - PREVENTS AUC ~0.5)
@@ -119,7 +121,7 @@ for epoch in range(max_epochs):
 ```
 
 ### 4. Reproducibility
-- Set `random_state=42` everywhere
+- Set Python, NumPy, framework seeds, and every `random_state` to `RUN_SEED`
 - Use deterministic operations when possible
 
 ### 5. MUST NOT:

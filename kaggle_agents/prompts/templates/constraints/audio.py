@@ -223,13 +223,13 @@ Examples:
 ```python
 import re
 
-def create_train_df_from_filenames(audio_dir: Path, label_pattern: str = r'_(\d+)\.'):
+def create_train_df_from_filenames(audio_dir: Path, label_pattern: str = r'_(\\d+)\\.'):
     \"\"\"
     Create training DataFrame by parsing labels from filenames.
 
     Args:
         audio_dir: Directory containing audio files
-        label_pattern: Regex pattern to extract label. Default r'_(\d+)\.' matches
+        label_pattern: Regex pattern to extract label. Default r'_(\\d+)\\.' matches
                        any digits before the extension (e.g., '_0.', '_1.', '_42.')
 
     Returns:
@@ -406,7 +406,11 @@ cache_dir = MODELS_DIR / 'mel_cache'
 cache_dir.mkdir(exist_ok=True)
 
 def get_cached_mel(audio_path: Path) -> np.ndarray:
-    cache_path = cache_dir / f'{audio_path.stem}.npy'
+    # Hash the full source path so equal stems in different folders cannot collide.
+    from hashlib import sha256
+    cache_key = sha256(str(audio_path.resolve()).encode()).hexdigest()
+    cache_path = cache_dir / cache_key[:2] / f'{cache_key}.npy'
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists():
         return np.load(cache_path)
 
@@ -454,16 +458,18 @@ img = (img - img.min()) / (img.max() - img.min() + 1e-6)
 img = img.astype(np.float32)  # Explicit cast
 ```
 
-### 7. Model Selection (Lighter is Better for Time Limits)
-Use smaller models to avoid timeouts.
+### 7. Model Selection (Budget-Aware)
+Start light; scale up only when the time budget allows.
 
 ```python
-# PREFERRED - lighter, faster:
+# BASELINE (always safe): light and fast
 from torchvision.models import resnet18, efficientnet_b0
 model = resnet18(pretrained=True)  # or efficientnet_b0
 
-# AVOID - heavy, may timeout:
-# from torchvision.models import resnet50, efficientnet_b3
+# UPGRADE when remaining budget > ~30 min/fold with AMP + cached spectrograms:
+# efficientnet_b3 (stronger on spectrograms) or resnet50
+# Always pair with mixed precision (autocast + GradScaler) and the
+# mel_cache decode-once pattern so the upgrade fits the budget.
 ```
 
 ### 8. Multi-Label vs Multi-Class

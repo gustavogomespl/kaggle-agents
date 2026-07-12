@@ -10,15 +10,17 @@ NLP_CONSTRAINTS = """## NLP/TEXT REQUIREMENTS:
 - Clean text: lowercase, remove special chars (if appropriate)
 
 ### 2. Pretrained Models
-- Use HuggingFace Transformers: BERT, RoBERTa, DistilBERT
-- Fine-tune on task-specific data
+- PREFERRED backbone: DeBERTa-v3 ('microsoft/deberta-v3-small' fast /
+  'microsoft/deberta-v3-base' when budget allows) - consistently stronger than
+  BERT/RoBERTa on classification. Fallbacks: 'roberta-base', 'distilbert-base-uncased'.
+- Fine-tune with fp16 (torch.cuda.amp) on GPU
 - Use appropriate attention mask and token type ids
 
 ```python
 from transformers import AutoTokenizer, AutoModel
 
-tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-model = AutoModel.from_pretrained('bert-base-uncased')
+tokenizer = AutoTokenizer.from_pretrained('microsoft/deberta-v3-small')
+model = AutoModel.from_pretrained('microsoft/deberta-v3-small')
 
 encoding = tokenizer(
     texts,

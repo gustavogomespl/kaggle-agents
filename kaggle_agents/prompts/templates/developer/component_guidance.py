@@ -14,7 +14,9 @@ COMPONENT_GUIDANCE = {
 - Handle class imbalance if ratio > 2:1 (class_weight or scale_pos_weight)
 - Print per-fold scores: [LOG:FOLD] fold={n} score={s:.6f}
 - Use GPU if available (check torch.cuda.is_available())
-- Create submission.csv with probabilities [0,1]
+- Create submission.csv in the metric's required representation: probabilities
+  in [0,1] for AUC/LogLoss, original labels for hard-label metrics, and raw
+  continuous predictions for regression (non-negative only when RMSLE requires it)
 - SUBMISSION FORMAT: Target column is NOT always columns[1]!
   ```python
   sample_sub = pd.read_csv(sample_submission_path)
@@ -29,6 +31,36 @@ COMPONENT_GUIDANCE = {
   ```python
   scripted_model = torch.jit.script(model)
   torch.jit.save(scripted_model, f"models/{component_name}_fold{fold_idx}.pt")
+  ```
+- FOLD CHECKPOINTING (MANDATORY for models slower than ~2 min/fold): after EACH
+  completed fold, persist partial OOF + state so a timeout never loses finished
+  folds (the ensemble recovers them automatically from this exact layout):
+  ```python
+  ckpt_dir = Path("models/checkpoints"); ckpt_dir.mkdir(parents=True, exist_ok=True)
+  state_path = ckpt_dir / f"{component_name}_checkpoint_state.json"
+  partial_test_path = ckpt_dir / f"{component_name}_test_partial.npy"
+  completed_folds = []
+  test_pred_sum = None
+  if state_path.exists() and partial_test_path.exists():
+      with open(state_path) as f:
+          completed_folds = [int(v) for v in json.load(f)["completed_folds"]]
+      test_pred_sum = np.load(partial_test_path) * len(completed_folds)
+
+  # At the START of each CV iteration, skip folds already in completed_folds.
+  # Only accumulate after that fold's training and inference both succeed.
+  if fold_idx in completed_folds:
+      continue
+  if test_pred_sum is None:
+      test_pred_sum = np.zeros_like(fold_test_preds, dtype=np.float64)
+  test_pred_sum += fold_test_preds
+  completed_folds.append(int(fold_idx))
+  np.save(ckpt_dir / f"{component_name}_oof_partial.npy", oof_preds)
+  np.save(partial_test_path,
+          test_pred_sum / len(completed_folds))
+  with open(state_path, "w") as f:
+      json.dump({"component_name": component_name,
+                 "completed_folds": completed_folds,
+                 "min_folds": 2}, f)
   ```""",
 
     "feature_engineering": """## Feature Engineering Requirements
@@ -79,7 +111,12 @@ COMPONENT_GUIDANCE = {
     "preprocessing": """## Preprocessing Requirements
 - Clean data, handle missing values, encode categoricals
 - NO model training
-- Fast execution (<10 seconds)
+- Fast execution (<10 seconds) for tabular data
+- EXCEPTION - image/audio decode-once caching: for datasets > 5 GB (or DICOM),
+  this component SHOULD decode + resize every image ONCE into models/img_cache/
+  (resumable: skip files that already exist). This may take longer than 10s and
+  is what makes large competitions converge - downstream model components then
+  read ONLY from the cache.
 - Save processed data for subsequent components
 - Print "Final Validation Performance: 1.0" on completion""",
 

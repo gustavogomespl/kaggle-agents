@@ -35,9 +35,22 @@ train_transform = transforms.Compose([
 ])
 ```
 
-**VALIDATION/TEST**: Use `batch_size=1`:
+**VALIDATION/TEST**: Use the SAME fixed-size Resize, then BATCHED inference.
+NEVER use batch_size=1 for val/test - it is 10-30x slower and burns the time
+budget exactly on large datasets:
 ```python
-val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+val_transform = transforms.Compose([
+    transforms.Resize((256, 256)),  # fixed size -> batching is safe
+    transforms.ToTensor(),
+])
+val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False,
+                        num_workers=2, pin_memory=True)
+
+model.eval()
+preds = []
+with torch.no_grad(), torch.cuda.amp.autocast():
+    for xb in val_loader:
+        preds.append(model(xb.to(device, non_blocking=True)).float().cpu())
 ```
 
 ### 1b. TensorFlow Image Decode Safety (CRITICAL)
@@ -178,6 +191,53 @@ The loss function applies sigmoid internally for numerical stability.
 For AUC-ROC, LogLoss, or any probability-based metric:
 - ALWAYS submit RAW PROBABILITIES (float between 0 and 1)
 - NEVER convert to hard labels - this destroys your score!
+
+### 9. Large-Dataset Throughput (MANDATORY for datasets > 5 GB or DICOM)
+Decoding/resizing the original images every epoch is what makes big
+competitions time out. Decode ONCE, then train from the cache:
+
+```python
+# PREPROCESSING (once): decode + resize/pad every image to a cache.
+# Hash the full source path: train/a.jpg and test/a.jpg must not collide.
+from hashlib import sha256
+import json
+
+CACHE_DIR = Path("models/img_cache"); CACHE_DIR.mkdir(parents=True, exist_ok=True)
+cache_manifest = {}
+for path in all_image_paths:  # includes DICOM via pydicom when needed
+    cache_key = sha256(str(path.resolve()).encode()).hexdigest()
+    is_medical = path.suffix.lower() in {".dcm", ".dicom"}
+    base_out = CACHE_DIR / cache_key[:2] / cache_key
+    existing = next((p for p in (base_out.with_suffix(".npy"), base_out.with_suffix(".jpg"))
+                     if p.exists()), None)
+    if existing is not None:
+        cache_manifest[str(path.resolve())] = str(existing)
+        continue  # resumable
+    img = load_any_format(path)          # PIL / pydicom array
+    img = resize_and_pad(img, (384, 384))  # exact shape -> safe batching
+    # Retain precision for DICOM, TIFF and any >8-bit decoded data. Pixel-level
+    # restoration tasks should also force lossless .npy even when inputs are PNG.
+    requires_lossless = (is_medical or path.suffix.lower() in {".tif", ".tiff"}
+                         or np.asarray(img).dtype.itemsize > 1)
+    out = base_out.with_suffix(".npy" if requires_lossless else ".jpg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if requires_lossless:
+        np.save(out, img)                # lossless: retain DICOM/windowed precision
+    else:
+        Image.fromarray(img).save(out, quality=95)
+    cache_manifest[str(path.resolve())] = str(out)
+
+(CACHE_DIR / "manifest.json").write_text(json.dumps(cache_manifest, indent=2))
+
+# MODEL components: read manifest.json and resolve every source through it.
+# Never rediscover cached files by basename or stem.
+```
+
+Training throughput on GPU is also MANDATORY:
+- Mixed precision ALWAYS: `torch.cuda.amp.autocast()` + `GradScaler` (see #7 for loss safety)
+- `model = model.to(device, memory_format=torch.channels_last)`
+- `DataLoader(num_workers=2-4, pin_memory=True, persistent_workers=True)`
+- `torch.backends.cudnn.benchmark = True` (fixed input sizes)
 
 ```python
 # WRONG for AUC/LogLoss (Score will be ~0.5 - terrible!):
