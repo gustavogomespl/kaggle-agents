@@ -344,6 +344,18 @@ class MLEBenchRunner:
             if toggles and toggles.disabled_components():
                 _log(f"  ABLATION active - disabled: {toggles.disabled_components()}", "WARN")
 
+            # Leftover domain overrides poison multi-competition runs (e.g. a
+            # text-normalization override forcing an image competition to seq2seq)
+            for override_var in ("KAGGLE_AGENTS_FORCE_DATA_TYPE", "KAGGLE_AGENTS_FORCE_DOMAIN"):
+                override_value = os.getenv(override_var)
+                if override_value:
+                    _log(
+                        f"  WARNING: {override_var}='{override_value}' is set and will "
+                        f"override domain detection for '{competition_id}'. Unset it "
+                        "unless this is intentional for THIS competition.",
+                        "WARN",
+                    )
+
             from ..workflow import create_mlebench_workflow
 
             _log("  Creating workflow graph...")

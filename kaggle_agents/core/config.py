@@ -20,6 +20,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _default_use_responses_api() -> bool:
+    """Responses API on for api.openai.com; off for OpenAI-compatible gateways."""
+    explicit = os.getenv("OPENAI_USE_RESPONSES_API")
+    if explicit is not None:
+        return explicit.lower() == "true"
+    return not (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"))
+
+
 @dataclass
 class LLMConfig:
     """LLM provider and model configuration."""
@@ -48,7 +56,10 @@ class LLMConfig:
     )  # Safe default
     timeout: int = 120  # seconds
     # OpenAI Responses API - enables new API features (structured outputs, web search, etc.)
-    use_responses_api: bool = True
+    # Auto-inferred: a custom OPENAI_BASE_URL means an OpenAI-COMPATIBLE gateway
+    # (e.g. OpenRouter), where chat completions is the battle-tested path.
+    # Override explicitly with OPENAI_USE_RESPONSES_API=true|false if needed.
+    use_responses_api: bool = field(default_factory=lambda: _default_use_responses_api())
 
 
 @dataclass

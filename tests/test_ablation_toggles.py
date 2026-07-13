@@ -1,6 +1,6 @@
 """Tests for ablation toggles and contamination-guard configuration."""
 
-from kaggle_agents.core.config import AblationTogglesConfig, SearchConfig
+from kaggle_agents.core.config import AblationTogglesConfig, LLMConfig, SearchConfig
 
 
 _TOGGLE_ENV_VARS = [
@@ -51,3 +51,33 @@ class TestContaminationGuardConfig:
         monkeypatch.setenv("KAGGLE_AGENTS_ALLOW_SAME_COMP_SOURCES", "true")
         search = SearchConfig()
         assert search.allow_same_competition_sources is True
+
+
+class TestOpenAICompatGatewayConfig:
+    def _clear(self, monkeypatch):
+        for var in ("OPENAI_USE_RESPONSES_API", "OPENAI_BASE_URL", "OPENAI_API_BASE"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_responses_api_default_on_for_openai(self, monkeypatch):
+        self._clear(monkeypatch)
+
+        assert LLMConfig().use_responses_api is True
+
+    def test_custom_base_url_auto_disables_responses_api(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+
+        assert LLMConfig().use_responses_api is False
+
+    def test_explicit_override_beats_inference(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
+        monkeypatch.setenv("OPENAI_USE_RESPONSES_API", "true")
+
+        assert LLMConfig().use_responses_api is True
+
+    def test_explicit_disable_without_gateway(self, monkeypatch):
+        self._clear(monkeypatch)
+        monkeypatch.setenv("OPENAI_USE_RESPONSES_API", "false")
+
+        assert LLMConfig().use_responses_api is False
