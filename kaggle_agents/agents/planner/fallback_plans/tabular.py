@@ -34,6 +34,8 @@ def extract_sota_recommendations(sota_guidance: Any) -> list[str]:
         recommendations.append("neural_network")
     if "random forest" in sota_str or "randomforest" in sota_str:
         recommendations.append("random_forest")
+    if any(k in sota_str for k in ("tabfm", "tabpfn", "tabicl", "foundation model")):
+        recommendations.append("tabular_foundation")
     if "feature" in sota_str or "encoding" in sota_str:
         recommendations.append("feature_engineering")
     if "optuna" in sota_str or "hyperparameter" in sota_str or "tuning" in sota_str:
@@ -51,8 +53,9 @@ _MODEL_ROTATIONS: list[list[str]] = [
     ["lightgbm_fast_cv", "xgboost_fast_cv"],
     # Iteration 1: CatBoost + LGBM tuned
     ["catboost_fast_cv", "lightgbm_tuned_cv"],
-    # Iteration 2: Neural Network + Random Forest (different model families)
-    ["neural_network_mlp", "random_forest_fast"],
+    # Iteration 2: Zero-shot foundation model + Random Forest (radically
+    # different model families - strongest plateau breaker)
+    ["tabfm_zero_shot", "random_forest_fast"],
     # Iteration 3: Feature Engineering + CatBoost (FE can shift the score)
     ["target_encoding_fe", "catboost_fast_cv"],
     # Iteration 4: Intensive training - more folds/iterations
@@ -91,6 +94,14 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "estimated_impact": 0.19,
         "rationale": "Quick hyperparameter search often finds 2-5% improvement.",
         "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. LGBMClassifier/Regressor with Optuna (5 trials), tune learning_rate/num_leaves, 3-fold CV, save OOF/test preds.",
+    },
+    "tabfm_zero_shot": {
+        "name": "tabfm_zero_shot",
+        "component_type": "model",
+        "description": "TabFM (Google zero-shot tabular foundation model): in-context prediction with NO tuning and NO feature engineering. Completely different model family from GBMs - strong ensemble diversity and plateau breaker.",
+        "estimated_impact": 0.18,
+        "rationale": "Foundation-model predictions are decorrelated from tree ensembles; TabFM beats tuned GBMs on TabArena with a single forward pass. Synthetic-only pretraining = no contamination concerns.",
+        "code_outline": "Follow TABULAR constraints section 9 (TabFM): pip install tabfm with try/except fallback to LightGBM; check <=10 classes; subsample ONLY the fit() context to <=50k rows (stratified) - predict the FULL validation fold and FULL test; iterate canonical folds to build OOF; save models/oof_tabfm_zero_shot.npy + models/test_tabfm_zero_shot.npy; use predict_proba for classification.",
     },
     "neural_network_mlp": {
         "name": "neural_network_mlp",
@@ -167,14 +178,20 @@ def _create_fast_rotation_plan(
     rotation_slot = stagnation_iteration % len(model_rotations)
 
     # SOTA-guided rotation override: prioritize what the SOTA search found.
-    # First match wins (specific model recommendations beat generic FE advice)
-    if "catboost" in sota_recommended and stagnation_iteration > 0:
+    # First match wins (specific model recommendations beat generic FE advice).
+    # Each override fires at ONE specific iteration only - real SOTA text almost
+    # always contains 'feature'/model names, and overriding every slot would pin
+    # the rotation to a single pair, defeating the anti-stagnation diversity.
+    if "catboost" in sota_recommended and stagnation_iteration == 1:
         print("   SOTA override: prioritizing CatBoost rotation")
         model_rotations[rotation_slot] = ["catboost_fast_cv", "lightgbm_tuned_cv"]
-    elif "neural_network" in sota_recommended and stagnation_iteration > 1:
+    elif "tabular_foundation" in sota_recommended and stagnation_iteration == 1:
+        print("   SOTA override: prioritizing TabFM (foundation model) rotation")
+        model_rotations[rotation_slot] = ["tabfm_zero_shot", "lightgbm_fast_cv"]
+    elif "neural_network" in sota_recommended and stagnation_iteration == 2:
         print("   SOTA override: prioritizing Neural Network rotation")
         model_rotations[rotation_slot] = ["neural_network_mlp", "catboost_fast_cv"]
-    elif "feature_engineering" in sota_recommended and stagnation_iteration > 0:
+    elif "feature_engineering" in sota_recommended and stagnation_iteration == 1:
         print("   SOTA override: prioritizing Feature Engineering rotation")
         model_rotations[rotation_slot] = ["target_encoding_fe", "lightgbm_fast_cv"]
 
@@ -329,6 +346,14 @@ def create_tabular_fallback_plan(
                 "estimated_impact": 0.14,
                 "rationale": "Sklearn GB has different regularization behavior, adds diversity to the ensemble.",
                 "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: GradientBoostingClassifier with predict_proba for probabilities [0,1]. If regression: GradientBoostingRegressor. Use n_estimators=200, learning_rate=0.1, max_depth=5, 5-fold CV.",
+            },
+            {
+                "name": "tabfm_zero_shot",
+                "component_type": "model",
+                "description": "TabFM (Google zero-shot tabular foundation model): in-context prediction, no tuning, no feature engineering. Radically different model family for ensemble diversity.",
+                "estimated_impact": 0.17,
+                "rationale": "Foundation-model predictions are decorrelated from tree ensembles; strong out-of-the-box TabArena performance in a single forward pass.",
+                "code_outline": "Follow TABULAR constraints section 9 (TabFM): pip install tabfm with try/except fallback to LightGBM; check <=10 classes; subsample ONLY the fit() context to <=50k rows (stratified) - predict FULL validation fold and FULL test; OOF via canonical folds; save models/oof_tabfm_zero_shot.npy + models/test_tabfm_zero_shot.npy.",
             },
         ]
     )

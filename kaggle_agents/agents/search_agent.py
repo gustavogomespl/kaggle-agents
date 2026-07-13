@@ -557,7 +557,7 @@ Return ONLY valid JSON, no explanation or markdown."""
         domain_models = {
             "audio": ["mel_spectrogram + CNN", "wav2vec2", "AST (Audio Spectrogram Transformer)"],
             "image": ["EfficientNet-B4", "ResNet-200D", "ConvNeXt"],
-            "tabular": ["LightGBM", "XGBoost", "CatBoost"],
+            "tabular": ["LightGBM", "XGBoost", "TabFM (zero-shot foundation model)"],
             "text": ["RoBERTa-large", "DeBERTa-v3", "DistilBERT"],
             "time_series": ["LightGBM", "LSTM", "N-BEATS"],
         }

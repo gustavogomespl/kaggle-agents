@@ -399,3 +399,22 @@ class TestCheckpointRecovery:
         )
 
         assert recover_from_checkpoints(models_dir) == {}
+
+
+class TestQwkRoundingSoundness:
+    def test_reported_score_matches_returned_boundaries(self):
+        """The reported tuned score must be the true score of the returned rule."""
+        from sklearn.metrics import cohen_kappa_score
+
+        rng = np.random.default_rng(21)
+        classes = np.array([0, 2, 4])  # non-contiguous labels
+        y = rng.choice(classes, 900)
+        oof = y + rng.normal(0, 0.9, 900)
+
+        boundaries, tuned, baseline, out_classes = tune_qwk_rounding(oof, y)
+
+        applied = apply_rounding(oof, boundaries, out_classes)
+        actual = cohen_kappa_score(y, applied, weights="quadratic")
+        assert actual == pytest.approx(tuned)
+        assert tuned >= baseline
+        assert set(np.unique(applied)).issubset(set(classes.tolist()))

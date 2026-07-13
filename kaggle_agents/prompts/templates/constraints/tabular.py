@@ -345,6 +345,38 @@ predictions = np.clip(predictions, 0, None)
 # For specific domains (e.g., taxi fares, prices):
 predictions = np.clip(predictions, min_valid, max_valid)
 ```
+
+### 9. TabFM: Zero-Shot Tabular Foundation Model (STRONG stagnation breaker)
+TabFM (Google, 2026) predicts tabular targets in-context with NO tuning and NO
+feature engineering — a completely different model family from GBMs, ideal for
+ensemble diversity and for breaking score plateaus.
+
+```python
+# Install with graceful fallback (component must never hard-fail):
+try:
+    from tabfm import tabfm_v1_0_0
+except ImportError:
+    import subprocess
+    subprocess.check_call(["pip", "install", "tabfm", "-q"], timeout=300)
+    from tabfm import tabfm_v1_0_0
+
+model = tabfm_v1_0_0.load()  # sklearn-compatible; uses GPU if available
+model.fit(X_ctx, y_ctx)      # 'fit' = context ingestion (no weight updates)
+proba = model.predict_proba(X_val)  # or model.predict(X_val) for regression
+```
+
+HARD LIMITS (check BEFORE using; on violation fall back to LightGBM):
+- Classification: at most 10 classes (multi-label NOT supported - skip TabFM).
+- Context size: ICL context should be <= ~50,000 rows. For larger training
+  sets, subsample ONLY the fit() context (stratified for classification):
+  `ctx = train_fold.sample(n=50_000, random_state=42)` — this does NOT violate
+  the no-sampling rule in section 7, because predictions are still produced
+  for ALL validation/test rows (only the in-context examples are subsampled).
+- OOF contract still applies: iterate the canonical folds, fit() on the
+  (subsampled) train-fold context, predict the FULL validation fold, save
+  models/oof_{name}.npy and models/test_{name}.npy exactly like other models.
+- Wrap in try/except: if TabFM is unavailable or errors, train the LightGBM
+  baseline instead and say so in the logs.
 """
 
 MULTI_LABEL_CONSTRAINTS = """## MULTI-LABEL CLASSIFICATION (target_type="multi_label")

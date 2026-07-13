@@ -122,35 +122,40 @@ def tune_qwk_rounding(
         y_true: 1-D integer ordinal labels
 
     Returns:
-        (boundaries, tuned_qwk, baseline_qwk_plain_rounding, classes)
+        (boundaries, tuned_qwk, baseline_qwk_midpoint_rule, classes)
     """
     oof = np.asarray(oof_preds, dtype=float).ravel()
     y = np.asarray(y_true).ravel().astype(int)
     classes = np.unique(y)
-
-    # Baseline: plain rounding clipped to the observed class range
-    plain = np.clip(np.rint(oof), classes.min(), classes.max()).astype(int)
-    baseline = float(cohen_kappa_score(y, plain, weights="quadratic"))
 
     if len(classes) < 3:
         # Binary: rounding boundaries degenerate to a single threshold
         threshold, tuned, base = tune_binary_threshold(oof, y, "quadratic_weighted_kappa")
         return [threshold], tuned, base, classes
 
-    initial = (classes[:-1] + classes[1:]) / 2.0
+    def rule_score(boundaries: list[float]) -> float:
+        labels = apply_rounding(oof, sorted(boundaries), classes)
+        return float(cohen_kappa_score(y, labels, weights="quadratic"))
 
-    def objective(boundaries: np.ndarray) -> float:
-        labels = apply_rounding(oof, sorted(boundaries.tolist()), classes)
-        return -cohen_kappa_score(y, labels, weights="quadratic")
+    # Baseline = midpoint boundaries: the SAME rule family that gets applied,
+    # so the reported scores are always the true scores of the returned rule
+    # (plain np.rint is a different rule and can even emit invalid classes for
+    # non-contiguous label sets)
+    midpoint_boundaries = ((classes[:-1] + classes[1:]) / 2.0).tolist()
+    baseline = rule_score(midpoint_boundaries)
 
-    result = minimize(objective, initial, method="Nelder-Mead", options={"maxiter": 500})
+    result = minimize(
+        lambda b: -rule_score(b.tolist()),
+        np.asarray(midpoint_boundaries),
+        method="Nelder-Mead",
+        options={"maxiter": 500},
+    )
     boundaries = sorted(result.x.tolist())
-    tuned = float(-objective(np.asarray(boundaries)))
+    tuned = rule_score(boundaries)
 
     if tuned < baseline:
-        # Never do worse than plain rounding
-        boundaries = ((classes[:-1] + classes[1:]) / 2.0).tolist()
-        tuned = baseline
+        # Never do worse than the default midpoint rule
+        boundaries, tuned = midpoint_boundaries, baseline
 
     return boundaries, tuned, baseline, classes
 

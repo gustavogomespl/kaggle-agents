@@ -66,8 +66,8 @@ class TestCreateTabularFallbackPlan:
         assert "catboost_fast_cv" in component_names
         assert "lightgbm_tuned_cv" in component_names
 
-    def test_rotation_2_returns_mlp_rf(self, fallback_fn, base_state):
-        """Iteration 2 should return neural_network_mlp + random_forest."""
+    def test_rotation_2_returns_tabfm_rf(self, fallback_fn, base_state):
+        """Iteration 2 should return the foundation model + random_forest."""
         plan = fallback_fn(
             domain="tabular_classification",
             sota_analysis={},
@@ -78,7 +78,7 @@ class TestCreateTabularFallbackPlan:
         )
 
         component_names = [c["name"] for c in plan]
-        assert "neural_network_mlp" in component_names
+        assert "tabfm_zero_shot" in component_names
         assert "random_forest_fast" in component_names
 
     def test_rotation_3_returns_target_encoding(self, fallback_fn, base_state):
@@ -247,6 +247,30 @@ class TestSOTAOverride:
         assert "feature_engineering" in recs
         assert extract_sota_recommendations(None) == []
 
+    def test_tabfm_recommendation_and_override(self):
+        from kaggle_agents.agents.planner.fallback_plans.tabular import (
+            create_tabular_fallback_plan,
+            extract_sota_recommendations,
+        )
+
+        recs = extract_sota_recommendations({"notes": "TabFM zero-shot worked well"})
+        assert "tabular_foundation" in recs
+
+        state = {
+            "failed_component_names": [],
+            "refinement_guidance": {"sota_guidance": "try the TabPFN/TabFM foundation model"},
+        }
+        plan = create_tabular_fallback_plan(
+            domain="tabular_classification",
+            sota_analysis={},
+            curriculum_insights="",
+            fast_mode=True,
+            state=state,
+            stagnation_iteration=1,
+        )
+        component_names = [c["name"] for c in plan]
+        assert "tabfm_zero_shot" in component_names
+
 
 @pytest.mark.skipif(not DSPY_AVAILABLE, reason="dspy not installed")
 class TestCreateExplorationPlan:
@@ -350,3 +374,43 @@ class TestCreateExplorationPlan:
         component_names = [c["name"] for c in plan]
         # Should include image-specific models
         assert any("efficientnet" in name.lower() or "convnext" in name.lower() for name in component_names)
+
+
+@pytest.mark.skipif(not DSPY_AVAILABLE, reason="dspy not installed")
+class TestSOTAOverrideDoesNotPinRotation:
+    """Generic SOTA text must not collapse all rotations into one pair."""
+
+    def test_rotation_diversity_survives_generic_sota_text(self):
+        from kaggle_agents.agents.planner.fallback_plans.tabular import (
+            create_tabular_fallback_plan,
+        )
+
+        state = {
+            "failed_component_names": [],
+            "refinement_guidance": {
+                "sota_guidance": (
+                    "Winners used gradient boosting with careful feature "
+                    "engineering and target encoding."
+                )
+            },
+        }
+        component_sets = []
+        for i in range(5):
+            plan = create_tabular_fallback_plan(
+                domain="tabular_classification",
+                sota_analysis={},
+                curriculum_insights="",
+                fast_mode=True,
+                state=state,
+                stagnation_iteration=i,
+            )
+            component_sets.append(
+                frozenset(
+                    c["name"]
+                    for c in plan
+                    if c["component_type"] in ("model", "feature_engineering")
+                )
+            )
+
+        # Overrides may replace at most iterations 1-2; the rest must rotate
+        assert len(set(component_sets)) >= 4, component_sets

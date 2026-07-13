@@ -80,10 +80,22 @@ def build_subprocess_env(
     }
     if home_dir is not None:
         isolated_home = os.fspath(home_dir)
+        real_home = env.get("HOME", "")
         sanitized["HOME"] = isolated_home
         sanitized["USERPROFILE"] = isolated_home
         sanitized["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
         sanitized["XDG_CACHE_HOME"] = os.path.join(isolated_home, ".cache")
+        # Pretrained-weight caches are not credentials: keep them shared so
+        # backbones (EfficientNet/DeBERTa/...) are not re-downloaded per
+        # workspace. HF_HOME itself stays isolated (it holds the hub token
+        # file); only the hub cache subdirectory is shared.
+        if real_home:
+            sanitized.setdefault(
+                "TORCH_HOME", os.path.join(real_home, ".cache", "torch")
+            )
+            sanitized.setdefault(
+                "HF_HUB_CACHE", os.path.join(real_home, ".cache", "huggingface", "hub")
+            )
     return sanitized
 
 

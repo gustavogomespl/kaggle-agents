@@ -362,7 +362,19 @@ def stack_from_prediction_pairs(
             final_test_preds = final_test_preds / final_test_preds.sum(axis=1, keepdims=True)
 
     calibration_info = {}
-    if problem_type == "classification" and enable_post_calibration and not ordinal_continuous:
+    # Post-calibration only helps probability metrics. For hard-label metrics
+    # the decision rule (threshold/rounding) is tuned downstream on selected_oof
+    # and applied to final_test_preds - calibrating only the test side would put
+    # the two on different scales and invalidate the tuned rule.
+    from .postprocessing import metric_label_kind
+
+    label_metric = metric_label_kind(metric_name) is not None
+    if (
+        problem_type == "classification"
+        and enable_post_calibration
+        and not ordinal_continuous
+        and not label_metric
+    ):
         final_test_preds, calibration_info = post_calibrate_ensemble(
             selected_oof, final_test_preds, y_encoded, method=calibration_method
         )
