@@ -26,11 +26,19 @@ COMPONENT_GUIDANCE = {
   sample_sub[target_col] = predictions  # Fill ONLY the target column
   sample_sub.to_csv('submission.csv', index=False)
   ```
-- ALWAYS print "Final Validation Performance: {score}" even if stopped early due to deadline
+- ALWAYS print "Final Validation Performance: {score}" (a REAL computed score,
+  never a fabricated one) even if stopped early due to deadline
 - SAVE PyTorch checkpoints with TorchScript for ensemble compatibility (see HARD_CONSTRAINTS #10):
   ```python
   scripted_model = torch.jit.script(model)
   torch.jit.save(scripted_model, f"models/{component_name}_fold{fold_idx}.pt")
+  ```
+- PyTorch >= 2.6: torch.load() defaults to weights_only=True. NEVER save a whole
+  model with torch.save(model) and reload with torch.load(path) - it raises
+  UnpicklingError. Save/load state_dicts instead:
+  ```python
+  torch.save(model.state_dict(), path)
+  model.load_state_dict(torch.load(path, map_location=device))
   ```
 - FOLD CHECKPOINTING (MANDATORY for models slower than ~2 min/fold): after EACH
   completed fold, persist partial OOF + state so a timeout never loses finished
@@ -105,6 +113,10 @@ COMPONENT_GUIDANCE = {
   final test predictions.
 - If only ONE model has valid OOF/test artifacts, SKIP the meta-learner: reuse
   that model's test predictions and report its OOF score directly.
+- ANTI-FABRICATION RULE (guardrail-enforced): NEVER print a hardcoded, estimated,
+  mock, or placeholder number as "Final Validation Performance". The printed score
+  MUST be computed from real predictions on real held-out data produced in THIS
+  run. If a real validation score cannot be computed, do NOT print the line at all.
 - Fallback: Weighted average if OOF files missing
 - Can use correlation analysis to select diverse models
 - MUST validate shapes:

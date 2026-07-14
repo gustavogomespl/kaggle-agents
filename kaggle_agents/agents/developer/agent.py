@@ -51,7 +51,7 @@ from .quiet_star import QuietStarMixin
 from .refinement import RefinementMixin
 from .retry import RetryMixin
 from .utils import DeveloperUtilsMixin
-from .validation import ValidationMixin
+from .validation import ValidationMixin, quarantine_component_artifacts
 
 
 class DeveloperAgent(
@@ -356,6 +356,11 @@ class DeveloperAgent(
 
             if not should_keep_component:
                 print("\nROLLBACK: Component did not improve score - discarding")
+                quarantined = quarantine_component_artifacts(
+                    working_dir / "models", component.name
+                )
+                if quarantined:
+                    print(f"   Quarantined rejected artifacts: {', '.join(quarantined)}")
                 return {
                     "development_results": [],
                     "current_component_index": current_index + 1,
@@ -623,7 +628,9 @@ class DeveloperAgent(
                             )
 
                 is_best = False
-                if primary_score is not None:
+                if primary_score is not None and not self._is_score_implausible(
+                    primary_score, metric_name
+                ):
                     best_str = f"{current_best_score:.5f}" if current_best_score is not None else "None"
                     print(f"[SCORE COMPARISON] Current best: {best_str}, New score: {primary_score:.5f} (source: {primary_score_source})")
 
@@ -713,8 +720,26 @@ class DeveloperAgent(
 
             score_for_gate = primary_score
             if score_for_gate is None:
-                extracted = self._extract_cv_score(result.stdout)
+                # Strict marker only: the lenient _extract_cv_score also matches
+                # decorated lines like "Final Validation Performance (rmse): ..."
+                # and once promoted a mocked score into submission_best.csv.
+                extracted = self.executor.extract_performance_metric(result.stdout)
                 score_for_gate = _coerce_score(extracted)
+            if score_for_gate is not None and self._is_score_implausible(
+                score_for_gate, metric_name
+            ):
+                print(
+                    f"Implausible {metric_name} score {score_for_gate}; "
+                    "ignoring for submission gating"
+                )
+                score_for_gate = None
+                if submission_path.exists() and best_submission.exists():
+                    shutil.copy(best_submission, submission_path)
+                    print(
+                        "Restored submission.csv from submission_best.csv (implausible score)"
+                    )
+                    state_updates["submission_reverted"] = True
+                    state_updates["submission_revert_reason"] = "implausible_score"
 
             if (
                 isinstance(baseline_score, (int, float))

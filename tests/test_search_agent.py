@@ -265,3 +265,43 @@ class TestSearchAgentStateFields:
 
         for field in expected_fields:
             assert field in source, f"Expected field '{field}' in SearchAgent return"
+
+
+class TestCrossCompetitionQueryDomains:
+    """Contamination-guard queries must reflect the detected domain.
+
+    Regression: image_to_image fell through to the tabular default queries, so
+    9/10 retrieved "SOTA" notebooks were Titanic/tabular for a denoising comp.
+    """
+
+    @staticmethod
+    def _queries(domain, metric="rmse"):
+        from types import SimpleNamespace
+
+        from kaggle_agents.agents.search_agent import SearchAgent
+
+        state = {
+            "domain_detected": domain,
+            "competition_info": SimpleNamespace(evaluation_metric=metric),
+        }
+        return SearchAgent._generate_cross_competition_queries(None, state)
+
+    def test_image_to_image_gets_denoising_queries(self):
+        queries = self._queries("image_to_image")
+        joined = " ".join(queries).lower()
+        assert "lightgbm" not in joined
+        assert "xgboost" not in joined
+        assert "denoising" in joined
+        assert "image_to_image competition rmse optimization" in queries
+
+    def test_every_domain_type_avoids_tabular_default(self):
+        from typing import get_args
+
+        from kaggle_agents.core.state.types import DomainType
+
+        tabular_defaults = self._queries("tabular", metric="")
+        for domain in get_args(DomainType):
+            if domain.startswith("tabular"):
+                continue
+            queries = self._queries(domain, metric="")
+            assert queries != tabular_defaults, f"{domain} fell back to tabular queries"

@@ -625,12 +625,17 @@ class TestCanonicalDirFallback:
         This prevents overriding the canonical contract when real canonical
         artifacts are present (e.g., train_ids.npy, folds.npy).
         """
-        # Simulate existing canonical data
+        # Simulate existing canonical data (complete: ids + metadata)
         canonical_dir = tmp_path / "canonical"
         canonical_dir.mkdir(parents=True, exist_ok=True)
         (canonical_dir / "train_ids.npy").touch()  # Marker file
+        (canonical_dir / "metadata.json").touch()
 
-        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        has_canonical = (
+            canonical_dir.exists()
+            and (canonical_dir / "train_ids.npy").exists()
+            and (canonical_dir / "metadata.json").exists()
+        )
         data_type = "audio"
 
         # Fallback condition: only inject when has_canonical is False
@@ -644,7 +649,11 @@ class TestCanonicalDirFallback:
         # No canonical directory exists
         canonical_dir = tmp_path / "canonical"
 
-        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        has_canonical = (
+            canonical_dir.exists()
+            and (canonical_dir / "train_ids.npy").exists()
+            and (canonical_dir / "metadata.json").exists()
+        )
         data_type = "audio"
 
         # Fallback condition: inject when has_canonical is False for audio
@@ -652,6 +661,22 @@ class TestCanonicalDirFallback:
 
         assert has_canonical is False
         assert should_inject_fallback is True  # Fallback SHOULD be injected
+
+    def test_partial_canonical_dir_does_not_count(self, tmp_path: Path) -> None:
+        """A canonical/ dir created mid-run by generated code (train_ids.npy but
+        no metadata.json) must NOT trigger the canonical contract block: the
+        injected block would crash every script at import time."""
+        canonical_dir = tmp_path / "canonical"
+        canonical_dir.mkdir(parents=True, exist_ok=True)
+        (canonical_dir / "train_ids.npy").touch()
+
+        has_canonical = (
+            canonical_dir.exists()
+            and (canonical_dir / "train_ids.npy").exists()
+            and (canonical_dir / "metadata.json").exists()
+        )
+
+        assert has_canonical is False
 
 
 class TestEnsureFoldsFallback:
@@ -764,3 +789,70 @@ class TestPreloadedIdToPath:
         assert id_to_path.get("1") == "/path/to/audio_1.wav"
         # Integer lookup should NOT work
         assert id_to_path.get(0) is None
+
+
+class TestPathRedefinitionSanitizer:
+    """The sanitizer must only protect constants the injected header defines.
+
+    Stripping a redefinition of a constant the header never defined (e.g.
+    CANONICAL_DIR on comps without canonical data) leaves the LLM's code with
+    a NameError at runtime.
+    """
+
+    HEADER = (
+        'TRAIN_PATH = Path("/data/train.csv")\n'
+        'OUTPUT_DIR = Path("/data")\n'
+        "# === END PATH CONSTANTS ===\n"
+    )
+
+    def test_llm_canonical_dir_kept_when_header_lacks_it(self):
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = self.HEADER + 'CANONICAL_DIR = OUTPUT_DIR / "canonical"\n'
+
+        is_valid, violations = CodeGeneratorMixin._validate_no_path_redefinition(None, code)
+        assert is_valid
+        assert violations == []
+
+        stripped = CodeGeneratorMixin._strip_path_redefinitions(None, code)
+        assert 'CANONICAL_DIR = OUTPUT_DIR / "canonical"' in stripped
+        assert "# STRIPPED" not in stripped
+
+    def test_header_defined_constant_still_stripped(self):
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = self.HEADER + 'OUTPUT_DIR = Path("/tmp/elsewhere")\n'
+
+        is_valid, violations = CodeGeneratorMixin._validate_no_path_redefinition(None, code)
+        assert not is_valid
+        assert "Path redefinition detected: OUTPUT_DIR" in violations
+
+        stripped = CodeGeneratorMixin._strip_path_redefinitions(None, code)
+        assert "# STRIPPED (path constant):" in stripped
+
+    def test_base_dir_always_stripped(self):
+        # _rewrite_base_dir_references later rewrites bare BASE_DIR to
+        # OUTPUT_DIR, so a surviving "BASE_DIR = ..." line would redefine
+        # OUTPUT_DIR at runtime even though the header never defines BASE_DIR.
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = self.HEADER + 'BASE_DIR = Path("/tmp/other")\n'
+
+        is_valid, violations = CodeGeneratorMixin._validate_no_path_redefinition(None, code)
+        assert not is_valid
+
+        stripped = CodeGeneratorMixin._strip_path_redefinitions(None, code)
+        assert "# STRIPPED (path constant):" in stripped
+        assert 'BASE_DIR = Path("/tmp/other")' not in stripped.split(
+            "# === END PATH CONSTANTS ===",
+        )[1].splitlines()
+
+    def test_injected_canonical_block_guards_metadata_open(self):
+        # The generated header must degrade gracefully when canonical/ is
+        # incomplete instead of crashing at import time.
+        import inspect
+
+        from kaggle_agents.agents.developer import code_generator
+
+        src = inspect.getsource(code_generator)
+        assert "if CANONICAL_METADATA_PATH.exists():" in src

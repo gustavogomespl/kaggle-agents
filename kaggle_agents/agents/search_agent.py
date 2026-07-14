@@ -293,10 +293,25 @@ class SearchAgent:
         (MLE-bench contamination guard). Built from domain + metric keywords.
         """
         domain = state.get("domain_detected", "tabular") or "tabular"
+        # Map every DomainType value onto a query bucket; unmapped domains fall
+        # back to tabular queries, which are useless for e.g. image comps.
         domain_aliases = {
             "computer_vision": "image",
             "nlp": "text",
             "natural_language": "text",
+            "image_classification": "image",
+            "image_regression": "image",
+            "image_segmentation": "image",
+            "object_detection": "image",
+            "text_classification": "text",
+            "text_regression": "text",
+            "seq_to_seq": "seq2seq",
+            "audio_classification": "audio",
+            "audio_regression": "audio",
+            "tabular_classification": "tabular",
+            "tabular_regression": "tabular",
+            "time_series_forecasting": "time_series",
+            "multi_modal": "image",
         }
         domain = domain_aliases.get(domain, domain)
 
@@ -313,6 +328,10 @@ class SearchAgent:
             "image": [
                 "image classification efficientnet pytorch competition solution",
                 "CNN transfer learning augmentation training pipeline",
+            ],
+            "image_to_image": [
+                "image denoising unet autoencoder competition solution",
+                "image restoration pixel level prediction encoder decoder pytorch",
             ],
             "text": [
                 "text classification transformer deberta competition solution",

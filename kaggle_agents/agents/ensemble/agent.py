@@ -1273,12 +1273,39 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             if isinstance(metric_contract, dict) and metric_contract.get("name"):
                 metric_name = str(metric_contract["name"])
 
+            sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
+            output_path = working_dir / "submission.csv"
+            best_submission = working_dir / "submission_best.csv"
+
             # Find prediction pairs
             prediction_pairs = self._find_prediction_pairs(models_dir)
             print(f"   Found {len(prediction_pairs)} prediction pairs")
 
+            # Only ensemble components accepted by the hill-climb: oof_available_*
+            # is set solely for kept components (developer/agent.py). No keys means
+            # a resumed/legacy state - keep the glob results (rollback quarantine
+            # already hides rejected files on disk).
+            accepted = (
+                {
+                    key.replace("oof_available_", "", 1)
+                    for key in state.keys()
+                    if isinstance(key, str) and key.startswith("oof_available_")
+                }
+                if isinstance(state, dict)
+                else set()
+            )
+            if accepted:
+                dropped = sorted(set(prediction_pairs) - accepted)
+                prediction_pairs = {
+                    name: pair for name, pair in prediction_pairs.items() if name in accepted
+                }
+                if dropped:
+                    print(f"   Excluding non-accepted prediction pairs: {', '.join(dropped)}")
+
             if len(prediction_pairs) < 1:
                 print("   No prediction pairs found, skipping ensemble")
+                if best_submission.exists():
+                    self._safe_restore_submission(best_submission, output_path, sample_path)
                 return {
                     "ensemble_skipped": True,
                     "skip_reason": "no_prediction_pairs",
@@ -1291,10 +1318,6 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                         )
                     ],
                 }
-
-            # Create simple average ensemble
-            sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
-            output_path = working_dir / "submission.csv"
 
             # Get expected test count from CVfolds (if available) for validation
             test_rec_ids = state.get("test_rec_ids", []) if isinstance(state, dict) else []
@@ -1315,6 +1338,31 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             )
             if stacking_outcome is not None:
                 return stacking_outcome
+
+            # OOF stacking unavailable (e.g. no canonical y.npy on image comps).
+            # The simple average below is UNSCORED - never let it overwrite a
+            # scored hill-climb best.
+            best_existing, best_source = self._get_comparable_cv_score(state)
+            if best_existing is not None and best_submission.exists():
+                print(
+                    f"   Unscored fallback blocked: keeping scored best "
+                    f"({best_source}={best_existing:.6f})"
+                )
+                self._safe_restore_submission(best_submission, output_path, sample_path)
+                return {
+                    "ensemble_skipped": True,
+                    "skip_reason": "unscored_fallback_kept_scored_best",
+                    "telemetry_events": [
+                        make_event(
+                            "ensemble",
+                            "skipped",
+                            iteration=current_iteration,
+                            reason="unscored_fallback_kept_scored_best",
+                            best_score=float(best_existing),
+                            score_source=best_source,
+                        )
+                    ],
+                }
 
             if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test, problem_type=problem_type, metric_name=metric_name):
                 return {

@@ -453,3 +453,25 @@ def test_parse_errors_still_detects_traceback_with_tqdm_noise():
     errors = executor._parse_errors(stderr=stderr, stdout="")
     assert errors, "Expected at least one parsed error"
     assert any("Value" in e or "boom" in e for e in errors)
+
+
+class TestStrictPerformanceMetricExtraction:
+    """The submission gate only trusts the exact score marker line."""
+
+    def test_exact_marker_extracted(self):
+        executor = CodeExecutor(timeout=5)
+        stdout = "training done\nFinal Validation Performance: 0.0152\n"
+        assert executor.extract_performance_metric(stdout) == 0.0152
+
+    def test_decorated_marker_rejected(self):
+        # A generated ensemble once printed this mocked variant; the lenient
+        # regex promoted it into submission_best.csv. The strict extractor
+        # must return None so the gate ignores it.
+        executor = CodeExecutor(timeout=5)
+        stdout = "Final Validation Performance (rmse): 0.015200\n"
+        assert executor.extract_performance_metric(stdout) is None
+
+    def test_prefixed_marker_still_extracted(self):
+        executor = CodeExecutor(timeout=5)
+        stdout = "🎯 Final Validation Performance: 0.000000\n"
+        assert executor.extract_performance_metric(stdout) == 0.0

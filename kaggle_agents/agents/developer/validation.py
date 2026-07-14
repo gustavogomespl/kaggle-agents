@@ -7,6 +7,7 @@ validating component improvements using hill climbing strategy.
 
 import math
 import re
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ...core.config import calculate_score_improvement, is_metric_minimization
@@ -17,8 +18,36 @@ if TYPE_CHECKING:
     from ...tools.code_executor import ExecutionResult
 
 
+def quarantine_component_artifacts(models_dir: Path, component_name: str) -> list[str]:
+    """Rename a rejected component's prediction artifacts so ensemble globs skip them.
+
+    Rollback only discards the in-memory result; the .npy files a rejected
+    component wrote would otherwise be picked up by the ensemble's
+    ``oof_*.npy``/``test_*.npy`` glob and averaged into the final submission.
+    """
+    renamed: list[str] = []
+    for prefix in ("oof_", "test_", "test_ids_", "train_ids_"):
+        src = models_dir / f"{prefix}{component_name}.npy"
+        if src.exists():
+            src.replace(models_dir / f"rejected_{prefix}{component_name}.npy")
+            renamed.append(src.name)
+    return renamed
+
+
 class ValidationMixin:
     """Mixin providing validation capabilities."""
+
+    @staticmethod
+    def _is_score_implausible(score: float | None, metric_name: str) -> bool:
+        """A score <= 0.0 on a lower-is-better metric (RMSE, log loss, MAE...)
+        means the validation calc is broken, not that the model is perfect.
+
+        Higher-is-better perfect scores are NOT flagged: AUC=1.0 is legitimate
+        on saturated competitions.
+        """
+        if score is None:
+            return False
+        return is_metric_minimization(metric_name) and float(score) <= 0.0
 
     def _infer_metric_from_stdout(self, stdout: str) -> str | None:
         """Infer metric name from stdout patterns.
@@ -116,6 +145,12 @@ class ValidationMixin:
             )
             print("      ⚠️  No CV score found in stdout; skipping rollback and keeping component.")
             return True, None
+
+        if self._is_score_implausible(cv_score, metric_name):
+            print("\n   📊 Ablation Study (Hill Climbing):")
+            print(f"      Component CV:   {cv_score:.6f} ({metric_name}, lower is better)")
+            print("      ❌ Component REJECTED (implausible score <= 0; validation calc likely broken)")
+            return False, None
 
         baseline_score = state.get("baseline_cv_score")
         if baseline_score is None:

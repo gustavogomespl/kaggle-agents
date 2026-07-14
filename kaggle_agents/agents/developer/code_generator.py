@@ -55,6 +55,22 @@ IMMUTABLE_PATH_VARS = [
 ]
 
 
+def _protected_vars_in_header(header: str) -> list[str]:
+    """Immutable path constants actually defined in the injected header.
+
+    Stripping a redefinition of a constant the header never defined leaves the
+    LLM's code with a NameError (e.g. CANONICAL_DIR on comps without canonical
+    data). BASE_DIR stays always-protected: _rewrite_base_dir_references later
+    rewrites bare BASE_DIR to OUTPUT_DIR, which would turn a surviving
+    "BASE_DIR = ..." line into a runtime OUTPUT_DIR redefinition.
+    """
+    return [
+        var
+        for var in IMMUTABLE_PATH_VARS
+        if var == "BASE_DIR" or re.search(rf"^[ \t]*{var}\s*=", header, re.MULTILINE)
+    ]
+
+
 if TYPE_CHECKING:
     from .agent import DeveloperAgent
 
@@ -239,22 +255,24 @@ class CodeGeneratorMixin:
         # Get the code after the injected header
         code_after_header = code[marker_idx + len(path_header_end_marker) :]
 
-        # Check for redefinitions of each immutable path variable
-        for var in IMMUTABLE_PATH_VARS:
+        # Check for redefinitions of each immutable path variable the header
+        # defines. Leading whitespace is [ \t]* (not \s*): with re.MULTILINE,
+        # \s* crosses newlines and anchors the match to the previous blank line.
+        for var in _protected_vars_in_header(code[:marker_idx]):
             # Multiple patterns to catch various redefinition attempts
             patterns = [
                 # VAR = Path(...)
-                rf"^\s*{var}\s*=\s*Path\s*\(",
+                rf"^[ \t]*{var}\s*=\s*Path\s*\(",
                 # VAR = "..." or VAR = '...'
-                rf"^\s*{var}\s*=\s*['\"]",
+                rf"^[ \t]*{var}\s*=\s*['\"]",
                 # VAR = something / ... (path concatenation)
-                rf"^\s*{var}\s*=\s*\w+\s*/",
+                rf"^[ \t]*{var}\s*=\s*\w+\s*/",
                 # VAR = BASE_DIR / ...
-                rf"^\s*{var}\s*=\s*\w+_DIR\s*/",
+                rf"^[ \t]*{var}\s*=\s*\w+_DIR\s*/",
                 # VAR = os.path.join(...)
-                rf"^\s*{var}\s*=\s*os\.path\.join\s*\(",
+                rf"^[ \t]*{var}\s*=\s*os\.path\.join\s*\(",
                 # VAR = str(...) (converting path)
-                rf"^\s*{var}\s*=\s*str\s*\(",
+                rf"^[ \t]*{var}\s*=\s*str\s*\(",
             ]
             for pattern in patterns:
                 if re.search(pattern, code_after_header, re.MULTILINE):
@@ -285,13 +303,16 @@ class CodeGeneratorMixin:
         header = code[:marker_idx + len(path_header_end_marker)]
         code_after_header = code[marker_idx + len(path_header_end_marker):]
 
-        for var in IMMUTABLE_PATH_VARS:
-            # Pattern to match full line with path redefinition
+        for var in _protected_vars_in_header(header):
+            # Full-line patterns; leading whitespace is [ \t]* (not \s*): with
+            # re.MULTILINE, \s* crosses newlines, and a redefinition after a
+            # blank line got the comment prefix on the blank line while the
+            # actual assignment survived untouched.
             patterns = [
-                rf"^(\s*{var}\s*=\s*Path\s*\([^\)]+\)\s*)$",
-                rf"^(\s*{var}\s*=\s*['\"][^'\"]+['\"]\s*)$",
-                rf"^(\s*{var}\s*=\s*\w+\s*/[^\n]+)$",
-                rf"^(\s*{var}\s*=\s*os\.path\.join\([^\)]+\)\s*)$",
+                rf"^([ \t]*{var}\s*=\s*Path\s*\([^\)]+\)[ \t]*)$",
+                rf"^([ \t]*{var}\s*=\s*['\"][^'\"]+['\"][ \t]*)$",
+                rf"^([ \t]*{var}\s*=\s*\w+\s*/[^\n]+)$",
+                rf"^([ \t]*{var}\s*=\s*os\.path\.join\([^\)]+\)[ \t]*)$",
             ]
             for pattern in patterns:
                 code_after_header = re.sub(
@@ -673,9 +694,16 @@ class CodeGeneratorMixin:
         # Store resolved paths for use by fix/debug functions
         self._resolved_paths = paths
 
-        # Check for canonical data (prepared by canonical_data_preparation_node)
+        # Check for canonical data (prepared by canonical_data_preparation_node).
+        # Require metadata.json too: generated components sometimes create a
+        # partial canonical/ dir mid-run, and injecting the contract block for
+        # an incomplete dir crashes every subsequent script at import time.
         canonical_dir = working_dir / "canonical"
-        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        has_canonical = (
+            canonical_dir.exists()
+            and (canonical_dir / "train_ids.npy").exists()
+            and (canonical_dir / "metadata.json").exists()
+        )
 
         # Generate path constants header to inject into code
         # This ensures the LLM cannot ignore the correct paths
@@ -747,20 +775,24 @@ CANONICAL_FOLDS_PATH = CANONICAL_DIR / "folds.npy"
 CANONICAL_FEATURE_COLS_PATH = CANONICAL_DIR / "feature_cols.json"
 CANONICAL_METADATA_PATH = CANONICAL_DIR / "metadata.json"
 
-# Load canonical metadata
-with open(CANONICAL_METADATA_PATH) as _f:
-    CANONICAL_METADATA = json.load(_f)
-    N_FOLDS = CANONICAL_METADATA["n_folds"]
-    ID_COL = CANONICAL_METADATA.get("id_col", "id")
-    TARGET_COL = CANONICAL_METADATA.get("target_col", "target")
-    IS_CLASSIFICATION = CANONICAL_METADATA.get("is_classification", True)
+# Load canonical metadata (guarded: degrade gracefully if the dir is incomplete)
+if CANONICAL_METADATA_PATH.exists():
+    with open(CANONICAL_METADATA_PATH) as _f:
+        CANONICAL_METADATA = json.load(_f)
+else:
+    print(f"[WARNING] Canonical metadata missing at {{CANONICAL_METADATA_PATH}}; using defaults")
+    CANONICAL_METADATA = {{}}
+N_FOLDS = CANONICAL_METADATA.get("n_folds", 5)
+ID_COL = CANONICAL_METADATA.get("id_col", "id")
+TARGET_COL = CANONICAL_METADATA.get("target_col", "target")
+IS_CLASSIFICATION = CANONICAL_METADATA.get("is_classification", True)
 
 print(f"[LOG:INFO] Canonical data loaded: {{CANONICAL_METADATA.get('canonical_rows', 'unknown')}} samples, {{N_FOLDS}} folds")
 
 # === CANONICAL FOLDS (USE IF AVAILABLE) ===
 # PREFERRED: Use canonical folds for OOF alignment across all models
 # FALLBACK: If canonical folds don't exist, create folds from data (StratifiedKFold)
-if CANONICAL_FOLDS_PATH.exists():
+if CANONICAL_FOLDS_PATH.exists() and CANONICAL_TRAIN_IDS_PATH.exists() and CANONICAL_Y_PATH.exists():
     CANONICAL_FOLDS = np.load(CANONICAL_FOLDS_PATH)
     CANONICAL_TRAIN_IDS = np.load(CANONICAL_TRAIN_IDS_PATH, allow_pickle=True)
     CANONICAL_Y = np.load(CANONICAL_Y_PATH, allow_pickle=True)
