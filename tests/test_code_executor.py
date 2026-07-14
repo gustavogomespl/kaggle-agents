@@ -37,6 +37,41 @@ def _start_new_process_group() -> None:
     os.setpgrp()
 
 
+class TestGpuAwareResourceLimits:
+    """RLIMIT_AS must be skipped on GPU hosts: CUDA maps device/pinned memory
+    into the process address space, so the cap fires as fake CUDA OOM and
+    pthread_create failures with plenty of free VRAM."""
+
+    def _record_calls(self, monkeypatch):
+        import resource
+
+        from kaggle_agents.tools.code_executor import process
+
+        calls = []
+        monkeypatch.setattr(process, "ENABLE_RESOURCE_LIMITS", True)
+        monkeypatch.setattr(resource, "setrlimit", lambda limit, value: calls.append(limit))
+        return process, resource, calls
+
+    @pytest.mark.skipif(platform.system() == "Windows", reason="rlimits are Unix-only")
+    def test_rlimit_as_skipped_on_gpu_host(self, monkeypatch):
+        process, resource, calls = self._record_calls(monkeypatch)
+        monkeypatch.setattr(process, "_nvidia_gpu_present", lambda: True)
+
+        process.set_resource_limits()
+
+        assert resource.RLIMIT_AS not in calls
+        assert resource.RLIMIT_CPU in calls
+
+    @pytest.mark.skipif(platform.system() == "Windows", reason="rlimits are Unix-only")
+    def test_rlimit_as_applied_without_gpu(self, monkeypatch):
+        process, resource, calls = self._record_calls(monkeypatch)
+        monkeypatch.setattr(process, "_nvidia_gpu_present", lambda: False)
+
+        process.set_resource_limits()
+
+        assert resource.RLIMIT_AS in calls
+
+
 def _validate_optuna_pruning_contract(code: str) -> tuple:
     """
     Validate Optuna pruning contract. Copied for isolated testing.

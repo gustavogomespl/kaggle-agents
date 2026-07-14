@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
 import signal
 import subprocess
 from collections.abc import Mapping
@@ -99,6 +100,11 @@ def build_subprocess_env(
     return sanitized
 
 
+def _nvidia_gpu_present() -> bool:
+    """Whether the host has an NVIDIA GPU driver available."""
+    return os.path.exists("/proc/driver/nvidia") or shutil.which("nvidia-smi") is not None
+
+
 def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
     """
     Set resource limits for subprocess (Unix only).
@@ -119,9 +125,12 @@ def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
     try:
         import resource
 
-        # Memory limit (soft, hard)
-        memory_bytes = memory_mb * 1024 * 1024
-        resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
+        # Memory limit (soft, hard). Skipped on GPU hosts: CUDA maps device and
+        # pinned memory into the process address space, so an RLIMIT_AS cap
+        # fires as fake CUDA OOM / pthread_create failures with free VRAM.
+        if not _nvidia_gpu_present():
+            memory_bytes = memory_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
 
         # CPU time limit
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_time_s, cpu_time_s))

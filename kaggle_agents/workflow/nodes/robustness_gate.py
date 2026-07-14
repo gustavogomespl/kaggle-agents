@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,18 @@ def _restore_best_valid_submission(state: KaggleState) -> Path | None:
             candidates.append((submission, path))
 
     if not candidates:
+        # In mlebench mode no scored submissions are recorded mid-run (no
+        # test-set feedback), so this list is empty even when hill-climbing
+        # kept a gradable artifact on disk. Never discard one that exists.
+        working_dir = Path(state["working_directory"])
+        destination = working_dir / "submission.csv"
+        best_on_disk = working_dir / "submission_best.csv"
+        if best_on_disk.is_file():
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(best_on_disk, destination)
+            return destination
+        if destination.is_file():
+            return destination
         return None
 
     metric_name = ""
@@ -55,6 +68,21 @@ def _restore_best_valid_submission(state: KaggleState) -> Path | None:
     if source.resolve() != destination.resolve():
         shutil.copy2(source, destination)
     return destination
+
+
+def _flagged_component_name(state: KaggleState) -> str:
+    """Name of the component whose code the robustness agent validated.
+
+    The robustness agent validates ``development_results[-1]``.
+    DevelopmentResult carries no component field, but every generated script
+    embeds an injected ``COMPONENT_NAME = "..."`` constant.
+    """
+    dev_results = state.get("development_results", []) or []
+    if not dev_results:
+        return ""
+    code = str(_field(dev_results[-1], "code", "") or "")
+    match = re.search(r"COMPONENT_NAME\s*=\s*[\"']([\w.-]+)[\"']", code)
+    return match.group(1) if match else ""
 
 
 def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
@@ -96,13 +124,25 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
     if recovery_count < max_recoveries:
         issue_text = "; ".join(str(issue) for issue in issues[:8]) or "robustness validation failed"
         suggestion_text = "; ".join(str(item) for item in suggestions[:8])
+        # Naming the flagged component does double duty: the planner is told to
+        # re-plan it, and the developer skip-cache invalidates on name mention.
+        # Without it the stale code is revalidated and recovery cannot converge.
+        flagged = _flagged_component_name(state)
+        regen_planner = (
+            f" The plan MUST include a component that reimplements '{flagged}' "
+            "without these issues."
+            if flagged
+            else ""
+        )
+        regen_developer = f" Regenerate '{flagged}' from scratch." if flagged else ""
         guidance = dict(state.get("refinement_guidance", {}) or {})
         guidance["planner_guidance"] = (
             "Create a targeted correction plan for failed robustness modules "
-            f"{failed_modules}: {issue_text}"
+            f"{failed_modules}: {issue_text}.{regen_planner}"
         )
         guidance["developer_guidance"] = (
-            f"Fix these guardrail failures before ensemble: {issue_text}. {suggestion_text}"
+            f"Fix these guardrail failures before ensemble: {issue_text}. "
+            f"{suggestion_text}{regen_developer}"
         ).strip()
         guidance["priority_fixes"] = issues[:8]
 

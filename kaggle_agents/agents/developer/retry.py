@@ -468,6 +468,15 @@ class RetryMixin:
         # Inject categorical encoding hint when applicable
         error_text = _maybe_add_encoding_hint(error_text)
 
+        # Fixers rewrite whole scripts and routinely drop the score marker the
+        # pipeline parses, burning an attempt on static validation. Restate it
+        # on every fix request (reaches both the DSPy and the fallback fixer).
+        error_text += (
+            "\n\nMANDATORY: the fixed code must still print "
+            '"Final Validation Performance: {score}" (exact prefix) with the '
+            "real computed CV score before it finishes."
+        )
+
         # Get dynamic temperature based on attempt number
         fix_temperature = get_dynamic_temperature(
             context="fixing",

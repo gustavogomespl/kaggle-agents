@@ -98,6 +98,13 @@ COMPONENT_GUIDANCE = {
 ### OOF-Based Stacking (no checkpoint loading needed):
 - Load OOF predictions from models/oof_*.npy files
 - Preferred: Stacking with LogisticRegression/Ridge meta-learner
+- LEAKAGE RULE (guardrail-enforced): NEVER fit the meta-learner on the full OOF
+  matrix and score it on those same rows. Score stacking with K-fold CV over the
+  OOF matrix (fit on K-1 folds, score the held-out fold) and report the mean CV
+  score as Final Validation Performance. Refit on all rows ONLY to produce the
+  final test predictions.
+- If only ONE model has valid OOF/test artifacts, SKIP the meta-learner: reuse
+  that model's test predictions and report its OOF score directly.
 - Fallback: Weighted average if OOF files missing
 - Can use correlation analysis to select diverse models
 - MUST validate shapes:

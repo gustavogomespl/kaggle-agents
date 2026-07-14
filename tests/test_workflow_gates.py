@@ -98,6 +98,43 @@ class TestRobustnessGate:
             encoding="utf-8"
         )
 
+    def test_second_failure_preserves_hill_climb_best_from_disk(self, tmp_path):
+        # mlebench mode records no scored submissions mid-run, but the
+        # hill-climbing best on disk is still gradable — grading must proceed.
+        best = tmp_path / "submission_best.csv"
+        best.write_text("id,target\n1,0.9\n", encoding="utf-8")
+        state = _failure_state(tmp_path, robustness_recovery_count=1)
+        updates = robustness_gate_node(state)
+        assert updates["robustness_gate_action"] == "fail"
+        assert updates["workflow_valid"] is True
+        assert updates["termination_reason"] == "robustness_failed_preserved_best_submission"
+        assert updates["submission_validation_error"] is None
+        assert (tmp_path / "submission.csv").read_text(encoding="utf-8") == best.read_text(
+            encoding="utf-8"
+        )
+
+    def test_second_failure_keeps_existing_submission_csv(self, tmp_path):
+        existing = tmp_path / "submission.csv"
+        existing.write_text("id,target\n1,0.7\n", encoding="utf-8")
+        updates = robustness_gate_node(_failure_state(tmp_path, robustness_recovery_count=1))
+        assert updates["workflow_valid"] is True
+        assert existing.read_text(encoding="utf-8") == "id,target\n1,0.7\n"
+
+    def test_recovery_guidance_names_flagged_component(self, tmp_path):
+        # Naming the validated component invalidates the developer skip-cache
+        # and steers the correction plan at it — otherwise recovery revalidates
+        # the same stale code and can never converge.
+        flagged_code = 'COMPONENT_NAME = "ensemble_weighted_averaging"\nprint("x")\n'
+        state = _failure_state(
+            tmp_path,
+            development_results=[DevelopmentResult(code=flagged_code, success=True)],
+        )
+        updates = robustness_gate_node(state)
+        assert updates["robustness_gate_action"] == "recover"
+        guidance = updates["refinement_guidance"]
+        assert "ensemble_weighted_averaging" in guidance["planner_guidance"]
+        assert "ensemble_weighted_averaging" in guidance["developer_guidance"]
+
 
 class TestCausalAblations:
     def test_robustness_ablation_abstains_without_perfect_score(self, tmp_path):
