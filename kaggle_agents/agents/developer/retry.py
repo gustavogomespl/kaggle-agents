@@ -11,6 +11,7 @@ Uses dynamic temperature strategy:
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,35 @@ _CATEGORICAL_ENCODING_HINT = (
 )
 
 _CATEGORICAL_ERROR_PATTERNS = ("could not convert string", "invalid literal")
+
+_MISSING_ARTIFACT_PATTERN = "missing expected artifacts"
+
+_MISSING_ARTIFACT_HINT = (
+    "\n\n## Missing-Artifact Hint (auto-detected from error):\n"
+    "The previous run finished training but did not save every required "
+    "artifact file. Do NOT retrain from scratch when reusable outputs exist: "
+    "first check models/ for fold checkpoints or partial prediction arrays "
+    "saved by the previous run and load them to produce the missing files. "
+    "Either way, the script MUST create every artifact listed in the error "
+    "above; train_ids_<component>.npy must contain the train IDs in canonical "
+    "row order, saved with allow_pickle=False."
+)
+
+
+def require_oof_artifacts() -> bool:
+    """Whether model components must persist OOF evidence artifacts."""
+    return os.getenv("KAGGLE_AGENTS_REQUIRE_OOF", "1").lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
+def _maybe_add_artifact_hint(error_text: str) -> str:
+    """Append a reuse-not-retrain hint when only artifact saves are missing."""
+    if _MISSING_ARTIFACT_PATTERN in error_text.lower():
+        return error_text + _MISSING_ARTIFACT_HINT
+    return error_text
 
 _EXECUTION_ARTIFACT_TRUST_BOUNDARY = """
 SECURITY BOUNDARY:
@@ -216,6 +246,19 @@ class RetryMixin:
             return self._validate_data_volume(working_dir, state)
 
         if component.component_type == "model":
+            # A cached "success" only counts as a model result if its OOF
+            # evidence still exists on disk. This invalidates reuse when the
+            # planner re-emits a name under a different type (the old run
+            # never produced oof_*) and when a rejected candidate's artifacts
+            # were quarantined after rollback.
+            if require_oof_artifacts():
+                oof_path = working_dir / "models" / f"oof_{component.name}.npy"
+                if not oof_path.is_file():
+                    print(
+                        f"   ⚠️  No OOF artifact on disk for {component.name} - "
+                        "cached result cannot be reused as a model"
+                    )
+                    return False
             problem_type = state.get("problem_type", "classification")
             if problem_type == "regression":
                 return self._validate_regression_predictions(component.name, working_dir)
@@ -563,6 +606,9 @@ class RetryMixin:
 
         # Inject categorical encoding hint when applicable
         error_text = _maybe_add_encoding_hint(error_text)
+        # Missing-artifact failures follow a successful training run; steer the
+        # fixer toward saving artifacts instead of retraining from scratch.
+        error_text = _maybe_add_artifact_hint(error_text)
 
         # Fixers rewrite whole scripts and routinely drop the score marker the
         # pipeline parses, burning an attempt on static validation. Restate it
@@ -707,6 +753,10 @@ Output Dir: {paths.get('output_dir', '.')}"""
         if any(p in initial_errors.lower() for p in _CATEGORICAL_ERROR_PATTERNS):
             meta_feedback = (meta_feedback or "") + _CATEGORICAL_ENCODING_HINT
             print("   🔤 Injected categorical encoding hint into debug context")
+
+        if _MISSING_ARTIFACT_PATTERN in initial_errors.lower():
+            meta_feedback = (meta_feedback or "") + _MISSING_ARTIFACT_HINT
+            print("   📦 Injected missing-artifact hint into debug context")
 
         # Get debug temperature (higher for creative problem-solving)
         debug_temperature = get_dynamic_temperature(

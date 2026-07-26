@@ -52,9 +52,46 @@ from .dspy_modules import CodeFixerModule, CodeGeneratorModule
 from .grpo import GRPOMixin
 from .quiet_star import QuietStarMixin
 from .refinement import REFINEMENT_TRUST_BOUNDARY, RefinementMixin
-from .retry import RetryMixin
+from .retry import RetryMixin, require_oof_artifacts
 from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin, quarantine_component_artifacts
+
+
+def _expected_model_artifacts(
+    component: AblationComponent,
+    working_dir: Path,
+) -> list[str] | None:
+    """Artifacts the executor must see before a model run counts as success.
+
+    ``train_ids_<name>.npy`` is required whenever the canonical contract
+    exists: trusted-OOF promotion cannot verify row alignment without it, so
+    enforcing it at execution keeps the failure inside the fix/retry loop
+    instead of surfacing as a silent post-training rollback.
+    """
+    if component.component_type != "model" or not require_oof_artifacts():
+        return None
+    expected = [
+        f"models/oof_{component.name}.npy",
+        f"models/test_{component.name}.npy",
+    ]
+    if (working_dir / "canonical" / "metadata.json").is_file():
+        expected.append(f"models/train_ids_{component.name}.npy")
+    return expected
+
+
+def _has_combinable_model_predictions(
+    state: KaggleState,
+    working_dir: Path,
+) -> bool:
+    """Whether any accepted model predictions exist for an ensemble to use.
+
+    Rejected candidates are quarantined under ``rejected_*`` names, so a plain
+    ``oof_*.npy`` glob only sees artifacts that were never rolled back.
+    """
+    if any(bool(flag) for flag in (state.get("oof_availability") or {}).values()):
+        return True
+    models_dir = working_dir / "models"
+    return models_dir.is_dir() and any(models_dir.glob("oof_*.npy"))
 
 
 class DeveloperAgent(
@@ -691,6 +728,30 @@ class DeveloperAgent(
                     make_event(
                         "ablation",
                         "developer_ensemble_component_skipped",
+                        iteration=state.get("current_iteration", 0),
+                        component="ensemble",
+                        component_name=component.name,
+                    )
+                ],
+                "last_updated": datetime.now(),
+            }
+
+        # An ensemble component with nothing accepted to combine can only fail
+        # or fabricate a fallback (constant predictions, identity copies).
+        if component.component_type == "ensemble" and not _has_combinable_model_predictions(
+            state, working_dir
+        ):
+            print(
+                f"   Skipping ensemble component {component.name} - "
+                "no accepted model predictions to combine"
+            )
+            return {
+                "current_component_index": current_index + 1,
+                "code_retry_count": 0,
+                "telemetry_events": [
+                    make_event(
+                        "developer",
+                        "ensemble_component_skipped_no_models",
                         iteration=state.get("current_iteration", 0),
                         component="ensemble",
                         component_name=component.name,
@@ -2259,17 +2320,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
             return self._extract_cv_score(stdout)
 
         prev_env: dict[str, str | None] = {k: os.getenv(k) for k in env_overrides}
-        require_oof_env = os.getenv("KAGGLE_AGENTS_REQUIRE_OOF", "1").lower() not in {
-            "0",
-            "false",
-            "no",
-        }
-        expected_artifacts = None
-        if component.component_type == "model" and require_oof_env:
-            expected_artifacts = [
-                f"models/oof_{component.name}.npy",
-                f"models/test_{component.name}.npy",
-            ]
+        expected_artifacts = _expected_model_artifacts(component, working_dir)
 
         for attempt in range(max_retries):
             print(f"\nAttempt {attempt + 1}/{max_retries}")
