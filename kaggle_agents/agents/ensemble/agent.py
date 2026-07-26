@@ -9,7 +9,11 @@ import pandas as pd
 from scipy.stats import rankdata
 from sklearn.model_selection import cross_val_predict
 
-from ...core.config import get_config, is_metric_minimization
+from ...core.config import (
+    calculate_score_improvement,
+    get_config,
+    is_metric_minimization,
+)
 from ...core.state import KaggleState
 from ...utils.csv_utils import read_csv_auto
 from ...utils.llm_utils import get_text_content
@@ -32,6 +36,7 @@ from .meta_model import (
     dirichlet_weight_search,
     tune_meta_model,
 )
+from .postprocessing import labels_from_oof_tuning, metric_label_kind
 from .prediction_pairs import find_prediction_pairs, validate_prediction_artifacts_contract
 from .scoring import compute_oof_score, filter_by_score_threshold, score_predictions
 from .stacking import load_cv_folds, stack_from_prediction_pairs
@@ -485,6 +490,8 @@ class EnsembleAgent:
         expected_n_test: int | None = None,
         problem_type: str = "",
         metric_name: str = "",
+        oof_preds: np.ndarray | None = None,
+        y_true: np.ndarray | None = None,
     ) -> bool:
         """Create a simple average ensemble directly from saved predictions.
 
@@ -653,9 +660,17 @@ class EnsembleAgent:
             )
             return False
 
+        # Without OOF evidence this call falls back to a fixed 0.5 / argmax
+        # rule, which is exactly the score left on the table for hard-label
+        # metrics. Pass the OOF whenever it is available and aligned.
         formatted = np.asarray(
             format_ensemble_predictions(
-                ensemble_preds, sample_sub, problem_type, metric_name
+                ensemble_preds,
+                sample_sub,
+                problem_type,
+                metric_name,
+                oof_preds=oof_preds,
+                y_true=y_true,
             )
         )
         if formatted.ndim == 1:
@@ -1235,6 +1250,214 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                     return score, field
         return None, None
 
+    def _load_aligned_oof(
+        self,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        y: Any,
+        models_dir: Path | None,
+    ) -> np.ndarray | None:
+        """Mean 1-D OOF for the given pairs, aligned with canonical ``y``.
+
+        Fails closed: any shape disagreement, non-finite value, or column count
+        other than one yields ``None``, because a misaligned OOF would tune the
+        decision rule against the wrong labels.
+        """
+        if models_dir is None or y is None:
+            return None
+
+        n_train = len(np.asarray(y))
+        columns: list[np.ndarray] = []
+        for name, (oof_path, _) in prediction_pairs.items():
+            try:
+                oof = np.asarray(np.load(oof_path, allow_pickle=False), dtype=np.float64)
+            except Exception as exc:
+                print(f"   OOF unavailable for postprocessing ({name}): {exc}")
+                return None
+            oof = oof.reshape(len(oof), -1)
+            if oof.shape[0] != n_train or oof.shape[1] != 1:
+                # Multi-column OOF needs the class-order machinery that only the
+                # stacking path carries.
+                return None
+            if not np.all(np.isfinite(oof)):
+                return None
+            columns.append(oof[:, 0])
+
+        if not columns:
+            return None
+        return np.mean(np.stack(columns, axis=0), axis=0)
+
+    def _try_single_model_postprocessing(
+        self,
+        state: KaggleState,
+        prediction_pairs: dict[str, tuple[Path, Path]],
+        models_dir: Path,
+        sample_path: Path,
+        output_path: Path,
+        problem_type: str,
+        metric_name: str,
+        current_iteration: int,
+    ) -> dict[str, Any] | None:
+        """OOF-tuned decision rule for a run with a single accepted model.
+
+        Stacking requires at least two models, so a single-model run shipped
+        whatever decision rule the generated script happened to pick -- a fixed
+        0.5 threshold or a plain argmax -- even on competitions scored on hard
+        labels. The tuning helpers existed and were tested, but no reachable
+        path could call them. On accuracy/F1/QWK tasks that is a deterministic
+        loss of score.
+
+        Returns the node outcome dict when it produced a better-scoring
+        artifact, or ``None`` to leave the existing behaviour untouched.
+        """
+        if len(prediction_pairs) != 1 or not sample_path.exists():
+            return None
+        if metric_label_kind(metric_name) is None:
+            # Probability/regression metric: a decision rule would only destroy
+            # information.
+            return None
+
+        y, _train_ids, _folds = self._load_canonical_training_data(state)
+        if y is None:
+            return None
+
+        working_dir = Path(state["working_directory"])
+        if (working_dir / "canonical" / "oof_eligible_mask.npy").is_file():
+            # Temporal OOF carries warm-up NaNs; tuning would score them.
+            return None
+
+        oof_1d = self._load_aligned_oof(prediction_pairs, y, models_dir)
+        if oof_1d is None:
+            return None
+
+        try:
+            sample_sub = read_csv_auto(sample_path)
+        except Exception:
+            return None
+        if len(sample_sub.columns) - 1 != 1:
+            # Multi-column submissions are the stacking path's business.
+            return None
+
+        name = next(iter(prediction_pairs))
+        test_path = prediction_pairs[name][1]
+        try:
+            test_preds = np.asarray(
+                np.load(test_path, allow_pickle=False), dtype=np.float64
+            )
+        except Exception:
+            return None
+        test_preds = test_preds.reshape(len(test_preds), -1)
+        if test_preds.shape[1] != 1 or not np.all(np.isfinite(test_preds)):
+            return None
+
+        if is_metric_minimization(metric_name):
+            # Every hard-label metric this path handles is a maximize metric;
+            # the score convention below depends on that.
+            return None
+
+        y_values = np.asarray(y).reshape(-1)
+        try:
+            labels, info = labels_from_oof_tuning(
+                test_preds[:, 0], oof_1d, y_values, metric_name
+            )
+        except Exception as exc:
+            print(f"   [POSTPROC] Tuning unavailable: {exc}")
+            return None
+
+        # `oof_score_tuned` is the metric under the tuned rule, evaluated on the
+        # ORIGINAL label values. Re-scoring through score_predictions instead
+        # would be wrong: its hard-label path re-thresholds at 0.5, so a label
+        # set like {1, 2} collapses to a single class and a perfect classifier
+        # scores as noise. For a maximize label metric the trusted convention
+        # (negate a lower-is-better loss) reduces to the raw metric, so this
+        # value is directly comparable with trusted_component_scores.
+        tuned_score = float(info["oof_score_tuned"])
+        if not np.isfinite(tuned_score):
+            return None
+
+        best_existing, best_source = self._get_comparable_cv_score(state)
+        if best_existing is not None and (
+            calculate_score_improvement(tuned_score, float(best_existing), metric_name)
+            < 0
+        ):
+            print(
+                f"   [POSTPROC] Tuned rule scores {tuned_score:.6f} vs "
+                f"{best_source}={float(best_existing):.6f}; keeping the existing artifact"
+            )
+            return None
+
+        aligned = self._align_labels_to_submission(
+            labels, models_dir / f"test_ids_{name}.npy", sample_sub
+        )
+        if aligned is None:
+            return None
+
+        sample_sub.iloc[:, 1] = aligned
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        sample_sub.to_csv(output_path, index=False)
+        print(
+            f"   [POSTPROC] {info['rule']} on a single model: OOF "
+            f"{info['oof_score_baseline']:.4f} -> {info['oof_score_tuned']:.4f}"
+        )
+
+        try:
+            digest = sha256_file(output_path)
+        except OSError:
+            return None
+
+        return {
+            "ensemble_created": True,
+            "ensemble_strategy": "single_model_postprocessing",
+            "ensemble_oof_score": tuned_score,
+            "ensemble_submission_sha256": digest,
+            "ensemble_submission_owner": "ensemble",
+            "ensemble_score_source": "host_oof_postprocessing",
+            "n_models": 1,
+            "telemetry_events": [
+                make_event(
+                    "ensemble",
+                    "created",
+                    iteration=current_iteration,
+                    strategy="single_model_postprocessing",
+                    n_models=1,
+                    oof_score=tuned_score,
+                    postprocessing=info["rule"],
+                )
+            ],
+        }
+
+    @staticmethod
+    def _align_labels_to_submission(
+        labels: np.ndarray,
+        test_ids_path: Path,
+        sample_sub: pd.DataFrame,
+    ) -> np.ndarray | None:
+        """Map per-row labels onto submission order by persisted test IDs."""
+        if not test_ids_path.exists():
+            print("   [POSTPROC] Missing test IDs; refusing positional alignment")
+            return None
+        try:
+            model_ids = np.asarray(
+                np.load(test_ids_path, allow_pickle=True)
+            ).reshape(-1)
+        except Exception:
+            return None
+        if len(model_ids) != len(labels):
+            return None
+
+        reference = sample_sub.iloc[:, 0]
+        if reference.isna().any() or reference.astype(str).duplicated().any():
+            return None
+        model_ids_str = pd.Series(model_ids).astype(str)
+        if model_ids_str.isna().any() or model_ids_str.duplicated().any():
+            return None
+
+        lookup = dict(zip(model_ids_str.tolist(), list(labels), strict=True))
+        try:
+            return np.asarray([lookup[key] for key in reference.astype(str).tolist()])
+        except KeyError:
+            print("   [POSTPROC] Incomplete test-ID coverage; leaving the artifact alone")
+            return None
+
     def _try_oof_stacking(
         self,
         state: KaggleState,
@@ -1758,6 +1981,22 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             if stacking_outcome is not None:
                 return stacking_outcome
 
+            # Stacking needs two models. A single accepted model on a
+            # hard-label metric still deserves an OOF-tuned decision rule
+            # instead of whatever threshold the generated script chose.
+            postprocessing_outcome = self._try_single_model_postprocessing(
+                state=state,
+                prediction_pairs=prediction_pairs,
+                models_dir=models_dir,
+                sample_path=sample_path,
+                output_path=output_path,
+                problem_type=problem_type,
+                metric_name=metric_name,
+                current_iteration=current_iteration,
+            )
+            if postprocessing_outcome is not None:
+                return postprocessing_outcome
+
             # OOF stacking unavailable (e.g. no canonical y.npy on image comps).
             # The simple average below is UNSCORED - never let it overwrite a
             # scored hill-climb best.
@@ -1801,7 +2040,25 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                     "continuing to the ID-safe fallback"
                 )
 
-            if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test, problem_type=problem_type, metric_name=metric_name):
+            fallback_y, _, _ = self._load_canonical_training_data(state)
+            fallback_oof = self._load_aligned_oof(
+                prediction_pairs, fallback_y, models_dir
+            )
+            if self._ensemble_from_predictions(
+                prediction_pairs,
+                sample_path,
+                output_path,
+                models_dir,
+                expected_n_test,
+                problem_type=problem_type,
+                metric_name=metric_name,
+                oof_preds=fallback_oof,
+                y_true=(
+                    np.asarray(fallback_y).reshape(-1)
+                    if fallback_oof is not None and fallback_y is not None
+                    else None
+                ),
+            ):
                 return {
                     "ensemble_created": True,
                     # This fallback has no host-side OOF measurement. Clear any

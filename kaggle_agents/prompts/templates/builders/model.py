@@ -303,12 +303,20 @@ def build_previous_results_context(dev_results: list) -> list[str]:
 
 
 def build_performance_gap_instructions(
-    current_score: float,
+    current_score: float | None,
     target_score: float | None,
     metric_name: str,
 ) -> list[str]:
-    """Build performance gap instructions."""
-    if current_score <= 0 or target_score is None:
+    """Build performance gap instructions.
+
+    ``current_score`` is read from state with a 0.0 default, but a rollback can
+    leave the key present holding None -- in which case the default does not
+    apply. Guard here too: a prompt builder must never be able to abort a run
+    that already has an accepted submission.
+    """
+    if current_score is None or target_score is None:
+        return []
+    if current_score <= 0:
         return []
 
     minimize = is_metric_minimization(metric_name)

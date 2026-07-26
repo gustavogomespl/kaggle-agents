@@ -242,6 +242,15 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         print("   ⏩ skip_remaining_components=True - Ending")
         return "end"
 
+    # Hard wall-clock budget. Another iteration would need time for its own
+    # closing stages, so the reserve is checked, not just the raw deadline.
+    # This is a clock, not a score: it cannot leak test-set information.
+    from ..utils.run_budget import FINALIZATION_RESERVE_S, budget_exhausted, format_remaining
+
+    if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+        print(f"   ⏳ Wall-clock budget exhausted ({format_remaining(state)}) - Ending")
+        return "end"
+
     # Max iterations reached
     if current_iteration >= max_iterations:
         print(f"   ⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
@@ -347,6 +356,15 @@ def route_after_meta_evaluator(
 
     toggles = getattr(get_config(), "ablation_toggles", None)
     if toggles and toggles.disable_meta_evaluator:
+        return "skip_recovery"
+
+    # Recovery routes (SOTA search, curriculum, prompt refinement) only pay off
+    # if another iteration can still consume their output. Out of budget they
+    # would just burn the reserve set aside for closing the run.
+    from ..utils.run_budget import FINALIZATION_RESERVE_S, budget_exhausted
+
+    if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+        print("\n   ⏳ Wall-clock budget exhausted - skipping recovery routes")
         return "skip_recovery"
 
     # Check for SOTA search trigger (stagnation or score gap)

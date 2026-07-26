@@ -5,6 +5,11 @@ from datetime import datetime
 from typing import Any
 
 from ...core.state import KaggleState
+from ...utils.run_budget import (
+    FINALIZATION_RESERVE_S,
+    budget_exhausted,
+    format_remaining,
+)
 
 
 def _finite_score(value: Any) -> float | None:
@@ -51,16 +56,22 @@ def iteration_control_node(state: KaggleState) -> dict[str, Any]:
     print(f"\nIteration: {new_iteration}/{max_iterations}")
     print(f"   Best Score: {best_score:.4f}")
     print(f"   Target: Top {target_percentile}%")
+    print(f"   Budget remaining: {format_remaining(state)}")
 
-    # Check if we should continue
-    should_continue = new_iteration < max_iterations
+    # Check if we should continue. Iterations alone do not bound cost, so the
+    # wall-clock budget is a second, independent stop condition. It reserves
+    # time for the closing stages of the iteration it would otherwise start.
+    out_of_budget = budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S)
+    should_continue = new_iteration < max_iterations and not out_of_budget
 
     # Check if goal achieved
     # Note: In real scenario, would check actual percentile
     # For now, continue until max iterations
 
     termination_reason = None
-    if not should_continue:
+    if out_of_budget:
+        termination_reason = "wall_clock_budget_exhausted"
+    elif not should_continue:
         termination_reason = "max_iterations_reached"
 
     # Every continuation creates a new plan. Reset the component cursor before
@@ -190,7 +201,11 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
             else current_score >= target_score
         )
 
-    if target_achieved:
+    if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+        print("\n⏳ Wall-clock budget exhausted - no further refinement")
+        needs_refinement = False
+        refinement_reason = "wall_clock_budget_exhausted"
+    elif target_achieved:
         comparator = "<=" if minimize else ">="
         print(f"\n🎉 Target achieved! ({current_score:.4f} {comparator} {target_score:.4f})")
         needs_refinement = False

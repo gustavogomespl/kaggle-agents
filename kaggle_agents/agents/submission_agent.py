@@ -16,15 +16,22 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..core.config import compare_scores, get_config
+from ..core.config import calculate_score_improvement, compare_scores, get_config
 from ..core.state import KaggleState, SubmissionResult
 from ..utils.csv_utils import read_csv_auto
 from ..utils.submission_artifacts import (
+    restore_accepted_submission,
     sha256_file,
     snapshot_accepted_submission,
     verified_accepted_submission,
     verified_best_candidate_submission,
 )
+
+
+# Provenance sources meaning "the host recomputed this exact artifact's score
+# from canonical OOF". Kept distinct so an audit can tell a model combination
+# apart from a tuned decision rule over a single model.
+_HOST_OOF_SCORE_SOURCES = frozenset({"host_oof_ensemble", "host_oof_postprocessing"})
 
 
 class SubmissionAgent:
@@ -103,14 +110,18 @@ class SubmissionAgent:
             return None, None, None
 
         ensemble_score = cls._finite_score(state.get("ensemble_oof_score"))
+        ensemble_source = str(state.get("ensemble_score_source") or "")
         if (
             ensemble_score is not None
             and str(state.get("ensemble_submission_sha256") or "").lower()
             == current_digest
             and state.get("ensemble_submission_owner") == "ensemble"
-            and state.get("ensemble_score_source") == "host_oof_ensemble"
+            # Both sources mean the same thing: the host recomputed this exact
+            # artifact's score from canonical OOF. They are kept distinct so the
+            # audit can tell a combination apart from a tuned decision rule.
+            and ensemble_source in _HOST_OOF_SCORE_SOURCES
         ):
-            return ensemble_score, "host_oof_ensemble", "ensemble"
+            return ensemble_score, ensemble_source, "ensemble"
 
         best_snapshot = verified_best_candidate_submission(state, working_dir)
         owner = str(state.get("best_candidate_submission_component_name") or "")
@@ -143,7 +154,7 @@ class SubmissionAgent:
             state.get("accepted_submission_score_owner") or ""
         )
         accepted_provenance_valid = (
-            accepted_source == "host_oof_ensemble"
+            accepted_source in _HOST_OOF_SCORE_SOURCES
             and accepted_owner == "ensemble"
         )
         if accepted_source == "trusted_component_scores" and accepted_owner:
@@ -161,6 +172,93 @@ class SubmissionAgent:
             return accepted_score, accepted_source, accepted_owner
 
         return None, None, None
+
+    def _keep_better_accepted_submission(
+        self,
+        state: KaggleState,
+        working_dir: Path,
+        submission_path: Path,
+        cv_score: float | None,
+    ) -> dict[str, Any] | None:
+        """Keep the best accepted artifact of the run, not the most recent one.
+
+        Every iteration used to snapshot unconditionally, so a refinement that
+        made things worse still became the graded artifact: iteration 1 at CV
+        0.84 was replaced by iteration 3 at 0.79. The comparison uses only the
+        hash-bound CV provenance already resolved for each artifact -- no
+        leaderboard, medal, or test-set signal is involved.
+
+        Returns state updates when the previous artifact is kept, or ``None``
+        to let the caller accept the current one.
+        """
+        previous_score = self._finite_score(state.get("accepted_submission_cv_score"))
+        if previous_score is None:
+            # Nothing comparable was accepted yet (including runs whose domain
+            # has no canonical labels and therefore no scored lane).
+            return None
+
+        previous_snapshot = verified_accepted_submission(state, working_dir)
+        if previous_snapshot is None:
+            return None
+
+        try:
+            current_digest = sha256_file(submission_path)
+        except OSError:
+            return None
+        if current_digest == str(state.get("accepted_submission_sha256") or "").lower():
+            # Same bytes: nothing to choose between.
+            return None
+
+        try:
+            metric_name = state["competition_info"].evaluation_metric
+        except (KeyError, AttributeError, TypeError):
+            metric_name = ""
+
+        if cv_score is not None:
+            improved = (
+                calculate_score_improvement(cv_score, previous_score, metric_name) > 0
+            )
+            if improved:
+                return None
+            reason = (
+                f"CV {cv_score:.6f} does not improve on accepted "
+                f"{previous_score:.6f} ({metric_name})"
+            )
+        else:
+            # An artifact without hash-bound CV evidence cannot displace one
+            # that has it.
+            reason = (
+                f"current artifact has no hash-bound CV provenance; accepted "
+                f"{previous_score:.6f} is retained"
+            )
+
+        restored = restore_accepted_submission(state, working_dir)
+        if restored is None:
+            # Restoration is the only safe way to keep the better artifact. If
+            # it fails, fall through and accept the current one rather than
+            # leaving submission.csv disagreeing with the recorded state.
+            print("⚠️  Could not restore the previously accepted submission")
+            return None
+
+        print(f"↩️  Keeping the previously accepted submission: {reason}")
+        return {
+            "submissions": [
+                SubmissionResult(
+                    submission_id=None,
+                    public_score=None,
+                    private_score=None,
+                    percentile=None,
+                    cv_score=previous_score,
+                    file_path=str(previous_snapshot),
+                    valid=True,
+                    error=None,
+                    submitted_at=datetime.now(),
+                )
+            ],
+            "submission_validation_error": None,
+            "retry_submission_count": 0,
+            "last_updated": datetime.now(),
+        }
 
     @staticmethod
     def _retry_updates(
@@ -355,6 +453,15 @@ class SubmissionAgent:
                     submission_path,
                 )
             )
+
+            kept = self._keep_better_accepted_submission(
+                state,
+                working_dir,
+                submission_path,
+                cv_score,
+            )
+            if kept is not None:
+                return kept
 
             try:
                 snapshot_path, snapshot_sha256 = snapshot_accepted_submission(

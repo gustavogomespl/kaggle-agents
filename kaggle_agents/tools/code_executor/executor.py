@@ -30,6 +30,7 @@ from .filesystem_guard import (
 )
 from .process import (
     build_subprocess_env,
+    describe_signal_exit,
     kill_process_group_by_id,
     kill_process_tree,
     set_resource_limits,
@@ -220,7 +221,10 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
             def preexec_setup():
                 try:
                     start_new_process_group()
-                    set_resource_limits(memory_mb=16384, cpu_time_s=7200)  # 16GB, 2 hours
+                    # CPU-seconds are derived from this call's wall budget: a
+                    # fixed cap is summed across threads and would kill
+                    # multi-core training long before the wall timeout.
+                    set_resource_limits(memory_mb=16384, wall_timeout_s=self.timeout)
                 except Exception:
                     # Silently ignore all preexec errors (Colab/container compatibility)
                     pass
@@ -448,6 +452,13 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
 
             # Parse errors
             errors = self._parse_errors(result.stderr, result.stdout)
+
+            # Death by signal is not a defect in the generated program. Name it
+            # explicitly so the repair loop does not rewrite correct code.
+            signal_cause = describe_signal_exit(result.returncode)
+            if signal_cause:
+                print(f"   ⚠️  {signal_cause}")
+                errors.append(signal_cause)
 
             # Check success
             success = result.returncode == 0 and not errors

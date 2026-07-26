@@ -7,6 +7,7 @@ with automatic retry and debugging capabilities.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import math
@@ -42,6 +43,12 @@ from ...prompts.templates.developer_prompts import (
 from ...tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
+from ...utils.run_budget import (
+    FINALIZATION_RESERVE_S,
+    budget_exhausted,
+    clamp_timeout_to_budget,
+    format_remaining,
+)
 from ...utils.telemetry import make_event
 
 # Re-export temperature utilities for backward compatibility
@@ -55,6 +62,70 @@ from .refinement import REFINEMENT_TRUST_BOUNDARY, RefinementMixin
 from .retry import RetryMixin, require_oof_artifacts
 from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin, quarantine_component_artifacts
+
+
+def unsaved_expected_artifacts(
+    code: str,
+    expected_artifacts: list[str] | None,
+    component_name: str,
+) -> list[str]:
+    """Expected artifacts with no matching save call anywhere in the code.
+
+    The artifact contract is only enforced *after* execution, so a program that
+    trains correctly for half an hour and then saves just ``oof_<name>.npy`` is
+    failed and regenerated from scratch -- paying the full training cost twice.
+    Both models in a smoke run did exactly that, burning roughly half the GPU
+    time re-running work that had already succeeded.
+
+    A save is matched either literally (``"oof_my_model.npy"``) or composed
+    (``f"oof_{COMPONENT_NAME}.npy"``), which is how generated code writes it.
+    The reading is deliberately conservative: an unparseable program, an
+    unusual save expression, or no save calls at all yields no findings, so
+    this can delay a run but never block a correct one.
+    """
+    if not expected_artifacts or not component_name:
+        return []
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+
+    saved_targets: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        call_name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if call_name not in {"save", "savez", "savez_compressed", "tofile"} or not node.args:
+            continue
+        target = node.args[0]
+        # A destination assembled through a variable cannot be read statically.
+        # One opaque save makes the whole picture inconclusive, so report
+        # nothing rather than risk blocking a correct program.
+        if not any(
+            isinstance(sub, ast.JoinedStr)
+            or (isinstance(sub, ast.Constant) and isinstance(sub.value, str))
+            for sub in ast.walk(target)
+        ):
+            return []
+        try:
+            saved_targets.append(ast.unparse(target))
+        except Exception:
+            return []
+
+    if not saved_targets:
+        return []
+
+    haystack = " ".join(saved_targets)
+    missing = []
+    for artifact in expected_artifacts:
+        stem = Path(artifact).stem  # "test_ids_<component_name>"
+        if not stem.endswith(component_name):
+            continue
+        kind = stem[: -len(component_name)]  # "test_ids_"
+        if kind and f"{kind}{component_name}" not in haystack and f"{kind}{{" not in haystack:
+            missing.append(artifact)
+    return missing
 
 
 def _expected_model_artifacts(
@@ -391,7 +462,12 @@ class DeveloperAgent(
                     "best_single_model_name": None,
                     "best_single_model_score": None,
                     "baseline_cv_score": None,
-                    "current_performance_score": None,
+                    # Declared `float`, not `float | None`. Writing None here
+                    # crashed the next prompt build, because readers use
+                    # `state.get(key, 0.0)` and a default does not apply to a
+                    # key that exists holding None. 0.0 is the existing
+                    # "no measured score" sentinel for this field.
+                    "current_performance_score": 0.0,
                 }
             )
         if exhausted:
@@ -704,6 +780,20 @@ class DeveloperAgent(
             print("Skipping remaining components (skip_remaining_components=True)")
             return {"current_component_index": len(ablation_plan)}
 
+        # Starting a component that cannot finish before the deadline spends
+        # budget for nothing and delays the closing stages. The reserve keeps
+        # enough clock to ensemble, validate and snapshot what already exists.
+        if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+            print(
+                f"Wall-clock budget exhausted ({format_remaining(state)}) - "
+                "closing the run with the components already accepted"
+            )
+            return {
+                "current_component_index": len(ablation_plan),
+                "skip_remaining_components": True,
+                "last_updated": datetime.now(),
+            }
+
         run_mode = str(state.get("run_mode", "")).lower()
         # Persist mode on the executor so refinement/debug calls remain under
         # the same MLE-bench filesystem boundary even after temporary
@@ -825,6 +915,22 @@ class DeveloperAgent(
         if "optuna" in name_lower:
             desired_timeout = min(base_timeout, component_timeout_config.model_heavy)
 
+        # A component may not outlive the run's wall-clock deadline. Without
+        # this, a 50-minute component started 5 minutes before the deadline
+        # overruns the whole budget for the sweep.
+        budgeted_timeout = clamp_timeout_to_budget(
+            state,
+            desired_timeout,
+            reserve_s=FINALIZATION_RESERVE_S,
+        )
+        if budgeted_timeout < desired_timeout:
+            print(
+                f"Component timeout clamped by run budget: "
+                f"{desired_timeout}s -> {budgeted_timeout}s "
+                f"({format_remaining(state)} left)"
+            )
+            desired_timeout = budgeted_timeout
+
         if self.executor.timeout != desired_timeout:
             self.executor.timeout = desired_timeout
             print(f"Component timeout set to: {desired_timeout}s ({desired_timeout / 60:.1f} min)")
@@ -873,7 +979,11 @@ class DeveloperAgent(
         new_cv_score: float | None = None
         primary_score: float | None = None
         primary_score_source: str | None = None
-        if result.success and component.component_type == "model":
+        if (
+            result.success
+            and component.component_type == "model"
+            and not getattr(result, "reused_from_cache", False)
+        ):
             exec_result = ExecutionResult(
                 success=result.success,
                 stdout=result.stdout,
@@ -944,7 +1054,14 @@ class DeveloperAgent(
             "last_updated": datetime.now(),
             "code_attempts": attempt_records,
         }
-        if run_mode == "mlebench" and component.component_type == "model":
+        if (
+            run_mode == "mlebench"
+            and component.component_type == "model"
+            # A reused result was scored when it first ran and its gate was
+            # skipped above, so new_cv_score is None here. Rewriting the map
+            # would strip the evidence the ensemble gate needs.
+            and not getattr(result, "reused_from_cache", False)
+        ):
             trusted_scores = dict(state.get("trusted_component_scores") or {})
             trusted_score = _coerce_score(new_cv_score)
             if result.success and trusted_score is not None:
@@ -1667,6 +1784,15 @@ Based on the training results above, improve the model to achieve a {desired_dir
                                 active_component_name=component.name,
                             )
                         )
+                        # The executor still holds the timeout computed for the
+                        # first attempt. Re-clamp here or a refinement started
+                        # minutes before the deadline runs for its full
+                        # component budget past it.
+                        self.executor.timeout = clamp_timeout_to_budget(
+                            state,
+                            self.executor.timeout,
+                            reserve_s=FINALIZATION_RESERVE_S,
+                        )
                         try:
                             refined_exec = self.executor.execute(
                                 refined_code,
@@ -2332,12 +2458,36 @@ Based on the training results above, improve the model to achieve a {desired_dir
 
             for k, v in env_overrides.items():
                 os.environ[k] = v
-            exec_result = self.executor.execute(
-                code=code,
-                working_dir=working_dir,
-                expected_artifacts=expected_artifacts,
-                component_type=component.component_type,
+
+            # Check the artifact contract before paying for training: the
+            # post-execution check would fail the same program after it has
+            # already spent its whole budget, and the regenerated program then
+            # trains from scratch.
+            unsaved = unsaved_expected_artifacts(
+                code, expected_artifacts, component.name
             )
+            if unsaved:
+                print(
+                    "   Skipping execution: code never saves "
+                    + ", ".join(unsaved)
+                    + " (contract check before training)"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[f"Missing expected artifacts: {', '.join(unsaved)}"],
+                )
+            else:
+                exec_result = self.executor.execute(
+                    code=code,
+                    working_dir=working_dir,
+                    expected_artifacts=expected_artifacts,
+                    component_type=component.component_type,
+                )
             self._write_execution_logs_and_manifest(
                 component=component,
                 exec_result=exec_result,

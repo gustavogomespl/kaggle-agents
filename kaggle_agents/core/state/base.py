@@ -125,6 +125,10 @@ class KaggleState(TypedDict):
     mlebench_cache_path: str | None  # Host-only grader/cache root
     objective: str  # e.g. "top20" | "fixed_budget_public_cv"
     timeout_per_component: int | None
+    # Hard wall-clock budget for the agent, and the absolute epoch deadline it
+    # implies. Component timeouts alone cannot bound a run's cost.
+    run_wall_clock_budget_s: int | None
+    run_deadline_ts: float | None
     enable_checkpoint_recovery: bool
     cv_folds: int | None
     random_seed: int
@@ -420,6 +424,8 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         mlebench_cache_path=None,
         objective="top20",
         timeout_per_component=None,
+        run_wall_clock_budget_s=None,
+        run_deadline_ts=None,
         enable_checkpoint_recovery=True,
         cv_folds=None,
         random_seed=get_run_seed(),

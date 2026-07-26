@@ -23,6 +23,7 @@ from ...prompts.templates.developer_prompts import (
 )
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
+from ...utils.run_budget import FINALIZATION_RESERVE_S, budget_exhausted
 
 
 if TYPE_CHECKING:
@@ -46,12 +47,22 @@ class RefinementMixin:
     """Mixin providing refinement capabilities to DeveloperAgent."""
 
     def _get_refinement_iterations(self: DeveloperAgent, state: KaggleState) -> int:
-        """Number of refinement iterations (can be reduced for fast/mlebench runs)."""
+        """Number of refinement iterations.
+
+        This loop is the only mechanism that improves a model which already
+        works; it used to return 0 in ``mlebench`` -- switching off iterative
+        optimization in exactly the mode being benchmarked. In that mode each
+        refined candidate is re-validated fail-closed and rescored from
+        canonical OOF, so it is bounded by the run's wall clock instead of
+        being disabled: a run that converges early spends the remaining budget
+        on search rather than idling.
+        """
         run_mode = str(state.get("run_mode", "")).lower()
-        if run_mode == "mlebench":
-            return 0
+        env_name = (
+            "MLEBENCH_REFINEMENT_ITERS" if run_mode == "mlebench" else "REFINEMENT_ITERS"
+        )
         try:
-            return max(0, min(int(os.getenv("REFINEMENT_ITERS", "2")), 3))
+            return max(0, min(int(os.getenv(env_name, "2")), 3))
         except ValueError:
             return 2
 
@@ -70,11 +81,12 @@ class RefinementMixin:
         if not self.config.ablation.enable_refinement:
             return False
 
-        run_mode = str(state.get("run_mode", "")).lower()
-        objective = str(state.get("objective", "")).lower()
-
-        # Default to speed-first in MLE-bench / medal objective.
-        if run_mode == "mlebench" or "medal" in objective:
+        # Refinement re-executes the component, so it only makes sense while
+        # enough wall clock remains for another run of it plus the closing
+        # stages. This replaces the previous blanket "off in mlebench" rule:
+        # the cost is now bounded by the clock rather than by mode.
+        estimated_cost_s = float(execution_time_s or component_timeout_s or 0)
+        if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S + estimated_cost_s):
             return False
 
         # If the component already consumed most of its budget, don't re-run it.

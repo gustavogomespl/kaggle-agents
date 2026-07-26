@@ -289,6 +289,20 @@ class IterationConfig:
     """Configuration for iteration and convergence."""
 
     max_iterations: int = field(default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "2")))
+
+    # Wall-clock budget for the agent on a single task, in seconds. Iteration
+    # counts alone do not bound cost: each iteration carries a retry ladder
+    # whose worst case runs for hours. 0 disables the deadline.
+    # 7h is the restricted protocol used on a single Colab GPU.
+    #
+    # Enforcement is cooperative: stages check the clock before starting new
+    # work and component timeouts are clamped to what remains, but no watchdog
+    # kills a component mid-execution, so a run can overrun by at most one
+    # component timeout.
+    run_wall_clock_budget_s: int = field(
+        default_factory=lambda: int(os.getenv("KAGGLE_AGENTS_RUN_BUDGET_S", str(7 * 3600)))
+    )
+
     target_percentile: float = 20.0  # top 20%
     early_stopping: bool = True
     patience: int = 3  # iterations without improvement

@@ -208,6 +208,7 @@ class RetryMixin:
                     return None
                 print(f"Skipping {component.name} - already implemented successfully")
                 print(f"Reusing previous execution ({result.execution_time:.2f}s)")
+                result.reused_from_cache = True
                 return result
 
         # ``component_results`` is the declared state map; dynamic
@@ -220,6 +221,7 @@ class RetryMixin:
                 return None
             print(f"Skipping {component.name} - found in cache")
             print(f"Reusing cached execution ({cached_result.execution_time:.2f}s)")
+            cached_result.reused_from_cache = True
             return cached_result
 
         return None

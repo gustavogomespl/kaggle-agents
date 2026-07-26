@@ -178,9 +178,11 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
         print(f"   Warning: Test path not found: {test_path}")
         # Continue anyway - test path is optional for canonical prep
 
-    # Determine max_rows for sampling based on config
+    # Determine max_rows for sampling based on config.
+    # The state key is `timeout_per_component`; reading a `timeout_s` that is
+    # never written left the budget-aware branch below permanently dead.
     fast_mode = state.get("fast_mode", False)
-    timeout_s = state.get("timeout_s")
+    timeout_s = state.get("timeout_per_component")
 
     # Budget-aware sampling thresholds
     max_rows = None

@@ -114,7 +114,41 @@ def _nvidia_gpu_present() -> bool:
     return os.path.exists("/proc/driver/nvidia") or shutil.which("nvidia-smi") is not None
 
 
-def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
+# Wall-clock assumed when a caller does not declare its own timeout.
+DEFAULT_WALL_TIMEOUT_S = 3600
+# Headroom over wall_timeout * cores, for hosts whose usable core count differs
+# from os.cpu_count() (cgroup quotas, hyperthreading accounting).
+CPU_TIME_SAFETY_MARGIN = 2.0
+# Never tighten below the historical fixed ceiling.
+MIN_CPU_TIME_S = 7200
+
+
+def cpu_time_budget_for(wall_timeout_s: float | None = None) -> int:
+    """CPU-seconds ceiling that cannot fire before the wall-clock timeout does.
+
+    ``RLIMIT_CPU`` is summed across the threads of a process, so a fixed value
+    silently degrades into a much tighter *wall-clock* deadline as soon as
+    generated code uses more than one core -- and ``CV_N_JOBS=-1`` is the
+    default. A fixed 7200 killed an 8-core job after ~900s of wall time, well
+    inside its nominal 2700-3000s budget, and surfaced as SIGXCPU rather than as
+    a timeout, so the repair loop then burned attempts "fixing" correct code.
+
+    A process saturating every core for its whole wall budget consumes at most
+    ``wall_timeout * cpu_count`` CPU-seconds, so that product is the smallest
+    ceiling that still only catches genuinely runaway processes.
+    """
+    cores = os.cpu_count() or 1
+    if not wall_timeout_s or wall_timeout_s <= 0:
+        wall_timeout_s = DEFAULT_WALL_TIMEOUT_S
+    return max(MIN_CPU_TIME_S, int(wall_timeout_s * cores * CPU_TIME_SAFETY_MARGIN))
+
+
+def set_resource_limits(
+    memory_mb: int = 8192,
+    cpu_time_s: int | None = None,
+    *,
+    wall_timeout_s: float | None = None,
+) -> None:
     """
     Set resource limits for subprocess (Unix only).
 
@@ -122,7 +156,10 @@ def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
 
     Args:
         memory_mb: Maximum memory in MB (default 8GB)
-        cpu_time_s: Maximum CPU time in seconds (default 1 hour)
+        cpu_time_s: Explicit CPU-seconds cap. Prefer leaving it unset and
+            passing ``wall_timeout_s`` so the cap is derived from the real wall
+            budget -- see :func:`cpu_time_budget_for`.
+        wall_timeout_s: Wall-clock budget the caller enforces separately.
     """
     if not ENABLE_RESOURCE_LIMITS:
         return
@@ -130,6 +167,9 @@ def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
     # RLIMIT only works on Unix
     if platform.system() == "Windows":
         return
+
+    if cpu_time_s is None:
+        cpu_time_s = cpu_time_budget_for(wall_timeout_s)
 
     try:
         import resource
@@ -141,7 +181,8 @@ def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
             memory_bytes = memory_mb * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
 
-        # CPU time limit
+        # CPU time limit. Derived from the wall budget, never a fixed constant:
+        # this is a backstop against runaway processes, not a second deadline.
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_time_s, cpu_time_s))
 
         # Disable core dumps
@@ -150,6 +191,31 @@ def set_resource_limits(memory_mb: int = 8192, cpu_time_s: int = 3600) -> None:
     except (ImportError, OSError, ValueError) as e:
         # Fallback: just log warning, don't fail
         print(f"[WARN] Could not set resource limits: {e}")
+
+
+def describe_signal_exit(returncode: int | None) -> str | None:
+    """Human-readable cause when a subprocess was killed by a signal.
+
+    A negative return code means death by signal, which is otherwise
+    indistinguishable from "the generated program failed" -- and the repair loop
+    then spends its attempts rewriting code that was correct.
+    """
+    if returncode is None or returncode >= 0:
+        return None
+    try:
+        sig = signal.Signals(-returncode)
+    except ValueError:
+        return f"Killed by signal {-returncode}"
+    hints = {
+        "SIGXCPU": "CPU-time limit (RLIMIT_CPU) exhausted, not a defect in the code",
+        "SIGKILL": "killed by the OS or host (out of memory, or an external kill)",
+        "SIGSEGV": "segmentation fault inside a native library",
+        "SIGABRT": "aborted by a native library",
+        "SIGBUS": "bus error inside a native library",
+        "SIGTERM": "terminated by the harness",
+    }
+    hint = hints.get(sig.name)
+    return f"Killed by {sig.name}" + (f": {hint}" if hint else "")
 
 
 def start_new_process_group() -> None:

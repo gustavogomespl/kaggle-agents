@@ -21,6 +21,10 @@ class DevelopmentResult:
     artifacts_created: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     run_fidelity: Literal["full", "debug"] = "full"
+    # True when this result was reused from an earlier iteration instead of
+    # being re-executed. Such a result was already judged when it first ran, so
+    # re-judging it would compare a component against the baseline it set.
+    reused_from_cache: bool = False
 
 
 @dataclass

@@ -271,7 +271,10 @@ def _quarantine_rejected_candidate(
                 "best_single_model_name": None,
                 "best_single_model_score": None,
                 "baseline_cv_score": None,
-                "current_performance_score": None,
+                # Declared `float`: None here would crash downstream readers
+                # that use `state.get(key, 0.0)`, since the default does not
+                # apply to a key present with value None.
+                "current_performance_score": 0.0,
             }
         )
     if new_failed:
