@@ -34,10 +34,13 @@ _SENSITIVE_ENV_NAMES = {
     "GOOGLE_API_KEY",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "HF_TOKEN",
+    "KAGGLE_AGENTS_SEARCH_CACHE_DIR",
     "KAGGLE_KEY",
     "KAGGLE_CONFIG_DIR",
     "KAGGLE_USERNAME",
     "LANGSMITH_API_KEY",
+    "MLEBENCH_CACHE_DIR",
+    "MLEBENCH_DATA_DIR",
     "OPENAI_API_KEY",
     "SSH_AUTH_SOCK",
     "WANDB_API_KEY",
@@ -69,6 +72,12 @@ def build_subprocess_env(
     trusted local workflow that genuinely needs credentials inside generated code.
     """
     env = dict(os.environ if source is None else source)
+    if env.get("KAGGLE_AGENTS_RUN_MODE", "").strip().lower() == "mlebench":
+        # The original benchmark cache is grader-only. Generated code uses the
+        # public copy staged in its working directory.
+        env.pop("MLEBENCH_DATA_DIR", None)
+        env.pop("MLEBENCH_CACHE_DIR", None)
+        env.pop("KAGGLE_AGENTS_SEARCH_CACHE_DIR", None)
     allow_secrets = env.get("KAGGLE_AGENTS_ALLOW_GENERATED_CODE_SECRETS", "false").lower()
     if allow_secrets in {"1", "true", "yes"}:
         return env
@@ -190,4 +199,18 @@ def kill_process_tree(process: subprocess.Popen) -> None:
 
     except (ProcessLookupError, OSError):
         # Process already terminated
+        pass
+
+
+def kill_process_group_by_id(process_group_id: int | None) -> None:
+    """Kill descendants left after their process-group leader has exited."""
+    if (
+        process_group_id is None
+        or process_group_id <= 0
+        or platform.system() == "Windows"
+    ):
+        return
+    try:
+        os.killpg(process_group_id, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
         pass

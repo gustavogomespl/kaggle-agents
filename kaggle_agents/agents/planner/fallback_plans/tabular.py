@@ -69,7 +69,7 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "LightGBM baseline tuned for speed (no Optuna). Use fewer estimators + early stopping/callbacks. Respect KAGGLE_AGENTS_CV_FOLDS for faster iteration.",
         "estimated_impact": 0.18,
         "rationale": "High ROI baseline for tabular tasks; fast enough to iterate under tight time budgets (MLE-bench).",
-        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: LGBMClassifier with predict_proba for probabilities [0,1]. If regression: LGBMRegressor. Use sane defaults, 3-fold CV when FAST_MODE, save OOF/test preds.",
+        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: LGBMClassifier with predict_proba for probabilities [0,1]. If regression: LGBMRegressor. Use the injected canonical folds exactly, budget-aware capacity, and save aligned OOF/test predictions.",
     },
     "xgboost_fast_cv": {
         "name": "xgboost_fast_cv",
@@ -77,7 +77,7 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "XGBoost baseline tuned for speed (no Optuna). Use hist/gpu_hist where available. Respect time budget and fold count env vars.",
         "estimated_impact": 0.16,
         "rationale": "Provides diversity vs LightGBM with similar compute budget; useful for a quick ensemble.",
-        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: XGBClassifier with predict_proba for probabilities [0,1]. If regression: XGBRegressor. Use fixed params, 3-fold CV when FAST_MODE, save OOF/test preds.",
+        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: XGBClassifier with predict_proba for probabilities [0,1]. If regression: XGBRegressor. Use the injected canonical folds exactly, budget-aware capacity, and save aligned OOF/test predictions.",
     },
     "catboost_fast_cv": {
         "name": "catboost_fast_cv",
@@ -85,23 +85,23 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "CatBoost baseline tuned for speed (no Optuna). Handles categoricals natively.",
         "estimated_impact": 0.17,
         "rationale": "Different regularization than XGBoost/LightGBM; handles categoricals well.",
-        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: CatBoostClassifier with predict_proba. If regression: CatBoostRegressor. Sane defaults, 3-fold CV, save OOF/test preds.",
+        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: CatBoostClassifier with predict_proba. If regression: CatBoostRegressor. Use the injected canonical folds exactly and save aligned OOF/test predictions.",
     },
     "lightgbm_tuned_cv": {
         "name": "lightgbm_tuned_cv",
         "component_type": "model",
         "description": "LightGBM with light Optuna tuning (5 trials). Better than defaults, still fast.",
         "estimated_impact": 0.19,
-        "rationale": "Quick hyperparameter search often finds 2-5% improvement.",
-        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. LGBMClassifier/Regressor with Optuna (5 trials), tune learning_rate/num_leaves, 3-fold CV, save OOF/test preds.",
+        "rationale": "A bounded search is justified only when it improves identical validation folds within budget.",
+        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Run a bounded LightGBM search on the injected canonical folds, tune only within the measured runtime budget, and save aligned OOF/test predictions.",
     },
     "tabfm_zero_shot": {
         "name": "tabfm_zero_shot",
         "component_type": "model",
-        "description": "TabFM (Google zero-shot tabular foundation model): in-context prediction with NO tuning and NO feature engineering. Completely different model family from GBMs - strong ensemble diversity and plateau breaker.",
+        "description": "Optional TabFM zero-shot tabular foundation model: in-context prediction with no tuning or feature engineering. Use only when the real TabFM implementation is available and compatible.",
         "estimated_impact": 0.18,
-        "rationale": "Foundation-model predictions are decorrelated from tree ensembles; TabFM beats tuned GBMs on TabArena with a single forward pass. Synthetic-only pretraining = no contamination concerns.",
-        "code_outline": "Follow TABULAR constraints section 9 (TabFM): pip install tabfm with try/except fallback to LightGBM; check <=10 classes; subsample ONLY the fit() context to <=50k rows (stratified) - predict the FULL validation fold and FULL test; iterate canonical folds to build OOF; save models/oof_tabfm_zero_shot.npy + models/test_tabfm_zero_shot.npy; use predict_proba for classification.",
+        "rationale": "A genuinely different model family may add ensemble diversity, but its contribution must never be attributed to a substitute estimator.",
+        "code_outline": "Follow TABULAR constraints section 9 (TabFM). Check compatibility before training. If the real TabFM package/model is unavailable, incompatible, or raises, fail this component explicitly with RuntimeError and write no TabFM-named artifacts; NEVER substitute LightGBM or another estimator under the tabfm_zero_shot name. On genuine TabFM success, iterate canonical folds, predict every validation/test row, and only then save models/oof_tabfm_zero_shot.npy and models/test_tabfm_zero_shot.npy.",
     },
     "neural_network_mlp": {
         "name": "neural_network_mlp",
@@ -109,7 +109,7 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "MLP Neural Network with MANDATORY StandardScaler. Different pattern capture than trees.",
         "estimated_impact": 0.14,
         "rationale": "Neural Networks capture non-linear patterns differently, adds diversity.",
-        "code_outline": "MANDATORY: StandardScaler on ALL numeric features (without it AUC ~0.50). Per-fold scaling (fit on train fold, transform val/test). MLPClassifier(hidden_layer_sizes=(128, 64), early_stopping=True, validation_fraction=0.1, max_iter=500) or MLPRegressor. Save OOF/test preds.",
+        "code_outline": "Fit StandardScaler inside each fold for scale-sensitive neural models; transform validation/test with that fold's scaler. Use an MLPClassifier or MLPRegressor selected from the inferred target type, then save aligned OOF/test predictions.",
     },
     "random_forest_fast": {
         "name": "random_forest_fast",
@@ -117,23 +117,23 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "Random Forest baseline with limited trees (n_estimators=200) for speed.",
         "estimated_impact": 0.13,
         "rationale": "Robust tree ensemble that rarely fails; good fallback option.",
-        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. RandomForestClassifier/Regressor with n_estimators=200, 3-fold CV, save OOF/test preds.",
+        "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Fit a budget-sized RandomForestClassifier/Regressor on every injected canonical fold and save aligned OOF/test predictions.",
     },
     "target_encoding_fe": {
         "name": "target_encoding_fe",
         "component_type": "feature_engineering",
         "description": "Target encoding with K-fold CV to prevent leakage. Creates powerful features from categoricals.",
         "estimated_impact": 0.16,
-        "rationale": "Target encoding often provides 2-5% improvement on tabular competitions with categoricals.",
+        "rationale": "Target encoding is useful only when leakage-safe folds show signal beyond ordinary categorical encodings.",
         "code_outline": "category_encoders.TargetEncoder(cols=categorical_cols, smoothing=0.3) fitted WITHIN CV folds (fit on train fold, transform val fold) to prevent leakage; fit on full train for test. Save encoded matrices to MODELS_DIR for downstream models.",
     },
     "lightgbm_intensive": {
         "name": "lightgbm_intensive",
         "component_type": "model",
-        "description": "LightGBM with MORE folds (5-7) and iterations for better score. Uses timeout-aware training.",
+        "description": "LightGBM with more capacity on the same canonical folds when measured runtime permits it.",
         "estimated_impact": 0.20,
-        "rationale": "More folds and iterations reduce variance and often improve leaderboard score by 1-3%.",
-        "code_outline": "Timeout-aware intensive training: read KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, pick n_folds (7/5/3) by remaining time, n_estimators=2000 with learning_rate=0.02 and early_stopping_rounds=150, check remaining time per fold (reserve 3 min for saving), save per-fold OOF/test checkpoints.",
+        "rationale": "Additional folds can reduce estimate variance when the measured runtime budget permits them.",
+        "code_outline": "Timeout-aware intensive training: read KAGGLE_AGENTS_COMPONENT_TIMEOUT_S, preserve every injected canonical fold, estimate feasible boosting capacity from a pilot, check remaining time before each fold, reserve time for artifacts, and save per-fold OOF/test checkpoints.",
     },
     "simple_ridge_baseline": {
         "name": "simple_ridge_baseline",
@@ -141,7 +141,7 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "Simple Ridge baseline with StandardScaler. Cannot fail, always produces predictions.",
         "estimated_impact": 0.08,
         "rationale": "Failsafe baseline that always works.",
-        "code_outline": "StandardScaler + Ridge (or LogisticRegression for classification), 3-fold CV, save OOF/test preds.",
+        "code_outline": "Fit StandardScaler + Ridge (or LogisticRegression for classification) inside every injected canonical fold and save aligned OOF/test predictions.",
     },
     "stacking_ensemble": {
         "name": "stacking_ensemble",
@@ -283,7 +283,7 @@ def create_tabular_fallback_plan(
                 "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
                 "estimated_impact": 0.22,
                 "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
-                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: LGBMClassifier with objective='binary' (2 classes) or 'multiclass', predict_proba for probabilities [0,1]. If regression: LGBMRegressor. Use OptunaSearchCV, 5-fold CV, early_stopping_rounds=100.",
+                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Select LGBMClassifier or LGBMRegressor accordingly; run bounded tuning and early stopping on the injected canonical folds only, then save aligned OOF/test predictions.",
             },
             {
                 "name": "xgboost_optuna_tuned",
@@ -291,7 +291,7 @@ def create_tabular_fallback_plan(
                 "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
                 "estimated_impact": 0.20,
                 "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
-                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: XGBClassifier with objective='binary:logistic' or 'multi:softprob', predict_proba for probabilities [0,1]. If regression: XGBRegressor. Use OptunaSearchCV, 5-fold CV, early_stopping_rounds=50.",
+                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Select XGBClassifier or XGBRegressor accordingly; run bounded tuning and early stopping on the injected canonical folds only, then save aligned OOF/test predictions.",
             },
             {
                 "name": "catboost_optuna_tuned",
@@ -299,7 +299,7 @@ def create_tabular_fallback_plan(
                 "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
                 "estimated_impact": 0.19,
                 "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
-                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: CatBoostClassifier with loss_function='Logloss' (binary) or 'MultiClass', predict_proba for probabilities [0,1]. If regression: CatBoostRegressor. Use OptunaSearchCV, cat_features parameter, 5-fold CV.",
+                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Select CatBoostClassifier or CatBoostRegressor accordingly; derive the loss from the target contract and tune on the injected canonical folds only.",
             },
             {
                 "name": "neural_network_mlp",
@@ -321,7 +321,7 @@ def create_tabular_fallback_plan(
                 "description": "ExtraTrees (Extremely Randomized Trees) with tuned n_estimators=500, max_depth tuned via simple grid.",
                 "estimated_impact": 0.16,
                 "rationale": "ExtraTrees uses random splits, decorrelated from GBMs. Great for ensemble diversity.",
-                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: ExtraTreesClassifier with predict_proba for probabilities [0,1]. If regression: ExtraTreesRegressor. Use n_estimators=500, max_depth tuned, 5-fold CV, save OOF/test preds.",
+                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Fit ExtraTreesClassifier or ExtraTreesRegressor on every injected canonical fold; size and tune the forest within budget and save aligned OOF/test predictions.",
             },
             {
                 "name": "ridge_classifier_tuned",
@@ -329,7 +329,7 @@ def create_tabular_fallback_plan(
                 "description": "Ridge Classifier with StandardScaler and alpha tuning. Linear model for diversity.",
                 "estimated_impact": 0.12,
                 "rationale": "Linear models capture different patterns than trees. Fast to train, adds diversity.",
-                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: Pipeline([StandardScaler, RidgeClassifier(alpha tuned)]) with decision_function for scores. If regression: Pipeline([StandardScaler, Ridge(alpha tuned)]). 5-fold CV, save OOF/test preds.",
+                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Fit the scaler and RidgeClassifier/Ridge pipeline independently inside every injected canonical fold, then save aligned OOF/test predictions.",
             },
             {
                 "name": "linearsvc_calibrated",
@@ -337,7 +337,7 @@ def create_tabular_fallback_plan(
                 "description": "Linear SVM with CalibratedClassifierCV for probability outputs. StandardScaler required.",
                 "estimated_impact": 0.11,
                 "rationale": "SVM with linear kernel captures linear boundaries. Calibration enables predict_proba for ensemble.",
-                "code_outline": "For CLASSIFICATION ONLY: Pipeline([StandardScaler, CalibratedClassifierCV(LinearSVC())]) with predict_proba for probabilities [0,1]. Skip this model for regression tasks. 5-fold CV, save OOF/test preds.",
+                "code_outline": "For classification only, fit StandardScaler plus calibrated LinearSVC inside every injected canonical fold and save aligned probability OOF/test predictions; skip for regression.",
             },
             {
                 "name": "gradient_boosting_sklearn",
@@ -345,15 +345,15 @@ def create_tabular_fallback_plan(
                 "description": "Scikit-learn GradientBoosting (different implementation from LightGBM/XGBoost).",
                 "estimated_impact": 0.14,
                 "rationale": "Sklearn GB has different regularization behavior, adds diversity to the ensemble.",
-                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: GradientBoostingClassifier with predict_proba for probabilities [0,1]. If regression: GradientBoostingRegressor. Use n_estimators=200, learning_rate=0.1, max_depth=5, 5-fold CV.",
+                "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. Fit GradientBoostingClassifier or GradientBoostingRegressor on every injected canonical fold; derive capacity from the runtime budget and save aligned OOF/test predictions.",
             },
             {
                 "name": "tabfm_zero_shot",
                 "component_type": "model",
-                "description": "TabFM (Google zero-shot tabular foundation model): in-context prediction, no tuning, no feature engineering. Radically different model family for ensemble diversity.",
+                "description": "Optional TabFM zero-shot tabular foundation model: use only when the real implementation is installed and compatible.",
                 "estimated_impact": 0.17,
-                "rationale": "Foundation-model predictions are decorrelated from tree ensembles; strong out-of-the-box TabArena performance in a single forward pass.",
-                "code_outline": "Follow TABULAR constraints section 9 (TabFM): pip install tabfm with try/except fallback to LightGBM; check <=10 classes; subsample ONLY the fit() context to <=50k rows (stratified) - predict FULL validation fold and FULL test; OOF via canonical folds; save models/oof_tabfm_zero_shot.npy + models/test_tabfm_zero_shot.npy.",
+                "rationale": "Evaluate a distinct model family without conflating its score or artifacts with a tree-model fallback.",
+                "code_outline": "Follow TABULAR constraints section 9 (TabFM). If the real TabFM implementation is unavailable, incompatible, or errors, raise RuntimeError and write no TabFM-named artifacts; NEVER substitute LightGBM or another model under this component name. Save tabfm_zero_shot OOF/test artifacts only after genuine TabFM inference succeeds on all canonical folds.",
             },
         ]
     )
@@ -365,8 +365,8 @@ def create_tabular_fallback_plan(
             "component_type": "ensemble",
             "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
             "estimated_impact": 0.25,
-            "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
-            "code_outline": "Check IS_CLASSIFICATION from canonical_metadata. If classification: StackingClassifier with final_estimator=LogisticRegression(), predict_proba for probabilities [0,1], clip to valid range. If regression: StackingRegressor with final_estimator=Ridge(). Use base_estimators=[lgb, xgb, cat, nn], cv=5.",
+            "rationale": "Cross-fitted stacking is an ensemble candidate whose benefit must be measured on aligned canonical OOF predictions.",
+            "code_outline": "Load only approved, aligned OOF/test prediction pairs. Cross-fit a LogisticRegression meta-learner for classification or Ridge for regression using the injected canonical folds, generate meta-OOF without fitting on its validation rows, refit on all eligible OOF rows for test inference, and retain only after an independently recomputed gain.",
         }
     )
 

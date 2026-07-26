@@ -13,61 +13,6 @@ from typing import Any
 import pandas as pd
 
 
-# Known feature file patterns for audio competitions
-KNOWN_FEATURE_PATTERNS: dict[str, list[str]] = {
-    "histogram": [
-        "histogram_features",
-        "hist_features",
-        "histogram",
-        "bag_of_words",
-        "bow_features",
-    ],
-    "location": [
-        "location_features",
-        "location",
-        "metadata",
-        "geo_features",
-        "site_features",
-    ],
-    "segment": [
-        "segment_features",
-        "segments",
-        "segment_info",
-        "time_segments",
-    ],
-    "spectrogram": [
-        "spectrogram_features",
-        "mel_features",
-        "mfcc_features",
-        "spectral_features",
-    ],
-    "background": [
-        "histogram_background",
-        "background_features",
-        "noise_features",
-    ],
-    "embedding": [
-        "embedding_features",
-        "embeddings",
-        "pretrained_features",
-        "vggish_features",
-        "panns_features",
-    ],
-    "cv_folds": [
-        "CVfolds",
-        "cv_folds",
-        "folds",
-        "train_folds",
-    ],
-    "id_mapping": [
-        "rec_id2filename",
-        "id2filename",
-        "file_mapping",
-        "audio_mapping",
-    ],
-}
-
-
 @dataclass
 class PrecomputedFeaturesInfo:
     """Information about detected precomputed features."""
@@ -101,8 +46,9 @@ def detect_precomputed_features(
     """
     Detect available precomputed features in competition data directory.
 
-    Searches for common feature file patterns used in audio competitions
-    like MLSP 2013 Birds (histogram_features.txt, location_features.txt, etc.)
+    Searches recursively for numeric feature matrices and public split/mapping
+    metadata. Metadata roles are also inferred from their columns so support
+    does not depend on a task-specific filename.
 
     Args:
         data_dir: Directory to search for feature files
@@ -113,15 +59,12 @@ def detect_precomputed_features(
         PrecomputedFeaturesInfo with detected features
 
     Example:
-        For MLSP 2013 Birds, this might find:
-        - histogram_features.txt (645 x 100)
-        - histogram_background.txt (645 x 100)
-        - location_features.txt (645 x 8)
-        - segment_features.txt (various)
+        A supplied data bundle may contain numeric feature matrices, a fold
+        assignment table, and an ID-to-file mapping.
     """
     data_dir = Path(data_dir)
     if extensions is None:
-        extensions = [".txt", ".csv", ".npy", ".npz", ".parquet", ".feather"]
+        extensions = [".txt", ".tsv", ".csv", ".npy", ".npz", ".parquet", ".feather"]
 
     features_found: dict[str, Path] = {}
     feature_shapes: dict[str, tuple[int, ...]] = {}
@@ -144,24 +87,110 @@ def detect_precomputed_features(
         if f.is_file() and f.suffix.lower() in extensions
     ]
 
-    # Match against known patterns
+    def infer_metadata_role(file_path: Path) -> str | None:
+        if file_path.suffix.lower() not in {".csv", ".txt", ".tsv"}:
+            return None
+        try:
+            preview = pd.read_csv(file_path, sep=None, engine="python", nrows=20)
+        except Exception:
+            return None
+        normalized_columns = [
+            str(column).strip().lower().replace("-", "_") for column in preview.columns
+        ]
+        if any("fold" in column or "split" in column for column in normalized_columns):
+            return "cv_folds"
+        has_id = any(
+            column == "id" or column.endswith("_id") or column.startswith("id_")
+            for column in normalized_columns
+        )
+        has_file = any(
+            "file" in column or "path" in column for column in normalized_columns
+        )
+        if has_id and has_file:
+            return "id_mapping"
+        return None
+
+    def infer_feature_key(file_path: Path) -> str | None:
+        normalized_stem = "".join(
+            character if character.isalnum() else "_"
+            for character in file_path.stem.lower()
+        ).strip("_")
+        excluded_tokens = {
+            "train",
+            "test",
+            "sample",
+            "label",
+            "labels",
+            "target",
+            "targets",
+            "annotation",
+            "annotations",
+        }
+        stem_tokens = set(normalized_stem.split("_"))
+        if stem_tokens & excluded_tokens:
+            return None
+
+        shape, columns = _get_feature_info(file_path)
+        if not shape or len(shape) < 2 or shape[1] < 2:
+            return None
+
+        if file_path.suffix.lower() in {".csv", ".txt", ".tsv", ".parquet", ".feather"}:
+            try:
+                if file_path.suffix.lower() == ".parquet":
+                    preview = pd.read_parquet(file_path).head(20)
+                elif file_path.suffix.lower() == ".feather":
+                    preview = pd.read_feather(file_path).head(20)
+                else:
+                    preview = pd.read_csv(file_path, sep=None, engine="python", nrows=20)
+            except Exception:
+                return None
+            numeric_columns = sum(
+                pd.api.types.is_numeric_dtype(preview[column])
+                for column in preview.columns
+            )
+            has_feature_marker = "feature" in normalized_stem or "embedding" in normalized_stem
+            if not has_feature_marker and (
+                len(preview.columns) < 3
+                or numeric_columns < max(2, len(preview.columns) - 1)
+            ):
+                return None
+
+        key = normalized_stem
+        for suffix in ("_features", "_feature", "_embeddings", "_embedding"):
+            if key.endswith(suffix):
+                key = key[: -len(suffix)]
+                break
+        if not key:
+            key = "numeric_features"
+
+        candidate_key = key
+        counter = 2
+        while candidate_key in features_found:
+            candidate_key = f"{key}_{counter}"
+            counter += 1
+        return candidate_key
+
+    # Infer metadata and feature matrices from the public file schemas.
     for file_path in candidate_files:
-        file_stem = file_path.stem.lower()
+        metadata_role = infer_metadata_role(file_path)
+        if metadata_role and metadata_role not in features_found:
+            features_found[metadata_role] = file_path
+            shape, columns = _get_feature_info(file_path)
+            if shape:
+                feature_shapes[metadata_role] = shape
+            if columns:
+                feature_columns[metadata_role] = columns
+            continue
 
-        for feature_type, patterns in KNOWN_FEATURE_PATTERNS.items():
-            for pattern in patterns:
-                if pattern.lower() in file_stem:
-                    # Found a match
-                    if feature_type not in features_found:
-                        features_found[feature_type] = file_path
-
-                        # Try to get shape info
-                        shape, columns = _get_feature_info(file_path)
-                        if shape:
-                            feature_shapes[feature_type] = shape
-                        if columns:
-                            feature_columns[feature_type] = columns
-                    break
+        feature_type = infer_feature_key(file_path)
+        if feature_type is None:
+            continue
+        features_found[feature_type] = file_path
+        shape, columns = _get_feature_info(file_path)
+        if shape:
+            feature_shapes[feature_type] = shape
+        if columns:
+            feature_columns[feature_type] = columns
 
     # Calculate total feature dimensions
     total_features = 0
@@ -192,9 +221,9 @@ def _get_feature_info(file_path: Path) -> tuple[tuple[int, ...] | None, list[str
     columns = None
 
     try:
-        if file_path.suffix.lower() in (".csv", ".txt"):
+        if file_path.suffix.lower() in (".csv", ".txt", ".tsv"):
             # Try to read first few rows to get shape
-            df = pd.read_csv(file_path, nrows=5)
+            df = pd.read_csv(file_path, sep=None, engine="python", nrows=5)
             # Get full row count by counting lines
             with open(file_path) as f:
                 num_rows = sum(1 for _ in f) - 1  # Subtract header
@@ -216,6 +245,11 @@ def _get_feature_info(file_path: Path) -> tuple[tuple[int, ...] | None, list[str
 
         elif file_path.suffix.lower() == ".parquet":
             df = pd.read_parquet(file_path)
+            shape = df.shape
+            columns = list(df.columns)
+
+        elif file_path.suffix.lower() == ".feather":
+            df = pd.read_feather(file_path)
             shape = df.shape
             columns = list(df.columns)
 
@@ -257,10 +291,12 @@ def load_precomputed_features(
 
         file_path = features_info.features_found[ft]
         try:
-            if file_path.suffix.lower() in (".csv", ".txt"):
-                df = pd.read_csv(file_path)
+            if file_path.suffix.lower() in (".csv", ".txt", ".tsv"):
+                df = pd.read_csv(file_path, sep=None, engine="python")
             elif file_path.suffix.lower() == ".parquet":
                 df = pd.read_parquet(file_path)
+            elif file_path.suffix.lower() == ".feather":
+                df = pd.read_feather(file_path)
             elif file_path.suffix.lower() == ".npy":
                 import numpy as np
                 arr = np.load(file_path)
@@ -295,8 +331,9 @@ def generate_feature_loading_code(features_info: PrecomputedFeaturesInfo) -> str
     Generate code snippet for loading detected precomputed features.
 
     Generates appropriate loading code based on file extension:
-    - .csv, .txt: pd.read_csv()
+    - .csv, .txt, .tsv: pd.read_csv()
     - .parquet: pd.read_parquet()
+    - .feather: pd.read_feather()
     - .npy: np.load()
     - .npz: np.load()
 
@@ -353,8 +390,10 @@ def generate_feature_loading_code(features_info: PrecomputedFeaturesInfo) -> str
         elif ext == ".feather":
             code_lines.append(f"{ft}_df = pd.read_feather(Path('{path}'))")
         else:
-            # Default to CSV for .csv, .txt, and unknown extensions
-            code_lines.append(f"{ft}_df = pd.read_csv(Path('{path}'))")
+            # Auto-detect delimiters for text tables.
+            code_lines.append(
+                f"{ft}_df = pd.read_csv(Path('{path}'), sep=None, engine='python')"
+            )
 
         code_lines.append("")
 

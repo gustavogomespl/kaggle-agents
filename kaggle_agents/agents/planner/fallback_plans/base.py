@@ -107,21 +107,12 @@ def create_fallback_plan(
         except ValueError:
             timeout_cap = None
 
-    # Speed-first when optimizing for MLE-bench medals or tight component caps.
+    # Speed-first is an explicit runtime/budget decision, not a benchmark-name
+    # shortcut.
     fast_mode = (
-        run_mode == "mlebench"
-        or "medal" in objective
+        bool((state or {}).get("fast_mode"))
         or (isinstance(timeout_cap, int) and timeout_cap <= 1200)
     )
-
-    # Get competition name for domain-specific settings (MUST be before safety check)
-    competition_name = ""
-    if state:
-        comp_info = state.get("competition_info")
-        if comp_info:
-            competition_name = getattr(comp_info, "name", "") or getattr(comp_info, "id", "") or ""
-        if not competition_name:
-            competition_name = str(state.get("competition_id", "") or state.get("competition_name", ""))
 
     # SAFETY CHECK: Prevent tabular models for image competitions
     if is_image_competition_without_features(state):
@@ -130,16 +121,22 @@ def create_fallback_plan(
         )
         print("            Tree models (LightGBM/XGBoost) require tabular features!")
         return create_image_fallback_plan(
-            "image_classification", sota_analysis, fast_mode=fast_mode, competition_name=competition_name
+            "image_classification",
+            sota_analysis,
+            fast_mode=fast_mode,
         )
 
     # Route to domain-specific fallback method
     if domain in ("image_to_image", "image_segmentation"):
         return create_image_to_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
     if domain in IMAGE_DOMAINS or domain.startswith("image_"):
-        return create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode, competition_name=competition_name)
+        return create_image_fallback_plan(
+            domain,
+            sota_analysis,
+            fast_mode=fast_mode,
+        )
     if domain in SEQ2SEQ_DOMAINS or domain == "seq_to_seq":
-        return create_seq2seq_fallback_plan(domain, sota_analysis, competition_name=competition_name)
+        return create_seq2seq_fallback_plan(domain, sota_analysis)
     if domain in TEXT_DOMAINS or domain.startswith("text_"):
         return create_text_fallback_plan(domain, sota_analysis)
     if domain in AUDIO_DOMAINS or domain.startswith("audio_"):

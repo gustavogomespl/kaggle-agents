@@ -1,11 +1,13 @@
 """Submission validation and alignment functions."""
 
 import shutil
+import uuid
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from ...utils.submission_artifacts import sha256_file
 from .postprocessing import labels_from_oof_tuning
 
 
@@ -131,6 +133,10 @@ def validate_and_align_submission(
     nan_count = sub_df[pred_cols].isna().sum().sum()
     if nan_count > 0:
         return False, f"Submission contains {nan_count} NaN values", None
+    numeric_predictions = sub_df[pred_cols].select_dtypes(include=[np.number])
+    inf_count = int(np.isinf(numeric_predictions.to_numpy(dtype=float)).sum())
+    if inf_count > 0:
+        return False, f"Submission contains {inf_count} infinite values", None
 
     # Save aligned submission
     sub_df.to_csv(output_path, index=False)
@@ -141,35 +147,104 @@ def safe_restore_submission(
     source_path: Path,
     dest_path: Path,
     sample_submission_path: Path | None,
+    *,
+    expected_sha256: str | None = None,
+    require_hash: bool = False,
 ) -> bool:
-    """Safely restore submission with validation.
+    """Atomically restore a submission only after all available checks pass.
 
     Args:
-        source_path: Path to source submission (e.g., submission_best.csv)
+        source_path: Path to the preserved source submission.
         dest_path: Path to destination (e.g., submission.csv)
         sample_submission_path: Path to sample_submission.csv for validation
+        expected_sha256: Optional immutable-snapshot digest.
+        require_hash: Fail closed unless ``expected_sha256`` is supplied and
+            matches both the source and restored destination.
 
     Returns:
         True if restoration succeeded, False otherwise
     """
-    if not source_path.exists():
+    source_path = Path(source_path)
+    dest_path = Path(dest_path)
+    sample_path = (
+        Path(sample_submission_path) if sample_submission_path is not None else None
+    )
+    expected_digest = str(expected_sha256 or "").strip().lower()
+
+    if not source_path.is_file() or source_path.is_symlink():
         print(f"      Warning: Source submission not found: {source_path}")
         return False
 
-    if sample_submission_path and Path(sample_submission_path).exists():
+    if require_hash and len(expected_digest) != 64:
+        print("      Warning: Immutable submission digest is missing or malformed")
+        return False
+    if expected_digest:
+        try:
+            if sha256_file(source_path) != expected_digest:
+                print("      Warning: Source submission failed hash verification")
+                return False
+        except OSError as exc:
+            print(f"      Warning: Could not hash source submission: {exc}")
+            return False
+
+    # A restore operation without the public schema cannot establish that the
+    # artifact is a valid submission. Callers that truly want an unchecked copy
+    # should use an ordinary filesystem copy instead of this safety boundary.
+    if sample_path is None or not sample_path.is_file():
+        print("      Warning: sample_submission contract unavailable; restore blocked")
+        return False
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    validation_path = dest_path.parent / (
+        f".{dest_path.name}.validation-{uuid.uuid4().hex}.tmp"
+    )
+    restore_path = dest_path.parent / (
+        f".{dest_path.name}.restore-{uuid.uuid4().hex}.tmp"
+    )
+
+    try:
         is_valid, error_msg, _ = validate_and_align_submission(
             source_path,
-            sample_submission_path,
-            dest_path
+            sample_path,
+            validation_path,
         )
-        if is_valid:
-            print(f"      OK: Validated and restored submission to {dest_path}")
-            return True
-        print(f"      Warning: Submission validation failed: {error_msg}")
-        print("      Copying without validation as fallback...")
-        shutil.copy(source_path, dest_path)
+        if not is_valid:
+            print(f"      Warning: Submission validation failed: {error_msg}")
+            return False
+
+        if expected_digest:
+            # Immutable snapshots must already have canonical row order. An
+            # alignment rewrite would sever the state digest from the bytes
+            # subsequently graded.
+            source_ids = pd.read_csv(source_path).iloc[:, 0]
+            sample_ids = pd.read_csv(sample_path).iloc[:, 0]
+            if not source_ids.equals(sample_ids):
+                print(
+                    "      Warning: Immutable submission row order differs from "
+                    "sample_submission"
+                )
+                return False
+            shutil.copyfile(source_path, restore_path)
+            if sha256_file(restore_path) != expected_digest:
+                print("      Warning: Restored submission failed hash verification")
+                return False
+        else:
+            # For regular Kaggle runs retain the safe historical behavior:
+            # reorder a structurally valid artifact to the template ID order.
+            validation_path.replace(restore_path)
+
+        restore_path.replace(dest_path)
+        if expected_digest and sha256_file(dest_path) != expected_digest:
+            # Do not report success if the final bytes differ from the snapshot.
+            dest_path.unlink(missing_ok=True)
+            print("      Warning: Destination submission failed hash verification")
+            return False
+
+        print(f"      OK: Validated and restored submission to {dest_path}")
         return True
-    # No sample_submission available, just copy
-    shutil.copy(source_path, dest_path)
-    print(f"      OK: Restored submission to {dest_path} (no validation)")
-    return True
+    except Exception as exc:
+        print(f"      Warning: Submission restore failed: {exc}")
+        return False
+    finally:
+        validation_path.unlink(missing_ok=True)
+        restore_path.unlink(missing_ok=True)

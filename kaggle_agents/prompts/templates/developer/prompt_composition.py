@@ -19,7 +19,7 @@ def compose_generate_prompt(
     Compose a dynamic, context-aware code generation prompt.
 
     Adaptive injection based on iteration:
-    - Iteration 0: SOTA-heavy (learn from winners)
+    - Iteration 0: retrieval-heavy (test external technique hypotheses)
     - Later iterations: Feedback-heavy + truncated SOTA reference
 
     Now supports modular constraints to reduce token usage (40-60% reduction).
@@ -72,7 +72,7 @@ def compose_generate_prompt(
         except Exception:
             pass  # Canonical data not available yet
 
-    # Non-standard label files instruction (e.g., MLSP 2013 Birds .txt files)
+    # Non-standard label files are described from the files detected in this run.
     label_files = paths.get("label_files", [])
     if label_files:
         label_section = """
@@ -80,22 +80,27 @@ def compose_generate_prompt(
 
 Label files detected: """ + ", ".join(str(lf) for lf in label_files) + """
 
-YOU MUST parse these files - NEVER use dummy labels (np.zeros)!
+Parse these supplied files and fail clearly if their target role cannot be
+validated. Never manufacture dummy targets.
 
 Steps:
 1. Use parse_label_file() helper (injected in code header)
-2. Create ID -> label mapping
-3. For multi-label: pivot to binary matrix
+2. Preserve the semantic record ID -> target mapping
+3. Pivot to a binary matrix only if the observed artifact is truly multi-label
 4. Match with training data BEFORE training
 
-Example for MLSP 2013 Birds:
+Generic variable-width example:
 ```python
-label_df = parse_label_file(LABEL_FILES[0])
-label_df.columns = ['rec_id', 'label']
-y_train = label_df.pivot_table(index='rec_id', columns='label', aggfunc=len, fill_value=0)
+targets_df = parse_label_file(LABEL_FILES[0])
+assert {'record_id', 'target'}.issubset(targets_df.columns)
+# Only for a verified multi-label target:
+y_train = targets_df.pivot_table(
+    index='record_id',
+    columns='target',
+    aggfunc='size',
+    fill_value=0,
+)
 ```
-
-WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
 """
         parts.append("")
         parts.append(label_section)
@@ -105,7 +110,12 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
         parts.append("")
         parts.append("## Objective & Budget")
         if context.run_mode:
-            parts.append(f"- run_mode: {context.run_mode}")
+            displayed_run_mode = (
+                "fixed_budget_evaluation"
+                if context.run_mode.lower() == "mlebench"
+                else context.run_mode
+            )
+            parts.append(f"- run_mode: {displayed_run_mode}")
         if context.objective:
             parts.append(f"- objective: {context.objective}")
         if context.timeout_per_component is not None:
@@ -145,26 +155,38 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
         )
         parts.append("```")
 
-    # Adaptive training guidance (GPU-accelerated, reduces epochs if timeout)
+    # Adaptive training guidance (GPU-accelerated, bounded by measured runtime)
     if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():
         parts.append("")
-        parts.append("## NEURAL NETWORK TRAINING (GPU-ACCELERATED)")
+        parts.append("## BUDGET-MATCHED NEURAL TRAINING")
         parts.append(
-            f"- **EPOCHS**: Train for up to {context.suggested_epochs} epochs with early stopping"
+            f"- **UPPER BOUND**: At most {context.suggested_epochs} epochs; "
+            "select the feasible step budget from a throughput pilot"
         )
         parts.append(
-            "- **GPU**: MUST use CUDA if available: `device = 'cuda' if torch.cuda.is_available() else 'cpu'`"
+            "- **DEVICE**: Use CUDA when available, while preserving a valid CPU path"
         )
         parts.append(
-            "- **BACKBONE**: Full fine-tuning for maximum performance (do NOT freeze layers)"
+            "- **BACKBONE**: Compare frozen, partial, or full fine-tuning only "
+            "when each fits the deadline; choose by identical OOF folds"
         )
-        parts.append("- **LEARNING RATE**: Use warmup (5% of epochs) + cosine annealing schedule")
-        parts.append("- **AUGMENTATION**: Apply heavy augmentation (Cutmix, Mixup, RandAugment)")
         parts.append(
-            f"- **EARLY STOPPING**: Stop if validation loss doesn't improve for {context.early_stopping_patience} epochs (SOTA uses patience=30)"
+            "- **SCHEDULE**: Derive warmup and decay from the measured number of "
+            "optimizer steps; do not assume a fixed epoch percentage"
+        )
+        parts.append(
+            "- **AUGMENTATION**: Use only label-preserving transforms supported "
+            "by the observed task; retain each candidate through OOF evidence"
+        )
+        parts.append(
+            f"- **EARLY STOPPING UPPER BOUND**: {context.early_stopping_patience} "
+            "checks, shortened when the remaining deadline requires it"
         )
         parts.append("- **CHECKPOINTING**: Save best model checkpoint by validation metric")
-        parts.append("- **MIXED PRECISION**: Use torch.cuda.amp.autocast() for faster training")
+        parts.append(
+            "- **MIXED PRECISION**: Use it only when supported and numerically "
+            "validated for the chosen device/model"
+        )
 
         if context.timeout_occurred:
             parts.append("")
@@ -173,8 +195,8 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
                 f"- REDUCED epochs from {context.epoch_budget} to {context.suggested_epochs}"
             )
             parts.append("- Use smaller batch size if memory issues")
-            parts.append("- Consider freezing early backbone layers if still too slow")
-            parts.append("- STILL prioritize completing training over speed")
+            parts.append("- Reduce trainable capacity if the throughput pilot still misses the deadline")
+            parts.append("- Prioritize a complete, validated candidate within the deadline")
 
         parts.append("")
         parts.append("## SOFT-DEADLINE PATTERN (MANDATORY)")
@@ -192,11 +214,14 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
         parts.append("    # ... train epoch ...")
         parts.append("```")
 
-    # ADAPTIVE: First iteration = SOTA heavy
+    # ADAPTIVE: First iteration = external-hypothesis heavy
     if context.iteration_num == 0:
         if context.sota_patterns:
             parts.append("")
-            parts.append("## SOTA Patterns (Learn from top solutions):")
+            parts.append(
+                "## Retrieved External Technique Hypotheses "
+                "(unverified; validate locally):"
+            )
             parts.append(context.sota_patterns)
 
     # ADAPTIVE: Later iterations = Feedback heavy
@@ -232,10 +257,10 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
             parts.append("")
             parts.append(context.dpo_examples)
 
-        # Still include truncated SOTA as reference
+        # Still include bounded retrieved hypotheses as reference
         if context.sota_patterns:
             parts.append("")
-            parts.append("## SOTA Reference (condensed):")
+            parts.append("## Retrieved External Hypotheses (condensed):")
             parts.append(context.sota_patterns[:1000])
 
     # Component-specific minimal guidance
@@ -252,7 +277,6 @@ def _format_task(component, competition_info, paths: dict[str, str]) -> str:
     component_type = getattr(component, "component_type", "model")
     component_name = getattr(component, "name", "component")
     component_code = getattr(component, "code", "")
-    estimated_impact = getattr(component, "estimated_impact", 0.0)
 
     name = getattr(competition_info, "name", "competition")
     domain = getattr(competition_info, "domain", "tabular")
@@ -267,7 +291,6 @@ def _format_task(component, competition_info, paths: dict[str, str]) -> str:
     return f"""## Task
 Component: {component_type} - {component_name}
 Goal: {component_code}
-Estimated Impact: {estimated_impact:.1%}
 
 ## Competition
 Name: {name}
@@ -334,8 +357,8 @@ The following path constants ARE pre-defined in the execution environment:
 
 The paths may point to:
 - CSV files: `train.csv`, `test.csv`
-- Directories: `supplemental_data/`, `train_images/`, `essential_data/`
-- Subdirectories: `essential_data/train.csv`
+- Directories: `media/`, `train_images/`, `dataset_bundle/`
+- Nested files: `dataset_bundle/train.csv`
 
 Always check if the path is a file or directory before loading."""
 

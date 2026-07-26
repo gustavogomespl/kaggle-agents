@@ -80,6 +80,15 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
 
     forced_type = (env_force_data_type or env_data_type or env_force_domain).strip().lower()
 
+    if (
+        str(state.get("run_mode", "")).strip().lower() == "mlebench"
+        and forced_type
+    ):
+        raise RuntimeError(
+            "Manual domain overrides are forbidden in MLE-bench mode; "
+            "domain must be inferred from public task data and metadata"
+        )
+
     # Debug: show which env vars are set
     if env_force_data_type or env_data_type or env_force_domain:
         print(f"   [ENV] KAGGLE_AGENTS_FORCE_DATA_TYPE={env_force_data_type!r}")

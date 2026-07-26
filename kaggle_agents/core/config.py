@@ -71,12 +71,11 @@ class SearchConfig:
     embedding_model: str = "text-embedding-ada-002"
     vector_store_path: str = ".chromadb"
     search_depth: Literal["quick", "moderate", "thorough"] = "moderate"
-    # MLE-bench rule compliance: competition-specific solutions must not be used.
-    # When run_mode == "mlebench", the Search-First retrieval switches to
-    # cross-competition queries and filters out notebooks that belong to the
-    # target competition (see tools/kaggle_search.py). Setting
-    # KAGGLE_AGENTS_ALLOW_SAME_COMP_SOURCES=true disables the guard, which is
-    # NOT benchmark-legal and should only be used for regular Kaggle runs.
+    # Target-blind protocol: MLE-bench switches to cross-competition queries
+    # and filters sources that identify the target (tools/kaggle_search.py).
+    # This legacy value remains for configuration compatibility only. Regular
+    # Kaggle already allows same-competition retrieval; MLE-bench ignores the
+    # value and always remains target-blind.
     allow_same_competition_sources: bool = field(
         default_factory=lambda: os.getenv(
             "KAGGLE_AGENTS_ALLOW_SAME_COMP_SOURCES", "false"

@@ -8,8 +8,12 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 
 ### 1. Cross-Validation
 - Define `RUN_SEED = int(os.getenv("RUN_SEED", "42"))` once and use it everywhere
-- Use StratifiedKFold: `n_splits=int(os.getenv("KAGGLE_AGENTS_CV_FOLDS","5"))`
-- Always `shuffle=True, random_state=RUN_SEED`
+- Load the injected `CANONICAL_FOLDS_PATH`, `CANONICAL_TRAIN_IDS_PATH`, and
+  `CANONICAL_Y_PATH`; fail if any canonical artifact is absent or misaligned
+- NEVER create a new KFold/StratifiedKFold/GroupKFold inside a model component.
+  The canonical assignments already encode the task-appropriate split policy
+- Iterate the canonical fold labels and write every validation prediction back
+  to its original canonical row; use `RUN_SEED` only for model randomness
 - Save OOF predictions: `np.save('models/oof_{component_name}.npy', oof_predictions)`
 
 ### 2. Output Requirements
@@ -18,46 +22,88 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 - For regression, preserve the prediction scale (RMSLE alone requires non-negative values)
 - Match sample_submission.csv exactly: columns, IDs, shape
 
-### 2a. PROBABILITY OUTPUT VALIDATION (CRITICAL - PREVENTS AUC ~0.5)
+### 2a. PROBABILITY OUTPUT VALIDATION (CRITICAL - FAIL CLOSED)
 For classification, ALWAYS validate predictions BEFORE saving OOF and test files:
 
 ```python
-def validate_and_fix_probabilities(preds, is_multiclass=True, name="predictions"):
-    '''Validate and fix probability predictions. Call for BOTH OOF and test.'''
+def validate_probabilities(
+    preds,
+    *,
+    expected_rows,
+    expected_cols=None,
+    is_multiclass=True,
+    independent_outputs=False,
+    name="predictions",
+):
+    '''Validate probability predictions. Call for BOTH OOF and test.'''
     import numpy as np
 
-    # 1. Check for NaN/Inf FIRST (must fix before other checks)
-    if np.any(~np.isfinite(preds)):
-        nan_count = np.sum(~np.isfinite(preds))
-        print(f'WARNING: {name} contains {nan_count} NaN/Inf values, replacing with 0.5')
-        preds = np.nan_to_num(preds, nan=0.5, posinf=1.0, neginf=0.0)
+    preds = np.asarray(preds, dtype=np.float64)
+    if preds.ndim == 0 or preds.shape[0] != expected_rows:
+        raise ValueError(
+            f'{name} row mismatch: shape={preds.shape}, expected_rows={expected_rows}'
+        )
+    if expected_cols is not None:
+        observed_cols = 1 if preds.ndim == 1 else preds.shape[1]
+        if observed_cols != int(expected_cols):
+            raise ValueError(
+                f'{name} output mismatch: cols={observed_cols}, expected={expected_cols}'
+            )
 
-    # 2. Range check and clipping
+    # Non-finite values invalidate the candidate. Never replace them with
+    # constants because that fabricates predictions and conceals model failure.
+    nonfinite_count = int(np.sum(~np.isfinite(preds)))
+    if nonfinite_count:
+        raise ValueError(
+            f'{name} contains {nonfinite_count} NaN/Inf values; candidate is invalid'
+        )
+
+    # Probability metrics require probabilities. Clipping is allowed only after
+    # the finite/shape checks above have passed.
     if np.any(preds < 0) or np.any(preds > 1):
         print(f'WARNING: {name} outside [0,1]: min={preds.min():.4f}, max={preds.max():.4f}, clipping')
         preds = np.clip(preds, 1e-15, 1 - 1e-15)
 
-    # 3. Multiclass: normalize rows to sum=1 (CRITICAL for log_loss)
-    if is_multiclass and preds.ndim > 1 and preds.shape[1] > 1:
+    # Multiclass: normalize finite positive rows to sum=1 for log loss.
+    if (
+        is_multiclass
+        and not independent_outputs
+        and preds.ndim > 1
+        and preds.shape[1] > 1
+    ):
         row_sums = preds.sum(axis=1, keepdims=True)
+        if np.any(row_sums <= 0):
+            bad_rows = int(np.sum(row_sums <= 0))
+            raise ValueError(
+                f'{name} has {bad_rows} non-positive rows; OOF/test is incomplete'
+            )
         bad_rows = np.sum(np.abs(row_sums.flatten() - 1.0) > 0.01)
         if bad_rows > 0:
             print(f'WARNING: {name} has {bad_rows} rows not summing to 1.0, renormalizing')
-            preds = preds / np.maximum(row_sums, 1e-10)
+            preds = preds / row_sums
 
-    # 4. Check for empty rows (indicates unfilled OOF - CRITICAL BUG)
-    if preds.ndim > 1:
-        empty = np.sum(preds.sum(axis=1) < 1e-10)
-    else:
-        empty = np.sum(np.abs(preds) < 1e-10)
-    if empty > 0:
-        print(f'CRITICAL WARNING: {name} has {empty} empty/zero rows (unfilled predictions!)')
+    if not np.all(np.isfinite(preds)):
+        raise ValueError(f'{name} became non-finite during validation')
 
     return preds
 
 # MANDATORY: Call BEFORE saving OOF and test predictions
-oof_preds = validate_and_fix_probabilities(oof_preds, is_multiclass=(n_classes > 2), name="OOF")
-test_preds = validate_and_fix_probabilities(test_preds, is_multiclass=(n_classes > 2), name="Test")
+oof_preds = validate_probabilities(
+    oof_preds,
+    expected_rows=len(CANONICAL_TRAIN_IDS),
+    expected_cols=(N_TARGETS if TARGET_TYPE == "multi_label" else None),
+    is_multiclass=(TARGET_TYPE == "single" and n_classes > 2),
+    independent_outputs=(TARGET_TYPE == "multi_label"),
+    name="OOF",
+)
+test_preds = validate_probabilities(
+    test_preds,
+    expected_rows=n_test_entities,
+    expected_cols=(N_TARGETS if TARGET_TYPE == "multi_label" else None),
+    is_multiclass=(TARGET_TYPE == "single" and n_classes > 2),
+    independent_outputs=(TARGET_TYPE == "multi_label"),
+    name="Test",
+)
 ```
 
 ### 2b. Multi-Modal Hybrid Best Practice
@@ -102,10 +148,11 @@ _SOFT_DEADLINE_S = _TIMEOUT_S - 50  # Reserve 50s for cleanup/save
 def _check_deadline() -> bool:
     return (time.time() - _START_TIME) >= _SOFT_DEADLINE_S
 
-# For sklearn/fold-based: Check at start of each fold
-for fold_idx, (train_idx, val_idx) in enumerate(kfold.split(X, y)):
+# For fold-based training: use the exact injected split iterator. A temporal
+# fold cannot be reconstructed with `CANONICAL_FOLDS != fold_idx`.
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
     if _check_deadline():
-        print("[LOG:WARNING] Soft deadline reached, stopping early")
+        print("[LOG:WARNING] Soft deadline reached; checkpointing partial fold state")
         break
     # ... train fold ...
 
@@ -114,11 +161,24 @@ for epoch in range(max_epochs):
     for batch_idx, batch in enumerate(dataloader):
         if batch_idx % 10 == 0 and _check_deadline():  # Check every 10 batches
             print(f"[TIMEOUT] Soft deadline at epoch {epoch}, batch {batch_idx}")
-            torch.save(model, 'model_emergency.pth')  # Emergency save FULL model
+            torch.save(
+                {
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "epoch": epoch,
+                },
+                "model_emergency_state.pt",
+            )
             break
     if _check_deadline():
         break
 ```
+
+If the deadline leaves any canonical fold unfinished, save only the documented
+partial checkpoint. Do not save a final OOF/test artifact, print a validation
+score, or create a submission until every row selected by
+`CANONICAL_OOF_ELIGIBLE_MASK` is filled. Temporal warm-up rows outside that
+mask must remain NaN.
 
 ### 4. Reproducibility
 - Set Python, NumPy, framework seeds, and every `random_state` to `RUN_SEED`
@@ -132,6 +192,8 @@ for epoch in range(max_epochs):
 - Convert predictions to integers for AUC/LogLoss metrics: NEVER `(predictions > 0.5).astype(int)`
 - Create dummy/fallback submissions with constant values (0.5, mean, zeros) when errors occur
 - Use broad `except Exception` clauses that hide FileNotFoundError, RuntimeError, ValueError
+- Serialize/pickle a full PyTorch model object; save state_dict plus explicit
+  architecture/config metadata instead
 
 ### 6. API Gotchas
 - OneHotEncoder: `sparse_output=False` (sklearn 1.2+)

@@ -19,6 +19,12 @@ import pandas as pd
 from ..core.config import compare_scores, get_config
 from ..core.state import KaggleState, SubmissionResult
 from ..utils.csv_utils import read_csv_auto
+from ..utils.submission_artifacts import (
+    sha256_file,
+    snapshot_accepted_submission,
+    verified_accepted_submission,
+    verified_best_candidate_submission,
+)
 
 
 class SubmissionAgent:
@@ -62,6 +68,160 @@ class SubmissionAgent:
             self.authenticated = False
         return self.authenticated
 
+    @staticmethod
+    def _finite_score(value: Any) -> float | None:
+        """Return a finite numeric score without accepting booleans."""
+        if isinstance(value, bool):
+            return None
+        try:
+            score = float(value)
+        except (TypeError, ValueError):
+            return None
+        return score if np.isfinite(score) else None
+
+    @classmethod
+    def _resolve_mlebench_cv_provenance(
+        cls,
+        state: KaggleState,
+        working_dir: Path,
+        submission_path: Path,
+    ) -> tuple[float | None, str | None, str | None]:
+        """Resolve host-side CV evidence for the exact submitted artifact.
+
+        Generic progress fields such as ``current_performance_score`` and
+        ``baseline_cv_score`` are deliberately excluded: they do not prove
+        which model produced ``submission.csv``. A score is reportable only
+        when an exact artifact hash binds it to either:
+
+        * a host-scored ensemble; or
+        * a robustness-approved component with a host-recomputed trusted score;
+        * a prior accepted snapshot carrying one of those provenances.
+        """
+        try:
+            current_digest = sha256_file(submission_path)
+        except OSError:
+            return None, None, None
+
+        ensemble_score = cls._finite_score(state.get("ensemble_oof_score"))
+        if (
+            ensemble_score is not None
+            and str(state.get("ensemble_submission_sha256") or "").lower()
+            == current_digest
+            and state.get("ensemble_submission_owner") == "ensemble"
+            and state.get("ensemble_score_source") == "host_oof_ensemble"
+        ):
+            return ensemble_score, "host_oof_ensemble", "ensemble"
+
+        best_snapshot = verified_best_candidate_submission(state, working_dir)
+        owner = str(state.get("best_candidate_submission_component_name") or "")
+        approvals = state.get("robustness_approved_components") or {}
+        trusted_scores = state.get("trusted_component_scores") or {}
+        if (
+            best_snapshot is not None
+            and current_digest
+            == str(state.get("best_candidate_submission_sha256") or "").lower()
+            and owner
+            and isinstance(approvals, dict)
+            and approvals.get(owner) is True
+            and isinstance(trusted_scores, dict)
+        ):
+            raw_score = trusted_scores.get(owner)
+            if isinstance(raw_score, dict):
+                raw_score = raw_score.get("score", raw_score.get("cv_score"))
+            component_score = cls._finite_score(raw_score)
+            if component_score is not None:
+                return component_score, "trusted_component_scores", owner
+
+        accepted_snapshot = verified_accepted_submission(state, working_dir)
+        accepted_score = cls._finite_score(
+            state.get("accepted_submission_cv_score")
+        )
+        accepted_source = str(
+            state.get("accepted_submission_score_source") or ""
+        )
+        accepted_owner = str(
+            state.get("accepted_submission_score_owner") or ""
+        )
+        accepted_provenance_valid = (
+            accepted_source == "host_oof_ensemble"
+            and accepted_owner == "ensemble"
+        )
+        if accepted_source == "trusted_component_scores" and accepted_owner:
+            accepted_provenance_valid = (
+                isinstance(approvals, dict)
+                and approvals.get(accepted_owner) is True
+            )
+        if (
+            accepted_snapshot is not None
+            and accepted_score is not None
+            and accepted_provenance_valid
+            and current_digest
+            == str(state.get("accepted_submission_sha256") or "").lower()
+        ):
+            return accepted_score, accepted_source, accepted_owner
+
+        return None, None, None
+
+    @staticmethod
+    def _retry_updates(
+        state: KaggleState,
+        error: str,
+        *,
+        failure_kind: str = "invalid",
+    ) -> dict[str, Any]:
+        """Persist bounded retry control as a node update.
+
+        LangGraph route functions choose an edge; mutating state inside a route
+        is not a durable state update. Submission failures therefore advance
+        the counter and reset the developer cursor in this node.
+        """
+        try:
+            failure_count = max(0, int(state.get("retry_submission_count", 0))) + 1
+        except (TypeError, ValueError):
+            failure_count = 1
+
+        plan = state.get("ablation_plan", []) or []
+
+        def component_type(item: Any) -> str | None:
+            if isinstance(item, dict):
+                return item.get("component_type")
+            return getattr(item, "component_type", None)
+
+        retry_index = next(
+            (
+                index
+                for index in range(len(plan) - 1, -1, -1)
+                if component_type(plan[index]) in {"model", "ensemble"}
+            ),
+            max(0, len(plan) - 1),
+        )
+        updates: dict[str, Any] = {
+            "submission_validation_error": error,
+            "retry_submission_count": failure_count,
+            "current_component_index": retry_index,
+            "skip_remaining_components": False,
+        }
+        if failure_count > 3:
+            updates.update(
+                {
+                    "should_continue": False,
+                    "termination_reason": (
+                        f"submission_{failure_kind}_after_retries"
+                    ),
+                }
+            )
+            # A hash-verified artifact accepted in an earlier iteration can
+            # still be graded; only invalidate the whole run when no such
+            # artifact exists. Otherwise retry exhaustion in a later iteration
+            # would convert a real partial success into "no submission".
+            has_verified_accepted = bool(
+                state.get("accepted_submission_snapshot_path")
+                and state.get("accepted_submission_sha256")
+            )
+            if not has_verified_accepted:
+                updates["workflow_valid"] = False
+        return updates
+
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute submission upload and monitoring.
@@ -83,15 +243,56 @@ class SubmissionAgent:
         sample_submission_path = (
             state.get("sample_submission_path") or working_dir / "sample_submission.csv"
         )
+        mlebench_mode = str(state.get("run_mode", "")).lower() == "mlebench" or os.getenv(
+            "MLEBENCH_MODE", ""
+        ).lower() in {"1", "true", "yes"}
 
-        # Find submission file
-        submission_path = self._find_submission_file(working_dir)
+        # Upstream MLE-bench gates use ``workflow_valid=False`` when a required
+        # immutable artifact cannot be verified. Never let a shape-valid
+        # mutable file left in the workspace bypass that decision.
+        if mlebench_mode and state.get("workflow_valid") is False:
+            message = str(
+                state.get("submission_validation_error")
+                or "Workflow invalidated before submission"
+            )
+            print(f"❌ Submission blocked: {message}")
+            submission_path = working_dir / "submission.csv"
+            submission_result = SubmissionResult(
+                submission_id=None,
+                public_score=None,
+                private_score=None,
+                percentile=None,
+                cv_score=None,
+                file_path=str(submission_path) if submission_path.is_file() else None,
+                valid=False,
+                error=message,
+            )
+            return {
+                "submissions": [submission_result],
+                **self._retry_updates(state, message),
+                "workflow_valid": False,
+                "last_updated": datetime.now(),
+            }
+
+        # Benchmark runs accept only the current canonical output. Recursive
+        # discovery could accidentally promote a prior/rejected hidden snapshot.
+        submission_path = (
+            working_dir / "submission.csv"
+            if mlebench_mode and (working_dir / "submission.csv").is_file()
+            else None
+        )
+        if not mlebench_mode:
+            submission_path = self._find_submission_file(working_dir)
 
         if not submission_path:
             print("❌ No submission file found")
             return {
                 "last_updated": datetime.now(),
-                "submission_validation_error": "No submission file found",
+                **self._retry_updates(
+                    state,
+                    "No submission file found",
+                    failure_kind="missing",
+                ),
             }
 
         print(f"\n📄 Submission file: {submission_path.name}")
@@ -113,6 +314,16 @@ class SubmissionAgent:
             problem_type=problem_type,
             metric_name=metric_name,
         )
+        if is_valid and mlebench_mode and Path(sample_submission_path).is_file():
+            try:
+                is_template = Path(sample_submission_path).samefile(submission_path) or (
+                    sha256_file(submission_path) == sha256_file(Path(sample_submission_path))
+                )
+            except OSError:
+                is_template = False
+            if is_template:
+                is_valid = False
+                message = "Generated submission is identical to the sample submission template"
 
         if not is_valid:
             print(f"❌ Validation failed: {message}")
@@ -129,37 +340,70 @@ class SubmissionAgent:
             return {
                 "last_updated": datetime.now(),
                 "submissions": [submission_result],
-                "submission_validation_error": message,
+                **self._retry_updates(state, message),
             }
 
         print("✅ Validation passed")
 
         # In MLE-bench mode, validate and return the artifact without uploading it.
         # The runner performs the sole test-set grading pass after this workflow ends.
-        mlebench_mode = str(state.get("run_mode", "")).lower() == "mlebench" or os.getenv(
-            "MLEBENCH_MODE", ""
-        ).lower() in {"1", "true", "yes"}
         if mlebench_mode:
-            cv_score = state.get("current_performance_score")
-            if not isinstance(cv_score, (int, float)):
-                cv_score = state.get("best_single_model_score")
-            if not isinstance(cv_score, (int, float)):
-                cv_score = state.get("baseline_cv_score")
+            cv_score, score_source, score_owner = (
+                self._resolve_mlebench_cv_provenance(
+                    state,
+                    working_dir,
+                    submission_path,
+                )
+            )
 
-            print("✅ MLE-bench artifact ready; final grading deferred to the runner")
+            try:
+                snapshot_path, snapshot_sha256 = snapshot_accepted_submission(
+                    working_dir,
+                    submission_path,
+                    run_id=str(state.get("run_id") or ""),
+                    iteration=int(state.get("current_iteration", 0) or 0),
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                message = f"Failed to preserve accepted submission: {exc}"
+                print(f"❌ {message}")
+                submission_result = SubmissionResult(
+                    submission_id=None,
+                    public_score=None,
+                    private_score=None,
+                    percentile=None,
+                    cv_score=None,
+                    file_path=str(submission_path),
+                    valid=False,
+                    error=message,
+                )
+                return {
+                    "submissions": [submission_result],
+                    **self._retry_updates(state, message),
+                    "last_updated": datetime.now(),
+                }
+
+            print(
+                "✅ MLE-bench artifact snapshotted; final grading deferred to the runner"
+            )
             submission_result = SubmissionResult(
                 submission_id=None,
                 public_score=None,
                 private_score=None,
                 percentile=None,
                 cv_score=float(cv_score) if isinstance(cv_score, (int, float)) else None,
-                file_path=str(submission_path),
+                file_path=str(snapshot_path),
                 valid=True,
                 error=None,
                 submitted_at=datetime.now(),
             )
             return {
                 "submissions": [submission_result],
+                "accepted_submission_path": str(snapshot_path),
+                "accepted_submission_snapshot_path": str(snapshot_path),
+                "accepted_submission_sha256": snapshot_sha256,
+                "accepted_submission_cv_score": cv_score,
+                "accepted_submission_score_owner": score_owner,
+                "accepted_submission_score_source": score_source,
                 "submission_validation_error": None,
                 "retry_submission_count": 0,
                 "last_updated": datetime.now(),
@@ -194,13 +438,25 @@ class SubmissionAgent:
             # No score available (hidden score competition), keep previous best
             updated_best = current_best
 
-        return {
+        updates: dict[str, Any] = {
             "submissions": [submission_result],
             "best_score": updated_best,  # Guaranteed to be float
-            "submission_validation_error": None,
-            "retry_submission_count": 0,
             "last_updated": datetime.now(),
         }
+        if submission_result.valid:
+            updates["submission_validation_error"] = None
+            updates["retry_submission_count"] = 0
+        else:
+            # A terminal upload failure must advance the bounded retry
+            # counter; resetting it here made the route retry forever.
+            updates.update(
+                self._retry_updates(
+                    state,
+                    submission_result.error or "Kaggle submission failed",
+                    failure_kind="upload",
+                )
+            )
+        return updates
 
     def _find_submission_file(self, working_dir: Path) -> Path | None:
         """Find submission file in working directory."""
@@ -212,6 +468,8 @@ class SubmissionAgent:
 
         # Search for a generated alternative, never the template itself.
         for file in working_dir.rglob("*submission*.csv"):
+            if any(part.startswith(".") for part in file.relative_to(working_dir).parts):
+                continue
             if file.name.lower() in {"sample_submission.csv", "sample-submission.csv"}:
                 continue
             return file
@@ -256,61 +514,13 @@ class SubmissionAgent:
                 try:
                     sample_sub = read_csv_auto(sample_submission_path)
 
-                    # Enhanced shape mismatch detection for pixel-level format
                     if df.shape[0] != sample_sub.shape[0]:
-                        expected_rows = sample_sub.shape[0]
-                        actual_rows = df.shape[0]
-                        ratio = expected_rows / max(actual_rows, 1)
-
-                        # Detect pixel-level format mismatch (expected >> actual)
-                        if ratio > 100:
-                            return (
-                                False,
-                                f"""
-PIXEL-LEVEL FORMAT MISMATCH DETECTED!
-
-Expected: {expected_rows:,} rows (one per pixel)
-Got: {actual_rows:,} rows (looks like one per image)
-
-This appears to be an image-to-image task (denoising, segmentation, super-resolution)
-that requires PIXEL-LEVEL predictions.
-
-YOUR MODEL ARCHITECTURE IS WRONG. You likely used a classifier (e.g., EfficientNet,
-ResNet with FC head) instead of an encoder-decoder (e.g., U-Net, autoencoder).
-
-REQUIREMENTS:
-1. Model must output a FULL IMAGE (same H x W as input), not a single value
-2. Use encoder-decoder architecture (U-Net, autoencoder, FCN)
-3. Flatten output to pixel-level format for submission
-
-CORRECT CODE PATTERN:
-```python
-sample_sub = pd.read_csv(sample_submission_path)
-expected_rows = len(sample_sub)  # {expected_rows:,} rows
-
-submission_rows = []
-for img_path in sorted(test_images):
-    img_id = img_path.stem  # e.g., "1" from "1.png"
-    pred = model(preprocess(img))  # OUTPUT: (H, W) image, NOT single value
-    H, W = pred.shape
-    for row in range(H):
-        for col in range(W):
-            pixel_id = f"{{img_id}}_{{row+1}}_{{col+1}}"
-            submission_rows.append({{"id": pixel_id, "value": pred[row, col]}})
-
-assert len(submission_rows) == expected_rows
-pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
-```
-
-DO NOT USE:
-- Image classifiers (EfficientNet, ResNet, VGG with FC head)
-- Models that output a single value per image
-- Global average pooling followed by dense layers
-""",
-                            )
                         return (
                             False,
-                            f"Shape mismatch vs sample_submission (got {df.shape}, expected {sample_sub.shape})",
+                            "Row-count mismatch versus the supplied sample template "
+                            f"(got {df.shape[0]:,}, expected {sample_sub.shape[0]:,}). "
+                            "Generate one prediction for every observed template ID "
+                            "without assuming an ID encoding or coordinate base.",
                         )
 
                     if df.columns.tolist() != sample_sub.columns.tolist():

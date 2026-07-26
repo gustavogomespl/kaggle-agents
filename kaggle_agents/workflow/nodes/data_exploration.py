@@ -63,17 +63,29 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     n_train_samples = len(df)
     n_features = len(df.columns)
 
-    # Detect target column
-    target_col = state.get("target_column")
-    if not target_col:
-        # Try common target names
-        possible_targets = ["target", "label", "class", "y", "outcome"]
-        for pt in possible_targets:
-            if pt in df.columns:
-                target_col = pt
-                break
-        if not target_col and df.columns[-1] not in ["id", "Id", "ID"]:
-            target_col = df.columns[-1]
+    # Column roles must come from the public/canonical contract. Guessing from
+    # familiar target names or from "the last column" is benchmark-shaped prior
+    # knowledge and can silently analyze a feature as the target.
+    canonical_contract = state.get("canonical_contract") or {}
+    raw_target_cols = (
+        canonical_contract.get("target_cols")
+        or state.get("target_cols")
+        or [
+            state.get("target_col")
+            or canonical_contract.get("target_col")
+        ]
+    )
+    target_cols = [
+        str(column)
+        for column in raw_target_cols
+        if isinstance(column, str) and column in df.columns
+    ]
+    target_col = target_cols[0] if len(target_cols) == 1 else None
+    target_type = str(
+        canonical_contract.get("target_type")
+        or state.get("target_type")
+        or "single"
+    )
 
     # Feature type detection
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -81,11 +93,17 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     datetime_cols = []
 
     # Remove target and ID from feature lists
-    id_cols = [c for c in df.columns if c.lower() in ("id", "row_id", "index")]
-    exclude_cols = set(id_cols + ([target_col] if target_col else []))
+    contracted_id = canonical_contract.get("id_col")
+    id_cols = (
+        [contracted_id]
+        if isinstance(contracted_id, str) and contracted_id in df.columns
+        else []
+    )
+    exclude_cols = set(id_cols + target_cols)
 
     numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
     categorical_cols = [c for c in categorical_cols if c not in exclude_cols]
+    n_features = len([column for column in df.columns if column not in exclude_cols])
 
     # Try to detect datetime columns from object columns
     for col in categorical_cols[:]:
@@ -124,7 +142,35 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     imbalance_ratio = None
     n_classes = None
 
-    if target_col and target_col in df.columns:
+    is_classification = canonical_contract.get("is_classification")
+    if (
+        target_type == "multi_label"
+        and len(target_cols) > 1
+        and is_classification is True
+    ):
+        positive_rates = {
+            column: float(pd.to_numeric(df[column], errors="coerce").mean())
+            for column in target_cols
+        }
+        target_distribution = {
+            f"{column}:positive_rate": rate
+            for column, rate in positive_rates.items()
+        }
+        n_classes = len(target_cols)
+        per_label_ratios = []
+        for rate in positive_rates.values():
+            if 0.0 < rate < 1.0:
+                per_label_ratios.append(
+                    max(rate / (1.0 - rate), (1.0 - rate) / rate)
+                )
+        if per_label_ratios:
+            imbalance_ratio = float(max(per_label_ratios))
+            is_imbalanced = imbalance_ratio > 3.0
+    elif (
+        target_col
+        and target_col in df.columns
+        and is_classification is True
+    ):
         value_counts = df[target_col].value_counts(normalize=True)
         target_distribution = value_counts.to_dict()
         n_classes = len(value_counts)

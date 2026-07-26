@@ -26,9 +26,10 @@ class MLEBenchDataInfo:
     description_path: Path | None = None
     data_type: str = "tabular"  # tabular, image, audio, text
     target_column: str = "target"
+    target_columns: list[str] = field(default_factory=lambda: ["target"])
     id_column: str = "id"
     extra_files: list[Path] = field(default_factory=list)
-    # Non-standard label files (e.g., .txt files for MLSP 2013 Birds)
+    # Label and split-metadata files discovered from the public data.
     label_files: list[Path] = field(default_factory=list)
-    # Audio source directory (e.g., essential_data/src_wavs)
+    # Audio source directory inferred from local file extensions.
     audio_source_path: Path | None = None

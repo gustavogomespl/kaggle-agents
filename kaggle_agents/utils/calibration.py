@@ -28,7 +28,12 @@ class CalibrationResult:
     logloss_before: float
     logloss_after: float
     improvement_pct: float
-    calibrator: LogisticRegression | list[IsotonicRegression] | None = None
+    calibrator: (
+        LogisticRegression
+        | list[LogisticRegression]
+        | list[IsotonicRegression]
+        | None
+    ) = None
 
 
 def compute_brier_score(probs: np.ndarray, y_true: np.ndarray) -> float:
@@ -71,6 +76,7 @@ def platt_scaling(
     y_true: np.ndarray,
     cv_folds: np.ndarray | None = None,
     n_cv_splits: int = 5,
+    forward_chaining: bool = False,
 ) -> tuple[np.ndarray, LogisticRegression | list[LogisticRegression]]:
     """Apply Platt scaling (logistic calibration) to OOF probabilities.
 
@@ -87,9 +93,21 @@ def platt_scaling(
     """
     if oof_probs.ndim == 1:
         # Binary classification
-        return _platt_scaling_binary(oof_probs, y_true, cv_folds, n_cv_splits)
+        return _platt_scaling_binary(
+            oof_probs,
+            y_true,
+            cv_folds,
+            n_cv_splits,
+            forward_chaining,
+        )
     # Multiclass: per-class calibration
-    return _platt_scaling_multiclass(oof_probs, y_true, cv_folds, n_cv_splits)
+    return _platt_scaling_multiclass(
+        oof_probs,
+        y_true,
+        cv_folds,
+        n_cv_splits,
+        forward_chaining,
+    )
 
 
 def _platt_scaling_binary(
@@ -97,16 +115,23 @@ def _platt_scaling_binary(
     y_true: np.ndarray,
     cv_folds: np.ndarray | None,
     n_cv_splits: int,
+    forward_chaining: bool,
 ) -> tuple[np.ndarray, LogisticRegression]:
     """Platt scaling for binary classification."""
-    calibrated = np.zeros_like(probs)
+    calibrated = np.asarray(probs).copy() if forward_chaining else np.zeros_like(probs)
 
     if cv_folds is not None:
         # Use provided folds for OOF calibration
         unique_folds = np.unique(cv_folds)
         for fold in unique_folds:
-            train_mask = cv_folds != fold
+            train_mask = (
+                cv_folds < fold if forward_chaining else cv_folds != fold
+            )
             val_mask = cv_folds == fold
+            if not train_mask.any():
+                # The first temporal validation block has no earlier OOF
+                # calibration observations. Identity is the only honest choice.
+                continue
 
             calibrator = LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")
             calibrator.fit(probs[train_mask].reshape(-1, 1), y_true[train_mask])
@@ -131,10 +156,11 @@ def _platt_scaling_multiclass(
     y_true: np.ndarray,
     cv_folds: np.ndarray | None,
     n_cv_splits: int,
+    forward_chaining: bool,
 ) -> tuple[np.ndarray, list[LogisticRegression]]:
     """Platt scaling for multiclass classification (per-class)."""
     n_samples, n_classes = probs.shape
-    calibrated = np.zeros_like(probs)
+    calibrated = np.asarray(probs).copy() if forward_chaining else np.zeros_like(probs)
     calibrators: list[LogisticRegression] = []
 
     for c in range(n_classes):
@@ -144,8 +170,12 @@ def _platt_scaling_multiclass(
         if cv_folds is not None:
             unique_folds = np.unique(cv_folds)
             for fold in unique_folds:
-                train_mask = cv_folds != fold
+                train_mask = (
+                    cv_folds < fold if forward_chaining else cv_folds != fold
+                )
                 val_mask = cv_folds == fold
+                if not train_mask.any():
+                    continue
 
                 calibrator = LogisticRegression(C=1.0, max_iter=1000, solver="lbfgs")
                 calibrator.fit(probs_c[train_mask].reshape(-1, 1), y_binary[train_mask])
@@ -175,6 +205,7 @@ def isotonic_calibration(
     y_true: np.ndarray,
     cv_folds: np.ndarray | None = None,
     n_cv_splits: int = 5,
+    forward_chaining: bool = False,
 ) -> tuple[np.ndarray, list[IsotonicRegression]]:
     """Apply isotonic regression calibration to OOF probabilities.
 
@@ -194,7 +225,11 @@ def isotonic_calibration(
         oof_probs = oof_probs.reshape(-1, 1)
 
     n_samples, n_classes = oof_probs.shape
-    calibrated = np.zeros_like(oof_probs)
+    calibrated = (
+        np.asarray(oof_probs).copy()
+        if forward_chaining
+        else np.zeros_like(oof_probs)
+    )
     calibrators: list[IsotonicRegression] = []
 
     for c in range(n_classes):
@@ -204,8 +239,12 @@ def isotonic_calibration(
         if cv_folds is not None:
             unique_folds = np.unique(cv_folds)
             for fold in unique_folds:
-                train_mask = cv_folds != fold
+                train_mask = (
+                    cv_folds < fold if forward_chaining else cv_folds != fold
+                )
                 val_mask = cv_folds == fold
+                if not train_mask.any():
+                    continue
 
                 iso = IsotonicRegression(out_of_bounds="clip", y_min=0, y_max=1)
                 iso.fit(probs_c[train_mask], y_binary[train_mask])
@@ -241,6 +280,7 @@ def calibrate_oof_predictions(
     method: Literal["platt", "isotonic", "auto"] = "auto",
     cv_folds: np.ndarray | None = None,
     save_both: bool = True,
+    oof_eligible_mask: np.ndarray | None = None,
 ) -> CalibrationResult:
     """Calibrate OOF predictions and optionally save both raw and calibrated versions.
 
@@ -255,7 +295,36 @@ def calibrate_oof_predictions(
         CalibrationResult with before/after metrics
     """
     name = oof_path.stem.replace("oof_", "", 1)
-    oof_raw = np.load(oof_path)
+    oof_raw_full = np.asarray(np.load(oof_path, allow_pickle=False))
+    y_true = np.asarray(y_true)
+    if len(oof_raw_full) != len(y_true):
+        raise ValueError("OOF/target length mismatch during calibration")
+
+    forward_chaining = oof_eligible_mask is not None
+    if forward_chaining:
+        eligible = np.asarray(oof_eligible_mask, dtype=bool)
+        if eligible.shape != (len(oof_raw_full),) or not eligible.any():
+            raise ValueError("Invalid temporal OOF eligibility mask")
+        warmup = oof_raw_full[~eligible]
+        if warmup.size and not np.isnan(warmup).all():
+            raise ValueError(
+                "Temporal warm-up OOF rows must remain NaN before calibration"
+            )
+        if cv_folds is None:
+            raise ValueError(
+                "Temporal calibration requires canonical forward fold assignments"
+            )
+        cv_folds = np.asarray(cv_folds)
+        if cv_folds.shape != eligible.shape:
+            raise ValueError("Temporal calibration folds are not row-aligned")
+        oof_raw = oof_raw_full[eligible]
+        y_true = y_true[eligible]
+        cv_folds = cv_folds[eligible]
+        if np.any(cv_folds < 0):
+            raise ValueError("Eligible temporal calibration folds must be non-negative")
+    else:
+        eligible = np.ones(len(oof_raw_full), dtype=bool)
+        oof_raw = oof_raw_full
 
     # Compute metrics before calibration
     brier_before = compute_brier_score(oof_raw, y_true)
@@ -265,7 +334,12 @@ def calibrate_oof_predictions(
     if method == "auto":
         # Try Platt
         try:
-            oof_platt, cal_platt = platt_scaling(oof_raw, y_true, cv_folds)
+            oof_platt, cal_platt = platt_scaling(
+                oof_raw,
+                y_true,
+                cv_folds,
+                forward_chaining=forward_chaining,
+            )
             brier_platt = compute_brier_score(oof_platt, y_true)
         except Exception:
             brier_platt = float("inf")
@@ -274,7 +348,12 @@ def calibrate_oof_predictions(
 
         # Try Isotonic
         try:
-            oof_iso, cal_iso = isotonic_calibration(oof_raw, y_true, cv_folds)
+            oof_iso, cal_iso = isotonic_calibration(
+                oof_raw,
+                y_true,
+                cv_folds,
+                forward_chaining=forward_chaining,
+            )
             brier_iso = compute_brier_score(oof_iso, y_true)
         except Exception:
             brier_iso = float("inf")
@@ -294,10 +373,20 @@ def calibrate_oof_predictions(
             calibrator = None
             selected_method = "none"
     elif method == "platt":
-        oof_cal, calibrator = platt_scaling(oof_raw, y_true, cv_folds)
+        oof_cal, calibrator = platt_scaling(
+            oof_raw,
+            y_true,
+            cv_folds,
+            forward_chaining=forward_chaining,
+        )
         selected_method = "platt"
     else:
-        oof_cal, calibrator = isotonic_calibration(oof_raw, y_true, cv_folds)
+        oof_cal, calibrator = isotonic_calibration(
+            oof_raw,
+            y_true,
+            cv_folds,
+            forward_chaining=forward_chaining,
+        )
         selected_method = "isotonic"
 
     # Compute metrics after calibration
@@ -313,8 +402,17 @@ def calibrate_oof_predictions(
         raw_path = models_dir / f"oof_raw_{name}.npy"
         cal_path = models_dir / f"oof_cal_{name}.npy"
 
-        np.save(raw_path, oof_raw)
-        np.save(cal_path, oof_cal)
+        np.save(raw_path, oof_raw_full)
+        if forward_chaining:
+            oof_cal_full = np.full(
+                oof_raw_full.shape,
+                np.nan,
+                dtype=np.asarray(oof_cal).dtype,
+            )
+            oof_cal_full[eligible] = oof_cal
+        else:
+            oof_cal_full = oof_cal
+        np.save(cal_path, oof_cal_full)
 
     return CalibrationResult(
         model_name=name,
@@ -343,7 +441,7 @@ def calibrate_test_predictions(
     Returns:
         Calibrated test predictions
     """
-    test_raw = np.load(test_path)
+    test_raw = np.load(test_path, allow_pickle=False)
 
     if test_raw.ndim == 1:
         # Binary classification

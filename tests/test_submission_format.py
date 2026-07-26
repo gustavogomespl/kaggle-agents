@@ -207,6 +207,19 @@ class TestDetectMultiplierPattern:
         assert multiplier == 1000
         assert num_classes == 150
 
+    def test_infers_unseen_multiplier_from_local_id_grid(self) -> None:
+        """Detection must be data-driven rather than a benchmark multiplier list."""
+        ids = [
+            rec_id * 37 + class_id
+            for rec_id in (2, 5, 8, 11)
+            for class_id in range(7)
+        ]
+
+        multiplier, num_classes = _detect_multiplier_pattern(sorted(ids))
+
+        assert multiplier == 37
+        assert num_classes == 7
+
     def test_no_pattern_random_ids(self) -> None:
         """Test that random IDs don't match a pattern."""
         ids = [1, 5, 23, 47, 89, 101, 234, 567, 890]
@@ -243,8 +256,8 @@ class TestGenerateSubmissionCodeHint:
         assert "Wide format" in code
         assert "submission[col] = predictions[:, i]" in code
 
-    def test_long_format_mlsp_hint(self) -> None:
-        """Test code hint generation for MLSP long format."""
+    def test_long_format_numeric_grid_hint(self) -> None:
+        """Test code hint generation for a detected numeric-grid long format."""
         format_info = SubmissionFormatInfo(
             format_type="long",
             id_column="Id",
@@ -257,7 +270,7 @@ class TestGenerateSubmissionCodeHint:
         code = generate_submission_code_hint(format_info)
 
         assert "Long format" in code
-        assert "MLSP" in code
+        assert "ID pattern" in code
         assert "rec_id * 100 + class_id" in code
 
     def test_unknown_format_hint(self) -> None:

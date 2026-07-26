@@ -123,7 +123,10 @@ class EnsembleAgent:
 
             if class_order_path.exists():
                 try:
-                    saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+                    saved_order = np.load(
+                        class_order_path,
+                        allow_pickle=False,
+                    ).tolist()
                     if not _class_orders_match(saved_order, expected_class_order):
                         skip_reasons.append(
                             f"{name}: Class order mismatch - "
@@ -140,7 +143,10 @@ class EnsembleAgent:
                 global_class_order = models_dir / "class_order.npy"
                 if global_class_order.exists():
                     try:
-                        saved_order = np.load(global_class_order, allow_pickle=True).tolist()
+                        saved_order = np.load(
+                            global_class_order,
+                            allow_pickle=False,
+                        ).tolist()
                         if not _class_orders_match(saved_order, expected_class_order):
                             skip_reasons.append(
                                 f"{name}: Global class order mismatch - "
@@ -165,7 +171,10 @@ class EnsembleAgent:
             train_ids_path = models_dir / f"train_ids_{name}.npy"
             if train_ids_path.exists():
                 try:
-                    saved_ids = np.load(train_ids_path, allow_pickle=True)
+                    saved_ids = np.load(
+                        train_ids_path,
+                        allow_pickle=False,
+                    )
                     if not np.array_equal(saved_ids, train_ids):
                         skip_reasons.append(f"{name}: Train IDs mismatch (row order differs)")
                         continue
@@ -620,7 +629,7 @@ class EnsembleAgent:
             print(f"      [LOG:WARNING] No train_ids file for {oof_path.name}, assuming aligned")
             return oof, np.ones(len(oof), dtype=bool)
 
-        train_ids = np.load(train_ids_path, allow_pickle=True)
+        train_ids = np.load(train_ids_path, allow_pickle=False)
 
         if len(train_ids) != len(oof):
             raise ValueError(f"train_ids length {len(train_ids)} != oof length {len(oof)}")
@@ -1678,7 +1687,10 @@ class EnsembleAgent:
 
         try:
             # Load saved class order
-            saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+            saved_order = np.load(
+                class_order_path,
+                allow_pickle=False,
+            ).tolist()
 
             # Load expected class order from sample submission
             sample_sub = read_csv_auto(sample_submission_path)
@@ -1737,7 +1749,10 @@ class EnsembleAgent:
 
         for class_file in class_order_files:
             try:
-                saved_order = np.load(class_file, allow_pickle=True).tolist()
+                saved_order = np.load(
+                    class_file,
+                    allow_pickle=False,
+                ).tolist()
                 model_name = class_file.stem.replace("class_order_", "").replace("classes_", "")
 
                 if _class_orders_match(saved_order, expected_order):
@@ -1843,7 +1858,10 @@ class EnsembleAgent:
                     class_order_path = models_dir / "class_order.npy"
 
                 if class_order_path.exists():
-                    model_order = np.load(class_order_path, allow_pickle=True).tolist()
+                    model_order = np.load(
+                        class_order_path,
+                        allow_pickle=False,
+                    ).tolist()
 
                     if model_order != canonical_order:
                         print(f"   🔄 Reordering {name} predictions to canonical order")
@@ -2438,8 +2456,7 @@ class EnsembleAgent:
 
         # Sort by score (Assume HIGHER is better for selection logic, we will check metric later)
         # Actually simplest heuristic: take top 3 distinct files
-        # We don't know metric direction here easily, but usually MLE-bench scores are "higher=better" implies internal conversion?
-        # Let's assume standard kaggle logic: we need to know metric.
+        # Metric direction must come from the declared evaluation contract.
         # SAFE FALLBACK: Just take the *last* 3 iterations as they should be improving?
         # BETTER: Sort by score descending (assuming AUC/Acc) or ascending (RMSE/LogLoss)??
         # CRITICAL: We need metric direction. But Rank Averaging is robust to scale, not direction if sorted wrong.
@@ -2798,6 +2815,17 @@ Return a JSON object:
         print("\n" + "=" * 60)
         print("ENSEMBLE AGENT: Creating Model Ensemble")
         print("=" * 60)
+
+        # The legacy implementation still contains regular-Kaggle compatibility
+        # fallbacks around mutable ``submission_best.csv`` files. Formal
+        # MLE-bench runs must use the modular agent's immutable snapshot policy.
+        if (
+            isinstance(state, dict)
+            and str(state.get("run_mode", "")).strip().lower() == "mlebench"
+        ):
+            from .ensemble.agent import EnsembleAgent as ModularEnsembleAgent
+
+            return ModularEnsembleAgent()(state)
 
         errors = []
         if isinstance(state, dict):
@@ -3226,12 +3254,20 @@ Return a JSON object:
                             if sample_submission_path
                             else working_dir / "sample_submission.csv"
                         )
+                        y_vals, inferred_problem_type = _load_oof_target()
+                        prediction_problem_type = (
+                            inferred_problem_type
+                            or (getattr(comp_info, "problem_type", "") if comp_info else "")
+                        )
                         if self._ensemble_from_predictions(
-                            prediction_pairs, sample_path, output_path, problem_type, metric_name
+                            prediction_pairs,
+                            sample_path,
+                            output_path,
+                            prediction_problem_type,
+                            metric_name,
                         ):
                             ensemble_oof_score = None
                             if baseline_score_val is not None:
-                                y_vals, inferred_problem_type = _load_oof_target()
                                 if y_vals is not None and inferred_problem_type:
                                     try:
                                         oof_list = [

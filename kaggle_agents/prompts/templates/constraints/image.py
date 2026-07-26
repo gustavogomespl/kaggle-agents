@@ -16,13 +16,20 @@ def resolve_image_dir(base_dir: Path, split: str) -> Path:
         base_dir / "images" / split,
     ]
     for path in candidates:
-        if path.exists():
+        if path.is_dir():
             return path
-    return candidates[0]  # fallback
+    raise FileNotFoundError(
+        f"No image directory for split={split!r}; checked "
+        f"{[str(path) for path in candidates]}"
+    )
 
 train_dir = resolve_image_dir(base_dir, "train")
 test_dir = resolve_image_dir(base_dir, "test")
 ```
+
+Every model component must load `CANONICAL_FOLDS`, `CANONICAL_TRAIN_IDS`, and
+`CANONICAL_Y`, assert their lengths match the image records, and iterate those
+assignments. Never build an image-specific holdout or a new fold splitter.
 
 ### 1. Variable Image Dimensions (CRITICAL)
 Images often have different sizes. DataLoader's `torch.stack()` fails on different sizes.
@@ -65,9 +72,19 @@ def decode_image(path: tf.Tensor) -> tf.Tensor:
     img = tf.image.resize(img, (224, 224))
     return img
 
-dataset = dataset.map(decode_image, num_parallel_calls=tf.data.AUTOTUNE)
-dataset = dataset.apply(tf.data.Dataset.ignore_errors())
+dataset = dataset.map(
+    decode_image,
+    num_parallel_calls=tf.data.AUTOTUNE,
+    deterministic=True,
+)
+dataset = dataset.apply(
+    tf.data.experimental.assert_cardinality(len(canonical_image_paths))
+)
 ```
+
+Do not suppress dataset element errors or replace a failed decode with a blank
+image. A missing/corrupt record must raise with its canonical record ID;
+silently dropping it corrupts OOF and submission alignment.
 
 If you must use `tf.py_function`, always set shape after:
 ```python
@@ -94,6 +111,25 @@ def apply_augmentation(img: np.ndarray) -> np.ndarray:
 ```python
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = model.to(device)
+```
+
+Save PyTorch checkpoints as state dictionaries plus the explicit reconstruction
+configuration. Never pickle the full model object:
+
+```python
+torch.save(
+    {
+        "model_state_dict": model.state_dict(),
+        "architecture": architecture_name,
+        "architecture_kwargs": architecture_kwargs,
+        "class_order": class_order,
+    },
+    checkpoint_path,
+)
+
+restored = build_model(architecture_name, **architecture_kwargs)
+payload = torch.load(checkpoint_path, map_location=device, weights_only=True)
+restored.load_state_dict(payload["model_state_dict"])
 ```
 
 ### 5. Albumentations v2.x API Changes (CRITICAL)
@@ -229,6 +265,15 @@ for path in all_image_paths:  # includes DICOM via pydicom when needed
 
 (CACHE_DIR / "manifest.json").write_text(json.dumps(cache_manifest, indent=2))
 
+# Fail closed if even one canonical source is absent from the cache manifest.
+expected_sources = {str(path.resolve()) for path in all_image_paths}
+if set(cache_manifest) != expected_sources:
+    missing = sorted(expected_sources - set(cache_manifest))
+    extra = sorted(set(cache_manifest) - expected_sources)
+    raise RuntimeError(
+        f"Image-cache coverage mismatch: missing={missing[:10]}, extra={extra[:10]}"
+    )
+
 # MODEL components: read manifest.json and resolve every source through it.
 # Never rediscover cached files by basename or stem.
 ```
@@ -254,7 +299,7 @@ WHY: AUC measures ranking ability. Hard labels (0/1) lose all ranking informatio
 A model with 0.51 confidence and 0.99 confidence both become "1", destroying the metric.
 
 ### 9. MULTI-LABEL CLASSIFICATION (CRITICAL - PREVENTS NaN LOSS)
-Multi-label tasks (e.g., RANZCR, ChestX-ray14) require DIFFERENT setup than multi-class:
+Multi-label medical-image tasks require DIFFERENT setup than multi-class:
 
 **TRAINING SETUP:**
 ```python
@@ -301,16 +346,23 @@ with torch.no_grad():
     predictions = probabilities.cpu().numpy()
 ```
 
-**COLUMN ORDER (CRITICAL):**
-ALWAYS read target columns from sample_submission.csv, NEVER hardcode:
-```python
-# ✅ CORRECT - dynamic column reading:
-sample_sub = pd.read_csv(sample_submission_path)
-TARGET_COLS = sample_sub.columns[1:].tolist()  # Skip ID column
-print(f"Target columns from sample_sub: {TARGET_COLS}")
+**COLUMN ROLES AND ORDER (CRITICAL):**
+Use the exact ID/prediction roles from injected `submission_format_info`, then
+verify those names against the public template. The template alone does not
+prove that its first column is the ID.
 
-# ❌ WRONG - hardcoded column names may have typos:
-TARGET_COLS = ['ETT - Abnormal', 'NGT - Incomplete', ...]  # May not match!
+```python
+def validate_submission_roles(sample_submission_path, id_col, target_cols):
+    sample_sub = pd.read_csv(sample_submission_path)
+    target_cols = list(target_cols)
+    if not target_cols:
+        raise ValueError("Submission contract contains no prediction columns")
+    required = [id_col, *target_cols]
+    if len(set(required)) != len(required) or any(
+        col not in sample_sub.columns for col in required
+    ):
+        raise ValueError("Injected submission roles do not match public template")
+    return sample_sub, target_cols
 ```
 
 ### 10. FORBIDDEN: HARDCODED PLACEHOLDER METRICS

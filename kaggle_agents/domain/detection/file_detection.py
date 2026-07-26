@@ -36,8 +36,7 @@ class FileDetectionMixin:
 
         # =================================================================
         # CRITICAL: Check for audio files GLOBALLY first
-        # Audio competitions often have spectrograms in train/test dirs
-        # but actual audio files in essential_data/, supplemental_data/, etc.
+        # Audio datasets may include derived spectrograms near source files.
         # If audio files exist ANYWHERE, this is likely an audio competition.
         # =================================================================
         has_audio, audio_count = self._has_audio_assets(data_dir, return_count=True)
@@ -107,7 +106,7 @@ class FileDetectionMixin:
                 if p.is_dir() and p.name.lower().startswith(("train", "test"))
             ]
 
-            # Second priority: other data directories (essential_data, supplemental_data, data, etc.)
+            # Second priority: every other supplied data directory.
             other_data_dirs = [
                 p
                 for p in data_dir.iterdir()
@@ -209,7 +208,7 @@ class FileDetectionMixin:
 
         # CRITICAL: Audio takes priority over images
         # Audio competitions often have spectrograms in train/test but actual
-        # audio files in essential_data/, supplemental_data/, etc.
+        # audio files inside arbitrary nested data directories.
         # If ANY audio files found, prioritize audio detection
         if counts["audio"] > 0:
             return "audio"
@@ -274,7 +273,7 @@ class FileDetectionMixin:
         audio_count = 0
 
         # Check ALL subdirectories (not just train/test prefixed)
-        # This handles non-standard structures like essential_data/, supplemental_data/
+        # Inspect every supplied subdirectory instead of relying on its name.
         exclude_dirs = {"models", "__pycache__", ".git", "logs", ".ipynb_checkpoints"}
 
         for item in data_dir.iterdir():

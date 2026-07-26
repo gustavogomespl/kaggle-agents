@@ -128,7 +128,9 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     return "end"
 
 
-def route_after_submission(state: KaggleState) -> Literal["retry_developer", "continue"]:
+def route_after_submission(
+    state: KaggleState,
+) -> Literal["retry_developer", "continue", "fail"]:
     """
     Route after submission agent - retry if submission is invalid.
 
@@ -143,16 +145,24 @@ def route_after_submission(state: KaggleState) -> Literal["retry_developer", "co
         "continue" otherwise
     """
     submissions = state.get("submissions", [])
+    current_error = state.get("submission_validation_error")
+    failure_count = state.get("retry_submission_count", 0)
+
+    # ``submissions`` is append-only. A missing artifact in the current
+    # iteration must not be masked by a valid submission from an earlier one.
+    if current_error:
+        if failure_count <= 3:
+            print(f"⚠️ Invalid submission: {str(current_error)[:100]}...")
+            print(f"   Retrying with error context... ({failure_count}/3)")
+            return "retry_developer"
+        print("❌ Max submission retries reached; candidate remains invalid")
+        return "fail"
 
     if not submissions:
-        # No submission generated at all - retry
-        retry_count = state.get("retry_submission_count", 0)
-        if retry_count < 3:
-            state["retry_submission_count"] = retry_count + 1
-            state["submission_validation_error"] = "No submission file generated"
-            print(f"⚠️ No submission generated, retrying... ({retry_count + 1}/3)")
+        if failure_count <= 3:
+            print(f"⚠️ No submission generated, retrying... ({failure_count}/3)")
             return "retry_developer"
-        return "continue"
+        return "fail"
 
     last_submission = submissions[-1]
 
@@ -168,16 +178,15 @@ def route_after_submission(state: KaggleState) -> Literal["retry_developer", "co
         is_valid = getattr(last_submission, "valid", True)
         error_msg = getattr(last_submission, "error", None)
 
-    if not is_valid and error_msg:
-        retry_count = state.get("retry_submission_count", 0)
+    if not is_valid:
+        error_msg = error_msg or "Submission validation failed"
 
-        if retry_count < 3:
-            state["retry_submission_count"] = retry_count + 1
-            state["submission_validation_error"] = error_msg
+        if failure_count <= 3:
             print(f"⚠️ Invalid submission: {error_msg[:100]}...")
-            print(f"   Retrying with error context... ({retry_count + 1}/3)")
+            print(f"   Retrying with error context... ({failure_count}/3)")
             return "retry_developer"
-        print("⚠️ Max submission retries reached, continuing...")
+        print("❌ Max submission retries reached; candidate remains invalid")
+        return "fail"
 
     return "continue"
 

@@ -6,6 +6,7 @@ Contains the CodeExecutor class for executing Python code in a sandboxed environ
 
 from __future__ import annotations
 
+import os
 import platform
 import re
 import subprocess
@@ -15,10 +16,21 @@ import time
 from pathlib import Path
 from queue import Empty, Queue
 
+from .canonical_integrity import (
+    CanonicalIntegrityError,
+    snapshot_canonical_contract,
+    verify_and_restore_canonical_contract,
+)
 from .dataclasses import ExecutionResult
 from .error_parser import ErrorParserMixin
+from .filesystem_guard import (
+    install_mlebench_runtime_guard,
+    is_mlebench_execution,
+    validate_mlebench_filesystem_access,
+)
 from .process import (
     build_subprocess_env,
+    kill_process_group_by_id,
     kill_process_tree,
     set_resource_limits,
     start_new_process_group,
@@ -39,18 +51,29 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
     - Working directory management
     """
 
-    def __init__(self, timeout: int = 300):
+    def __init__(
+        self,
+        timeout: int = 300,
+        run_mode: str = "",
+        mlebench_cache_path: str | None = None,
+    ):
         """
         Initialize code executor.
 
         Args:
             timeout: Maximum execution time in seconds (default: 5 minutes)
+            run_mode: Optional workflow mode. ``mlebench`` enables the
+                benchmark filesystem boundary for every retry/debug execution.
+            mlebench_cache_path: Optional host-only MLE-bench cache root to
+                block even when it is outside the standard cache locations.
         """
         # Lazy import to avoid circular dependency
         from ...core.config import get_config
 
         self.config = get_config()
         self.timeout = timeout
+        self.run_mode = run_mode.strip().lower()
+        self.mlebench_cache_path = str(mlebench_cache_path or "").strip()
 
     def execute(
         self,
@@ -89,16 +112,98 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                 errors=[validation_msg],
             )
 
+        execution_env = dict(os.environ)
+        if self.run_mode:
+            execution_env["KAGGLE_AGENTS_RUN_MODE"] = self.run_mode
+        if self.mlebench_cache_path:
+            # The guard generator consumes this path before the child
+            # environment is sanitized. ``build_subprocess_env`` removes it,
+            # so generated code cannot discover the host cache through env.
+            execution_env["MLEBENCH_DATA_DIR"] = self.mlebench_cache_path
+        mlebench_execution = is_mlebench_execution(execution_env)
+        if mlebench_execution:
+            is_valid, validation_msg = validate_mlebench_filesystem_access(code)
+            if not is_valid:
+                print(f"   ⚠️  MLE-bench filesystem validation failed: {validation_msg}")
+                return ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr=f"Pre-execution validation failed: {validation_msg}",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[validation_msg],
+                )
+
         working_path = Path(working_dir) if isinstance(working_dir, str) else working_dir
         working_path.mkdir(parents=True, exist_ok=True)
 
-        # Track artifacts before execution
-        artifacts_before = self._get_artifacts(working_path)
+        canonical_snapshot = None
+        process_group_id: int | None = None
 
-        # Create temporary script file
+        def finalize_execution_result(
+            execution_result: ExecutionResult,
+        ) -> ExecutionResult:
+            """Restore host canonical bytes and reject any mutating candidate."""
+            nonlocal canonical_snapshot
+            if canonical_snapshot is None:
+                return execution_result
+
+            try:
+                changes = verify_and_restore_canonical_contract(
+                    canonical_snapshot
+                )
+            except Exception as exc:
+                changes = [
+                    "verification_or_restore_failed="
+                    f"{type(exc).__name__}:{exc}"
+                ]
+            finally:
+                canonical_snapshot = None
+
+            if not changes:
+                return execution_result
+
+            detail = "; ".join(changes)
+            message = (
+                "Canonical contract integrity violation: generated code changed "
+                f"host-owned evaluation artifacts ({detail}). The candidate is "
+                "rejected and original canonical bytes were restored."
+            )
+            print(f"   ⚠️  {message}")
+            execution_result.success = False
+            execution_result.errors = list(execution_result.errors or [])
+            execution_result.errors.append(message)
+            execution_result.stderr = (
+                f"{execution_result.stderr}\n{message}".strip()
+            )
+            return execution_result
+
+        runtime_guard_dir = None
+
+        # Create temporary script file before the guarded try so final cleanup
+        # is safe even when integrity-boundary setup fails.
         script_file = working_path / f"_exec_{int(time.time())}.py"
 
         try:
+            if mlebench_execution:
+                try:
+                    canonical_snapshot = snapshot_canonical_contract(
+                        working_path
+                    )
+                except CanonicalIntegrityError as exc:
+                    raise CanonicalIntegrityError(
+                        "Canonical contract integrity setup failed: "
+                        f"{exc}"
+                    ) from exc
+                runtime_guard_dir = install_mlebench_runtime_guard(
+                    working_path,
+                    source=execution_env,
+                )
+
+            # Track artifacts before execution
+            artifacts_before = self._get_artifacts(working_path)
+
             # Write code to file
             with open(script_file, "w", encoding="utf-8") as f:
                 f.write(code)
@@ -121,6 +226,17 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                     pass
 
             # Start process with line-buffered output for real-time streaming
+            subprocess_env = build_subprocess_env(
+                source=execution_env,
+                home_dir=generated_home,
+            )
+            if runtime_guard_dir is not None:
+                existing_pythonpath = subprocess_env.get("PYTHONPATH", "")
+                pythonpath_parts = [str(runtime_guard_dir)]
+                if existing_pythonpath:
+                    pythonpath_parts.append(existing_pythonpath)
+                subprocess_env["PYTHONPATH"] = os.pathsep.join(pythonpath_parts)
+
             process = subprocess.Popen(
                 [sys.executable, "-u", str(script_file)],  # -u for unbuffered output
                 cwd=str(working_path),
@@ -128,10 +244,15 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                 stderr=subprocess.PIPE,
                 text=True,
                 bufsize=1,  # Line buffered
-                env=build_subprocess_env(home_dir=generated_home),
+                env=subprocess_env,
                 preexec_fn=preexec_setup if platform.system() != "Windows" else None,
                 start_new_session=True if platform.system() != "Windows" else False,
             )
+            if platform.system() != "Windows":
+                # ``start_new_session=True`` makes the leader PID the process
+                # group ID. Preserve it after the leader exits so background
+                # descendants cannot mutate artifacts after host verification.
+                process_group_id = process.pid
 
             # Queues for collecting output from threads
             stdout_queue: Queue = Queue()
@@ -220,6 +341,8 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                         break
 
                 if poll_result is not None:
+                    kill_process_group_by_id(process_group_id)
+                    process_group_id = None
                     # Process finished - drain remaining output
                     time.sleep(0.1)  # Brief pause to collect any remaining output
                     while not stdout_queue.empty():
@@ -269,14 +392,21 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                         a for a in artifacts_created if not a.endswith(script_file.name)
                     ]
 
-                    return ExecutionResult(
-                        success=False,
-                        stdout=stdout,
-                        stderr=(stderr + f"\nExecution timeout after {self.timeout}s").strip(),
-                        execution_time=self.timeout,
-                        exit_code=-1,
-                        artifacts_created=artifacts_created,
-                        errors=[f"Timeout: execution exceeded {self.timeout}s"],
+                    return finalize_execution_result(
+                        ExecutionResult(
+                            success=False,
+                            stdout=stdout,
+                            stderr=(
+                                stderr
+                                + f"\nExecution timeout after {self.timeout}s"
+                            ).strip(),
+                            execution_time=self.timeout,
+                            exit_code=-1,
+                            artifacts_created=artifacts_created,
+                            errors=[
+                                f"Timeout: execution exceeded {self.timeout}s"
+                            ],
+                        )
                     )
 
                 # Print progress update if no output for a while
@@ -338,42 +468,56 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                 else:
                     print("   ⚠️  Warning: Could not extract performance metric from output")
 
-            return ExecutionResult(
-                success=success,
-                stdout=result.stdout,
-                stderr=result.stderr,
-                execution_time=execution_time,
-                exit_code=result.returncode,
-                artifacts_created=artifacts_created,
-                errors=errors,
+            return finalize_execution_result(
+                ExecutionResult(
+                    success=success,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                    execution_time=execution_time,
+                    exit_code=result.returncode,
+                    artifacts_created=artifacts_created,
+                    errors=errors,
+                )
             )
 
         except subprocess.TimeoutExpired:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr=f"Execution timeout after {self.timeout}s",
-                execution_time=self.timeout,
-                exit_code=-1,
-                artifacts_created=[],
-                errors=[f"Timeout: execution exceeded {self.timeout}s"],
+            return finalize_execution_result(
+                ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr=f"Execution timeout after {self.timeout}s",
+                    execution_time=self.timeout,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[f"Timeout: execution exceeded {self.timeout}s"],
+                )
             )
 
         except Exception as e:
-            return ExecutionResult(
-                success=False,
-                stdout="",
-                stderr=str(e),
-                execution_time=0.0,
-                exit_code=-1,
-                artifacts_created=[],
-                errors=[f"Execution error: {e!s}"],
+            return finalize_execution_result(
+                ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr=str(e),
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[f"Execution error: {e!s}"],
+                )
             )
 
         finally:
+            kill_process_group_by_id(process_group_id)
             # Cleanup script file
             if script_file.exists():
                 script_file.unlink()
+            # Defensive cleanup for BaseException paths that bypass the normal
+            # result finalizer. Ordinary returns set this to ``None``.
+            if canonical_snapshot is not None:
+                try:
+                    verify_and_restore_canonical_contract(canonical_snapshot)
+                finally:
+                    canonical_snapshot = None
 
     def execute_with_retry(
         self,

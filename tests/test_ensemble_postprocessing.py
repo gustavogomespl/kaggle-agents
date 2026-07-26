@@ -1,5 +1,6 @@
 """Tests for metric-aware postprocessing and the OOF-stacking route guards."""
 
+import hashlib
 import json
 
 import numpy as np
@@ -308,6 +309,72 @@ class TestTryOofStackingGuards:
         assert loaded_ids.tolist() == ["a", "b", "c", "d"]
         assert folds_path is not None
 
+    def test_success_persists_host_oof_score_bound_to_submission_hash(
+        self,
+        agent,
+        temp_data_dir,
+        monkeypatch,
+    ):
+        y_path = temp_data_dir / "y.npy"
+        ids_path = temp_data_dir / "train_ids.npy"
+        sample_path = temp_data_dir / "sample_submission.csv"
+        output_path = temp_data_dir / "submission.csv"
+        np.save(y_path, np.array([0.0, 1.0]))
+        np.save(ids_path, np.array(["row-a", "row-b"]))
+        pd.DataFrame({"id": [10, 11], "target": [0.0, 0.0]}).to_csv(
+            sample_path,
+            index=False,
+        )
+        pairs = {
+            "m1": (temp_data_dir / "oof_m1.npy", temp_data_dir / "test_m1.npy"),
+            "m2": (temp_data_dir / "oof_m2.npy", temp_data_dir / "test_m2.npy"),
+        }
+
+        def host_stacking(**_kwargs):
+            return (
+                {
+                    "base_model_names": ["m1", "m2"],
+                    "stacking_method": "weighted",
+                    "weights": [0.5, 0.5],
+                    "oof_score": 0.12,
+                    "selected_oof": np.array([0.1, 0.9]),
+                    "test_ids": np.array(["10", "11"]),
+                    "class_order": None,
+                },
+                np.array([0.2, 0.8]),
+            )
+
+        monkeypatch.setattr(
+            "kaggle_agents.agents.ensemble.agent.stack_from_prediction_pairs",
+            host_stacking,
+        )
+
+        outcome = agent._try_oof_stacking(
+            state={
+                "run_mode": "mlebench",
+                "working_directory": str(temp_data_dir),
+                "canonical_contract": {
+                    "y_path": str(y_path),
+                    "train_ids_path": str(ids_path),
+                },
+            },
+            prediction_pairs=pairs,
+            models_dir=temp_data_dir,
+            sample_path=sample_path,
+            output_path=output_path,
+            problem_type="regression",
+            metric_name="rmse",
+            current_iteration=0,
+        )
+
+        assert outcome is not None
+        assert outcome["ensemble_oof_score"] == pytest.approx(0.12)
+        assert outcome["ensemble_submission_owner"] == "ensemble"
+        assert outcome["ensemble_score_source"] == "host_oof_ensemble"
+        assert outcome["ensemble_submission_sha256"] == hashlib.sha256(
+            output_path.read_bytes()
+        ).hexdigest()
+
     def test_comparable_cv_score_ignores_leaderboard_best(self, agent):
         score, source = agent._get_comparable_cv_score(
             {
@@ -352,6 +419,9 @@ class TestCheckpointRecovery:
 
         assert "test_pred_sum += fold_test_preds" in guidance
         assert "_test_partial.npy" in guidance
+        assert "oof_preds[...] = partial_oof" in guidance
+        assert "Incomplete fold checkpoint; refusing unsafe resume" in guidance
+        assert '"oof_shape": list(oof_preds.shape)' in guidance
         assert "completed_folds" in guidance
 
     def test_uses_partial_test_predictions(self, temp_data_dir):
@@ -393,6 +463,64 @@ class TestCheckpointRecovery:
                     "component_name": component,
                     "completed_folds": [0, 1],
                     "min_folds": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert recover_from_checkpoints(models_dir) == {}
+
+    def test_skips_non_finite_checkpoint_predictions(self, temp_data_dir):
+        models_dir = temp_data_dir / "models"
+        checkpoints = models_dir / "checkpoints"
+        checkpoints.mkdir(parents=True)
+        component = "lgbm"
+        np.save(
+            checkpoints / f"{component}_oof_partial.npy",
+            np.array([0.1, np.nan]),
+        )
+        np.save(
+            checkpoints / f"{component}_test_partial.npy",
+            np.array([0.25, 0.75]),
+        )
+        (checkpoints / f"{component}_checkpoint_state.json").write_text(
+            json.dumps(
+                {
+                    "component_name": component,
+                    "completed_folds": [0, 1],
+                    "min_folds": 2,
+                    "oof_shape": [2],
+                    "test_shape": [2],
+                    "n_samples": 2,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        assert recover_from_checkpoints(models_dir) == {}
+
+    def test_skips_checkpoint_with_shape_metadata_mismatch(self, temp_data_dir):
+        models_dir = temp_data_dir / "models"
+        checkpoints = models_dir / "checkpoints"
+        checkpoints.mkdir(parents=True)
+        component = "lgbm"
+        np.save(
+            checkpoints / f"{component}_oof_partial.npy",
+            np.array([0.1, 0.8]),
+        )
+        np.save(
+            checkpoints / f"{component}_test_partial.npy",
+            np.array([0.25, 0.75]),
+        )
+        (checkpoints / f"{component}_checkpoint_state.json").write_text(
+            json.dumps(
+                {
+                    "component_name": component,
+                    "completed_folds": [0, 1],
+                    "min_folds": 2,
+                    "oof_shape": [3],
+                    "test_shape": [2],
+                    "n_samples": 2,
                 }
             ),
             encoding="utf-8",

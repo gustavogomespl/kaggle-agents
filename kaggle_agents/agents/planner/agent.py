@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterable
+from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
@@ -41,12 +43,16 @@ from .fallback_plans import (
 from .plan_refinement import (
     analyze_gaps,
     create_refined_fallback_plan,
-    extract_validation_score,
     refine_ablation_plan,
 )
 from .sota_analysis import (
     analyze_sota_solutions,
+    eligible_external_source_ids,
+    filter_declared_external_source_ids,
     format_sota_details,
+    planner_external_solutions,
+    sanitize_external_document_for_prompt,
+    sanitize_external_fact_for_prompt,
 )
 from .validation import (
     detect_multimodal_competition,
@@ -59,12 +65,10 @@ def determine_planning_mode(state: KaggleState) -> tuple[bool, bool]:
     """Return ``(is_targeted_refinement, use_eureka)`` for the current turn."""
     current_iteration = state.get("current_iteration", 0)
     is_refinement = current_iteration > 0 or bool(state.get("force_refinement", False))
-    crossover_guidance = state.get("crossover_guidance", {})
-    evolutionary_generation = state.get("evolutionary_generation", 0)
     explicit_eureka = bool(state.get("force_eureka_planning", False))
-    use_eureka = explicit_eureka or (
-        not is_refinement and (bool(crossover_guidance) or evolutionary_generation > 0)
-    )
+    # Eureka remains an opt-in experimental planner. Persisted crossover state
+    # must not silently switch the baseline planning algorithm.
+    use_eureka = explicit_eureka
     return is_refinement, use_eureka
 
 
@@ -173,7 +177,12 @@ class PlannerAgent:
                 sota_analysis,
                 n_candidates=3,
                 create_fallback_plan_fn=self._create_fallback_plan,
-                coerce_components_fn=self._coerce_components,
+                coerce_components_fn=lambda plan_data: self._coerce_components(
+                    plan_data,
+                    eligible_external_source_ids=eligible_external_source_ids(
+                        state.get("sota_solutions", [])
+                    ),
+                ),
             )
 
             # Validate the selected plan
@@ -185,6 +194,7 @@ class PlannerAgent:
 
             return {
                 "ablation_plan": validated_plan,
+                "current_component_index": 0,
                 "candidate_plans": eureka_result["candidate_plans"],
                 "current_plan_index": eureka_result["current_plan_index"],
                 "evolutionary_generation": eureka_result["evolutionary_generation"],
@@ -211,6 +221,7 @@ class PlannerAgent:
 
         return {
             "ablation_plan": validated_plan,
+            "current_component_index": 0,
             "optimization_strategy": "ablation_driven",
             "previous_plan_hashes": plan_hashes,
             "force_refinement": False,
@@ -243,32 +254,79 @@ class PlannerAgent:
         # Extract curriculum learning insights
         curriculum_insights = extract_curriculum_insights(state)
 
-        # Get raw SOTA solutions for "Adopt & Improve" strategy
-        sota_solutions = state.get("sota_solutions", [])
-        sota_details = format_sota_details(sota_solutions)
+        # Get raw SOTA solutions for "Adopt & Improve" strategy. External
+        # retrieval uses the same bounded source set as the source-specific
+        # analysis. If retrieval yielded nothing, retain the existing internal
+        # heuristic fallback in the prompt without treating it as an eligible
+        # external source.
+        all_sota_solutions = state.get("sota_solutions", [])
+        sota_solutions = planner_external_solutions(all_sota_solutions)
+        prompt_sota_solutions = (
+            sota_solutions
+            if sota_solutions
+            else list(all_sota_solutions or [])[:1]
+        )
+        sota_details = format_sota_details(prompt_sota_solutions)
         memory_summary = get_memory_summary_for_planning(state)
 
         # Extract domain-specific patterns and format insights
-        domain_patterns = extract_domain_specific_patterns(sota_solutions, domain)
+        domain_patterns = extract_domain_specific_patterns(
+            prompt_sota_solutions,
+            domain,
+        )
         domain_insights = format_domain_insights(domain, domain_patterns)
 
-        # Prepare inputs
-        comp_info_str = f"""
-Name: {competition_info.name}
-Description: {competition_info.description}
-Problem Type: {competition_info.problem_type}
-Metric: {competition_info.evaluation_metric}
-Domain: {domain}
-"""
+        # Competition descriptions and persisted memory are public/model-derived
+        # data, not a second instruction channel.
+        safe_competition_info = {
+            "name": sanitize_external_fact_for_prompt(
+                competition_info.name,
+                max_length=180,
+            ),
+            # Descriptions are long benign-rich documents: neutralize spans
+            # instead of erasing the whole text on one benign "ignore ...".
+            "description": sanitize_external_document_for_prompt(
+                competition_info.description,
+                max_length=8000,
+            ),
+            "problem_type": sanitize_external_fact_for_prompt(
+                competition_info.problem_type,
+                max_length=100,
+            ),
+            "metric": sanitize_external_fact_for_prompt(
+                competition_info.evaluation_metric,
+                max_length=100,
+            ),
+            "domain": sanitize_external_fact_for_prompt(domain, max_length=100),
+        }
+        comp_info_str = (
+            "BEGIN_UNTRUSTED_COMPETITION_METADATA_JSON\n"
+            + json.dumps(safe_competition_info, ensure_ascii=True, sort_keys=True)
+            + "\nEND_UNTRUSTED_COMPETITION_METADATA_JSON"
+        )
 
         sota_summary = json.dumps(sota_analysis, indent=2)
         domain_guidance = get_domain_guidance(domain)
+        safe_memory_summary = sanitize_external_fact_for_prompt(
+            memory_summary,
+            max_length=3000,
+        )
+        if safe_memory_summary == "<external-fact-redacted>":
+            safe_memory_summary = "No trusted memory summary available."
+        safe_curriculum_insights = sanitize_external_fact_for_prompt(
+            curriculum_insights,
+            max_length=3000,
+        )
+        if safe_curriculum_insights == "<external-fact-redacted>":
+            safe_curriculum_insights = "No trusted curriculum insight available."
 
         # Resolve max components
-        run_mode = state.get("run_mode", "")
-        objective = state.get("objective", "") or ""
-        fast_mode = bool(state.get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
-        max_components = 3 if fast_mode else 6
+        run_mode = str(state.get("run_mode", "")).lower()
+        fast_mode = bool(state.get("fast_mode"))
+        default_max_components = 3 if run_mode == "mlebench" else 3 if fast_mode else 6
+        max_components = int(
+            state.get("max_components") or default_max_components
+        )
         override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
         if override:
             try:
@@ -280,7 +338,7 @@ Domain: {domain}
 
         # Print curriculum insights
         if "No previous iteration" not in curriculum_insights:
-            print(curriculum_insights)
+            print(safe_curriculum_insights)
 
         # Combine domain_guidance with domain_insights
         enhanced_domain_guidance = domain_guidance + "\n\n" + domain_insights if domain_insights else domain_guidance
@@ -295,7 +353,7 @@ Domain: {domain}
                         sota_details=sota_details,
                         sota_summary=sota_summary,
                         domain_guidance=enhanced_domain_guidance,
-                        memory_summary=memory_summary,
+                        memory_summary=safe_memory_summary,
                     )
                 except TypeError:
                     result = self.planner_module(
@@ -309,12 +367,12 @@ Domain: {domain}
                 if len(plan_data) < 3:
                     print(f"  ⚠️ DSPy generated only {len(plan_data)} components, using fallback")
                     plan_data = self._create_fallback_plan(
-                        domain, sota_analysis, curriculum_insights, state=state
+                        domain, sota_analysis, safe_curriculum_insights, state=state
                     )
             except Exception as e:
                 print(f"  ⚠️ DSPy plan generation failed: {e}, using fallback")
                 plan_data = self._create_fallback_plan(
-                    domain, sota_analysis, curriculum_insights, state=state
+                    domain, sota_analysis, safe_curriculum_insights, state=state
                 )
 
         else:
@@ -325,13 +383,13 @@ Domain: {domain}
                 sota_details=sota_details,
                 sota_summary=sota_summary,
                 domain_insights=domain_insights,
-                memory_summary=memory_summary,
+                memory_summary=safe_memory_summary,
             )
 
             # Inject curriculum learning insights
             enhanced_prompt = f"""{prompt}
 
-{curriculum_insights}
+{safe_curriculum_insights}
 
 IMPORTANT: Use the curriculum insights above to:
 1. Prioritize components and techniques that worked in previous iterations
@@ -346,7 +404,9 @@ Return a JSON array with up to {max_components} components. Each component must 
 - component_type: one of [feature_engineering, model, preprocessing, ensemble]
 - description: what this component does
 - estimated_impact: float 0.0-1.0
-- code_outline: brief implementation sketch"""
+- code_outline: brief implementation sketch
+- uses_external_retrieval: boolean; true only with an eligible source ID
+- external_source_ids: list containing only opaque IDs shown in this prompt"""
 
             # INJECT FAILURE ANALYSIS
             failure_analysis = state.get("failure_analysis", {})
@@ -356,7 +416,15 @@ Return a JSON array with up to {max_components} components. Each component must 
                     failure_text = "\n\n## ⚠️ ERROR PATTERNS FROM PREVIOUS RUNS\n"
                     failure_text += "Avoid these known issues when planning components:\n"
                     for pattern in error_patterns[:5]:
-                        failure_text += f"- {pattern}\n"
+                        safe_pattern = sanitize_external_fact_for_prompt(
+                            pattern,
+                            max_length=240,
+                        )
+                        if (
+                            safe_pattern
+                            and safe_pattern != "<external-fact-redacted>"
+                        ):
+                            failure_text += f"- {safe_pattern}\n"
                     enhanced_prompt += failure_text
                     print(f"  ⚠️ Added {len(error_patterns[:5])} error patterns to initial plan")
 
@@ -378,31 +446,106 @@ Return a JSON array with up to {max_components} components. Each component must 
                     except Exception:
                         plan_text = str(plan_text)
                 plan_data = self._parse_llm_plan_response(plan_text, sota_analysis)
-                if len(plan_data) < 3:
-                    print(f"  ⚠️ LLM generated only {len(plan_data)} components, using fallback")
+                if not plan_data:
+                    print("  ⚠️ LLM generated no components, using fallback")
                     plan_data = self._create_fallback_plan(
-                        domain, sota_analysis, curriculum_insights, state=state
+                        domain, sota_analysis, safe_curriculum_insights, state=state
                     )
             except Exception as e:
                 print(f"  ⚠️ LLM plan generation failed: {e}, using fallback")
                 plan_data = self._create_fallback_plan(
-                    domain, sota_analysis, curriculum_insights, state=state
+                    domain, sota_analysis, safe_curriculum_insights, state=state
                 )
 
-        components = self._coerce_components(plan_data)
-        components.sort(key=lambda x: x.estimated_impact, reverse=True)
-
-        return components
+        return self._coerce_components(
+            plan_data,
+            eligible_external_source_ids=eligible_external_source_ids(
+                sota_solutions
+            ),
+        )
 
     def _coerce_components(
         self,
         plan_data: list[Any],
+        *,
+        eligible_external_source_ids: Iterable[str] | None = None,
     ) -> list[AblationComponent]:
-        """Normalize plan data into AblationComponent objects."""
+        """Normalize components and allow-list declared external inspiration."""
+        def safe_component_name(value: Any, fallback: str) -> str:
+            safe = sanitize_external_fact_for_prompt(value, max_length=100)
+            if not safe or safe == "<external-fact-redacted>":
+                return fallback
+            normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", safe)
+            normalized = normalized.strip("._-")[:80]
+            return normalized or fallback
+
+        def safe_component_text(value: Any, component_type: str) -> str:
+            safe = sanitize_external_fact_for_prompt(value, max_length=2000)
+            if safe and safe != "<external-fact-redacted>":
+                return safe
+            return (
+                f"Implement a target-agnostic {component_type} component using "
+                "the public schema and canonical validation contract."
+            )
+
+        def safe_component_code(value: Any, component_type: str) -> str:
+            # Code outlines are multi-line by construction; collapsing them
+            # through the single-line fact sanitizer truncated fallback-plan
+            # logic mid-statement (the audio audit outline is ~3k chars).
+            # Sanitize per line: flagged lines are dropped whole, clean lines
+            # keep their structure. An all-flagged outline falls back.
+            raw = str(value or "")
+            if not raw.strip():
+                return safe_component_text("", component_type)
+            lines = []
+            for line in raw.splitlines():
+                if not line.strip():
+                    lines.append("")
+                    continue
+                safe_line = sanitize_external_fact_for_prompt(
+                    line, max_length=400
+                )
+                if safe_line and safe_line != "<external-fact-redacted>":
+                    lines.append(safe_line)
+            safe = "\n".join(lines).strip()
+            if len(safe) > 8000:
+                safe = safe[:8000].rstrip() + "\n# ...truncated..."
+            return safe or safe_component_text("", component_type)
+
         components: list[AblationComponent] = []
         for i, item in enumerate(plan_data):
             if isinstance(item, AblationComponent):
-                components.append(item)
+                declared_ids = list(
+                    getattr(item, "external_source_ids", []) or []
+                )
+                filtered_ids = filter_declared_external_source_ids(
+                    declared_ids,
+                    eligible_external_source_ids,
+                )
+                if declared_ids and not filtered_ids:
+                    print(
+                        "  ⚠️ Dropping component with retrieval declaration "
+                        "but no eligible external source ID"
+                    )
+                    continue
+                safe_type = sanitize_external_fact_for_prompt(
+                    item.component_type,
+                    max_length=80,
+                )
+                if not safe_type or safe_type == "<external-fact-redacted>":
+                    safe_type = "preprocessing"
+                components.append(
+                    replace(
+                        item,
+                        name=safe_component_name(
+                            item.name,
+                            f"{safe_type}_{i + 1}",
+                        ),
+                        component_type=safe_type,
+                        code=safe_component_code(item.code, safe_type),
+                        external_source_ids=filtered_ids,
+                    )
+                )
                 continue
             if not isinstance(item, dict):
                 continue
@@ -417,19 +560,51 @@ Return a JSON array with up to {max_components} components. Each component must 
                         if len(word) > 4 and word not in ["using", "apply", "create", "implement"]:
                             name = f"{word}_{comp_type}"
                             break
+            component_type = sanitize_external_fact_for_prompt(
+                item.get("component_type", "preprocessing"),
+                max_length=80,
+            )
+            if (
+                not component_type
+                or component_type == "<external-fact-redacted>"
+            ):
+                component_type = "preprocessing"
+            name = safe_component_name(
+                name,
+                f"{component_type}_{i + 1}",
+            )
 
             try:
                 estimated_impact = float(item.get("estimated_impact", 0.05))
             except (TypeError, ValueError):
                 estimated_impact = 0.05
 
+            raw_source_ids = item.get("external_source_ids")
+            filtered_source_ids = filter_declared_external_source_ids(
+                raw_source_ids,
+                eligible_external_source_ids,
+            )
+            declares_retrieval = item.get("uses_external_retrieval") is True or bool(
+                raw_source_ids
+            )
+            if declares_retrieval and not filtered_source_ids:
+                print(
+                    "  ⚠️ Dropping component with retrieval declaration "
+                    "but no eligible external source ID"
+                )
+                continue
+
             component = AblationComponent(
                 name=name,
-                component_type=item.get("component_type", "preprocessing"),
-                code=item.get("code_outline", item.get("description", "")),
+                component_type=component_type,
+                code=safe_component_code(
+                    item.get("code_outline", item.get("description", "")),
+                    component_type,
+                ),
                 estimated_impact=estimated_impact,
                 tested=False,
                 actual_impact=None,
+                external_source_ids=filtered_source_ids,
             )
             components.append(component)
 
@@ -439,7 +614,7 @@ Return a JSON array with up to {max_components} components. Each component must 
         self, state: KaggleState, sota_analysis: dict[str, Any]
     ) -> list[AblationComponent]:
         """Refine the ablation plan based on previous results."""
-        return refine_ablation_plan(
+        refined = refine_ablation_plan(
             state=state,
             sota_analysis=sota_analysis,
             llm=self.llm,
@@ -452,12 +627,15 @@ Return a JSON array with up to {max_components} components. Each component must 
                 get_memory_summary_for_planning_fn=get_memory_summary_for_planning,
                 **kwargs,
             ),
-            create_refined_fallback_plan_fn=lambda *args: create_refined_fallback_plan(
-                *args,
-                extract_validation_score_fn=extract_validation_score,
-            ),
+            create_refined_fallback_plan_fn=create_refined_fallback_plan,
             create_diversified_fallback_plan_fn=create_diversified_fallback_plan,
             get_memory_summary_for_planning_fn=get_memory_summary_for_planning,
+        )
+        return self._coerce_components(
+            refined,
+            eligible_external_source_ids=eligible_external_source_ids(
+                state.get("sota_solutions", [])
+            ),
         )
 
     def _validate_plan(
@@ -470,7 +648,12 @@ Return a JSON array with up to {max_components} components. Each component must 
         return validate_plan(
             plan=plan,
             state=state,
-            coerce_components_fn=self._coerce_components,
+            coerce_components_fn=lambda plan_data: self._coerce_components(
+                plan_data,
+                eligible_external_source_ids=eligible_external_source_ids(
+                    (state or {}).get("sota_solutions", [])
+                ),
+            ),
             is_image_competition_without_features_fn=is_image_competition_without_features,
         )
 
@@ -560,6 +743,10 @@ Return a JSON array with up to {max_components} components. Each component must 
                                     "code_outline", item.get("description", "")
                                 ),
                                 "rationale": item.get("rationale", ""),
+                                "external_source_ids": item.get(
+                                    "external_source_ids",
+                                    [],
+                                ),
                             }
                             valid_components.append(component)
                     return valid_components
@@ -592,5 +779,9 @@ def planner_agent_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
-    agent = PlannerAgent()
+    # MLE-bench runs must be independent.  An optimized DSPy pickle is global
+    # state learned from earlier competitions, so loading it would make a
+    # sequential benchmark depend on run order.
+    is_mlebench = str(state.get("run_mode", "")).strip().lower() == "mlebench"
+    agent = PlannerAgent(use_dspy=not is_mlebench)
     return agent(state)

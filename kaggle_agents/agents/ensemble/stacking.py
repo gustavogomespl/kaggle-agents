@@ -6,13 +6,15 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
 
-from ...core.config import get_run_seed
 from ...utils.calibration import calibrate_oof_predictions, calibrate_test_predictions
 from ...utils.ensemble_audit import full_ensemble_audit, post_calibrate_ensemble
 from ...utils.oof_validation import print_oof_summary, validate_oof_stack
-from .meta_model import constrained_meta_learner, diagnose_stacking_issues, tune_meta_model
+from .meta_model import (
+    cross_fitted_meta_predictions,
+    cross_validated_constrained_blend,
+    diagnose_stacking_issues,
+)
 from .scoring import filter_by_score_threshold, score_predictions
 from .utils import encode_labels
 
@@ -37,7 +39,7 @@ def load_cv_folds(
     fold_assignment_path = models_dir / f"fold_assignment_{name}.npy"
     if fold_assignment_path.exists():
         try:
-            folds = np.load(fold_assignment_path)
+            folds = np.load(fold_assignment_path, allow_pickle=False)
             if len(folds) == n_samples:
                 return folds
             print(f"   Warning: Fold assignment length mismatch for {name}")
@@ -47,7 +49,9 @@ def load_cv_folds(
     if folds_path is not None and folds_path.exists():
         try:
             if folds_path.suffix.lower() == ".npy":
-                folds = np.asarray(np.load(folds_path)).ravel()
+                folds = np.asarray(
+                    np.load(folds_path, allow_pickle=False)
+                ).ravel()
                 if len(folds) == n_samples:
                     return folds
                 print("   Warning: canonical folds.npy length mismatch")
@@ -64,7 +68,7 @@ def load_cv_folds(
 
 def stack_from_prediction_pairs(
     prediction_pairs: dict[str, tuple[Path, Path]],
-    y: pd.Series,
+    y: np.ndarray | pd.Series,
     problem_type: str,
     metric_name: str,
     models_dir: Path,
@@ -75,6 +79,7 @@ def stack_from_prediction_pairs(
     enable_post_calibration: bool,
     n_targets: int | None,
     calibration_method: str = "auto",
+    require_identity_artifacts: bool = False,
 ) -> tuple[dict[str, Any] | None, np.ndarray | None]:
     """Build stacking ensemble directly from saved OOF/Test predictions.
 
@@ -97,16 +102,42 @@ def stack_from_prediction_pairs(
     """
     if len(prediction_pairs) < 2:
         return None, None
-    run_seed = get_run_seed()
+    target_array = np.asarray(y)
+    multi_output = (
+        target_array.ndim == 2 and target_array.shape[1] > 1
+    )
+    expected_multioutput_shape = target_array.shape if multi_output else None
+    validation_problem_type = (
+        "multi_label"
+        if multi_output and problem_type == "classification"
+        else problem_type
+    )
+    if multi_output:
+        canonical_width = int(target_array.shape[1])
+        if n_targets is not None and int(n_targets) != canonical_width:
+            raise ValueError(
+                "Canonical target width and submission output width differ: "
+                f"{canonical_width} != {n_targets}"
+            )
+        if (
+            expected_class_order is not None
+            and len(expected_class_order) != canonical_width
+        ):
+            raise ValueError(
+                "Canonical target width and ordered submission columns differ: "
+                f"{canonical_width} != {len(expected_class_order)}"
+            )
 
     valid_pairs, results = validate_oof_stack(
         prediction_pairs,
         models_dir,
         train_ids=train_ids,
         expected_class_order=expected_class_order,
+        expected_shape=expected_multioutput_shape,
         folds_path=folds_path,
         strict_mode=False,
-        problem_type=problem_type,
+        problem_type=validation_problem_type,
+        require_identity_artifacts=require_identity_artifacts,
     )
     print_oof_summary(results)
     if len(valid_pairs) < 2:
@@ -127,27 +158,44 @@ def stack_from_prediction_pairs(
 
     model_names = list(valid_pairs.keys())
 
-    if problem_type == "classification":
+    if problem_type == "classification" and not multi_output:
         y_encoded, class_order = encode_labels(y, expected_class_order)
     else:
-        y_encoded = np.asarray(y)
+        y_encoded = target_array
         class_order = expected_class_order
 
     oof_list: list[np.ndarray] = []
     test_list: list[np.ndarray] = []
     loaded_model_names: list[str] = []
     calibration_summaries: list[dict[str, Any]] = []
+    reference_test_ids: np.ndarray | None = None
 
     for name, (oof_path, test_path) in valid_pairs.items():
         try:
-            oof_raw = np.load(oof_path)
-            test_raw = np.load(test_path)
+            oof_raw = np.load(oof_path, allow_pickle=False)
+            test_raw = np.load(test_path, allow_pickle=False)
         except Exception as e:
             print(f"   Warning: Failed to load predictions for {name}: {e}")
             continue
 
         oof_raw = np.asarray(oof_raw, dtype=float)
         test_raw = np.asarray(test_raw, dtype=float)
+
+        if multi_output:
+            expected_width = int(target_array.shape[1])
+            if oof_raw.shape != target_array.shape:
+                print(
+                    f"   Warning: Excluding {name}: OOF shape "
+                    f"{oof_raw.shape} != canonical target shape "
+                    f"{target_array.shape}"
+                )
+                continue
+            if test_raw.ndim != 2 or test_raw.shape[1] != expected_width:
+                print(
+                    f"   Warning: Excluding {name}: test output width/shape "
+                    f"{test_raw.shape} != (*, {expected_width})"
+                )
+                continue
 
         # Exclude models with NaN/Inf/zero-variance (CRITICAL for ensemble health)
         if np.isnan(oof_raw).any():
@@ -168,7 +216,51 @@ def stack_from_prediction_pairs(
             print(f"   Warning: Excluding {name}: Contains Inf values in test predictions")
             continue
 
-        if enable_calibration and problem_type == "classification":
+        test_ids_path = models_dir / f"test_ids_{name}.npy"
+        if not test_ids_path.exists():
+            print(f"   Warning: Excluding {name}: missing test_ids_{name}.npy")
+            continue
+        try:
+            model_test_ids = np.asarray(
+                np.load(test_ids_path, allow_pickle=False)
+            ).reshape(-1)
+        except Exception as e:
+            print(f"   Warning: Excluding {name}: invalid test IDs ({e})")
+            continue
+        if len(model_test_ids) != len(test_raw):
+            print(
+                f"   Warning: Excluding {name}: test ID/prediction mismatch "
+                f"({len(model_test_ids)} vs {len(test_raw)})"
+            )
+            continue
+        model_test_ids_str = pd.Series(model_test_ids).astype(str)
+        if model_test_ids_str.duplicated().any():
+            print(f"   Warning: Excluding {name}: duplicate test IDs")
+            continue
+
+        test_reorder: np.ndarray | None = None
+        if reference_test_ids is None:
+            reference_test_ids = model_test_ids_str.to_numpy()
+        else:
+            reference_ids_str = np.asarray(reference_test_ids).astype(str)
+            if set(model_test_ids_str) != set(reference_ids_str):
+                print(f"   Warning: Excluding {name}: incomplete test ID coverage")
+                continue
+            position_by_id = {
+                test_id: idx
+                for idx, test_id in enumerate(model_test_ids_str.tolist())
+            }
+            test_reorder = np.fromiter(
+                (position_by_id[test_id] for test_id in reference_ids_str),
+                dtype=np.int64,
+                count=len(reference_ids_str),
+            )
+
+        if (
+            enable_calibration
+            and problem_type == "classification"
+            and not multi_output
+        ):
             try:
                 cv_folds = load_cv_folds(
                     name, models_dir, folds_path, n_samples=len(y_encoded)
@@ -188,7 +280,7 @@ def stack_from_prediction_pairs(
 
                 if use_cal:
                     cal_path = models_dir / f"oof_cal_{name}.npy"
-                    oof_preds = np.load(cal_path)
+                    oof_preds = np.load(cal_path, allow_pickle=False)
                     test_preds = calibrate_test_predictions(
                         test_path, result.calibrator, result.method
                     )
@@ -212,6 +304,9 @@ def stack_from_prediction_pairs(
         else:
             oof_preds = oof_raw
             test_preds = test_raw
+
+        if test_reorder is not None:
+            test_preds = np.asarray(test_preds)[test_reorder]
 
         if n_targets == 1 and oof_preds.ndim == 2 and oof_preds.shape[1] == 2:
             oof_preds = oof_preds[:, 1]
@@ -281,34 +376,44 @@ def stack_from_prediction_pairs(
     avg_score = score_predictions(avg_oof, score_targets, problem_type, metric_name)
     print(f"   [META] Simple average: {avg_score:.6f}")
 
-    weights_constrained, constrained_score = constrained_meta_learner(
-        oof_stack, score_targets, problem_type, metric_name
+    (
+        weights_constrained,
+        constrained_oof,
+        constrained_score,
+    ) = cross_validated_constrained_blend(
+        oof_stack,
+        score_targets,
+        problem_type,
+        metric_name,
+        split_targets=y_encoded,
     )
-    print(f"   [META] Constrained: {constrained_score:.6f}")
+    print(f"   [META] Constrained (cross-fitted): {constrained_score:.6f}")
 
     meta_score = float("inf")
     meta_oof_preds = None
     meta_model = None
     try:
-        n_classes = len(np.unique(y_encoded)) if problem_type == "classification" else None
-        meta_model, _meta_metric_name = tune_meta_model(meta_X, y_encoded, problem_type, n_classes)
-        if problem_type == "classification":
-            cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=run_seed)
-            meta_oof_preds = cross_val_predict(
-                meta_model, meta_X, y_encoded, cv=cv, method="predict_proba"
+        if multi_output:
+            raise ValueError(
+                "Per-output meta-model fitting is not enabled; using "
+                "cross-fitted constrained or average blending"
             )
-            if binary_single_col and meta_oof_preds.ndim > 1:
-                meta_oof_preds = meta_oof_preds[:, 1]
-        else:
-            cv = KFold(n_splits=3, shuffle=True, random_state=run_seed)
-            meta_oof_preds = cross_val_predict(meta_model, meta_X, y_encoded, cv=cv)
+        n_classes = len(np.unique(y_encoded)) if problem_type == "classification" else None
+        meta_model, meta_oof_preds = cross_fitted_meta_predictions(
+            meta_X,
+            y_encoded,
+            problem_type,
+            n_classes,
+            binary_single_col=binary_single_col,
+        )
 
         meta_score = score_predictions(
             meta_oof_preds, score_targets, problem_type, metric_name
         )
-        print(f"   [META] Meta-model: {meta_score:.6f}")
+        print(f"   [META] Meta-model (nested CV): {meta_score:.6f}")
 
         # Run stacking diagnostics to detect potential issues
+        meta_model.fit(meta_X, y_encoded)
         stacking_diagnostics = diagnose_stacking_issues(
             meta_model, model_names, meta_X, y_encoded
         )
@@ -338,16 +443,16 @@ def stack_from_prediction_pairs(
         selected_weights = None
     elif best_method == "constrained":
         final_test_preds = np.average(test_stack, axis=0, weights=weights_constrained)
-        selected_oof = np.average(oof_stack, axis=0, weights=weights_constrained)
+        if constrained_oof is None:
+            raise ValueError("Selected constrained blend has no cross-fitted predictions")
+        selected_oof = constrained_oof
         selected_weights = weights_constrained
     else:
         final_test_preds = np.average(test_stack, axis=0, weights=np.ones(len(oof_list)))
         selected_oof = avg_oof
         selected_weights = np.ones(len(oof_list)) / len(oof_list)
 
-    selected_score = score_predictions(
-        selected_oof, score_targets, problem_type, metric_name
-    )
+    selected_score = float(scores[best_method])
 
     selected_array = np.asarray(selected_oof)
     ordinal_continuous = (
@@ -356,9 +461,16 @@ def stack_from_prediction_pairs(
         and (np.nanmin(selected_array) < 0 or np.nanmax(selected_array) > 1)
     )
 
-    if problem_type == "classification" and not ordinal_continuous:
+    if (
+        problem_type == "classification"
+        and not ordinal_continuous
+    ):
         final_test_preds = np.clip(final_test_preds, 1e-15, 1 - 1e-15)
-        if final_test_preds.ndim > 1 and final_test_preds.shape[1] > 1:
+        if (
+            not multi_output
+            and final_test_preds.ndim > 1
+            and final_test_preds.shape[1] > 1
+        ):
             final_test_preds = final_test_preds / final_test_preds.sum(axis=1, keepdims=True)
 
     calibration_info = {}
@@ -374,6 +486,7 @@ def stack_from_prediction_pairs(
         and enable_post_calibration
         and not ordinal_continuous
         and not label_metric
+        and not multi_output
     ):
         final_test_preds, calibration_info = post_calibrate_ensemble(
             selected_oof, final_test_preds, y_encoded, method=calibration_method
@@ -436,6 +549,7 @@ def stack_from_prediction_pairs(
             "calibration": audit.calibration,
         },
         "class_order": class_order,
+        "test_ids": reference_test_ids,
     }
 
     return ensemble, final_test_preds

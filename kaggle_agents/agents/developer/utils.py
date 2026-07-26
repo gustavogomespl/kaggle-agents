@@ -33,16 +33,46 @@ class DeveloperUtilsMixin:
         if state:
             data_files = state.get("data_files", {}) if isinstance(state, dict) else {}
 
-        # 1. FILE SYSTEM STRUCTURE (CRITICAL for non-tabular competitions)
+        # 1. FILE SYSTEM STRUCTURE (CRITICAL for non-tabular datasets)
         info_parts.append("**FILE SYSTEM STRUCTURE (Use this to build paths):**")
-        data_dirs_to_check = [
-            "train", "test", "audio", "images", "train_images", "test_images",
-            "essential_data", "supplemental_data", "data", "train_audio", "test_audio"
-        ]
+        preferred_dir_names = {
+            name: index
+            for index, name in enumerate(
+                (
+                    "train",
+                    "test",
+                    "data",
+                    "audio",
+                    "images",
+                    "train_images",
+                    "test_images",
+                    "train_audio",
+                    "test_audio",
+                )
+            )
+        }
+        try:
+            data_dirs_to_check = sorted(
+                (
+                    path
+                    for path in working_dir.iterdir()
+                    if (
+                        path.is_dir()
+                        and not path.name.startswith(".")
+                        and path.name.lower() not in {"canonical", "models"}
+                    )
+                ),
+                key=lambda path: (
+                    preferred_dir_names.get(path.name.lower(), len(preferred_dir_names)),
+                    path.name.lower(),
+                ),
+            )
+        except (PermissionError, OSError):
+            data_dirs_to_check = []
 
         found_dirs = []
-        for dirname in data_dirs_to_check:
-            dir_path = working_dir / dirname
+        for dir_path in data_dirs_to_check:
+            dirname = dir_path.name
             if dir_path.exists() and dir_path.is_dir():
                 try:
                     files = [f for f in dir_path.rglob("*") if f.is_file()]
@@ -96,18 +126,30 @@ class DeveloperUtilsMixin:
                 info_parts.append(f"- `{csv_path.name}` (at {csv_path.parent.name}/): {len(columns)} columns")
                 info_parts.append(f"  - Columns: {', '.join(columns)}")
 
-                # Detect target column
+                # Report only an explicit target role. Guessing from names such
+                # as "species" or from the last column encodes task-shaped
+                # priors and can mislead the generated program.
                 target_col = "UNKNOWN"
                 if state and state.get("target_col"):
                     target_col = state["target_col"]
-                else:
-                    target_candidates = [
-                        c for c in columns
-                        if c.lower() in ["target", "label", "y", "class", "species", "category"]
-                    ]
-                    target_col = target_candidates[0] if target_candidates else columns[-1] if len(columns) > 1 else "UNKNOWN"
+                elif state:
+                    canonical_contract = state.get("canonical_contract") or {}
+                    contracted_target = canonical_contract.get("target_col")
+                    if (
+                        isinstance(contracted_target, str)
+                        and contracted_target in columns
+                    ):
+                        target_col = contracted_target
 
-                info_parts.append(f"  - Likely target column: `{target_col}`")
+                info_parts.append(f"  - Contract target column: `{target_col}`")
+                if state:
+                    canonical_contract = state.get("canonical_contract") or {}
+                    contracted_targets = canonical_contract.get("target_cols")
+                    if isinstance(contracted_targets, list) and contracted_targets:
+                        info_parts.append(
+                            "  - Ordered contract target columns: "
+                            f"`{contracted_targets}`"
+                        )
 
                 # Show sample values for ID column (usually first column)
                 if columns:
@@ -136,8 +178,8 @@ class DeveloperUtilsMixin:
                     csv_found = True
                     break
 
-        # Third: Scan for CSVs inside discovered data directories (CRITICAL for MLSP-2013-Birds)
-        # The training labels might be inside essential_data/, supplemental_data/, etc.
+        # Third: Scan for CSVs inside the data directories discovered above.
+        # This covers arbitrary nested layouts without privileging dataset names.
         if not csv_found and found_dirs:
             info_parts.append("  - No CSV at root, scanning inside data directories...")
             for dirname, count, extensions in found_dirs:
@@ -226,7 +268,10 @@ class DeveloperUtilsMixin:
         """
         # Audio domain: Provide essential templates for audio processing
         # These are critical because audio competitions often have non-standard formats
-        if domain == "audio" and component_type in ("model", "preprocessing"):
+        if domain in {"audio", "audio_classification"} and component_type in (
+            "model",
+            "preprocessing",
+        ):
             try:
                 from ...prompts.templates.audio_template import (
                     AUDIO_CONFIG_TEMPLATE,

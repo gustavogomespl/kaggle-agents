@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from sklearn.metrics import f1_score, mean_squared_log_error
+from sklearn.metrics import f1_score, mean_squared_log_error, roc_auc_score
 
 from kaggle_agents.agents.ensemble.scoring import compute_oof_score, score_predictions
 
@@ -114,3 +114,59 @@ def test_compute_oof_score_uses_rmsle(temp_data_dir):
 
     expected = np.sqrt(mean_squared_log_error(y, predictions))
     assert compute_oof_score(oof_path, y, "rmsle") == pytest.approx(expected)
+
+
+def test_multilabel_auc_is_mean_column_wise_without_row_normalization():
+    y = np.array(
+        [
+            [0, 1, 0],
+            [1, 0, 1],
+            [0, 0, 1],
+            [1, 1, 0],
+        ]
+    )
+    predictions = np.array(
+        [
+            [0.1, 0.8, 0.2],
+            [0.7, 0.3, 0.9],
+            [0.4, 0.2, 0.8],
+            [0.9, 0.7, 0.1],
+        ]
+    )
+    expected = roc_auc_score(y, predictions, average="macro")
+
+    assert score_predictions(
+        predictions,
+        y,
+        "classification",
+        "auc",
+    ) == pytest.approx(-expected)
+
+
+def test_multioutput_rmsle_is_mean_column_wise():
+    y = np.array([[1.0, 100.0], [4.0, 400.0], [9.0, 900.0]])
+    predictions = np.array([[2.0, 120.0], [2.0, 350.0], [12.0, 1000.0]])
+    expected = np.mean(
+        [
+            np.sqrt(mean_squared_log_error(y[:, 0], predictions[:, 0])),
+            np.sqrt(mean_squared_log_error(y[:, 1], predictions[:, 1])),
+        ]
+    )
+
+    assert score_predictions(
+        predictions,
+        y,
+        "regression",
+        "rmsle",
+    ) == pytest.approx(expected)
+
+
+def test_score_predictions_supports_seq2seq_exact_match():
+    score = score_predictions(
+        np.array(["one", "wrong", "three"], dtype=object),
+        np.array(["one", "two", "three"], dtype=object),
+        "seq2seq",
+        "accuracy",
+    )
+
+    assert score == pytest.approx(-(2 / 3))

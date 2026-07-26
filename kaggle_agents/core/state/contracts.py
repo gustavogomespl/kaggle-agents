@@ -177,6 +177,18 @@ class CanonicalDataContract:
     train_ids_hash: str
     train_schema_hash: str
 
+    # Ordered training-label contract. ``target_col`` remains the first target
+    # for backward compatibility with single-target consumers.
+    target_cols: list[str] = field(default_factory=list)
+    target_type: Literal["single", "multi_label", "multi_target"] = "single"
+
+    # Evaluation protocol metadata. Temporal fields are mandatory when
+    # ``cv_strategy`` is ``temporal_forward_chaining`` and absent otherwise.
+    cv_strategy: str = ""
+    temporal_splits_path: str | None = None
+    oof_eligible_mask_path: str | None = None
+    temporal_order_path: str | None = None
+
     def validate(self) -> tuple[bool, list[str]]:
         """Validate all canonical files exist and match checksums.
 
@@ -226,6 +238,18 @@ class CanonicalDataContract:
                     f"train_ids.npy hash mismatch: {actual_hash[:8]}... != {self.train_ids_hash[:8]}..."
                 )
 
+        if self.cv_strategy == "temporal_forward_chaining":
+            for attr in (
+                "temporal_splits_path",
+                "oof_eligible_mask_path",
+                "temporal_order_path",
+            ):
+                raw_path = getattr(self, attr)
+                if not raw_path or not Path(raw_path).is_file():
+                    violations.append(
+                        f"Missing temporal contract artifact {attr}: {raw_path!r}"
+                    )
+
         return len(violations) == 0, violations
 
     def to_dict(self) -> dict:
@@ -242,11 +266,17 @@ class CanonicalDataContract:
             "n_folds": self.n_folds,
             "id_col": self.id_col,
             "target_col": self.target_col,
+            "target_cols": self.target_cols or [self.target_col],
+            "target_type": self.target_type,
             "is_classification": self.is_classification,
             "folds_hash": self.folds_hash,
             "y_hash": self.y_hash,
             "train_ids_hash": self.train_ids_hash,
             "train_schema_hash": self.train_schema_hash,
+            "cv_strategy": self.cv_strategy,
+            "temporal_splits_path": self.temporal_splits_path,
+            "oof_eligible_mask_path": self.oof_eligible_mask_path,
+            "temporal_order_path": self.temporal_order_path,
         }
 
     def __repr__(self) -> str:
@@ -260,7 +290,16 @@ class CanonicalDataContract:
     @classmethod
     def from_dict(cls, data: dict) -> CanonicalDataContract:
         """Deserialize from checkpoint."""
-        return cls(**data)
+        payload = dict(data)
+        payload.setdefault(
+            "target_cols",
+            [payload["target_col"]] if payload.get("target_col") else [],
+        )
+        payload.setdefault(
+            "target_type",
+            "single" if len(payload["target_cols"]) <= 1 else "multi_target",
+        )
+        return cls(**payload)
 
     @staticmethod
     def compute_array_hash(arr: "np.ndarray") -> str:
@@ -558,15 +597,13 @@ def create_submission_contract_from_sample(
     target_cols = cols[1:]
     expected_rows = len(sample_sub)
 
-    # Determine format type
+    # Determine only the public layout. Template values are placeholders and
+    # cannot identify multilabel classification versus multi-target regression.
     if len(target_cols) == 1:
         format_type = "label"
         class_order = None
     else:
-        # Check if binary (multi-label) or continuous (multi-target)
-        sample_values = sample_sub[target_cols].iloc[:100]
-        is_binary = sample_values.isin([0, 1, 0.0, 1.0]).all().all()
-        format_type = "wide" if is_binary else "multi_target"
+        format_type = "wide"
         class_order = target_cols
 
     return SubmissionContract(

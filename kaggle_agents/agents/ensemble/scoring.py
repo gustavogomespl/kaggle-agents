@@ -117,7 +117,67 @@ def _hard_label_score(
 def _classification_score(preds: np.ndarray, y_true: np.ndarray, metric: str) -> float:
     """Return a lower-is-better score for a classification metric."""
     raw_predictions = np.asarray(preds, dtype=float)
-    raw_targets = np.asarray(y_true).ravel()
+    target_array = np.asarray(y_true)
+
+    # Multi-output canonical targets are independent columns. They must never
+    # be row-normalized or flattened into a synthetic multiclass task.
+    if target_array.ndim == 2 and target_array.shape[1] > 1:
+        if raw_predictions.shape != target_array.shape:
+            raise ValueError(
+                "Multi-output classification requires prediction and target "
+                "matrices with "
+                f"identical shape, got {raw_predictions.shape} and "
+                f"{target_array.shape}"
+            )
+        probabilities = np.clip(raw_predictions, 1e-15, 1 - 1e-15)
+        column_scores: list[float] = []
+        for column in range(target_array.shape[1]):
+            target_column = target_array[:, column]
+            prediction_column = probabilities[:, column]
+            if _contains(metric, _LOG_LOSS_NAMES) or not metric:
+                column_scores.append(
+                    float(
+                        log_loss(
+                            target_column,
+                            prediction_column,
+                            labels=[0, 1],
+                        )
+                    )
+                )
+            elif "brier" in metric:
+                column_scores.append(
+                    float(
+                        brier_score_loss(
+                            target_column,
+                            prediction_column,
+                        )
+                    )
+                )
+            elif any(name in metric for name in ("auc", "roc", "gini")):
+                column_scores.append(
+                    -float(
+                        roc_auc_score(
+                            target_column,
+                            prediction_column,
+                        )
+                    )
+                )
+            elif _contains(metric, _LABEL_METRICS):
+                labels = (prediction_column >= 0.5).astype(int)
+                column_scores.append(
+                    -_hard_label_score(
+                        target_column,
+                        labels,
+                        metric,
+                    )
+                )
+            else:
+                raise ValueError(
+                    f"Unsupported multilabel classification metric: {metric}"
+                )
+        return float(np.mean(column_scores))
+
+    raw_targets = target_array.ravel()
     is_ordinal_vector = (
         ("kappa" in metric or "qwk" in metric)
         and (raw_predictions.ndim == 1 or raw_predictions.shape[1] == 1)
@@ -174,12 +234,48 @@ def _classification_score(preds: np.ndarray, y_true: np.ndarray, metric: str) ->
 
 def _regression_score(preds: np.ndarray, y_true: np.ndarray, metric: str) -> float:
     """Return a lower-is-better score in the requested regression metric."""
-    predictions = np.asarray(preds, dtype=float).ravel()
-    y = np.asarray(y_true, dtype=float).ravel()
+    prediction_array = np.asarray(preds, dtype=float)
+    target_array = np.asarray(y_true, dtype=float)
+
+    if target_array.ndim == 2 and target_array.shape[1] > 1:
+        if prediction_array.shape != target_array.shape:
+            raise ValueError(
+                "Column-wise regression requires prediction and target matrices "
+                f"with identical shape, got {prediction_array.shape} and "
+                f"{target_array.shape}"
+            )
+        column_scores: list[float] = []
+        for column in range(target_array.shape[1]):
+            y_column = target_array[:, column]
+            prediction_column = prediction_array[:, column]
+            if _contains(metric, _RMSLE_NAMES):
+                if np.any(y_column < 0):
+                    raise ValueError("RMSLE requires non-negative targets")
+                score = np.sqrt(
+                    mean_squared_log_error(
+                        y_column,
+                        np.clip(prediction_column, 0, None),
+                    )
+                )
+            elif _contains(metric, _RMSE_NAMES) or not metric:
+                score = np.sqrt(
+                    mean_squared_error(y_column, prediction_column)
+                )
+            elif _contains(metric, _MSE_NAMES):
+                score = mean_squared_error(y_column, prediction_column)
+            elif _contains(metric, _MAE_NAMES) or "absolute" in metric:
+                score = mean_absolute_error(y_column, prediction_column)
+            else:
+                raise ValueError(
+                    f"Unsupported multi-target regression metric: {metric}"
+                )
+            column_scores.append(float(score))
+        return float(np.mean(column_scores))
+
+    predictions = prediction_array.ravel()
+    y = target_array.ravel()
 
     if _contains(metric, _RMSLE_NAMES):
-        if np.any(y < 0):
-            raise ValueError("RMSLE requires non-negative targets")
         return float(np.sqrt(mean_squared_log_error(y, np.clip(predictions, 0, None))))
     if _contains(metric, _RMSE_NAMES) or not metric:
         return float(np.sqrt(mean_squared_error(y, predictions)))
@@ -214,9 +310,47 @@ def score_predictions(
     targets = np.asarray(y_true)
     if len(predictions) != len(targets):
         raise ValueError(f"Length mismatch: preds has {len(preds)} samples, y_true has {len(y_true)}")
+    if (
+        targets.ndim == 2
+        and targets.shape[1] > 1
+        and predictions.shape != targets.shape
+    ):
+        raise ValueError(
+            "Multi-output prediction artifact shape mismatch: "
+            f"{predictions.shape} != {targets.shape}"
+        )
 
     metric = (metric_name or "").lower().strip()
-    if problem_type == "classification":
+    normalized_problem = (
+        str(problem_type or "").lower().replace("-", "_").replace(" ", "_")
+    )
+    if normalized_problem in {
+        "seq2seq",
+        "seq_to_seq",
+        "sequence_to_sequence",
+        "text_normalization",
+        "translation",
+        "summarization",
+    }:
+        if metric not in {"", "accuracy", "exact_match", "exact_match_accuracy"}:
+            raise ValueError(f"Unsupported seq2seq metric: {metric}")
+        predicted_text = predictions.astype(str).reshape(-1)
+        target_text = targets.astype(str).reshape(-1)
+        if len(predicted_text) != len(target_text):
+            raise ValueError("Flattened seq2seq prediction/target lengths differ")
+        return -float(np.mean(predicted_text == target_text))
+    is_classification_problem = (
+        "classification" in normalized_problem
+        or normalized_problem
+        in {
+            "binary",
+            "multiclass",
+            "multi_class",
+            "multilabel",
+            "multi_label",
+        }
+    )
+    if is_classification_problem:
         return _classification_score(predictions, targets, metric or "log_loss")
     return _regression_score(predictions, targets, metric or "rmse")
 
@@ -225,6 +359,7 @@ def compute_oof_score(
     oof_path: Path,
     y_true: np.ndarray,
     metric_name: str = "log_loss",
+    oof_eligible_mask: np.ndarray | None = None,
 ) -> float:
     """Compute a LOWER-IS-BETTER, non-negative loss from OOF predictions.
 
@@ -240,7 +375,31 @@ def compute_oof_score(
     Returns:
         Loss value (float("inf") when the metric cannot be computed)
     """
-    oof = np.asarray(np.load(oof_path), dtype=float)
+    oof = np.asarray(
+        np.load(oof_path, allow_pickle=False),
+        dtype=float,
+    )
+    targets = np.asarray(y_true)
+    if len(oof) != len(targets):
+        print(
+            "   Warning: OOF scoring failed: prediction/target length mismatch "
+            f"({len(oof)} vs {len(targets)})"
+        )
+        return float("inf")
+    if oof_eligible_mask is not None:
+        eligible = np.asarray(oof_eligible_mask, dtype=bool)
+        if eligible.shape != (len(oof),) or not eligible.any():
+            print("   Warning: OOF scoring failed: invalid eligibility mask")
+            return float("inf")
+        warmup = oof[~eligible]
+        if warmup.size and not np.isnan(warmup).all():
+            print(
+                "   Warning: OOF scoring failed: temporal warm-up rows contain "
+                "fabricated predictions"
+            )
+            return float("inf")
+        oof = oof[eligible]
+        targets = targets[eligible]
     metric = (metric_name or "log_loss").lower().strip()
     try:
         regression_metric = _contains(
@@ -248,7 +407,7 @@ def compute_oof_score(
             _RMSLE_NAMES + _RMSE_NAMES + _MSE_NAMES + _MAE_NAMES,
         )
         if regression_metric:
-            return _regression_score(oof, np.asarray(y_true), metric)
+            return _regression_score(oof, targets, metric)
 
         classification_metric = (
             _contains(metric, _LOG_LOSS_NAMES)
@@ -259,7 +418,7 @@ def compute_oof_score(
         if not classification_metric:
             return float("inf")
 
-        internal_score = _classification_score(oof, np.asarray(y_true), metric)
+        internal_score = _classification_score(oof, targets, metric)
         if _contains(metric, _LOG_LOSS_NAMES) or "brier" in metric:
             return internal_score
 
@@ -277,6 +436,7 @@ def filter_by_score_threshold(
     metric_name: str,
     model_scores: dict[str, float] | None = None,
     threshold_pct: float = 0.20,
+    oof_eligible_mask: np.ndarray | None = None,
 ) -> tuple[dict[str, tuple[Path, Path]], dict[str, float]]:
     """Filter models with score within X% of best.
 
@@ -301,16 +461,31 @@ def filter_by_score_threshold(
             computed_scores[name] = model_scores[name]
         else:
             # Compute on-the-fly and cache
-            computed_scores[name] = compute_oof_score(oof_path, y_true, metric_name)
+            computed_scores[name] = compute_oof_score(
+                oof_path,
+                y_true,
+                metric_name,
+                oof_eligible_mask=oof_eligible_mask,
+            )
             print(f"   Computed OOF score for {name}: {computed_scores[name]:.6f}")
 
-    # Find best score
-    best_score = min(computed_scores.values()) if computed_scores else float("inf")
+    finite_scores = {
+        name: score
+        for name, score in computed_scores.items()
+        if isinstance(score, (int, float)) and np.isfinite(score)
+    }
+    if not finite_scores:
+        print("   Warning: no model has a finite OOF score; refusing unscored ensemble")
+        return {}, computed_scores
+
+    # Find best finite score. Failed scoring returns +inf and must never pass
+    # through the ``inf <= inf`` edge case below.
+    best_score = min(finite_scores.values())
 
     # Filter by threshold
     filtered: dict[str, tuple[Path, Path]] = {}
     for name, pair in prediction_pairs.items():
-        score = computed_scores.get(name, float("inf"))
+        score = finite_scores.get(name, float("inf"))
         threshold = best_score * (1 + threshold_pct)
         if score <= threshold:
             filtered[name] = pair
@@ -321,8 +496,8 @@ def filter_by_score_threshold(
     # Never starve the ensemble: the ratio threshold explodes near zero losses
     # (e.g. 1-AUC of two strong models), so if it leaves <2 models keep the
     # 2 best-scoring ones - ensemble diversity beats the threshold rule
-    if len(filtered) < 2 and len(prediction_pairs) >= 2:
-        best_two = sorted(computed_scores, key=computed_scores.get)[:2]
+    if len(filtered) < 2 and len(finite_scores) >= 2:
+        best_two = sorted(finite_scores, key=finite_scores.get)[:2]
         for name in best_two:
             filtered.setdefault(name, prediction_pairs[name])
         print(f"   Filter left <2 models; keeping top-2 by OOF score: {best_two}")

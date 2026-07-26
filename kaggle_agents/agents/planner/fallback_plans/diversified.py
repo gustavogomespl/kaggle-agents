@@ -53,7 +53,7 @@ def create_diversified_fallback_plan(
                 "description": "Target encoding with proper CV to avoid leakage",
                 "estimated_impact": 0.15,
                 "rationale": "Powerful encoding for categorical features",
-                "code_outline": "category_encoders.TargetEncoder with cv=5 folds",
+                "code_outline": "Fit category_encoders.TargetEncoder inside each injected canonical training fold and transform only its held-out fold",
             },
             {
                 "name": "feature_selection",

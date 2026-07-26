@@ -16,7 +16,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ...core.config import get_config, get_llm_for_role
-from ...optimization import create_training_collector
 from ...utils.telemetry import make_event
 from .analysis import AnalysisMixin
 from .detection import DetectionMixin
@@ -51,8 +50,13 @@ class MetaEvaluatorAgent(
     - Collects training data for DSPy optimization
     """
 
-    def __init__(self):
-        """Initialize meta-evaluator with configured model."""
+    def __init__(self, *, enable_training_collection: bool = True):
+        """Initialize meta-evaluator with configured model.
+
+        Args:
+            enable_training_collection: Whether this run may persist online
+                DSPy training examples. Formal MLE-bench runs disable it.
+        """
         self.config = get_config()
 
         # Use configured LLM (supports OpenAI and Anthropic)
@@ -62,8 +66,21 @@ class MetaEvaluatorAgent(
         model = self.config.llm.model
         print(f"   🧠 Meta-Evaluator initialized with {provider} ({model})")
 
-        # Training data collector for RL
-        self.training_collector = create_training_collector()
+        # Creating TrainingDataCollector creates the global ``training_data``
+        # directory immediately. Keep it lazy so read-only evaluation paths
+        # and runs without usable examples have no cross-run side effects.
+        self._training_collection_enabled = enable_training_collection
+        self.training_collector = None
+
+    def _get_training_collector(self):
+        """Create the persistent collector only when collection is authorized."""
+        if not self._training_collection_enabled:
+            return None
+        if self.training_collector is None:
+            from ...optimization import create_training_collector
+
+            self.training_collector = create_training_collector()
+        return self.training_collector
 
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -126,8 +143,10 @@ class MetaEvaluatorAgent(
         # Create iteration memory for learning
         iteration_memory = self._create_iteration_memory(state, failure_analysis, reward_signals)
 
-        # Collect training data for DSPy optimization
-        self._collect_training_data(state, failure_analysis, reward_signals)
+        # Collect training data for DSPy optimization. MLE-bench is explicitly
+        # excluded so sequential benchmark tasks cannot train one another.
+        if self._training_collection_enabled:
+            self._collect_training_data(state, failure_analysis, reward_signals)
 
         # Eureka: Perform evolutionary crossover for next generation planning
         crossover_guidance = self._evolutionary_crossover(state)
@@ -195,5 +214,6 @@ def meta_evaluator_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
-    agent = MetaEvaluatorAgent()
+    is_mlebench = str(state.get("run_mode", "")).strip().lower() == "mlebench"
+    agent = MetaEvaluatorAgent(enable_training_collection=not is_mlebench)
     return agent(state)

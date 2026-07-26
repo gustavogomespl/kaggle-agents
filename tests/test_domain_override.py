@@ -100,40 +100,33 @@ class TestSeq2SeqFallbackPlan:
         return module.create_seq2seq_fallback_plan
 
     def test_creates_seq2seq_fallback_plan(self, create_seq2seq_fallback_plan):
-        """Should create seq2seq fallback plan for seq_to_seq domain."""
+        """Competition identity must not specialize a generic seq2seq plan."""
         plan = create_seq2seq_fallback_plan(
             domain="seq_to_seq",
             sota_analysis={},
             competition_name="text-normalization-challenge-english-language",
         )
 
-        # Text normalization uses 4-component hybrid approach:
-        # 1. lookup_baseline (frequency-based lookup table)
-        # 2. rule_based_normalizer (class-specific fallback rules)
-        # 3. t5_small_ambiguous_only (neural for ambiguous cases)
-        # 4. hybrid_ensemble (lookup-priority ensemble)
         assert len(plan) == 4
         assert plan[0]["name"] == "lookup_baseline"
-        assert plan[1]["name"] == "rule_based_normalizer"
-        assert plan[2]["name"] == "t5_small_ambiguous_only"
-        assert plan[3]["name"] == "hybrid_ensemble"
 
-    def test_creates_generic_seq2seq_plan_for_translation(self, create_seq2seq_fallback_plan):
-        """Should create generic seq2seq plan for non-normalization tasks."""
+    def test_translation_gets_validation_gated_mapping_candidate(
+        self, create_seq2seq_fallback_plan
+    ):
+        """A cheap lookup candidate is harmless when OOF coverage is low."""
         plan = create_seq2seq_fallback_plan(
             domain="seq_to_seq",
             sota_analysis={},
             competition_name="machine-translation-task",
         )
 
-        assert len(plan) == 3
-        assert plan[0]["name"] == "t5_base_seq2seq"
-        assert plan[1]["name"] == "bart_seq2seq"
-        assert plan[2]["name"] == "seq2seq_ensemble"
+        assert len(plan) == 4
+        assert plan[0]["name"] == "lookup_baseline"
+        assert plan[2]["name"] == "t5_small_ambiguous_only"
+        assert "actual routed fraction" in plan[2]["rationale"]
 
-    def test_seq2seq_text_normalization_detection(self, create_seq2seq_fallback_plan):
-        """Should detect text normalization from competition name."""
-        # Test various text normalization competition names
+    def test_competition_names_do_not_change_routing(self, create_seq2seq_fallback_plan):
+        """Task titles are not schema evidence."""
         norm_names = [
             "text-normalization-challenge",
             "normalize-text-competition",
@@ -147,9 +140,23 @@ class TestSeq2SeqFallbackPlan:
                 sota_analysis={},
                 competition_name=name,
             )
-            # Text normalization should use hybrid approach with lookup_baseline first
             assert plan[0]["name"] == "lookup_baseline", f"Failed for {name}"
-            assert len(plan) == 4, f"Expected 4 components for {name}"
+            assert len(plan) == 4
+
+    def test_structured_task_metadata_enables_hybrid_plan(
+        self, create_seq2seq_fallback_plan
+    ):
+        plan = create_seq2seq_fallback_plan(
+            domain="seq_to_seq",
+            sota_analysis={
+                "canonical_metadata": {"task_type": "text_normalization"}
+            },
+            competition_name="opaque-task-id",
+        )
+
+        assert len(plan) == 4
+        assert plan[0]["name"] == "lookup_baseline"
+        assert "submission['after']" not in plan[-1]["code_outline"]
 
     def test_text_normalization_domain_overrides_competition_name(self, create_seq2seq_fallback_plan):
         """Should use text normalization plan when domain is explicitly set, regardless of competition name."""
@@ -163,7 +170,7 @@ class TestSeq2SeqFallbackPlan:
         # Should still use the hybrid text normalization approach (4 components)
         assert len(plan) == 4
         assert plan[0]["name"] == "lookup_baseline"
-        assert plan[1]["name"] == "rule_based_normalizer"
+        assert plan[1]["name"] == "validated_mapping_rules"
         assert plan[2]["name"] == "t5_small_ambiguous_only"
         assert plan[3]["name"] == "hybrid_ensemble"
 

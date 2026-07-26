@@ -53,13 +53,11 @@ print(f"[LOG:INFO] Classes: {le.classes_} (n={n_classes})")
 # ==========================================
 # STEP 2: CV loop uses PRE-ENCODED labels
 # ==========================================
-for fold_idx in range(n_folds):
-    train_mask = folds != fold_idx
-    val_mask = folds == fold_idx
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
 
     # y is ALREADY encoded - no transform needed inside loop
-    y_train = y_encoded[train_mask]
-    y_val = y_encoded[val_mask]  # Safe: all classes known from full fit
+    y_train = y_encoded[train_idx]
+    y_val = y_encoded[val_idx]  # Safe: all classes known from full fit
 
     model.fit(X_train, y_train)
     # LightGBM won't fail because y_val classes are subset of y_train's encoder
@@ -68,8 +66,8 @@ for fold_idx in range(n_folds):
 **WRONG PATTERN (CAUSES CRASHES)**:
 ```python
 # ❌ WRONG: Fitting LabelEncoder inside each fold
-for fold_idx in range(n_folds):
-    y_train, y_val = y[train_mask], y[val_mask]
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    y_train, y_val = y[train_idx], y[val_idx]
 
     le = LabelEncoder()
     y_train_enc = le.fit_transform(y_train)  # Only sees this fold's classes!
@@ -277,13 +275,18 @@ elif len(submission_cols) > 1:
     # Example: Id,class_0,class_1,class_2,...
     print(f"[LOG:INFO] Wide format detected - {len(submission_cols)} probability columns")
 
-    # Assign probabilities to each class column
+    if predictions.ndim != 2 or predictions.shape != (
+        len(sample_sub),
+        len(submission_cols),
+    ):
+        raise ValueError(
+            "Wide submission requires shape "
+            f"({len(sample_sub)}, {len(submission_cols)}), got {predictions.shape}"
+        )
+
+    # Assign one independently modeled probability column per output.
     for i, col in enumerate(submission_cols):
-        if predictions.ndim == 2:
-            sample_sub[col] = predictions[:, i]
-        else:
-            # 1D predictions: replicate for each column (unusual)
-            sample_sub[col] = predictions
+        sample_sub[col] = predictions[:, i]
 
 sample_sub.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
 print(f"[LOG:INFO] Submission saved with {len(submission_cols)} target column(s)")
@@ -332,41 +335,71 @@ for chunk in chunks:
 
 ALWAYS validate row count after feature engineering:
 ```python
-assert len(train_engineered) >= len(train_original) * 0.95, \\
-    f"CRITICAL: Data loss detected {len(train_original)} → {len(train_engineered)}"
+if len(train_engineered) != len(train_original):
+    raise ValueError(
+        f"Feature engineering changed row count: "
+        f"{len(train_original)} -> {len(train_engineered)}"
+    )
+if ID_COL in train_original.columns and ID_COL in train_engineered.columns:
+    if not np.array_equal(
+        train_engineered[ID_COL].to_numpy(),
+        train_original[ID_COL].to_numpy(),
+    ):
+        raise ValueError("Feature engineering changed canonical row order")
+elif not train_engineered.index.equals(train_original.index):
+    raise ValueError("Feature engineering changed canonical row alignment")
 ```
 
 ### 8. Regression Model Output
-For regression tasks, ensure predictions are in valid range:
-```python
-# Clip predictions to valid range (example for positive targets)
-predictions = np.clip(predictions, 0, None)
+Preserve the learned prediction scale by default. Apply bounds only when the
+injected metric or data contract explicitly requires them (for example, a
+non-negative lower bound for RMSLE). Never derive clipping bounds from a target
+column name, competition identity, or assumed real-world semantics.
 
-# For specific domains (e.g., taxi fares, prices):
-predictions = np.clip(predictions, min_valid, max_valid)
+```python
+def validate_regression_predictions(predictions, explicit_bounds=None):
+    predictions = np.asarray(predictions, dtype=np.float64)
+    if not np.all(np.isfinite(predictions)):
+        raise ValueError("Regression predictions contain NaN or Inf")
+    if explicit_bounds is not None:
+        lower, upper = explicit_bounds
+        if lower is not None:
+            predictions = np.maximum(predictions, lower)
+        if upper is not None:
+            predictions = np.minimum(predictions, upper)
+    return predictions
 ```
 
 ### 9. TabFM: Zero-Shot Tabular Foundation Model (STRONG stagnation breaker)
-TabFM (Google, 2026) predicts tabular targets in-context with NO tuning and NO
-feature engineering — a completely different model family from GBMs, ideal for
-ensemble diversity and for breaking score plateaus.
+TabFM is an OPTIONAL tabular foundation-model arm. Its score and artifacts are
+valid only when they were produced by the real TabFM implementation. A tree
+model or any other estimator trained under the TabFM component name is a false
+attribution and is forbidden.
 
 ```python
-# Install with graceful fallback (component must never hard-fail):
+# Dependency setup may fail this optional component; it must never change model
+# identity. Installation is allowed only when the active runtime policy permits.
 try:
     from tabfm import tabfm_v1_0_0
 except ImportError:
-    import subprocess
-    subprocess.check_call(["pip", "install", "tabfm", "-q"], timeout=300)
-    from tabfm import tabfm_v1_0_0
+    raise RuntimeError("TabFM unavailable; prune tabfm_zero_shot") from None
 
 model = tabfm_v1_0_0.load()  # sklearn-compatible; uses GPU if available
 model.fit(X_ctx, y_ctx)      # 'fit' = context ingestion (no weight updates)
 proba = model.predict_proba(X_val)  # or model.predict(X_val) for regression
 ```
 
-HARD LIMITS (check BEFORE using; on violation fall back to LightGBM):
-- Classification: at most 10 classes (multi-label NOT supported - skip TabFM).
+MANDATORY MODEL-IDENTITY CONTRACT:
+- On import, load, compatibility, fit, or predict failure: log the cause, raise
+  `RuntimeError`, and let the planner mark/prune `tabfm_zero_shot`.
+- NEVER train LightGBM, XGBoost, CatBoost, sklearn, or another estimator in this
+  component. A substitute belongs in its own separately named component.
+- Write `oof_tabfm_zero_shot.npy` and `test_tabfm_zero_shot.npy` only after
+  genuine TabFM inference succeeds and all alignment/finite checks pass.
+- Do not reuse stale TabFM-named artifacts after a failed attempt.
+
+HARD LIMITS (check BEFORE using; on violation fail/prune this component):
+- Classification: at most 10 classes (multi-label NOT supported).
 - Context size: ICL context should be <= ~50,000 rows. For larger training
   sets, subsample ONLY the fit() context (stratified for classification):
   `ctx = train_fold.sample(n=50_000, random_state=42)` — this does NOT violate
@@ -375,8 +408,6 @@ HARD LIMITS (check BEFORE using; on violation fall back to LightGBM):
 - OOF contract still applies: iterate the canonical folds, fit() on the
   (subsampled) train-fold context, predict the FULL validation fold, save
   models/oof_{name}.npy and models/test_{name}.npy exactly like other models.
-- Wrap in try/except: if TabFM is unavailable or errors, train the LightGBM
-  baseline instead and say so in the logs.
 """
 
 MULTI_LABEL_CONSTRAINTS = """## MULTI-LABEL CLASSIFICATION (target_type="multi_label")

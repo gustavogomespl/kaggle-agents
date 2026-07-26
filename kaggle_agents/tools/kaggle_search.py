@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import tempfile
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from ..core.state import SOTASolution
 from ..utils.contamination import (
     code_references_competition,
     is_same_competition_candidate,
+    query_references_competition,
 )
 
 
@@ -51,6 +54,41 @@ class DiscussionMetadata:
     total_comments: int
     tags: list[str]
     url: str
+
+
+def _read_downloaded_metadata_refs(notebook_path: Path, field: str) -> list[str]:
+    """Read one source-reference list from the pulled kernel metadata.
+
+    Module-level on purpose: tests monkeypatch ``KaggleSearcher`` wholesale,
+    so the reader methods must not resolve their implementation through the
+    class name.
+    """
+    metadata_path = notebook_path.parent / "kernel-metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+
+    sources = metadata.get(field) or []
+    if isinstance(sources, str):
+        sources = [sources]
+    if not isinstance(sources, list):
+        return []
+
+    refs: list[str] = []
+    for source in sources:
+        if isinstance(source, str):
+            ref = source
+        elif isinstance(source, dict):
+            ref = next(
+                (str(source[key]) for key in ("ref", "slug", "name", "url") if source.get(key)),
+                "",
+            )
+        else:
+            ref = ""
+        if ref:
+            refs.append(ref)
+    return refs
 
 
 class KaggleSearcher:
@@ -119,17 +157,11 @@ class KaggleSearcher:
                 ref = source
             elif isinstance(source, dict):
                 ref = next(
-                    (
-                        str(source[key])
-                        for key in ("ref", "slug", "name", "url")
-                        if source.get(key)
-                    ),
+                    (str(source[key]) for key in ("ref", "slug", "name", "url") if source.get(key)),
                     "",
                 )
             else:
-                ref = str(
-                    cls._get_kernel_attr(source, ["ref", "slug", "name", "url"], "")
-                )
+                ref = str(cls._get_kernel_attr(source, ["ref", "slug", "name", "url"], ""))
             if ref:
                 refs.append(ref)
         return refs
@@ -218,6 +250,7 @@ class KaggleSearcher:
             self.api.kernels_pull(
                 notebook_ref,
                 path=str(output_path),
+                metadata=True,
             )
 
             # Find downloaded file
@@ -230,6 +263,31 @@ class KaggleSearcher:
         except Exception as e:
             print(f"  Error downloading notebook {notebook_ref}: {e}")
             return None
+
+    @staticmethod
+    def read_downloaded_competition_sources(notebook_path: Path) -> list[str]:
+        """Read authoritative competition refs written by ``kernels_pull``.
+
+        Cross-competition retrieval must prove that a candidate comes from a
+        different competition. Search-result metadata is not consistently
+        populated across Kaggle API versions, so the downloaded kernel
+        metadata is the final provenance source.
+        """
+        return _read_downloaded_metadata_refs(
+            notebook_path, "competition_sources"
+        )
+
+    @staticmethod
+    def read_downloaded_dataset_sources(notebook_path: Path) -> list[str]:
+        """Read authoritative dataset refs written by ``kernels_pull``.
+
+        Dataset-attached notebooks are a large, legal cross-competition
+        population; their pulled dataset refs are the provenance that keeps
+        them eligible without weakening target-blindness.
+        """
+        return _read_downloaded_metadata_refs(
+            notebook_path, "dataset_sources"
+        )
 
     def extract_code_from_notebook(self, notebook_path: Path) -> list[str]:
         """
@@ -433,39 +491,72 @@ class KaggleSearcher:
         )
 
 
-# ==================== MLE-bench Contamination Guard ====================
-# MLE-bench forbids using solutions specific to the target competition.
+# ==================== Target-Blind Retrieval Guard ====================
+# Our evaluation protocol excludes solutions specific to the target task.
 # Decision helpers live in utils/contamination.py (pure, unit-testable);
 # here they are applied to retrieved notebooks with a full audit trail.
+
+
+def _search_audit_record(
+    record: dict[str, Any],
+    *,
+    iteration: int | None = None,
+    search_attempt_id: str | None = None,
+) -> dict[str, Any]:
+    """Attach retrieval-attempt context without inventing unavailable fields."""
+    enriched = dict(record)
+    if iteration is not None:
+        enriched["iteration"] = iteration
+    if search_attempt_id is not None:
+        enriched["search_attempt_id"] = search_attempt_id
+    return enriched
 
 
 def filter_same_competition_candidates(
     candidates: list[NotebookMetadata],
     competition: str,
+    competition_aliases: Iterable[str] | None = None,
+    *,
+    candidate_origins: dict[str, dict[str, Any]] | None = None,
+    iteration: int | None = None,
+    search_attempt_id: str | None = None,
 ) -> tuple[list[NotebookMetadata], list[dict]]:
     """
     Split candidates into (kept, audit records), filtering notebooks that look
     like they belong to the target competition.
 
-    Every candidate produces an audit record so runs can be audited for
-    MLE-bench rule compliance.
+    Every candidate produces an audit record so target-blind runs can be
+    audited.
     """
     kept: list[NotebookMetadata] = []
     audit: list[dict] = []
 
     for nb in candidates:
-        same = is_same_competition_candidate(nb.ref, nb.title, nb.competition, competition)
+        same = is_same_competition_candidate(
+            nb.ref,
+            nb.title,
+            nb.competition,
+            competition,
+            competition_aliases,
+        )
+        origin = (candidate_origins or {}).get(nb.ref, {})
         audit.append(
-            {
-                "ref": nb.ref,
-                "title": nb.title,
-                "votes": nb.total_votes,
-                "source_competitions": nb.competition,
-                "stage": "metadata",
-                "same_competition": same,
-                "filtered": same,
-                "filter_reason": "target_competition_metadata" if same else None,
-            }
+            _search_audit_record(
+                {
+                    "ref": nb.ref,
+                    "title": nb.title,
+                    "votes": nb.total_votes,
+                    "source_competitions": nb.competition,
+                    "query": origin.get("query"),
+                    "query_index": origin.get("query_index"),
+                    "stage": "metadata",
+                    "same_competition": same,
+                    "filtered": same,
+                    "filter_reason": ("target_competition_metadata" if same else None),
+                },
+                iteration=iteration,
+                search_attempt_id=search_attempt_id,
+            )
         )
         if not same:
             kept.append(nb)
@@ -478,40 +569,83 @@ def search_notebooks_cross_competition(
     queries: list[str],
     max_notebooks: int = 10,
     min_votes: int = 5,
+    competition_aliases: Iterable[str] | None = None,
+    *,
+    iteration: int | None = None,
+    search_attempt_id: str | None = None,
 ) -> tuple[list[SOTASolution], list[dict]]:
     """
-    MLE-bench-compliant retrieval: search Kaggle notebooks by task/domain
-    queries (NOT by the target competition) and filter out anything that
-    belongs to the target competition itself.
+    Target-blind retrieval: search Kaggle notebooks by task/domain queries
+    (not by the target identity) and filter anything belonging to the target
+    competition itself.
 
     Args:
         competition: Target competition slug (used only for exclusion)
         queries: Cross-competition search queries (domain/task keywords)
         max_notebooks: Maximum solutions to return
         min_votes: Minimum votes threshold
+        competition_aliases: Complete public target titles/aliases to exclude
+        iteration: Workflow iteration attached to audit records when available
+        search_attempt_id: Stable retrieval-attempt label for audit lineage
 
     Returns:
         Tuple of (solutions, audit records). Audit records document every
-        candidate seen and every filter decision.
+        provider candidate seen and every filter decision.
     """
+    audit: list[dict] = []
+    safe_queries: list[tuple[int, str]] = []
+    for query_index, query in enumerate(queries, 1):
+        identifies_target = query_references_competition(
+            query,
+            competition,
+            competition_aliases,
+        )
+        audit.append(
+            _search_audit_record(
+                {
+                    "query": query,
+                    "query_index": query_index,
+                    "stage": "query",
+                    "same_competition": identifies_target,
+                    "filtered": identifies_target,
+                    "filter_reason": ("target_competition_query" if identifies_target else None),
+                },
+                iteration=iteration,
+                search_attempt_id=search_attempt_id,
+            )
+        )
+        if not identifies_target:
+            safe_queries.append((query_index, query))
+
+    if not safe_queries:
+        print("  Contamination guard: no target-blind query remained")
+        return [], audit
+
     try:
         searcher = KaggleSearcher()
     except RuntimeError as e:
         print(f"  Cross-competition search unavailable: {e}")
-        return [], [
-            {
-                "ref": None,
-                "stage": "initialization",
-                "same_competition": False,
-                "filtered": False,
-                "error": str(e),
-            }
-        ]
+        audit.append(
+            _search_audit_record(
+                {
+                    "ref": None,
+                    "stage": "initialization",
+                    "same_competition": False,
+                    "filtered": False,
+                    "error": str(e),
+                },
+                iteration=iteration,
+                search_attempt_id=search_attempt_id,
+            )
+        )
+        return [], audit
 
     seen_refs: set[str] = set()
+    seen_origins: dict[str, dict[str, Any]] = {}
+    candidate_origins: dict[str, dict[str, Any]] = {}
     candidates: list[NotebookMetadata] = []
 
-    for query in queries:
+    for query_index, query in safe_queries:
         try:
             kernels = searcher.api.kernels_list(
                 search=query,
@@ -520,140 +654,397 @@ def search_notebooks_cross_competition(
             )
         except Exception as e:
             print(f"  Error searching notebooks for query '{query}': {e}")
+            audit.append(
+                _search_audit_record(
+                    {
+                        "query": query,
+                        "query_index": query_index,
+                        "stage": "query_execution",
+                        "same_competition": False,
+                        "filtered": True,
+                        "filter_reason": "query_failed",
+                        "error": str(e),
+                    },
+                    iteration=iteration,
+                    search_attempt_id=search_attempt_id,
+                )
+            )
             continue
 
-        for kernel in kernels or []:
+        for candidate_index, kernel in enumerate(kernels or [], 1):
+            ref: str | None = None
+            title = ""
+            votes: int | None = None
             try:
-                ref = KaggleSearcher._get_kernel_attr(kernel, ["ref", "slug"])
-                if not ref or ref in seen_refs:
-                    continue
-                seen_refs.add(ref)
+                raw_ref = KaggleSearcher._get_kernel_attr(kernel, ["ref", "slug"])
+                ref = str(raw_ref or "").strip() or None
+                title = str(KaggleSearcher._get_kernel_attr(kernel, ["title"], "") or "")
+                if not ref:
+                    raise ValueError("provider candidate is missing a source reference")
 
                 total_votes = KaggleSearcher._get_kernel_attr(
                     kernel,
                     ["total_votes", "totalVotes", "voteCount", "vote_count"],
                     0,
                 )
+                votes = int(total_votes) if total_votes is not None else 0
+                origin = {
+                    "query": query,
+                    "query_index": query_index,
+                    "candidate_index": candidate_index,
+                }
+
+                if ref in seen_refs:
+                    first_origin = seen_origins.get(ref, {})
+                    audit.append(
+                        _search_audit_record(
+                            {
+                                "stage": "provider_candidate",
+                                **origin,
+                                "ref": ref,
+                                "title": title,
+                                "votes": votes,
+                                "filtered": True,
+                                "filter_reason": "duplicate_source_ref",
+                                "provider_decision": "duplicate",
+                                "duplicate_of_query": first_origin.get("query"),
+                                "duplicate_of_query_index": first_origin.get("query_index"),
+                            },
+                            iteration=iteration,
+                            search_attempt_id=search_attempt_id,
+                        )
+                    )
+                    continue
+                seen_refs.add(ref)
+                seen_origins[ref] = origin
+
+                if votes < min_votes:
+                    audit.append(
+                        _search_audit_record(
+                            {
+                                "stage": "provider_candidate",
+                                **origin,
+                                "ref": ref,
+                                "title": title,
+                                "votes": votes,
+                                "filtered": True,
+                                "filter_reason": "below_min_votes",
+                                "provider_decision": "below_min_votes",
+                                "min_votes": min_votes,
+                            },
+                            iteration=iteration,
+                            search_attempt_id=search_attempt_id,
+                        )
+                    )
+                    continue
+
                 candidates.append(
                     NotebookMetadata(
                         ref=ref,
-                        title=KaggleSearcher._get_kernel_attr(kernel, ["title"], ""),
-                        author=KaggleSearcher._get_kernel_attr(kernel, ["author", "owner"], ""),
-                        total_votes=int(total_votes) if total_votes is not None else 0,
-                        medal_type=KaggleSearcher._get_kernel_attr(kernel, ["medal_type", "medalType"]),
-                        language=KaggleSearcher._get_kernel_attr(kernel, ["language"], "python"),
-                        competition=" ".join(
-                            KaggleSearcher._get_kernel_competitions(kernel)
+                        title=title,
+                        author=KaggleSearcher._get_kernel_attr(
+                            kernel,
+                            ["author", "owner"],
+                            "",
                         ),
+                        total_votes=votes,
+                        medal_type=KaggleSearcher._get_kernel_attr(
+                            kernel,
+                            ["medal_type", "medalType"],
+                        ),
+                        language=KaggleSearcher._get_kernel_attr(
+                            kernel,
+                            ["language"],
+                            "python",
+                        ),
+                        competition=" ".join(KaggleSearcher._get_kernel_competitions(kernel)),
                         url=f"https://www.kaggle.com/code/{ref}",
+                    )
+                )
+                candidate_origins[ref] = origin
+                audit.append(
+                    _search_audit_record(
+                        {
+                            "stage": "provider_candidate",
+                            **origin,
+                            "ref": ref,
+                            "title": title,
+                            "votes": votes,
+                            "filtered": False,
+                            "filter_reason": None,
+                            "provider_decision": "queued_for_metadata_guard",
+                        },
+                        iteration=iteration,
+                        search_attempt_id=search_attempt_id,
                     )
                 )
             except Exception as kernel_err:
                 print(f"  Skipping kernel due to parse error: {kernel_err}")
+                audit.append(
+                    _search_audit_record(
+                        {
+                            "stage": "provider_candidate",
+                            "query": query,
+                            "query_index": query_index,
+                            "candidate_index": candidate_index,
+                            "ref": ref,
+                            "title": title,
+                            "votes": votes,
+                            "filtered": True,
+                            "filter_reason": "candidate_parse_error",
+                            "provider_decision": "parse_error",
+                            "error": (f"{type(kernel_err).__name__}: {kernel_err}")[:300],
+                        },
+                        iteration=iteration,
+                        search_attempt_id=search_attempt_id,
+                    )
+                )
 
-    candidates = [nb for nb in candidates if nb.total_votes >= min_votes]
     candidates.sort(key=lambda nb: nb.total_votes, reverse=True)
 
-    kept, audit = filter_same_competition_candidates(candidates, competition)
+    kept, metadata_audit = filter_same_competition_candidates(
+        candidates,
+        competition,
+        competition_aliases,
+        candidate_origins=candidate_origins,
+        iteration=iteration,
+        search_attempt_id=search_attempt_id,
+    )
+    audit.extend(metadata_audit)
     print(
         f"  Contamination guard: {len(candidates)} candidates, "
         f"{len(candidates) - len(kept)} filtered at metadata stage"
     )
 
-    config = get_config()
-    download_dir = config.paths.cache_dir / "notebooks" / f"_cross_comp_{competition}"
-
     solutions: list[SOTASolution] = []
     for nb in kept:
         if len(solutions) >= max_notebooks:
-            break
-
-        # Per-ref subdir: a shared dir would make download_notebook return the
-        # wrong file, corrupting the code_scan contamination decision below
-        nb_path = searcher.download_notebook(nb.ref, download_dir / nb.ref.replace("/", "__"))
-        if not nb_path:
+            origin = candidate_origins.get(nb.ref, {})
             audit.append(
-                {
-                    "ref": nb.ref,
-                    "stage": "download",
-                    "same_competition": False,
-                    "filtered": True,
-                    "filter_reason": "download_failed",
-                    "error": "download_failed",
-                }
+                _search_audit_record(
+                    {
+                        "ref": nb.ref,
+                        "title": nb.title,
+                        "query": origin.get("query"),
+                        "query_index": origin.get("query_index"),
+                        "stage": "selection",
+                        "same_competition": False,
+                        "filtered": True,
+                        "filter_reason": "not_selected_top_k_budget",
+                        "provider_decision": "not_selected_top_k_budget",
+                    },
+                    iteration=iteration,
+                    search_attempt_id=search_attempt_id,
+                )
             )
             continue
 
-        # Scan the complete source document first, including notebook markdown
-        # and data-source metadata. Code-only scanning misses target references
-        # written outside executable cells.
-        try:
-            source_bytes = nb_path.read_bytes()
-            source_document = source_bytes.decode("utf-8", errors="replace")
-            source_sha256 = hashlib.sha256(source_bytes).hexdigest()
-        except OSError as e:
-            audit.append(
+        origin = candidate_origins.get(nb.ref, {})
+
+        def source_record(
+            record: dict[str, Any],
+            *,
+            ref: str = nb.ref,
+            title: str = nb.title,
+            source_query: str | None = origin.get("query"),
+            source_query_index: int | None = origin.get("query_index"),
+        ) -> dict[str, Any]:
+            """Attach the provider query and retrieval-attempt lineage."""
+            return _search_audit_record(
                 {
-                    "ref": nb.ref,
-                    "title": nb.title,
-                    "stage": "source_read",
-                    "same_competition": False,
-                    "filtered": True,
-                    "filter_reason": "source_read_failed",
-                    "error": str(e),
-                }
+                    "ref": ref,
+                    "title": title,
+                    "query": source_query,
+                    "query_index": source_query_index,
+                    **record,
+                },
+                iteration=iteration,
+                search_attempt_id=search_attempt_id,
             )
-            continue
 
-        if nb_path.suffix == ".ipynb":
-            code_snippets = searcher.extract_code_from_notebook(nb_path)
-        else:
-            code_snippets = searcher.extract_code_from_script(nb_path)
+        # Raw third-party notebooks are inspection artifacts, not runtime
+        # dependencies.  Keeping them in the repository-wide cache would make a
+        # rejected target notebook readable by later generated code.  A
+        # per-candidate TemporaryDirectory guarantees cleanup on every return,
+        # rejection, parse error, and successful extraction.
+        with tempfile.TemporaryDirectory(
+            prefix="kaggle_agents_cross_comp_"
+        ) as temporary_download:
+            nb_path = searcher.download_notebook(
+                nb.ref,
+                Path(temporary_download),
+            )
+            if not nb_path:
+                audit.append(
+                    source_record(
+                        {
+                            "stage": "download",
+                            "same_competition": False,
+                            "filtered": True,
+                            "filter_reason": "download_failed",
+                            "error": "download_failed",
+                        }
+                    )
+                )
+                continue
 
-        if not code_snippets:
+            downloaded_competitions = searcher.read_downloaded_competition_sources(nb_path)
+            # Fail closed: only ``kernel-metadata.json`` written by kernels_pull is
+            # authoritative provenance. Search-result metadata can be missing,
+            # stale, or inconsistent and must never make a candidate eligible.
+            source_competitions = downloaded_competitions
+            provenance_kind = "competition_sources"
+            if not source_competitions:
+                dataset_sources = searcher.read_downloaded_dataset_sources(nb_path)
+                if not dataset_sources:
+                    audit.append(
+                        source_record(
+                            {
+                                "stage": "provenance",
+                                "same_competition": False,
+                                "filtered": True,
+                                "filter_reason": "unverified_source_competition",
+                                "source_competitions": [],
+                            }
+                        )
+                    )
+                    continue
+                # Dataset-attached notebooks stay eligible only when no
+                # attached dataset matches the target identity — target-data
+                # mirrors are typically republished under the competition's
+                # own name, which the identity aliases catch — and the
+                # full-source contamination scan below still applies.
+                if any(
+                    is_same_competition_candidate(
+                        "",
+                        "",
+                        dataset_ref,
+                        competition,
+                        competition_aliases,
+                    )
+                    for dataset_ref in dataset_sources
+                ):
+                    audit.append(
+                        source_record(
+                            {
+                                "stage": "provenance",
+                                "same_competition": True,
+                                "filtered": True,
+                                "filter_reason": "target_competition_dataset_source",
+                                "dataset_sources": dataset_sources,
+                            }
+                        )
+                    )
+                    continue
+                provenance_kind = "dataset_sources"
+            if any(
+                is_same_competition_candidate(
+                    "",
+                    "",
+                    source,
+                    competition,
+                    competition_aliases,
+                )
+                for source in source_competitions
+            ):
+                audit.append(
+                    source_record(
+                        {
+                            "stage": "provenance",
+                            "same_competition": True,
+                            "filtered": True,
+                            "filter_reason": "target_competition_download_metadata",
+                            "source_competitions": source_competitions,
+                        }
+                    )
+                )
+                continue
+
+            # Scan the complete source document first, including notebook markdown
+            # and data-source metadata. Code-only scanning misses target references
+            # written outside executable cells.
+            try:
+                source_bytes = nb_path.read_bytes()
+                source_document = source_bytes.decode("utf-8", errors="replace")
+                source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+            except OSError as e:
+                audit.append(
+                    source_record(
+                        {
+                            "stage": "source_read",
+                            "same_competition": False,
+                            "filtered": True,
+                            "filter_reason": "source_read_failed",
+                            "error": str(e),
+                        }
+                    )
+                )
+                continue
+
+            if nb_path.suffix == ".ipynb":
+                code_snippets = searcher.extract_code_from_notebook(nb_path)
+            else:
+                code_snippets = searcher.extract_code_from_script(nb_path)
+
+            if not code_snippets:
+                audit.append(
+                    source_record(
+                        {
+                            "stage": "source_parse",
+                            "same_competition": False,
+                            "filtered": True,
+                            "filter_reason": "source_parse_failed_or_empty",
+                            "source_sha256": source_sha256,
+                        }
+                    )
+                )
+                continue
+
+            # Second-stage filter: notebook code that reads the target competition's
+            # input data is competition-specific -> discard.
+            if code_references_competition(
+                source_document,
+                competition,
+                competition_aliases,
+            ):
+                audit.append(
+                    source_record(
+                        {
+                            "stage": "code_scan",
+                            "same_competition": True,
+                            "filtered": True,
+                            "filter_reason": "target_competition_source_reference",
+                            "source_sha256": source_sha256,
+                        }
+                    )
+                )
+                print(
+                    f"  Contamination guard: filtered {nb.ref} "
+                    f"(code references {competition})"
+                )
+                continue
+
+            strategies = searcher.analyze_notebook_strategies(code_snippets)
+            solution = searcher.create_sota_solution(
+                nb,
+                code_snippets,
+                strategies,
+            )
+            solution.source_sha256 = source_sha256
+            solutions.append(solution)
             audit.append(
-                {
-                    "ref": nb.ref,
-                    "title": nb.title,
-                    "stage": "source_parse",
-                    "same_competition": False,
-                    "filtered": True,
-                    "filter_reason": "source_parse_failed_or_empty",
-                    "source_sha256": source_sha256,
-                }
+                source_record(
+                    {
+                        "stage": "code_scan",
+                        "same_competition": False,
+                        "filtered": False,
+                        "filter_reason": None,
+                        "source_sha256": source_sha256,
+                        "source_competitions": source_competitions,
+                        "provenance_kind": provenance_kind,
+                    }
+                )
             )
-            continue
-
-        # Second-stage filter: notebook code that reads the target competition's
-        # input data is competition-specific -> discard.
-        if code_references_competition(source_document, competition):
-            audit.append(
-                {
-                    "ref": nb.ref,
-                    "title": nb.title,
-                    "stage": "code_scan",
-                    "same_competition": True,
-                    "filtered": True,
-                    "filter_reason": "target_competition_source_reference",
-                    "source_sha256": source_sha256,
-                }
-            )
-            print(f"  Contamination guard: filtered {nb.ref} (code references {competition})")
-            continue
-
-        strategies = searcher.analyze_notebook_strategies(code_snippets)
-        solutions.append(searcher.create_sota_solution(nb, code_snippets, strategies))
-        audit.append(
-            {
-                "ref": nb.ref,
-                "title": nb.title,
-                "stage": "code_scan",
-                "same_competition": False,
-                "filtered": False,
-                "filter_reason": None,
-                "source_sha256": source_sha256,
-            }
-        )
 
         # Rate limiting
         time.sleep(1)

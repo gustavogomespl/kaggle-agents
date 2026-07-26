@@ -219,6 +219,19 @@ class TestGeneratedCodeEnvironment:
         }
         assert build_subprocess_env(source) == source
 
+    def test_mlebench_cache_location_is_removed_even_with_trusted_override(self):
+        env = build_subprocess_env(
+            {
+                "KAGGLE_AGENTS_RUN_MODE": "mlebench",
+                "KAGGLE_AGENTS_ALLOW_GENERATED_CODE_SECRETS": "true",
+                "MLEBENCH_DATA_DIR": "/grader/cache",
+                "OPENAI_API_KEY": "explicitly-trusted",
+            }
+        )
+
+        assert "MLEBENCH_DATA_DIR" not in env
+        assert env["OPENAI_API_KEY"] == "explicitly-trusted"
+
     def test_executor_uses_isolated_home_and_scrubbed_environment(
         self, temp_data_dir, monkeypatch
     ):
@@ -247,6 +260,217 @@ print("Final Validation Performance: 1.0")
         payload = json.loads((temp_data_dir / "env.json").read_text())
         assert payload["home"] == str(temp_data_dir / ".agent_home")
         assert payload["openai"] is None
+
+    def test_mlebench_rejects_explicit_private_cache_source(
+        self, temp_data_dir, monkeypatch
+    ):
+        monkeypatch.setenv("KAGGLE_AGENTS_RUN_MODE", "mlebench")
+        code = """
+import numpy as np
+from pathlib import Path
+
+labels = Path("/root/.cache/mle-bench/data/task/prepared/private/labels.csv")
+print(labels.read_text())
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10).execute(
+            code,
+            str(temp_data_dir),
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert "grader-only" in result.stderr
+
+    def test_mlebench_runtime_guard_blocks_dynamic_private_path(
+        self, tmp_path, monkeypatch
+    ):
+        cache_root = tmp_path / "benchmark-cache"
+        private_dir = cache_root / "task" / "prepared" / "private"
+        private_dir.mkdir(parents=True)
+        (private_dir / "labels.csv").write_text("id,label\n1,secret\n")
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+
+        monkeypatch.setenv("KAGGLE_AGENTS_RUN_MODE", "mlebench")
+        monkeypatch.setenv("MLEBENCH_DATA_DIR", str(cache_root))
+        code = f"""
+import numpy as np
+from pathlib import Path
+
+parts = {list(private_dir.parts)!r}
+private_path = Path(*parts) / "labels.csv"
+print(private_path.read_text())
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10).execute(
+            code,
+            str(work_dir),
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert "private data access blocked" in result.stderr
+
+    def test_mlebench_runtime_guard_allows_staged_public_files(
+        self, tmp_path, monkeypatch
+    ):
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+        (work_dir / "train.csv").write_text("x,y\n1,0\n")
+        monkeypatch.setenv("KAGGLE_AGENTS_RUN_MODE", "mlebench")
+        code = """
+import numpy as np
+from pathlib import Path
+
+assert "x,y" in Path("train.csv").read_text()
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10).execute(
+            code,
+            str(work_dir),
+            component_type="model",
+        )
+
+        assert result.success, result.stderr
+
+    def test_mlebench_runtime_guard_blocks_private_path_in_shell_command(
+        self, tmp_path, monkeypatch
+    ):
+        cache_root = tmp_path / "benchmark-cache"
+        private_dir = cache_root / "task" / "prepared" / "private"
+        private_dir.mkdir(parents=True)
+        (private_dir / "labels.csv").write_text("secret\n")
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+
+        monkeypatch.setenv("KAGGLE_AGENTS_RUN_MODE", "mlebench")
+        monkeypatch.setenv("MLEBENCH_DATA_DIR", str(cache_root))
+        code = f"""
+import numpy as np
+import os
+import numpy as np
+from pathlib import Path
+
+private_path = Path(*{list(private_dir.parts)!r}) / "labels.csv"
+os.system("head -n 1 " + str(private_path))
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10).execute(
+            code,
+            str(work_dir),
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert "private data access blocked" in result.stderr
+
+    def test_mlebench_runtime_guard_checks_child_environment_paths(
+        self, tmp_path, monkeypatch
+    ):
+        cache_root = tmp_path / "benchmark-cache"
+        private_dir = cache_root / "task" / "prepared" / "private"
+        private_dir.mkdir(parents=True)
+        (private_dir / "labels.csv").write_text("PRIVATE_LABEL\n")
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+
+        monkeypatch.setenv("KAGGLE_AGENTS_RUN_MODE", "mlebench")
+        monkeypatch.setenv("MLEBENCH_DATA_DIR", str(cache_root))
+        code = f"""
+import numpy as np
+import os
+import subprocess
+from pathlib import Path
+
+private_path = Path(*{list(private_dir.parts)!r}) / "labels.csv"
+child_env = dict(os.environ)
+child_env["LABEL_PATH"] = str(private_path)
+subprocess.run(
+    ["sh", "-c", 'cat "$LABEL_PATH"'],
+    env=child_env,
+    check=True,
+)
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10).execute(
+            code,
+            str(work_dir),
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert "private data access blocked" in result.stderr
+        assert "PRIVATE_LABEL" not in result.stdout
+
+    def test_explicit_executor_mode_enables_guard_without_parent_env(
+        self, tmp_path, monkeypatch
+    ):
+        cache_root = tmp_path / "benchmark-cache"
+        private_dir = cache_root / "task" / "prepared" / "private"
+        private_dir.mkdir(parents=True)
+        (private_dir / "labels.csv").write_text("secret\n")
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+
+        monkeypatch.delenv("KAGGLE_AGENTS_RUN_MODE", raising=False)
+        monkeypatch.setenv("MLEBENCH_DATA_DIR", str(cache_root))
+        code = f"""
+import numpy as np
+from pathlib import Path
+
+private_path = Path(*{list(private_dir.parts)!r}) / "labels.csv"
+print(private_path.read_text())
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(timeout=10, run_mode="mlebench").execute(
+            code,
+            str(work_dir),
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert "private data access blocked" in result.stderr
+
+    def test_explicit_custom_mlebench_cache_is_host_only_and_blocked(
+        self, tmp_path, monkeypatch
+    ):
+        cache_root = tmp_path / "nonstandard-benchmark-cache"
+        private_dir = cache_root / "task"
+        private_dir.mkdir(parents=True)
+        (private_dir / "secret-labels.csv").write_text("secret\n")
+        work_dir = tmp_path / "workspace"
+        work_dir.mkdir()
+
+        monkeypatch.delenv("KAGGLE_AGENTS_RUN_MODE", raising=False)
+        monkeypatch.delenv("MLEBENCH_DATA_DIR", raising=False)
+        code = f"""
+import os
+import numpy as np
+from pathlib import Path
+
+cache_env_name = "".join(["MLEBENCH", "_DATA_DIR"])
+assert os.getenv(cache_env_name) is None
+private_path = Path(*{list(private_dir.parts)!r}) / "secret-labels.csv"
+print(private_path.read_text())
+print("Final Validation Performance: 1.0")
+"""
+
+        result = CodeExecutor(
+            timeout=10,
+            run_mode="mlebench",
+            mlebench_cache_path=str(cache_root),
+        ).execute(code, str(work_dir), component_type="model")
+
+        assert result.success is False
+        assert "private data access blocked" in result.stderr
+        assert "secret" not in result.stdout
 
 
 class TestOptunaPruningContractValidation:

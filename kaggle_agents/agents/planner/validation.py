@@ -36,7 +36,6 @@ def validate_plan(
         plan = coerce_components_fn(plan)
 
     run_mode = str((state or {}).get("run_mode", "")).lower()
-    objective = str((state or {}).get("objective", "")).lower()
     domain = str((state or {}).get("domain_detected", "tabular")).lower()
     timeout_cap = (state or {}).get("timeout_per_component")
 
@@ -46,29 +45,13 @@ def validate_plan(
         except ValueError:
             timeout_cap = None
 
-    fast_mode = (
-        bool((state or {}).get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
-    )
+    fast_mode = bool((state or {}).get("fast_mode"))
     if isinstance(timeout_cap, int) and timeout_cap <= 1200:
         fast_mode = True
 
-    # In fast mode, allow smaller-impact but cheap components (e.g., TTA inference).
-    min_impact = 0.05 if fast_mode else 0.10
-
-    # Filter out invalid components
-    valid_plan = [c for c in plan if c.estimated_impact >= min_impact]
-
-    # Validate and normalize impact sum
-    MAX_REALISTIC_IMPACT = 0.85
-    total_impact = sum(c.estimated_impact for c in valid_plan)
-    if total_impact > MAX_REALISTIC_IMPACT and valid_plan:
-        print(f"  ⚠️ Impact sum {total_impact:.2f} exceeds {MAX_REALISTIC_IMPACT:.2f}, normalizing...")
-        scale_factor = MAX_REALISTIC_IMPACT / total_impact
-        for component in valid_plan:
-            original = component.estimated_impact
-            component.estimated_impact = round(original * scale_factor, 3)
-            if abs(original - component.estimated_impact) > 0.001:
-                print(f"     {component.name}: {original:.2f} → {component.estimated_impact:.3f}")
+    # `estimated_impact` is an uncalibrated planner field. Keep every candidate
+    # here and let trusted canonical-fold results decide what survives later.
+    valid_plan = list(plan)
 
     # Guardrail: block tabular models for image competitions without features.
     if is_image_competition_without_features_fn and is_image_competition_without_features_fn(state):
@@ -100,43 +83,47 @@ def validate_plan(
             valid_plan = filtered_plan
 
     # Limit components (quality over quantity)
-    max_components = 3 if fast_mode else 6
+    default_max_components = 3 if run_mode == "mlebench" else 3 if fast_mode else 6
+    max_components = max(
+        1,
+        int((state or {}).get("max_components") or default_max_components),
+    )
     override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
     if override:
         try:
             override_val = int(override)
-            if override_val >= 2:
+            if override_val >= 1:
                 max_components = override_val
         except ValueError:
             print(f"  ⚠️ Invalid KAGGLE_AGENTS_MAX_COMPONENTS='{override}', using default")
     if len(valid_plan) > max_components:
         print(
-            f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top {max_components} by impact"
+            f"  ⚠️  Plan has {len(valid_plan)} components - preserving the first "
+            f"{max_components} proposed components"
         )
-        valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[
-            :max_components
-        ]
+    uncapped_plan = valid_plan
+    valid_plan = uncapped_plan[:max_components]
 
-    # Ensure we have enough model components to produce predictions.
+    # Ensure one executable model without forcing an unmeasured diversity arm.
     model_count = sum(1 for c in valid_plan if c.component_type == "model")
-    tabular_domain = domain.startswith("tabular") or domain in {
-        "tabular",
-        "tabular_classification",
-        "tabular_regression",
-    }
-    require_two_models = tabular_domain and not fast_mode
-
-    # Note: avoid_tree_models flag removed as it was harmful for tabular tasks
-    avoid_tree_models = False
-
     if model_count == 0:
-        print("  ⚠️  No 'model' components found - adding a baseline model")
-        if domain == "image_to_image" or domain == "image_segmentation":
+        print("  ⚠️  No 'model' component in the capped plan - ensuring one model")
+        deferred_model = next(
+            (
+                component
+                for component in uncapped_plan[max_components:]
+                if component.component_type == "model"
+            ),
+            None,
+        )
+        if deferred_model is not None:
+            baseline = deferred_model
+        elif domain == "image_to_image" or domain == "image_segmentation":
             baseline = AblationComponent(
                 name="baseline_unet_encoder_decoder",
                 component_type="model",
                 code="U-Net encoder-decoder for pixel-level prediction. Output must be same size as input. Flatten to pixel-level CSV format.",
-                estimated_impact=0.30 if not fast_mode else 0.20,
+                estimated_impact=0.0,
                 tested=False,
                 actual_impact=None,
             )
@@ -145,16 +132,7 @@ def validate_plan(
                 name="baseline_resnet18",
                 component_type="model",
                 code="",
-                estimated_impact=0.20 if not fast_mode else 0.10,
-                tested=False,
-                actual_impact=None,
-            )
-        elif avoid_tree_models and tabular_domain:
-            baseline = AblationComponent(
-                name="baseline_tabular_mlp",
-                component_type="model",
-                code="Tabular MLP with StandardScaler, Dropout, softmax for multiclass.",
-                estimated_impact=0.18 if not fast_mode else 0.12,
+                estimated_impact=0.0,
                 tested=False,
                 actual_impact=None,
             )
@@ -163,59 +141,26 @@ def validate_plan(
                 name="baseline_lightgbm",
                 component_type="model",
                 code="",
-                estimated_impact=0.20,
+                estimated_impact=0.0,
                 tested=False,
                 actual_impact=None,
             )
-        valid_plan.append(baseline)
-        print(f"     Added: {baseline.name}")
-
-    elif model_count == 1 and require_two_models:
-        print("  ⚠️  Only 1 'model' component found - adding second baseline model")
-        if avoid_tree_models and tabular_domain:
-            baseline_model = AblationComponent(
-                name="baseline_tabular_mlp_2",
-                component_type="model",
-                code="Tabular MLP variant with wider layers or batchnorm.",
-                estimated_impact=0.16 if not fast_mode else 0.10,
-                tested=False,
-                actual_impact=None,
-            )
+        if len(valid_plan) < max_components:
+            valid_plan.append(baseline)
         else:
-            baseline_model = AblationComponent(
-                name="baseline_xgboost",
-                component_type="model",
-                code="",
-                estimated_impact=0.18,
-                tested=False,
-                actual_impact=None,
-            )
-        valid_plan.append(baseline_model)
-        print(f"     Added: {baseline_model.name}")
-
-    # Ensure 2-5 components total (fast mode allows 2)
-    if len(valid_plan) < 2:
-        print("  ⚠️  Plan has fewer than 2 components")
-    elif len(valid_plan) > 5 and not fast_mode:
-        print(f"  ⚠️  Plan still has {len(valid_plan)} components after filtering")
-
-    # Sort by type: preprocessing first, then models, then ensembles
-    preprocessing_components = [
-        c for c in valid_plan if c.component_type in ["preprocessing", "feature_engineering"]
-    ]
-    model_components = [c for c in valid_plan if c.component_type == "model"]
-    other_components = [
-        c
-        for c in valid_plan
-        if c.component_type not in ["preprocessing", "feature_engineering", "model"]
-    ]
-
-    # Reorder: preprocessing first, then models, then ensembles
-    valid_plan = preprocessing_components + model_components + other_components
+            valid_plan[-1] = baseline
+        print(f"     Ensured: {baseline.name}")
 
     # Debug log: Show final plan composition
+    preprocessing_count = sum(
+        c.component_type in ["preprocessing", "feature_engineering"]
+        for c in valid_plan
+    )
+    model_count = sum(c.component_type == "model" for c in valid_plan)
+    other_count = len(valid_plan) - preprocessing_count - model_count
     print(
-        f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total"
+        f"  📊 Final plan: {preprocessing_count} FE + {model_count} models + "
+        f"{other_count} ensemble = {len(valid_plan)} total"
     )
 
     return valid_plan
@@ -294,7 +239,7 @@ def detect_multimodal_competition(state: KaggleState | None) -> dict[str, Any]:
     """
     Detect if competition has both images AND rich tabular features.
 
-    Multi-modal competitions (like leaf-classification) have:
+    Multi-modal datasets have:
     - Images in train/ or test/ directories
     - Rich tabular features in train.csv (>10 columns)
 
@@ -344,8 +289,21 @@ def detect_multimodal_competition(state: KaggleState | None) -> dict[str, Any]:
         if train_path.exists():
             try:
                 train_df = pd.read_csv(train_path, nrows=5)
-                # Count non-ID, non-target columns
-                exclude_cols = {"id", "target", "species", "label", "class", "image", "image_id"}
+                # Count features from the explicit state contract. Column-name
+                # recipes silently encode benchmark-shaped priors and can
+                # misclassify arbitrary targets as usable tabular features.
+                canonical_contract = state.get("canonical_contract") or {}
+                contract_targets = canonical_contract.get("target_cols") or []
+                exclude_cols = {
+                    str(value).lower()
+                    for value in (
+                        state.get("target_col"),
+                        canonical_contract.get("target_col"),
+                        canonical_contract.get("id_col"),
+                        *contract_targets,
+                    )
+                    if isinstance(value, str) and value
+                }
                 feature_cols = [
                     c for c in train_df.columns if c.lower() not in exclude_cols
                 ]

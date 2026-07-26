@@ -7,6 +7,7 @@ Combines all mixins to provide the full data adapter functionality.
 from __future__ import annotations
 
 import os
+from itertools import islice
 from pathlib import Path
 
 from .dataclasses import MLEBenchDataInfo
@@ -166,7 +167,6 @@ class MLEBenchDataAdapter(
         """
         comp_path = self.get_competition_path(competition_id)
         public_dir = comp_path / "public"
-        private_dir = comp_path / "private"
 
         if not public_dir.exists():
             raise FileNotFoundError(
@@ -225,10 +225,16 @@ class MLEBenchDataAdapter(
         )
         if sample_sub:
             info.sample_submission_path = sample_sub
-            info.target_column = self._detect_target_column(sample_sub)
+            info.target_columns = self._detect_target_columns(sample_sub)
+            info.target_column = info.target_columns[0]
             info.id_column = self._detect_id_column(sample_sub)
             print(f"   Sample submission: {sample_sub.name}")
             print(f"   Target column: {info.target_column}")
+            if len(info.target_columns) > 1:
+                print(
+                    "   Ordered submission targets: "
+                    f"{info.target_columns}"
+                )
 
         # Find train data - check both directories and CSVs regardless of data_type
         info = self._find_train_data(info, public_dir, data_type)
@@ -240,13 +246,8 @@ class MLEBenchDataAdapter(
         all_files = list(public_dir.glob("*"))
         print(f"   All files in public_dir: {[f.name for f in all_files]}")
 
-        # Find ground truth (for validation after submission)
-        if private_dir.exists():
-            gt_file = self._find_csv_file(
-                private_dir, ["test.csv", "answers.csv", "solution.csv", "test_labels.csv"]
-            )
-            if gt_file:
-                info.ground_truth_path = gt_file
+        # Private labels belong exclusively to the external MLE-bench grader.
+        # Do not discover or expose their path in agent state.
 
         # Find description
         desc_file = public_dir / "description.md"
@@ -256,8 +257,7 @@ class MLEBenchDataAdapter(
         # Create models directory in workspace
         (workspace_path / "models").mkdir(exist_ok=True)
 
-        # Create symlinks in workspace pointing to MLE-bench data
-        # This allows the developer agent to find files in working_directory
+        # Stage only public inputs inside the isolated run workspace.
         self._create_workspace_links(info, workspace_path, public_dir)
 
         return info
@@ -274,14 +274,18 @@ class MLEBenchDataAdapter(
             "training",
             "images/train",
         ]
-        # Non-standard patterns used by some MLE-bench competitions
-        nonstandard_data_dirs = [
-            "essential_data",
-            "supplemental_data",
-            "data",
-            "raw_data",
-            "audio",
-            "audio_data",
+        excluded_dirs = {
+            "models",
+            "__pycache__",
+            ".git",
+            ".ipynb_checkpoints",
+        }
+        candidate_data_dirs = [
+            path
+            for path in sorted(public_dir.iterdir())
+            if path.is_dir()
+            and path.name.lower() not in excluded_dirs
+            and not path.name.lower().startswith(("test", "clean", "target", "ground_truth"))
         ]
 
         # Check standard directories first
@@ -300,26 +304,27 @@ class MLEBenchDataAdapter(
                     print(f"   Train dir (pattern match): {train_dir.name}/")
                     break
 
-        # If no standard train dir found, check non-standard directories for audio/image data
+        # If no conventional train directory exists, inspect every supplied
+        # directory and select one only from its observed media extensions.
         if info.train_path is None:
             audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
             image_exts = {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
-            for dir_name in nonstandard_data_dirs:
-                data_dir = public_dir / dir_name
-                if data_dir.is_dir():
-                    # Check if this directory contains audio/image files
-                    sample_files = list(data_dir.glob("*"))[:50]
-                    has_audio = any(
-                        f.suffix.lower() in audio_exts for f in sample_files if f.is_file()
-                    )
-                    has_images = any(
-                        f.suffix.lower() in image_exts for f in sample_files if f.is_file()
-                    )
-                    if has_audio or has_images:
-                        info.train_path = data_dir
-                        dtype = "audio" if has_audio else "image"
-                        print(f"   Train dir (non-standard): {dir_name}/ [{dtype}]")
-                        break
+            for data_dir in candidate_data_dirs:
+                # islice stops the recursive walk after 500 files; a filtering
+                # generator would keep walking the entire tree of large image
+                # datasets just to discard the remainder.
+                sample_files = islice(
+                    (path for path in data_dir.rglob("*") if path.is_file()),
+                    500,
+                )
+                observed_exts = {path.suffix.lower() for path in sample_files}
+                has_audio = bool(observed_exts & audio_exts)
+                has_images = bool(observed_exts & image_exts)
+                if has_audio or has_images:
+                    info.train_path = data_dir
+                    dtype = "audio" if has_audio else "image"
+                    print(f"   Train dir (content detected): {data_dir.name}/ [{dtype}]")
+                    break
 
         # Train CSV (labels for image competitions, or data for tabular)
         train_csv = self._find_csv_file(
@@ -331,30 +336,24 @@ class MLEBenchDataAdapter(
                 info.train_path = train_csv
             print(f"   Train CSV: {train_csv.name}")
 
-        # Non-standard label file search
+        # Discover label/split metadata recursively from semantic filename hints.
         if info.train_csv_path is None or data_type == "audio":
-            for data_subdir in nonstandard_data_dirs:
-                subdir_path = public_dir / data_subdir
-                if subdir_path.is_dir():
-                    # Search for label files in this subdirectory
-                    label_files = self._find_label_files(subdir_path, recursive=True)
-                    if label_files:
-                        info.label_files.extend(label_files)
-                        for lf in label_files:
-                            rel_path = lf.relative_to(public_dir)
-                            print(f"   Label file found: {rel_path}")
+            label_files = self._find_label_files(public_dir, recursive=True)
+            info.label_files.extend(
+                label_file for label_file in label_files if label_file not in info.label_files
+            )
+            for label_file in label_files:
+                print(f"   Label file found: {label_file.relative_to(public_dir)}")
 
-                    # Search for audio source directory
-                    if info.audio_source_path is None:
-                        audio_src = self._find_audio_source_dir(subdir_path)
-                        if audio_src:
-                            info.audio_source_path = audio_src
-                            rel_path = audio_src.relative_to(public_dir)
-                            print(f"   Audio source dir: {rel_path}/")
-                            # Fallback: set train_path to audio source if not already set
-                            if info.train_path is None:
-                                info.train_path = audio_src
-                                print(f"   Train dir (from audio source): {rel_path}/")
+            if info.audio_source_path is None:
+                audio_src = self._find_audio_source_dir(public_dir)
+                if audio_src:
+                    info.audio_source_path = audio_src
+                    rel_path = audio_src.relative_to(public_dir)
+                    print(f"   Audio source dir: {rel_path}/")
+                    if info.train_path is None:
+                        info.train_path = audio_src
+                        print(f"   Train dir (from audio source): {rel_path}/")
 
         # Image-to-image: look for "clean"/target image directories
         clean_dir_candidates = [
@@ -413,13 +412,16 @@ class MLEBenchDataAdapter(
                     print(f"   Test dir (pattern match): {test_dir.name}/")
                     break
 
-        # If no standard test dir found but train was found in non-standard dir,
-        # check if the same directory contains test data
-        if info.test_path is None and info.train_path and info.train_path.is_dir():
-            parent_name = info.train_path.name.lower()
-            if parent_name in ["essential_data", "supplemental_data", "data", "audio", "audio_data"]:
-                info.test_path = info.train_path
-                print(f"   Test dir (shared with train): {info.train_path.name}/")
+        # Some audio datasets identify train/test records through public split
+        # metadata while storing all source media together.
+        if (
+            info.test_path is None
+            and data_type == "audio"
+            and info.audio_source_path
+            and info.audio_source_path.is_dir()
+        ):
+            info.test_path = info.audio_source_path
+            print(f"   Test dir (shared media source): {info.audio_source_path.name}/")
 
         # Test CSV
         test_csv = self._find_csv_file(public_dir, ["test.csv", "test*.csv"])

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from itertools import pairwise
+from math import gcd
 from pathlib import Path
 from typing import Any
 
@@ -22,8 +24,8 @@ class SubmissionFormatInfo:
     id_column: str
     target_columns: list[str]
     num_classes: int | None = None
-    id_pattern: str | None = None  # e.g., 'rec_id * 100 + class_id'
-    id_multiplier: int | None = None  # e.g., 100 for MLSP
+    id_pattern: str | None = None  # e.g., 'rec_id * multiplier + class_id'
+    id_multiplier: int | None = None
     sample_ids: list[int] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -48,8 +50,8 @@ def detect_audio_submission_format(
     Detect submission format for audio competitions.
 
     Distinguishes between:
-    - Wide format: One row per sample, one column per class (BirdCLEF style)
-    - Long format: One row per (sample, class) pair (MLSP style)
+    - Wide format: One row per sample, one column per class
+    - Long format: One row per (sample, class) pair
 
     Args:
         sample_submission_path: Path to sample_submission.csv
@@ -59,23 +61,21 @@ def detect_audio_submission_format(
         SubmissionFormatInfo with detected format details
 
     Examples:
-        Wide format (BirdCLEF):
+        Wide format:
         ```
         row_id,species_0,species_1,species_2
         audio_0001,0.5,0.5,0.5
         audio_0002,0.5,0.5,0.5
         ```
 
-        Long format (MLSP 2013 Birds):
+        Long format:
         ```
         Id,Probability
-        100,0.5        # rec_id=1, species=0 → Id=1*100+0=100
-        101,0.5        # rec_id=1, species=1 → Id=1*100+1=101
+        sampleA_0,0.5
+        sampleA_1,0.5
         ```
     """
     sample_submission_path = Path(sample_submission_path)
-    warnings: list[str] = []
-
     if not sample_submission_path.exists():
         return SubmissionFormatInfo(
             format_type="unknown",
@@ -146,19 +146,19 @@ def _detect_long_format_pattern(
     Detect pattern in long format submission IDs.
 
     Common patterns:
-    - MLSP: Id = rec_id * 100 + species_id (e.g., 100, 101, 102, ..., 118, 200, 201, ...)
+    - Numeric grid: Id = rec_id * inferred_multiplier + class_id
     - Underscore: Id = "rec_id_species_id" (e.g., "1_0", "1_1", ...)
     - Dash: Id = "rec_id-species_id" (e.g., "1-0", "1-1", ...)
     """
     warnings: list[str] = []
     ids = df[id_column].tolist()
 
-    # Check if IDs are numeric (MLSP style)
+    # Check if IDs form a numeric sample-by-class grid.
     # Use pd.api.types.is_numeric_dtype() because dtype objects don't compare to strings
     if pd.api.types.is_numeric_dtype(df[id_column]):
         numeric_ids = sorted([int(x) for x in ids if pd.notna(x)])
 
-        # Try to detect multiplier pattern (e.g., 100 for MLSP)
+        # Infer a multiplier from the supplied ID grid.
         multiplier, num_classes = _detect_multiplier_pattern(numeric_ids)
 
         if multiplier:
@@ -265,43 +265,71 @@ def _detect_multiplier_pattern(sorted_ids: list[int]) -> tuple[int | None, int |
     """
     Detect multiplier pattern in numeric IDs.
 
-    For MLSP: IDs go 100, 101, ..., 118, 200, 201, ..., 218, ...
-    Pattern: Id = rec_id * 100 + species_id where species_id ∈ [0, 18]
-
     Returns:
         (multiplier, num_classes) or (None, None) if no pattern detected
     """
     if len(sorted_ids) < 10:
         return None, None
 
-    # Try common multipliers: 100, 1000, 10
-    for multiplier in [100, 1000, 10, 50]:
-        # Check if IDs follow the pattern
-        rec_ids = set()
-        class_ids = set()
+    unique_ids = sorted(set(sorted_ids))
+    if len(unique_ids) != len(sorted_ids):
+        return None, None
 
-        for id_val in sorted_ids:
-            rec_id = id_val // multiplier
-            class_id = id_val % multiplier
-            rec_ids.add(rec_id)
-            class_ids.add(class_id)
+    # Candidate multipliers are inferred from boundaries between consecutive
+    # runs, plus decimal powers supported by the observed range. No
+    # competition-specific multiplier is preferred.
+    run_starts = [unique_ids[0]]
+    for previous, current in pairwise(unique_ids):
+        if current != previous + 1:
+            run_starts.append(current)
 
-        # Valid pattern if:
-        # 1. Class IDs are consecutive from 0 to N-1
-        # 2. Number of class IDs is reasonable (< multiplier)
-        # 3. Total rows = num_rec_ids * num_classes
-        if class_ids:
-            min_class = min(class_ids)
-            max_class = max(class_ids)
-            num_classes = max_class - min_class + 1
+    structural_candidates: list[int] = []
+    start_diffs = [
+        current - previous
+        for previous, current in pairwise(run_starts)
+        if current > previous
+    ]
 
-            if (
-                min_class == 0
-                and num_classes == len(class_ids)
-                and num_classes < multiplier
-                and len(sorted_ids) == len(rec_ids) * num_classes
-            ):
-                return multiplier, num_classes
+    if start_diffs:
+        common_gap = start_diffs[0]
+        for gap in start_diffs[1:]:
+            common_gap = gcd(common_gap, gap)
+
+        common_start_factor = run_starts[0]
+        for start in run_starts[1:]:
+            common_start_factor = gcd(common_start_factor, start)
+        structural_candidates.extend([common_start_factor, common_gap])
+        structural_candidates.extend(sorted(set(start_diffs)))
+
+    power_candidates: list[int] = []
+    power = 10
+    while power <= max(unique_ids) * 10:
+        power_candidates.append(power)
+        power *= 10
+
+    candidates = list(
+        dict.fromkeys(
+            candidate
+            for candidate in structural_candidates + power_candidates
+            if candidate > 1
+        )
+    )
+    for multiplier in candidates:
+        groups: dict[int, set[int]] = {}
+        for id_val in unique_ids:
+            groups.setdefault(id_val // multiplier, set()).add(id_val % multiplier)
+
+        if len(groups) < 2:
+            continue
+
+        remainder_sets = list(groups.values())
+        expected = remainder_sets[0]
+        if not expected or any(remainders != expected for remainders in remainder_sets[1:]):
+            continue
+
+        num_classes = len(expected)
+        if expected == set(range(num_classes)) and num_classes < multiplier:
+            return multiplier, num_classes
 
     return None, None
 
@@ -317,7 +345,7 @@ def generate_submission_code_hint(format_info: SubmissionFormatInfo) -> str:
         Python code snippet for generating submission
     """
     if format_info.format_type == "wide":
-        return f'''# Wide format submission (BirdCLEF style)
+        return f'''# Wide format submission
 # predictions shape: (num_samples, {format_info.num_classes})
 submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 for i, col in enumerate({format_info.target_columns}):
@@ -326,7 +354,7 @@ submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
 '''
 
     if format_info.format_type == "long" and format_info.id_multiplier:
-        return f'''# Long format submission (MLSP style)
+        return f'''# Long format submission
 # ID pattern: {format_info.id_pattern}
 # predictions shape: (num_samples, {format_info.num_classes})
 submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
@@ -386,7 +414,7 @@ def infer_submission_logic(
 
     Handles common patterns:
     - Direct mapping (test_id == submission_id)
-    - Multiplier pattern (MLSP: submission_id = test_id * 100 + class_id)
+    - Numeric multiplier inferred from test IDs and the submission ID grid
     - String concatenation (submission_id = f"{test_id}_{class_id}")
 
     Args:
@@ -402,9 +430,9 @@ def infer_submission_logic(
         - 'code_hint': str with Python code to generate submission IDs
 
     Examples:
-        >>> result = infer_submission_logic([1, 2, 3], [100, 101, ..., 118, 200, 201, ...])
-        >>> print(result['multiplier'])  # 100
-        >>> print(result['inferred_classes'])  # 19
+        >>> result = infer_submission_logic([2, 5], [40, 41, 100, 101])
+        >>> print(result['multiplier'])  # 20
+        >>> print(result['inferred_classes'])  # 2
     """
     # Normalize inputs
     test_ids_str = [str(x).strip() for x in test_ids[:20] if str(x).strip()]
@@ -431,7 +459,7 @@ for i, test_id in enumerate(test_ids):
 submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
         }
 
-    # Case 2: Multiplier pattern (numeric IDs like MLSP)
+    # Case 2: numeric multiplier pattern.
     # Try to parse as integers
     try:
         t_ids_int = []
@@ -447,34 +475,44 @@ submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
 
         if t_ids_int and s_ids_int:
             s_ids_sorted = sorted(s_ids_int)
+            candidate_multipliers = {
+                sub_id // test_id
+                for test_id in t_ids_int
+                if test_id > 0
+                for sub_id in s_ids_sorted
+                if sub_id > test_id and sub_id % test_id == 0
+            }
 
-            for multiplier in [100, 1000, 10, 50, 200]:
+            for multiplier in sorted(m for m in candidate_multipliers if m > 1):
                 # Check if test_id * multiplier appears in submission
                 matches = 0
+                class_sets: list[set[int]] = []
                 for t in t_ids_int[:10]:
                     base = t * multiplier
-                    # Check if any submission ID is in range [base, base + multiplier)
-                    for s in s_ids_sorted:
-                        if base <= s < base + multiplier:
-                            matches += 1
-                            break
+                    class_ids_for_record = {
+                        s - base for s in s_ids_sorted if base <= s < base + multiplier
+                    }
+                    if class_ids_for_record:
+                        matches += 1
+                        class_sets.append(class_ids_for_record)
 
                 match_rate = matches / len(t_ids_int[:10]) if t_ids_int else 0
-                if match_rate >= 0.8:
-                    # Infer num_classes from submission ID range
-                    class_ids = set()
-                    for s in s_ids_sorted:
-                        class_id = s % multiplier
-                        class_ids.add(class_id)
-
-                    inferred_classes = max(class_ids) + 1 if class_ids else num_classes
+                if match_rate >= 0.8 and class_sets:
+                    class_ids = class_sets[0]
+                    if any(candidate != class_ids for candidate in class_sets[1:]):
+                        continue
+                    inferred_classes = len(class_ids)
+                    if class_ids != set(range(inferred_classes)):
+                        continue
+                    if num_classes is not None and inferred_classes != num_classes:
+                        continue
 
                     return {
                         "pattern": "multiplier",
                         "description": f"submission_id = test_id * {multiplier} + class_id",
                         "multiplier": multiplier,
                         "inferred_classes": inferred_classes,
-                        "code_hint": f"""# MLSP-style submission: Id = rec_id * {multiplier} + class_id
+                        "code_hint": f"""# Numeric-grid submission: Id = rec_id * {multiplier} + class_id
 # predictions shape: (num_test_samples, {inferred_classes})
 submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)
 pred_map = {{}}
@@ -522,7 +560,7 @@ submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
 
             return {
                 "pattern": "underscore_concat",
-                "description": f"submission_id = f'{{test_id}}_{{class_id}}'",
+                "description": "submission_id = f'{test_id}_{class_id}'",
                 "inferred_classes": inferred_classes,
                 "code_hint": f"""# Underscore concatenation: Id = "{{test_id}}_{{class_id}}"
 # predictions shape: (num_test_samples, {inferred_classes})
@@ -561,7 +599,7 @@ submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)""",
 
             return {
                 "pattern": "dash_concat",
-                "description": f"submission_id = f'{{test_id}}-{{class_id}}'",
+                "description": "submission_id = f'{test_id}-{class_id}'",
                 "inferred_classes": inferred_classes,
                 "code_hint": f"""# Dash concatenation: Id = "{{test_id}}-{{class_id}}"
 # predictions shape: (num_test_samples, {inferred_classes})

@@ -148,7 +148,10 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
 
     # Audio-specific detection: submission format and precomputed features
     audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".wma", ".aiff", ".aif"}
-    is_audio = detected_type == "audio" or forced_type == "audio"
+    is_audio = (
+        detected_type in {"audio", "audio_classification"}
+        or forced_type in {"audio", "audio_classification"}
+    )
 
     # Check for audio files if not already detected
     if not is_audio and not train_dir:
@@ -164,6 +167,7 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
         # Detect submission format (wide vs long)
         sample_sub_path = data_files.get("sample_submission") or working_dir / "sample_submission.csv"
         sample_sub_path = Path(sample_sub_path)
+        submission_format_info = None
         if sample_sub_path.exists():
             submission_format_info = detect_audio_submission_format(sample_sub_path)
             updates["submission_format_info"] = submission_format_info.to_dict()
@@ -173,16 +177,8 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
             if submission_format_info.num_classes:
                 print(f"   Num classes: {submission_format_info.num_classes}")
 
-        # Detect precomputed features
-        data_dir = working_dir
-        # Check common data subdirectories
-        for subdir in ["essential_data", "data", "features", "prepared"]:
-            candidate = working_dir / subdir
-            if candidate.exists():
-                data_dir = candidate
-                break
-
-        precomputed_features_info = detect_precomputed_features(data_dir)
+        # Detect supplied features recursively, independent of directory names.
+        precomputed_features_info = detect_precomputed_features(working_dir)
         if precomputed_features_info.has_features():
             updates["precomputed_features_info"] = precomputed_features_info.to_dict()
             print(f"   Precomputed features found: {len(precomputed_features_info.features_found)}")
@@ -201,26 +197,83 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                         id_col = cv_df.columns[0]
                         fold_col = cv_df.columns[1]
 
-                        # Auto-detect fold semantics based on unique values
-                        unique_folds = set(cv_df[fold_col].unique())
-                        if unique_folds == {0, 1}:
-                            # MLSP-style: fold=0 is train, fold=1 is test
-                            train_rec_ids = cv_df[cv_df[fold_col] == 0][id_col].tolist()
-                            test_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
-                            print(f"   CVfolds semantics: 0=train, 1=test")
+                        # Infer train/test semantics from the public submission
+                        # IDs. Fold numbers themselves have no universal meaning.
+                        sample_ids: set[str] = set()
+                        if sample_sub_path.is_file():
+                            sample_df = pd.read_csv(sample_sub_path)
+                            raw_sample_ids = sample_df.iloc[:, 0].dropna().tolist()
+                            multiplier = (
+                                submission_format_info.id_multiplier
+                                if submission_format_info is not None
+                                else None
+                            )
+                            pattern = (
+                                submission_format_info.id_pattern or ""
+                                if submission_format_info is not None
+                                else ""
+                            )
+                            for raw_id in raw_sample_ids:
+                                if multiplier is not None:
+                                    try:
+                                        sample_ids.add(str(int(raw_id) // multiplier))
+                                        continue
+                                    except (TypeError, ValueError):
+                                        pass
+                                value = str(raw_id)
+                                if "underscore" in pattern:
+                                    value = value.rsplit("_", 1)[0]
+                                elif "dash" in pattern:
+                                    value = value.rsplit("-", 1)[0]
+                                sample_ids.add(value)
+
+                        fold_groups = {
+                            fold_value: group[id_col].tolist()
+                            for fold_value, group in cv_df.groupby(fold_col)
+                        }
+                        overlap_by_fold = {
+                            fold_value: sum(
+                                str(record_id) in sample_ids
+                                for record_id in record_ids
+                            )
+                            for fold_value, record_ids in fold_groups.items()
+                        }
+                        test_fold = (
+                            max(overlap_by_fold, key=overlap_by_fold.get)
+                            if overlap_by_fold and max(overlap_by_fold.values()) > 0
+                            else None
+                        )
+                        if test_fold is not None:
+                            test_rec_ids = fold_groups[test_fold]
+                            train_rec_ids = cv_df[
+                                cv_df[fold_col] != test_fold
+                            ][id_col].tolist()
+                            print(
+                                "   CVfolds semantics inferred from sample IDs: "
+                                f"{test_fold!r}=test"
+                            )
                         else:
-                            # Standard semantics: fold=1 is train, fold=2 is test
-                            train_rec_ids = cv_df[cv_df[fold_col] == 1][id_col].tolist()
-                            test_rec_ids = cv_df[cv_df[fold_col] == 2][id_col].tolist()
-                            print(f"   CVfolds semantics: 1=train, 2=test")
+                            # Treat the column as ordinary CV assignments. Do
+                            # not invent a private train/test interpretation.
+                            train_rec_ids = cv_df[id_col].tolist()
+                            test_rec_ids = []
+                            print(
+                                "   CVfolds contains CV assignments; no public "
+                                "evidence identifies a test fold"
+                            )
 
                         if train_rec_ids or test_rec_ids:
                             updates["train_rec_ids"] = train_rec_ids
                             updates["test_rec_ids"] = test_rec_ids
                             updates["cv_folds_used"] = True
+                            if train_rec_ids:
+                                updates["expected_train_rows"] = len(train_rec_ids)
+                            if test_rec_ids:
+                                updates["expected_test_rows"] = len(test_rec_ids)
                             print(f"   CVfolds: {len(train_rec_ids)} train, {len(test_rec_ids)} test")
 
-                            # Map rec_ids to filenames if id_mapping is available
+                            # Resolve semantic record IDs to file paths without
+                            # replacing the IDs used by OOF/submission contracts.
                             if "id_mapping" in precomputed_features_info.features_found:
                                 from ...utils.label_parser import read_id_mapping
 
@@ -231,44 +284,69 @@ def data_validation_node(state: KaggleState) -> dict[str, Any]:
                                 try:
                                     mapping_df = read_id_mapping(
                                         id_mapping_path,
-                                        id_col="rec_id",
-                                        filename_col="filename",
+                                        id_col="record_id",
+                                        filename_col="file_path",
                                         audio_dir=audio_dir,
                                         resolve_extensions=True,
                                     )
 
-                                    # Create rec_id -> filename dict
-                                    id_to_filename = dict(zip(
-                                        mapping_df["rec_id"].astype(str),
-                                        mapping_df["filename"]
-                                    ))
+                                    id_to_file_path = dict(
+                                        zip(
+                                            mapping_df["record_id"].astype(str),
+                                            mapping_df["file_path"],
+                                        )
+                                    )
 
-                                    # Map train/test IDs to filenames
-                                    train_filenames = [id_to_filename.get(str(rid)) for rid in train_rec_ids]
-                                    test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
+                                    train_paths = [
+                                        id_to_file_path.get(str(record_id))
+                                        for record_id in train_rec_ids
+                                    ]
+                                    test_paths = [
+                                        id_to_file_path.get(str(record_id))
+                                        for record_id in test_rec_ids
+                                    ]
 
-                                    # Filter out None values (unmapped IDs)
-                                    train_filenames = [f for f in train_filenames if f]
-                                    test_filenames = [f for f in test_filenames if f]
+                                    train_complete = bool(train_rec_ids) and all(train_paths)
+                                    test_complete = bool(test_rec_ids) and all(test_paths)
+                                    if train_complete:
+                                        updates["train_file_paths"] = [
+                                            str(path) for path in train_paths
+                                        ]
+                                    if test_complete:
+                                        updates["test_file_paths"] = [
+                                            str(path) for path in test_paths
+                                        ]
 
-                                    if train_filenames or test_filenames:
-                                        updates["train_rec_ids"] = train_filenames
-                                        updates["test_rec_ids"] = test_filenames
-                                        print(f"   ID mapping applied: {len(train_filenames)} train, {len(test_filenames)} test filenames")
+                                    mapped_train = sum(path is not None for path in train_paths)
+                                    mapped_test = sum(path is not None for path in test_paths)
+                                    print(
+                                        "   ID mapping resolved file paths: "
+                                        f"{mapped_train}/{len(train_rec_ids)} train, "
+                                        f"{mapped_test}/{len(test_rec_ids)} test"
+                                    )
+                                    if (
+                                        mapped_train != len(train_rec_ids)
+                                        or mapped_test != len(test_rec_ids)
+                                    ):
+                                        print(
+                                            "   Warning: Partial ID mapping ignored; "
+                                            "semantic record IDs were preserved"
+                                        )
                                 except Exception as e:
                                     print(f"   Warning: Failed to apply ID mapping: {e}")
                 except Exception as e:
                     print(f"   Warning: Failed to parse CVfolds file: {e}")
 
-        # ID Integrity Check: Validate that IDs match actual files
-        # This catches early errors like MLSP-2013 where IDs lack .wav extension
+        # ID Integrity Check: validate that public IDs match actual files.
         audio_source = data_files.get("audio_source") or ""
         train_rec_ids = updates.get("train_rec_ids", [])
+        train_file_paths = updates.get("train_file_paths", [])
 
         if audio_source and train_rec_ids:
             audio_dir = Path(audio_source)
             if audio_dir.exists():
-                sample_ids = [str(x) for x in train_rec_ids[:20]]
+                integrity_ids = train_file_paths or train_rec_ids
+                sample_ids = [str(x) for x in integrity_ids[:20]]
                 is_valid, msg, details = check_id_integrity(sample_ids, audio_dir)
 
                 if not is_valid:

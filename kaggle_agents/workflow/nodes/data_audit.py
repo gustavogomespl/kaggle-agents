@@ -41,6 +41,11 @@ def data_audit_node(state: KaggleState) -> dict[str, Any]:
 
         label_files = data_files.get("label_files", [])
         label_paths = [Path(lf) for lf in label_files] if label_files else []
+        expected_file_paths = [
+            Path(path)
+            for key in ("train_file_paths", "test_file_paths")
+            for path in state.get(key, []) or []
+        ]
 
         try:
             result = audit_audio_competition(
@@ -49,7 +54,8 @@ def data_audit_node(state: KaggleState) -> dict[str, Any]:
                 label_files=label_paths,
                 train_path=train_path,
                 test_path=test_path,
-                min_audio_files=10,
+                expected_file_paths=expected_file_paths,
+                min_audio_files=1,
                 strict=True,  # Fail-fast by default
             )
             print_audit_report(result)

@@ -2,7 +2,7 @@
 
 This module provides utilities for reading CSV files with automatic
 delimiter detection, handling non-standard formats like semicolon-delimited
-files commonly found in audio competitions (e.g., MLSP 2013 Birds).
+files supplied by some datasets.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def detect_delimiter(file_path: Path | str, sample_lines: int = 5) -> str:
         Detected delimiter character
 
     Example:
-        >>> delim = detect_delimiter("rec_labels_test_hidden.txt")
+        >>> delim = detect_delimiter("labels_semicolon.txt")
         >>> print(delim)  # ";" for semicolon-delimited files
     """
     file_path = Path(file_path)
@@ -75,7 +75,7 @@ def read_csv_auto(file_path: Path | str, **kwargs) -> pd.DataFrame:
 
     Example:
         >>> # Semicolon-delimited file
-        >>> df = read_csv_auto("rec_labels_test_hidden.txt")
+        >>> df = read_csv_auto("labels_semicolon.txt")
         >>> print(len(df.columns))  # Correct column count
 
         >>> # With explicit separator (skips detection)

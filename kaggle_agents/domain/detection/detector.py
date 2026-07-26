@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 DOMAIN_PROMPT = """Classify this Kaggle competition into exactly ONE category.
 
 Categories:
-- image_classification: Classify images into categories (dog breeds, cancer detection, plant diseases)
+- image_classification: Classify images into visual categories or conditions
 - image_regression: Predict continuous values from images (age estimation, severity scores)
 - image_to_image: Transform images (denoising, super-resolution, style transfer) or pixel-level (one row per pixel) if it's an image-to-image task and the sample submission has pixel-level format in csv
 - image_segmentation: Pixel-wise classification of images

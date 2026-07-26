@@ -28,7 +28,11 @@ class TestInferTargetColumns:
             path = Path(tmpdir) / "sample_submission.csv"
             sample_sub.to_csv(path, index=False)
 
-            result = infer_target_columns(path)
+            result = infer_target_columns(
+                path,
+                train_data=sample_sub,
+                problem_type="binary_classification",
+            )
 
             assert result.target_type == "single"
             assert result.target_cols == ["target"]
@@ -48,7 +52,11 @@ class TestInferTargetColumns:
             path = Path(tmpdir) / "sample_submission.csv"
             sample_sub.to_csv(path, index=False)
 
-            result = infer_target_columns(path)
+            result = infer_target_columns(
+                path,
+                train_data=sample_sub,
+                problem_type="multi_label_classification",
+            )
 
             assert result.target_type == "multi_label"
             assert result.target_cols == ["class_A", "class_B", "class_C"]
@@ -67,7 +75,11 @@ class TestInferTargetColumns:
             path = Path(tmpdir) / "sample_submission.csv"
             sample_sub.to_csv(path, index=False)
 
-            result = infer_target_columns(path)
+            result = infer_target_columns(
+                path,
+                train_data=sample_sub,
+                problem_type="multi_target_regression",
+            )
 
             assert result.target_type == "multi_target"
             assert result.target_cols == ["target_1", "target_2"]
@@ -86,7 +98,11 @@ class TestInferTargetColumns:
             path = Path(tmpdir) / "sample_submission.csv"
             sample_sub.to_csv(path, index=False)
 
-            result = infer_target_columns(path)
+            result = infer_target_columns(
+                path,
+                train_data=sample_sub,
+                problem_type="multi_label_classification",
+            )
 
             assert result.target_type == "multi_label"
 
@@ -100,6 +116,49 @@ class TestInferTargetColumns:
             sample_sub.to_csv(path, index=False)
 
             with pytest.raises(ValueError, match="at least 2 columns"):
+                infer_target_columns(path)
+
+    def test_all_zero_submission_placeholders_do_not_define_multilabel(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample_sub = pd.DataFrame(
+                {
+                    "id": range(4),
+                    "out_a": [0.0] * 4,
+                    "out_b": [0.0] * 4,
+                }
+            )
+            train = pd.DataFrame(
+                {
+                    "id": range(6),
+                    "out_a": [0.1, 1.2, 2.4, 3.8, 5.0, 6.7],
+                    "out_b": [10.5, 8.2, 7.1, 5.6, 3.3, 1.0],
+                }
+            )
+            path = Path(tmpdir) / "sample_submission.csv"
+            sample_sub.to_csv(path, index=False)
+
+            result = infer_target_columns(
+                path,
+                train_data=train,
+                problem_type="multi_target_regression",
+            )
+
+            assert result.target_type == "multi_target"
+            assert result.target_cols == ["out_a", "out_b"]
+
+    def test_multi_column_template_without_train_semantics_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sample_sub = pd.DataFrame(
+                {
+                    "id": range(3),
+                    "a": [0, 0, 0],
+                    "b": [0, 0, 0],
+                }
+            )
+            path = Path(tmpdir) / "sample_submission.csv"
+            sample_sub.to_csv(path, index=False)
+
+            with pytest.raises(ValueError, match="does not identify"):
                 infer_target_columns(path)
 
 

@@ -43,7 +43,7 @@ def create_text_fallback_plan(
             "description": "RoBERTa-base fine-tuned for text classification with learning rate warmup and linear decay schedule.",
             "estimated_impact": 0.28,
             "rationale": "RoBERTa improves on BERT with dynamic masking and larger training corpus. Achieves SOTA on GLUE, SuperGLUE, and many NLP benchmarks. Warmup stabilizes training.",
-            "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with TrainingArguments, AdamW optimizer with warmup_steps=500, 5-fold StratifiedKFold CV, save OOF predictions",
+            "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with a budget-derived warmup schedule; use the injected canonical folds exactly and save aligned OOF predictions",
         },
         {
             "name": "distilbert_classifier",
@@ -51,7 +51,7 @@ def create_text_fallback_plan(
             "description": "DistilBERT fine-tuned (60% faster than BERT, lighter for ensemble diversity).",
             "estimated_impact": 0.22,
             "rationale": "DistilBERT is 60% faster and 40% smaller than BERT while retaining 97% of performance through knowledge distillation. Provides architectural diversity for ensemble while being computationally efficient.",
-            "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'), similar training setup to RoBERTa, 5-fold CV",
+            "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'); use the same injected canonical folds as the RoBERTa candidate",
         },
         {
             "name": "transformer_ensemble",

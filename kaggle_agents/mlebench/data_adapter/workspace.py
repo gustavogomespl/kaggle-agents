@@ -1,11 +1,12 @@
 """
 Workspace management for MLE-bench data adapter.
 
-Contains methods for creating workspace directories and symlinks.
+Contains methods for staging public benchmark data in an isolated workspace.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Any
@@ -22,143 +23,133 @@ class WorkspaceMixin:
         workspace: Path,
         public_dir: Path,
     ) -> None:
+        """Copy public inputs into the run workspace and create local aliases.
+
+        Absolute symlinks into MLE-bench's ``prepared/public`` directory reveal
+        the adjacent private-label location through ``Path.resolve()``. Staging
+        the public tree matches the baseline protocol and keeps every path seen
+        by generated code inside the run workspace. Aliases such as ``train/``
+        are relative links between already-staged public paths.
         """
-        Create symlinks in workspace pointing to MLE-bench data files.
+        print("   Staging public benchmark data...", flush=True)
+        public_root = public_dir.resolve()
 
-        This ensures the developer agent can find data files in the working directory.
-        """
-        print("   Creating workspace links...", flush=True)
+        # Reject a prepared public tree that itself points outside the public
+        # boundary. Following such a link could import private data.
+        for source in public_dir.rglob("*"):
+            if source.is_symlink() and not source.resolve().is_relative_to(public_root):
+                raise ValueError(f"Public input escapes its boundary: {source}")
 
-        # Files/dirs to link
-        items_to_link = []
+        for source in public_dir.iterdir():
+            destination = workspace / source.name
+            if destination.exists() or destination.is_symlink():
+                continue
+            if source.is_dir():
+                shutil.copytree(source, destination, symlinks=False)
+            else:
+                shutil.copy2(source, destination)
 
-        # Link canonical train/test assets for non-tabular domains.
-        # We always expose them as `train/` and `test/` inside the workspace, even if the
-        # underlying directory is named differently (e.g., `train_images/`).
-        if info.train_path and info.train_path.is_dir():
-            items_to_link.append(("train", info.train_path))
-            print(f"      Found train dir: {info.train_path}", flush=True)
-        if info.test_path and info.test_path.is_dir():
-            items_to_link.append(("test", info.test_path))
-            print(f"      Found test dir: {info.test_path}", flush=True)
+        def staged(source: Path | None) -> Path | None:
+            if source is None:
+                return None
+            resolved = source.resolve()
+            if not resolved.is_relative_to(public_root):
+                raise ValueError(f"MLE-bench public asset is outside public/: {source}")
+            return workspace / resolved.relative_to(public_root)
 
-        # Add train CSV
-        if info.train_csv_path and info.train_csv_path.exists():
-            items_to_link.append(("train.csv", info.train_csv_path))
-
-        # Add clean/target train directory for image-to-image tasks
-        if info.clean_train_path and info.clean_train_path.is_dir():
-            items_to_link.append((info.clean_train_path.name, info.clean_train_path))
-            print(f"      Found clean/target dir: {info.clean_train_path}", flush=True)
-
-        # Add test CSV (if exists - many image competitions don't have this)
-        if info.test_csv_path and info.test_csv_path.exists():
-            items_to_link.append(("test.csv", info.test_csv_path))
-
-        # Add sample submission
-        # Handle case where "sample_submission.csv" is actually a directory containing the real CSV
-        if info.sample_submission_path and info.sample_submission_path.exists():
-            target = info.sample_submission_path
-            if target.is_dir():
-                inner_csvs = sorted(target.glob("*.csv"))
-                if inner_csvs:
-                    target = inner_csvs[0]
-                    print(
-                        f"      📂 Resolved sample_submission directory to file: {target.name}",
-                        flush=True,
-                    )
-                    # Update info so downstream code uses the correct path
-                    info.sample_submission_path = target
-            if target.is_file():
-                items_to_link.append(("sample_submission.csv", target))
-
-        # Add audio source directory if found (for MLSP-like competitions)
-        if info.audio_source_path and info.audio_source_path.is_dir():
-            # Link audio source as 'audio' for easy access
-            if not any(item[0] == "audio" for item in items_to_link):
-                items_to_link.append(("audio", info.audio_source_path))
-                print(f"      Found audio source: {info.audio_source_path}", flush=True)
-
-        # Add non-standard label files (.txt files from essential_data/, etc.)
-        # This is critical for MLSP 2013 Birds and similar competitions
-        if info.label_files:
-            for label_file in info.label_files:
-                if label_file.exists():
-                    # Keep original name to avoid confusion
-                    name = label_file.name
-                    if not any(name == item[0] for item in items_to_link):
-                        items_to_link.append((name, label_file))
-                        print(f"      Found label file: {name}", flush=True)
-
-        # Also link ZIPs (common in CV competitions); keep original names for transparency.
-        for zip_file in public_dir.glob("*.zip"):
-            items_to_link.append((zip_file.name, zip_file))
-
-        # Also link any other CSVs in public_dir
-        for csv_file in public_dir.glob("*.csv"):
-            name = csv_file.name
-            if not any(name == item[0] for item in items_to_link):
-                items_to_link.append((name, csv_file))
-
-        # Also link any subdirectories from public_dir (for competitions with nested data)
-        # This handles competitions like mlsp-2013-birds with essential_data/, supplemental_data/
-        for item in public_dir.iterdir():
-            if item.is_dir():
-                # Skip if already linked (e.g., train/, test/, clean dirs)
-                if not any(item.name == link[0] for link in items_to_link):
-                    items_to_link.append((item.name, item))
-                    print(f"      Linking subdirectory: {item.name}", flush=True)
-
-        # Create symlinks
-        for link_name, target in items_to_link:
-            link_path = workspace / link_name
-            if link_path.exists() or link_path.is_symlink():
-                # Remove existing link/file
-                if link_path.is_symlink() or link_path.is_file():
-                    link_path.unlink()
-                elif link_path.is_dir():
-                    shutil.rmtree(link_path)
-
+        def local_alias(name: str, source: Path | None) -> Path | None:
+            staged_source = staged(source)
+            if staged_source is None or not staged_source.exists():
+                return None
+            alias = workspace / name
+            if alias.exists() or alias.is_symlink():
+                try:
+                    if alias.resolve() == staged_source.resolve():
+                        return alias
+                except OSError:
+                    pass
+                # The alias name is occupied by a different staged artifact
+                # (e.g. a sample_submission.csv that is a directory in the
+                # public tree). Keep pointing at the detected source instead
+                # of inheriting the collision.
+                return staged_source
             try:
-                # Create symlink
-                link_path.symlink_to(target)
-                print(f"      Linked: {link_name} -> {target}", flush=True)
-            except OSError as e:
-                # Symlinks may fail on some systems, fall back to copy
-                print(f"      Symlink failed for {link_name}, copying instead: {e}", flush=True)
-                if target.is_dir():
-                    shutil.copytree(target, link_path)
+                relative_target = os.path.relpath(staged_source, alias.parent)
+                alias.symlink_to(relative_target, target_is_directory=staged_source.is_dir())
+            except OSError:
+                if staged_source.is_dir():
+                    shutil.copytree(staged_source, alias)
                 else:
-                    shutil.copy2(target, link_path)
-                print(f"      Copied: {link_name}", flush=True)
+                    shutil.copy2(staged_source, alias)
+            return alias
 
-        # Update info paths to point to workspace
-        if (workspace / "train.csv").exists():
+        # Resolve a sample-submission directory to its actual CSV before
+        # constructing the canonical local alias.
+        if info.sample_submission_path and info.sample_submission_path.is_dir():
+            inner_csvs = sorted(info.sample_submission_path.glob("*.csv"))
+            if inner_csvs:
+                info.sample_submission_path = inner_csvs[0]
+
+        info.train_path = local_alias(
+            "train" if info.train_path and info.train_path.is_dir() else info.train_path.name,
+            info.train_path,
+        ) if info.train_path else None
+        info.test_path = local_alias(
+            "test" if info.test_path and info.test_path.is_dir() else info.test_path.name,
+            info.test_path,
+        ) if info.test_path else None
+        info.clean_train_path = (
+            local_alias(info.clean_train_path.name, info.clean_train_path)
+            if info.clean_train_path
+            else None
+        )
+        info.train_csv_path = local_alias("train.csv", info.train_csv_path)
+        info.test_csv_path = local_alias("test.csv", info.test_csv_path)
+        info.sample_submission_path = local_alias(
+            "sample_submission.csv", info.sample_submission_path
+        )
+        info.audio_source_path = local_alias("audio", info.audio_source_path)
+        info.label_files = [
+            alias
+            for label_file in info.label_files
+            if (alias := local_alias(label_file.name, label_file)) is not None
+        ]
+        info.description_path = staged(info.description_path)
+        info.extra_files = [
+            path
+            for extra_file in info.extra_files
+            if (path := staged(extra_file)) is not None
+        ]
+
+        # Normalize conventional paths after staging. Type checks (is_file/
+        # is_dir) matter: a same-named artifact of the wrong kind (e.g. a
+        # sample_submission.csv directory) must not clobber a resolved path.
+        if (workspace / "train.csv").is_file():
             info.train_csv_path = workspace / "train.csv"
             if info.data_type == "tabular":
                 info.train_path = workspace / "train.csv"
-        if (workspace / "train").exists():
+        if (workspace / "train").is_dir():
             info.train_path = workspace / "train"
         if info.train_path and info.train_path.is_file():
             linked_train_file = workspace / info.train_path.name
-            if linked_train_file.exists():
+            if linked_train_file.is_file():
                 info.train_path = linked_train_file
 
-        if (workspace / "test.csv").exists():
+        if (workspace / "test.csv").is_file():
             info.test_csv_path = workspace / "test.csv"
             if info.data_type == "tabular":
                 info.test_path = workspace / "test.csv"
-        if (workspace / "test").exists():
+        if (workspace / "test").is_dir():
             info.test_path = workspace / "test"
         if info.test_path and info.test_path.is_file():
             linked_test_file = workspace / info.test_path.name
-            if linked_test_file.exists():
+            if linked_test_file.is_file():
                 info.test_path = linked_test_file
 
-        if (workspace / "sample_submission.csv").exists():
+        if (workspace / "sample_submission.csv").is_file():
             info.sample_submission_path = workspace / "sample_submission.csv"
 
-        print("   Workspace setup complete!", flush=True)
+        print("   Public data staged inside run workspace!", flush=True)
 
     def get_state_paths(self, info: MLEBenchDataInfo) -> dict[str, Any]:
         """
@@ -181,7 +172,7 @@ class WorkspaceMixin:
             # Search workspace subdirectories for actual train data
             found = self._find_data_in_subdirs(
                 workspace,
-                ["train.csv", "train", "essential_data", "supplemental_data", "data"],
+                ["train.csv", "train"],
             )
             if found:
                 train_data_path = found
@@ -192,7 +183,7 @@ class WorkspaceMixin:
             # Search workspace subdirectories for actual test data
             found = self._find_data_in_subdirs(
                 workspace,
-                ["test.csv", "test", "essential_data", "supplemental_data", "data"],
+                ["test.csv", "test"],
             )
             if found:
                 test_data_path = found
@@ -213,6 +204,7 @@ class WorkspaceMixin:
             "test_data_path": str(test_data_path or ""),
             "sample_submission_path": str(info.sample_submission_path or ""),
             "target_col": info.target_column,
+            "target_cols": list(info.target_columns),
             "data_files": {
                 "train": str(info.train_path) if info.train_path else "",
                 "test": str(info.test_path) if info.test_path else "",
@@ -223,9 +215,9 @@ class WorkspaceMixin:
                 if info.sample_submission_path
                 else "",
                 "data_type": info.data_type,
-                # Non-standard label files (.txt for MLSP 2013 Birds, etc.)
+                # Label and split-metadata files discovered from public data.
                 "label_files": label_file_paths,
-                # Audio source directory (e.g., essential_data/src_wavs)
+                # Audio source directory inferred from local extensions.
                 "audio_source": str(info.audio_source_path) if info.audio_source_path else "",
             },
         }

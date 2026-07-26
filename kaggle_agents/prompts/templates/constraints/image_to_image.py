@@ -10,41 +10,37 @@ IMAGE_TO_IMAGE_CONSTRAINTS = """## IMAGE-TO-IMAGE / PIXEL-LEVEL TASKS (CRITICAL)
 - NEVER use classifiers (EfficientNet, ResNet with FC head)
 - NEVER use global average pooling + dense layers
 
-### 2. No train.csv for Image-to-Image
-Many competitions store data in paired directories, not CSV.
-
-**DO NOT**: `pd.read_csv('train.csv')` - Will fail!
-
-**DO THIS**:
+### 2. Discover paired inputs
+Inspect `TRAIN_PATH` and the supplied data manifest. If training assets are
+paired directories rather than a table, build pairs from files that exist:
 ```python
 from pathlib import Path
 
 train_dir = Path('/path/to/train')
 clean_dir = Path('/path/to/train_cleaned')
 
-noisy_files = sorted(train_dir.glob('*.png'))
+noisy_files = sorted(path for path in train_dir.rglob('*') if path.is_file())
 pairs = [(f, clean_dir / f.name) for f in noisy_files if (clean_dir / f.name).exists()]
 print(f"Found {len(pairs)} paired samples")
 ```
 
 ### 3. Submission Format (CRITICAL)
-Submission must be FLATTENED to pixel-level format:
+Use the exact IDs and order in the local template. Do not assume coordinate
+indexing or construct an ID pattern that was not observed:
 ```python
 sample_sub = pd.read_csv(sample_submission_path)
-expected_rows = len(sample_sub)
-
-submission_rows = []
-for img_path in sorted(test_images):
-    img_id = img_path.stem
-    pred = model(preprocess(img))  # Output: HxW image
-    H, W = pred.shape
-    for row in range(H):
-        for col in range(W):
-            pixel_id = f"{img_id}_{row+1}_{col+1}"  # 1-indexed
-            submission_rows.append({"id": pixel_id, "value": float(pred[row, col])})
-
-assert len(submission_rows) == expected_rows
-pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
+id_col, target_col = sample_sub.columns[:2]
+template_ids = sample_sub[id_col].astype(str)
+predictions_by_template_id = build_predictions_for_observed_ids(
+    template_ids.tolist(), test_images, model
+)
+if set(predictions_by_template_id) != set(template_ids):
+    raise ValueError("Prediction IDs do not exactly cover the sample template")
+submission = sample_sub.copy()
+submission[target_col] = template_ids.map(predictions_by_template_id)
+if submission[target_col].isna().any():
+    raise ValueError("Missing predictions after template alignment")
+submission.to_csv("submission.csv", index=False)
 ```
 
 ### 4. Model Checkpointing for Ensemble

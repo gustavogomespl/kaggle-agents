@@ -36,15 +36,26 @@ class TrainingMixin:
             failure_analysis: Failure analysis
             reward_signals: Reward signals
         """
-        from ...core.state import get_memory_summary_for_planning
+        # This defense is intentionally repeated here: callers outside the
+        # LangGraph node must not be able to persist one MLE-bench task as
+        # prompt-optimization data for the next task.
+        is_mlebench = str(state.get("run_mode", "")).strip().lower() == "mlebench"
+        if is_mlebench or not getattr(self, "_training_collection_enabled", True):
+            return
 
-        print("\n   💾 Collecting training data for prompt optimization...")
+        from ...core.state import get_memory_summary_for_planning
 
         ablation_plan = state.get("ablation_plan", [])
         dev_results = state.get("development_results", [])
 
         if not ablation_plan or not dev_results:
             return
+
+        collector = self._get_training_collector()
+        if collector is None:
+            return
+
+        print("\n   💾 Collecting training data for prompt optimization...")
 
         competition_info = state.get("competition_info")
         domain = state.get("domain_detected", "tabular")
@@ -63,18 +74,9 @@ class TrainingMixin:
 
         sota_solutions = state.get("sota_solutions", [])
         if sota_solutions:
-            sota_lines = []
-            for sol in sota_solutions[:5]:
-                title = getattr(sol, "title", "Unknown")
-                score = getattr(sol, "score", 0.0)
-                votes = getattr(sol, "votes", 0)
-                models = getattr(sol, "models_used", []) or []
-                strategies = getattr(sol, "strategies", []) or []
-                sota_lines.append(
-                    f"- {title} (score={score}, votes={votes}) "
-                    f"models={models[:3]} strategies={strategies[:3]}"
-                )
-            sota_summary = "\n".join(sota_lines)
+            from ..planner.sota_analysis import format_sota_solutions
+
+            sota_summary = format_sota_solutions(sota_solutions)
         else:
             sota_summary = "No SOTA solutions available."
 
@@ -84,7 +86,7 @@ class TrainingMixin:
         # Collect planner example
         plan_quality_score = reward_signals["r_combined"]
 
-        self.training_collector.add_example(
+        collector.add_example(
             agent_name="planner",
             inputs={
                 "competition_info": comp_info_str,
@@ -121,7 +123,7 @@ class TrainingMixin:
             component = ablation_plan[i]
             component_score = 1.0 if result.success else 0.0
 
-            self.training_collector.add_example(
+            collector.add_example(
                 agent_name="developer_generator",
                 inputs={
                     "component_details": format_component_details(component),

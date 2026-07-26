@@ -268,6 +268,22 @@ def prompt_refinement_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
+    # Formal MLE-bench tasks must not read examples or optimized prompts left
+    # by earlier tasks, nor write artifacts that influence later tasks. This
+    # check deliberately precedes config lookup and construction of the
+    # decider/collector/optimizer.
+    if str(state.get("run_mode", "")).strip().lower() == "mlebench":
+        return {
+            "telemetry_events": [
+                make_event(
+                    "protocol",
+                    "prompt_refinement_skipped",
+                    iteration=state.get("current_iteration", 0),
+                    reason="mlebench_cross_run_isolation",
+                )
+            ]
+        }
+
     from ..core.config import get_config
 
     toggles = getattr(get_config(), "ablation_toggles", None)

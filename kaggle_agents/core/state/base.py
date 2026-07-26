@@ -4,9 +4,12 @@ Main KaggleState TypedDict and initialization.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from operator import add
 from typing import Annotated, Any, TypedDict
+from uuid import uuid4
 
 from ..config import get_run_seed
 from .competition import AblationComponent, CompetitionInfo, SOTASolution
@@ -23,6 +26,89 @@ from .results import CodeAttempt, DevelopmentResult, SubmissionResult, Validatio
 from .types import DomainType
 
 
+def merge_dict(existing: dict, new: dict) -> dict:
+    """Merge dictionaries, with new values overwriting existing ones."""
+    return {**existing, **new}
+
+
+def _sota_identity(solution: SOTASolution | dict[str, Any]) -> tuple[str | None, str]:
+    """Return stable source and content identities for one retrieved solution."""
+    if isinstance(solution, dict):
+        source = solution.get("source")
+        source_sha256 = solution.get("source_sha256")
+        payload = {
+            "title": solution.get("title", ""),
+            "code_snippets": solution.get("code_snippets", []),
+            "strategies": solution.get("strategies", []),
+            "models_used": solution.get("models_used", []),
+            "feature_engineering": solution.get(
+                "feature_engineering",
+                [],
+            ),
+            "ensemble_approach": solution.get("ensemble_approach"),
+        }
+    else:
+        source = getattr(solution, "source", None)
+        source_sha256 = getattr(solution, "source_sha256", None)
+        payload = {
+            "title": getattr(solution, "title", ""),
+            "code_snippets": getattr(solution, "code_snippets", []),
+            "strategies": getattr(solution, "strategies", []),
+            "models_used": getattr(solution, "models_used", []),
+            "feature_engineering": getattr(
+                solution,
+                "feature_engineering",
+                [],
+            ),
+            "ensemble_approach": getattr(solution, "ensemble_approach", None),
+        }
+
+    normalized_source = str(source or "").strip().casefold().rstrip("/") or None
+    normalized_sha = str(source_sha256 or "").strip().casefold()
+    if len(normalized_sha) == 64:
+        return normalized_source, normalized_sha
+
+    # Synthetic/domain fallbacks have no downloaded source hash. Hash only
+    # stable content fields so object identity and mutable popularity metadata
+    # cannot create duplicates.
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        default=str,
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return normalized_source, hashlib.sha256(serialized).hexdigest()
+
+
+def merge_sota_solutions(
+    existing: list[SOTASolution],
+    new: list[SOTASolution],
+) -> list[SOTASolution]:
+    """
+    Merge retrieval attempts with fresh, distinct sources first.
+
+    LangGraph's former append-only reducer left initial top-K results ahead of
+    recovery results, so planners that consume a bounded prefix could never see
+    the additional sources fetched after stagnation. A source reference or
+    complete-source hash identifies duplicates; genuinely distinct earlier
+    sources remain available after the fresh batch.
+    """
+    merged: list[SOTASolution] = []
+    seen_sources: set[str] = set()
+    seen_hashes: set[str] = set()
+
+    for solution in [*(new or []), *(existing or [])]:
+        source_key, hash_key = _sota_identity(solution)
+        if (source_key and source_key in seen_sources) or hash_key in seen_hashes:
+            continue
+        merged.append(solution)
+        if source_key:
+            seen_sources.add(source_key)
+        seen_hashes.add(hash_key)
+
+    return merged
+
+
 class KaggleState(TypedDict):
     """
     Unified state for the entire Kaggle agent workflow.
@@ -32,10 +118,12 @@ class KaggleState(TypedDict):
     """
 
     # Competition Context
+    run_id: str
     competition_info: CompetitionInfo
     working_directory: str
     run_mode: str  # e.g. "kaggle" | "mlebench"
-    objective: str  # e.g. "top20" | "mlebench_medal"
+    mlebench_cache_path: str | None  # Host-only grader/cache root
+    objective: str  # e.g. "top20" | "fixed_budget_public_cv"
     timeout_per_component: int | None
     enable_checkpoint_recovery: bool
     cv_folds: int | None
@@ -52,16 +140,27 @@ class KaggleState(TypedDict):
     test_data_path: str
     sample_submission_path: str
     target_col: str
+    target_cols: list[str]
+    target_type: str | None
     data_files: dict[str, Any]
 
     # Expected row counts (for OOF alignment across models)
     expected_train_rows: int | None  # Expected rows in train set
-    expected_test_rows: int | None   # Expected rows in test set
+    expected_test_rows: int | None  # Expected rows in test set
+    class_order: list[str] | None
+    train_rec_ids: list[Any]
+    test_rec_ids: list[Any]
+    train_file_paths: list[str]
+    test_file_paths: list[str]
+    cv_folds_used: bool
 
     # Data Format Discovery (for non-standard formats)
     data_format_type: str | None  # "traditional", "generated", "custom", or "unknown"
     parsing_info: dict[str, Any] | None  # LLM-generated parsing instructions
     data_loading_code: str | None  # Python code to load non-standard data
+    submission_format_info: dict[str, Any] | None
+    precomputed_features_info: dict[str, Any] | None
+    id_extension_hint: str | None
 
     # Domain Detection
     domain_detected: DomainType | None
@@ -74,6 +173,15 @@ class KaggleState(TypedDict):
     # ========================================================================
     metric_contract: dict[str, Any] | None  # MetricContract.to_dict()
     canonical_contract: dict[str, Any] | None  # CanonicalDataContract.to_dict()
+    canonical_data_prepared: bool
+    canonical_data_skipped_reason: str | None
+    canonical_data_error: str | None
+    canonical_dir: str | None
+    canonical_train_ids_path: str | None
+    canonical_y_path: str | None
+    canonical_folds_path: str | None
+    canonical_feature_cols_path: str | None
+    canonical_metadata: dict[str, Any] | None
     submission_contract: dict[str, Any] | None  # SubmissionContract.to_dict()
     eval_fidelity: dict[str, Any] | None  # EvalFidelityContract.to_dict()
     data_usage: dict[str, Any] | None  # DataUsageContract.to_dict()
@@ -98,8 +206,23 @@ class KaggleState(TypedDict):
     # SEARCH PHASE
     # ========================================================================
     # Search Phase
-    sota_solutions: Annotated[list[SOTASolution], add]
+    sota_solutions: Annotated[list[SOTASolution], merge_sota_solutions]
     search_queries_used: Annotated[list[str], add]
+    sota_retrieval_k: int
+    last_sota_update_iteration: int | None
+    search_attempted: bool
+    search_eligible_retrieved: bool
+    search_last_attempt_eligible_retrieved: bool
+    search_last_attempt_reason: str | None
+    search_eligibility_reason: str | None
+    search_downstream_gain: float | None
+    search_downstream_gain_status: str
+    # Backward-compatible alias for search_eligible_retrieved. This is not
+    # evidence that retrieval caused a downstream score improvement.
+    search_effective: bool
+    search_failure_reason: str | None
+    sota_search_triggered: bool
+    sota_search_results: dict[str, Any]
 
     # ========================================================================
     # TELEMETRY & AUDIT (paper instrumentation)
@@ -119,6 +242,13 @@ class KaggleState(TypedDict):
 
     # Development Phase
     development_results: Annotated[list[DevelopmentResult], add]
+    # Explicit maps replace dynamic ``oof_available_<name>`` and
+    # ``component_result_<name>`` keys, which LangGraph otherwise discards.
+    oof_availability: dict[str, bool]
+    component_results: dict[str, DevelopmentResult]
+    # Independently recomputed from canonical OOF artifacts. Generated stdout
+    # is never a score source for this map.
+    trusted_component_scores: dict[str, float]
     current_code: str
     code_retry_count: int
     code_attempts: Annotated[list[CodeAttempt], add]
@@ -129,6 +259,10 @@ class KaggleState(TypedDict):
     critical_issues: Annotated[list[str], add]
     robustness_passed: bool | None
     robustness_abstained: bool
+    # A scalar robustness result is insufficient when several model artifacts
+    # are developed before the single robustness node runs. Ensemble
+    # eligibility therefore requires an explicit decision for every component.
+    robustness_approved_components: dict[str, bool]
     robustness_failure_details: dict[str, Any]
     robustness_gate_action: str | None
     robustness_recovery_count: int
@@ -139,6 +273,13 @@ class KaggleState(TypedDict):
     # Ensemble Phase
     ensemble_strategy: str | None
     ensemble_weights: dict[str, float]
+    # Host-recomputed OOF score bound to the exact ensemble submission bytes.
+    # These fields are intentionally separate from generic performance fields:
+    # MLE-bench submission reporting must be artifact-provenanced.
+    ensemble_oof_score: float | None
+    ensemble_submission_sha256: str | None
+    ensemble_submission_owner: str | None
+    ensemble_score_source: str | None
 
     # Submission Phase
     submissions: Annotated[list[SubmissionResult], add]
@@ -147,6 +288,15 @@ class KaggleState(TypedDict):
     best_single_model_score: float | None  # [DERIVABLE] from model_registry.get_best_overall()
     best_single_model_name: str | None  # [DERIVABLE] from model_registry.get_best_overall()
     baseline_cv_score: float | None
+    accepted_submission_path: str | None
+    accepted_submission_sha256: str | None
+    accepted_submission_snapshot_path: str | None
+    accepted_submission_cv_score: float | None
+    accepted_submission_score_owner: str | None
+    accepted_submission_score_source: str | None
+    best_candidate_submission_snapshot_path: str | None
+    best_candidate_submission_sha256: str | None
+    best_candidate_submission_component_name: str | None
     submission_validation_error: str | None
     retry_submission_count: int
 
@@ -176,7 +326,9 @@ class KaggleState(TypedDict):
     top_features: list[str]  # [DERIVABLE] compute from model_registry feature importance
     successful_strategies: list[str]  # [DERIVABLE] from ablation_history.get_effective_ablations()
     failed_strategies: list[str]  # [DERIVABLE] from ablation_history.get_regressions()
-    failed_component_names: Annotated[list[str], add]  # Component names that failed (for planner to avoid)
+    failed_component_names: Annotated[
+        list[str], add
+    ]  # Component names that failed (for planner to avoid)
     strategy_effectiveness: dict[str, Any]  # [DERIVABLE] compute from ablation_history
 
     # ========================================================================
@@ -217,7 +369,9 @@ class KaggleState(TypedDict):
     preference_pairs: Annotated[list[PreferencePair], add]  # [OPTIONAL] Only when DPO enabled
 
     # Quiet-STaR: Self-Evaluation
-    self_evaluations: Annotated[list[SelfEvaluation], add]  # [OPTIONAL] Only when Quiet-STaR enabled
+    self_evaluations: Annotated[
+        list[SelfEvaluation], add
+    ]  # [OPTIONAL] Only when Quiet-STaR enabled
     last_self_evaluation: SelfEvaluation | None
 
     # ========================================================================
@@ -226,11 +380,6 @@ class KaggleState(TypedDict):
     # Metadata
     workflow_start_time: datetime
     last_updated: datetime
-
-
-def merge_dict(existing: dict, new: dict) -> dict:
-    """Merge dictionaries, with new values overwriting existing ones."""
-    return {**existing, **new}
 
 
 def create_initial_state(competition_name: str, working_dir: str) -> KaggleState:
@@ -248,14 +397,27 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
 
     return KaggleState(
         # Competition Context
+        run_id=str(uuid4()),
         competition_info=CompetitionInfo(
             name=competition_name,
             description="",
             evaluation_metric="",
             problem_type="",
+            identity_aliases=[competition_name] if competition_name else [],
+            identity_alias_evidence=(
+                [
+                    {
+                        "alias": competition_name,
+                        "source": "competition_slug",
+                    }
+                ]
+                if competition_name
+                else []
+            ),
         ),
         working_directory=working_dir,
         run_mode="kaggle",
+        mlebench_cache_path=None,
         objective="top20",
         timeout_per_component=None,
         enable_checkpoint_recovery=True,
@@ -273,20 +435,40 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         test_data_path="",
         sample_submission_path="",
         target_col="",
+        target_cols=[],
+        target_type=None,
         data_files={},
         # Expected row counts
         expected_train_rows=None,
         expected_test_rows=None,
+        class_order=None,
+        train_rec_ids=[],
+        test_rec_ids=[],
+        train_file_paths=[],
+        test_file_paths=[],
+        cv_folds_used=False,
         # Data Format Discovery
         data_format_type=None,
         parsing_info=None,
         data_loading_code=None,
+        submission_format_info=None,
+        precomputed_features_info=None,
+        id_extension_hint=None,
         # Domain Detection
         domain_detected=None,
         domain_confidence=0.0,
         # Contracts (Source of Truth) - PR1
         metric_contract=None,
         canonical_contract=None,
+        canonical_data_prepared=False,
+        canonical_data_skipped_reason=None,
+        canonical_data_error=None,
+        canonical_dir=None,
+        canonical_train_ids_path=None,
+        canonical_y_path=None,
+        canonical_folds_path=None,
+        canonical_feature_cols_path=None,
+        canonical_metadata=None,
         submission_contract=None,
         eval_fidelity=None,
         data_usage=None,
@@ -300,6 +482,19 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         # Search Phase
         sota_solutions=[],
         search_queries_used=[],
+        sota_retrieval_k=0,
+        last_sota_update_iteration=None,
+        search_attempted=False,
+        search_eligible_retrieved=False,
+        search_last_attempt_eligible_retrieved=False,
+        search_last_attempt_reason=None,
+        search_eligibility_reason=None,
+        search_downstream_gain=None,
+        search_downstream_gain_status="not_applicable_not_attempted",
+        search_effective=False,
+        search_failure_reason=None,
+        sota_search_triggered=False,
+        sota_search_results={},
         # Telemetry & Audit
         telemetry_events=[],
         search_audit=[],
@@ -312,6 +507,9 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         force_eureka_planning=False,
         # Development Phase
         development_results=[],
+        oof_availability={},
+        component_results={},
+        trusted_component_scores={},
         current_code="",
         code_retry_count=0,
         code_attempts=[],
@@ -321,6 +519,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         critical_issues=[],
         robustness_passed=None,
         robustness_abstained=False,
+        robustness_approved_components={},
         robustness_failure_details={},
         robustness_gate_action=None,
         robustness_recovery_count=0,
@@ -330,6 +529,10 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         # Ensemble Phase
         ensemble_strategy=None,
         ensemble_weights={},
+        ensemble_oof_score=None,
+        ensemble_submission_sha256=None,
+        ensemble_submission_owner=None,
+        ensemble_score_source=None,
         # Submission Phase
         submissions=[],
         best_score=0.0,
@@ -337,6 +540,15 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         best_single_model_score=None,
         best_single_model_name=None,
         baseline_cv_score=None,
+        accepted_submission_path=None,
+        accepted_submission_sha256=None,
+        accepted_submission_snapshot_path=None,
+        accepted_submission_cv_score=None,
+        accepted_submission_score_owner=None,
+        accepted_submission_score_source=None,
+        best_candidate_submission_snapshot_path=None,
+        best_candidate_submission_sha256=None,
+        best_candidate_submission_component_name=None,
         submission_validation_error=None,
         retry_submission_count=0,
         # Iteration Control

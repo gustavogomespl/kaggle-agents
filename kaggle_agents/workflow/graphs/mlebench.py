@@ -35,6 +35,7 @@ from ..routing import (
     route_after_iteration_control,
     route_after_meta_evaluator,
     route_after_robustness_gate,
+    route_after_submission,
 )
 
 
@@ -125,8 +126,16 @@ def create_mlebench_workflow() -> StateGraph:
     # Ensemble → Submission
     workflow.add_edge("ensemble", "submission")
 
-    # Submission → Performance Evaluation → Meta-Evaluator
-    workflow.add_edge("submission", "performance_evaluation")
+    # A missing/invalid artifact gets bounded regeneration, then fails closed.
+    workflow.add_conditional_edges(
+        "submission",
+        route_after_submission,
+        {
+            "retry_developer": "developer",
+            "continue": "performance_evaluation",
+            "fail": "reporting",
+        },
+    )
     workflow.add_edge("performance_evaluation", "meta_evaluator")
 
     # Meta-Evaluator → Conditional (WEBRL: curriculum, SOTA search, or continue?)

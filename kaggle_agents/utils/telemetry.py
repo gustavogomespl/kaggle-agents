@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import platform
 import subprocess
@@ -86,9 +87,7 @@ def collect_run_provenance(
 ) -> dict[str, Any]:
     """Collect reproducibility metadata without recording credentials or secrets."""
     root = Path(repo_root)
-    commit: str | None = os.getenv("GITHUB_SHA") or os.getenv(
-        "KAGGLE_AGENTS_GIT_COMMIT"
-    )
+    commit: str | None = os.getenv("GITHUB_SHA") or os.getenv("KAGGLE_AGENTS_GIT_COMMIT")
     dirty: bool | None = None
     worktree_sha256: str | None = None
     try:
@@ -261,14 +260,191 @@ def summarize_run_telemetry(state: dict[str, Any]) -> dict[str, Any]:
     # Search: retrieval volume + contamination-filter decisions
     search_audit = list(state.get("search_audit", []) or [])
     contamination_filtered = sum(
-        1
-        for rec in search_audit
-        if rec.get("filtered") and rec.get("same_competition")
+        1 for rec in search_audit if rec.get("filtered") and rec.get("same_competition")
     )
     search_excluded = sum(1 for rec in search_audit if rec.get("filtered"))
+    # Per-reason rejection breakdown: without it a run cannot distinguish
+    # "rejected as target contamination" (guard working) from "rejected for
+    # unverifiable provenance" (over-filtering starving Search-First).
+    search_rejection_reasons: dict[str, int] = {}
+    for rec in search_audit:
+        if rec.get("filtered"):
+            reason = str(rec.get("filter_reason") or "unspecified")
+            search_rejection_reasons[reason] = (
+                search_rejection_reasons.get(reason, 0) + 1
+            )
+    search_rejection_reasons = dict(
+        sorted(
+            search_rejection_reasons.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
+    )
+    query_audit = [rec for rec in search_audit if rec.get("stage") == "query"]
+    source_stages = {
+        "metadata",
+        "download",
+        "provenance",
+        "source_read",
+        "source_parse",
+        "code_scan",
+        "selection",
+    }
+    source_audit = [rec for rec in search_audit if rec.get("stage") in source_stages]
+    provider_candidates = [rec for rec in search_audit if rec.get("stage") == "provider_candidate"]
+    accepted_source_records = [
+        rec for rec in source_audit if rec.get("stage") == "code_scan" and not rec.get("filtered")
+    ]
+    accepted_source_identities = {
+        str(rec.get("source_sha256") or rec.get("ref") or "").strip()
+        for rec in accepted_source_records
+        if rec.get("source_sha256") or rec.get("ref")
+    }
+    search_attempt_ids = sorted(
+        {str(rec["search_attempt_id"]) for rec in search_audit if rec.get("search_attempt_id")}
+    )
+
+    eligible_retrieved = bool(
+        state.get(
+            "search_eligible_retrieved",
+            state.get("search_effective"),
+        )
+    )
+    eligibility_reason = state.get(
+        "search_eligibility_reason",
+        state.get("search_failure_reason"),
+    )
+    downstream_gain = state.get("search_downstream_gain")
+    downstream_gain_status = state.get("search_downstream_gain_status")
+    if not downstream_gain_status:
+        downstream_gain_status = (
+            "unknown_not_measured" if eligible_retrieved else "not_applicable_no_eligible_sources"
+        )
 
     competition_info = state.get("competition_info")
     competition_name = _get(competition_info, "name", "") if competition_info else ""
+    identity_aliases = (
+        list(_get(competition_info, "identity_aliases", []) or []) if competition_info else []
+    )
+    identity_alias_evidence = (
+        list(_get(competition_info, "identity_alias_evidence", []) or [])
+        if competition_info
+        else []
+    )
+
+    # Materialize the declared retrieval lineage in the persisted run artifact.
+    # This joins opaque source IDs to final components and their independently
+    # trusted evaluation status. It is an audit trail of declared inspiration,
+    # never an estimate of retrieval's causal effect.
+    def external_source_id(solution: Any) -> str | None:
+        source = str(_get(solution, "source", "") or "").strip()
+        if not source or source.lower().startswith(("fallback/", "internal/")):
+            return None
+        source_sha256 = str(
+            _get(solution, "source_sha256", "") or ""
+        ).strip().lower()
+        identity = (
+            f"content-sha256:{source_sha256}"
+            if source_sha256
+            else f"private-source-ref:{source}"
+        )
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
+        return f"extsrc_{digest}"
+
+    def finite_float(value: Any) -> float | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if math.isfinite(parsed) else None
+
+    source_lineage: list[dict[str, Any]] = []
+    seen_source_ids: set[str] = set()
+    for solution in state.get("sota_solutions", []) or []:
+        source_id = external_source_id(solution)
+        if not source_id or source_id in seen_source_ids:
+            continue
+        seen_source_ids.add(source_id)
+        source_lineage.append(
+            {
+                "external_source_id": source_id,
+                "source_ref": _get(solution, "source"),
+                "source_sha256": _get(solution, "source_sha256"),
+                "eligibility_status": "retrieved_external_source",
+            }
+        )
+
+    trusted_scores = state.get("trusted_component_scores") or {}
+    if not isinstance(trusted_scores, dict):
+        trusted_scores = {}
+    oof_availability = state.get("oof_availability") or {}
+    if not isinstance(oof_availability, dict):
+        oof_availability = {}
+    robustness_approved = state.get("robustness_approved_components") or {}
+    if not isinstance(robustness_approved, dict):
+        robustness_approved = {}
+    component_results = state.get("component_results") or {}
+    if not isinstance(component_results, dict):
+        component_results = {}
+
+    component_lineage: list[dict[str, Any]] = []
+    for index, component in enumerate(state.get("ablation_plan", []) or []):
+        name = str(_get(component, "name", "") or f"component_{index + 1}")
+        declared_ids = [
+            str(source_id)
+            for source_id in list(
+                _get(component, "external_source_ids", []) or []
+            )
+            if isinstance(source_id, str)
+        ]
+        known_ids = [
+            source_id
+            for source_id in dict.fromkeys(declared_ids)
+            if source_id in seen_source_ids
+        ]
+        result = component_results.get(name)
+        execution_success = _get(result, "success")
+        oof_available = oof_availability.get(name) is True
+        robustness_status = robustness_approved.get(name)
+        score = finite_float(trusted_scores.get(name))
+        trusted = (
+            score is not None
+            and execution_success is True
+            and oof_available
+            and robustness_status is True
+        )
+        if trusted:
+            evidence_status = "trusted_canonical_oof"
+        elif execution_success is False:
+            evidence_status = "execution_failed"
+        elif robustness_status is False:
+            evidence_status = "robustness_rejected"
+        elif not oof_available:
+            evidence_status = "trusted_oof_unavailable"
+        elif score is None:
+            evidence_status = "trusted_score_missing"
+        else:
+            evidence_status = "inconsistent_trusted_score_state"
+
+        component_lineage.append(
+            {
+                "component": name,
+                "component_type": _get(component, "component_type"),
+                "external_source_ids": known_ids,
+                "declared_external_inspiration": bool(known_ids),
+                "unknown_declared_source_ids": [
+                    source_id
+                    for source_id in dict.fromkeys(declared_ids)
+                    if source_id not in seen_source_ids
+                ],
+                "execution_success": execution_success,
+                "oof_available": oof_available,
+                "robustness_approved": robustness_status,
+                "trusted_oof_score": score if trusted else None,
+                "evidence_status": evidence_status,
+            }
+        )
 
     stagnation = state.get("stagnation_detection") or {}
 
@@ -287,10 +463,64 @@ def summarize_run_telemetry(state: dict[str, Any]) -> dict[str, Any]:
             "code_attempts_by_stage": attempts_by_stage,
         },
         "search": {
+            "target_identity": {
+                "aliases": _to_jsonable(identity_aliases),
+                "evidence": _to_jsonable(identity_alias_evidence),
+            },
             "sota_solutions": len(state.get("sota_solutions", []) or []),
+            "attempted": bool(state.get("search_attempted")),
+            "eligible_retrieved": eligible_retrieved,
+            "retrieval_treatment_eligible": bool(
+                state.get("search_attempted") and eligible_retrieved
+            ),
+            "eligibility_reason": eligibility_reason,
+            "last_attempt_eligible_retrieved": bool(
+                state.get(
+                    "search_last_attempt_eligible_retrieved",
+                    eligible_retrieved,
+                )
+            ),
+            "last_attempt_reason": state.get("search_last_attempt_reason"),
+            "downstream_gain": downstream_gain,
+            "downstream_gain_status": downstream_gain_status,
+            "causal_effect_estimated": bool(
+                downstream_gain is not None
+                and downstream_gain_status == "measured_from_trusted_evaluation"
+            ),
             "audit_records": len(search_audit),
             "contamination_filtered": contamination_filtered,
             "excluded": search_excluded,
+            "rejection_reasons": search_rejection_reasons,
+            "queries_audited": len(query_audit),
+            "queries_filtered": sum(1 for rec in query_audit if rec.get("filtered")),
+            "sources_audited": len(source_audit),
+            "sources_filtered": sum(1 for rec in source_audit if rec.get("filtered")),
+            "retrieval_errors": sum(1 for rec in search_audit if rec.get("error")),
+            "provider_candidates_audited": len(provider_candidates),
+            "provider_candidate_context_complete": (
+                all(
+                    rec.get("query")
+                    and rec.get("iteration") is not None
+                    and rec.get("search_attempt_id")
+                    for rec in provider_candidates
+                )
+                if provider_candidates
+                else None
+            ),
+            "provider_duplicates": sum(
+                1 for rec in provider_candidates if rec.get("provider_decision") == "duplicate"
+            ),
+            "provider_parse_errors": sum(
+                1 for rec in provider_candidates if rec.get("provider_decision") == "parse_error"
+            ),
+            "provider_below_min_votes": sum(
+                1
+                for rec in provider_candidates
+                if rec.get("provider_decision") == "below_min_votes"
+            ),
+            "external_source_acceptance_records": len(accepted_source_records),
+            "eligible_external_sources_unique": len(accepted_source_identities),
+            "search_attempt_ids": search_attempt_ids,
             "queries_used": len(state.get("search_queries_used", []) or []),
             "records": [_to_jsonable(record) for record in search_audit],
         },
@@ -309,10 +539,28 @@ def summarize_run_telemetry(state: dict[str, Any]) -> dict[str, Any]:
         "ablation": {
             "disabled_components": sorted(
                 {
-                    ev.get("detail", {}).get("component", ev.get("event", "")).replace("_skipped", "")
+                    ev.get("detail", {})
+                    .get("component", ev.get("event", ""))
+                    .replace("_skipped", "")
                     for ev in events
                     if ev.get("category") == "ablation"
                 }
+            ),
+        },
+        "retrieval_lineage": {
+            "interpretation": "declared_inspiration_not_causal_effect",
+            "eligible_sources": source_lineage,
+            "components": component_lineage,
+            "components_with_declared_external_inspiration": sum(
+                1
+                for component in component_lineage
+                if component["declared_external_inspiration"]
+            ),
+            "components_with_trusted_oof_and_external_inspiration": sum(
+                1
+                for component in component_lineage
+                if component["declared_external_inspiration"]
+                and component["evidence_status"] == "trusted_canonical_oof"
             ),
         },
         "stagnation_detection": _to_jsonable(stagnation),

@@ -1,6 +1,4 @@
-"""
-Time budget and MLE-bench objective instruction builders.
-"""
+"""Time-budget and fixed-evaluation instruction builders."""
 
 from __future__ import annotations
 
@@ -19,11 +17,21 @@ def build_budget_instructions(timeout_hint: int | None) -> list[str]:
 
 
 def build_mlebench_objective_instructions() -> list[str]:
-    """Build MLE-bench objective instructions."""
+    """Build target-agnostic instructions for a fixed-budget evaluation run."""
     return [
-        "\n🏁 MLE-BENCH OBJECTIVE:",
-        "  - Optimize for MLE-bench medal: prioritize fast end-to-end runtime + robust valid submission.",
-        "  - Prefer cheaper training (fewer folds/epochs) and inference-time tricks (TTA) over expensive CV sweeps.",
+        "\n🏁 FIXED-BUDGET EVALUATION OBJECTIVE:",
+        "  - Optimize the declared public-data metric while preserving a robust, "
+        "valid submission within the end-to-end runtime budget.",
+        "  - Use the supplied canonical folds; never reduce or replace them ad hoc.",
+        "  - External technique retrieval is SearchAgent-only. Candidate code "
+        "must not query Kaggle, competition pages, notebooks, solutions, "
+        "search engines, or Kaggle APIs/CLI.",
+        "  - If the runtime permits network access for package or pretrained-model "
+        "artifacts (for example PyPI or Hugging Face), do not use that channel "
+        "to retrieve task evidence, competition-specific material, or strategy.",
+        "  - Match capacity and training steps to measured throughput and the "
+        "component deadline. Keep TTA, transforms, or extra capacity only when "
+        "they improve the declared metric on identical OOF folds.",
     ]
 
 

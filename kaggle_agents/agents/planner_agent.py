@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import random
 from datetime import datetime
 from typing import Any
 
@@ -34,7 +33,19 @@ from ..prompts.templates.planner_prompts import (
     get_domain_guidance,
 )
 from ..utils.llm_utils import get_text_content
-from ..utils.text_normalization import AMBIGUOUS_CLASSES, DETERMINISTIC_CLASSES
+from .planner.domain_patterns import (
+    extract_domain_specific_patterns,
+    format_seq2seq_insights,
+)
+from .planner.fallback_plans.audio import create_audio_fallback_plan
+from .planner.fallback_plans.seq2seq import create_seq2seq_fallback_plan
+from .planner.fallback_plans.text import create_text_fallback_plan
+from .planner.sota_analysis import (
+    format_sota_details as format_external_sota_details,
+)
+from .planner.sota_analysis import (
+    format_sota_solutions as format_external_sota_solutions,
+)
 
 
 # ==================== Extended Strategy Templates ====================
@@ -471,70 +482,8 @@ class PlannerAgent:
     def _extract_domain_specific_patterns(
         self, sota_solutions: list[SOTASolution], domain: str
     ) -> dict[str, Any]:
-        """Extract domain-specific patterns from SOTA solutions.
-
-        Uses structured SOTASolution fields (strategies, models_used) for reliability,
-        with code snippet scanning as fallback for additional signals.
-
-        Args:
-            sota_solutions: List of SOTA solutions from search
-            domain: Detected domain (e.g., 'seq_to_seq', 'tabular')
-
-        Returns:
-            Dictionary with extracted patterns for the domain
-        """
-        if domain != "seq_to_seq":
-            return {}
-
-        patterns: dict[str, Any] = {
-            "uses_hybrid_lookup": False,
-            "uses_lookup_baseline": False,
-            "lookup_coverage_estimate": 0.0,
-            "deterministic_classes": list(DETERMINISTIC_CLASSES),
-            "ambiguous_classes": list(AMBIGUOUS_CLASSES),
-            "neural_models": set(),
-            "recommended_utilities": set(),
-        }
-
-        for sol in sota_solutions:
-            # PRIMARY: Use structured fields from SOTASolution dataclass
-            for strategy in sol.strategies:
-                strategy_lower = strategy.lower()
-                if any(kw in strategy_lower for kw in ["lookup", "dictionary", "hybrid"]):
-                    patterns["uses_hybrid_lookup"] = True
-                    patterns["lookup_coverage_estimate"] = 0.80
-
-            for model in sol.models_used:
-                model_lower = model.lower()
-                if "t5" in model_lower:
-                    patterns["neural_models"].add("T5")
-                if "seq2seq" in model_lower or "transformer" in model_lower:
-                    patterns["neural_models"].add("Seq2Seq")
-                if "lookup" in model_lower:
-                    patterns["uses_lookup_baseline"] = True
-                    patterns["recommended_utilities"].add("LookupBaseline")
-
-            # FALLBACK: Scan code snippets for additional signals
-            for snippet in sol.code_snippets:
-                snippet_lower = snippet.lower()
-                if "lookupbaseline" in snippet_lower:
-                    patterns["uses_lookup_baseline"] = True
-                    patterns["recommended_utilities"].add("LookupBaseline")
-                if "create_hybrid_pipeline" in snippet_lower:
-                    patterns["recommended_utilities"].add("create_hybrid_pipeline")
-
-        # Add utility recommendations based on detected patterns
-        if patterns["uses_hybrid_lookup"]:
-            patterns["recommended_utilities"].update([
-                "create_hybrid_pipeline",
-                "get_neural_training_config",
-            ])
-
-        # Convert sets to lists for JSON serialization
-        patterns["neural_models"] = list(patterns["neural_models"])
-        patterns["recommended_utilities"] = list(patterns["recommended_utilities"])
-
-        return patterns
+        """Extract patterns using the maintained, data-driven implementation."""
+        return extract_domain_specific_patterns(sota_solutions, domain)
 
     def _format_domain_insights(self, domain: str, domain_patterns: dict[str, Any]) -> str:
         """Format domain-specific insights for the planner prompt.
@@ -556,67 +505,8 @@ class PlannerAgent:
         return ""
 
     def _format_seq2seq_insights(self, patterns: dict[str, Any]) -> str:
-        """Format seq2seq-specific insights for text normalization competitions."""
-        # Use imported constants for complete class lists
-        deterministic_str = ", ".join(sorted(DETERMINISTIC_CLASSES))
-        ambiguous_str = ", ".join(sorted(AMBIGUOUS_CLASSES))
-
-        insights = f"""## DOMAIN-SPECIFIC INSIGHTS (CRITICAL FOR seq_to_seq)
-
-### SEQ2SEQ / TEXT NORMALIZATION PATTERNS
-
-**CRITICAL: HYBRID LOOKUP-FIRST STRATEGY**
-SOTA solutions show that lookup-based approaches handle 80%+ of tokens deterministically.
-This is a PROVEN pattern - you MUST include a lookup-first component.
-
-**Class Categories (from text_normalization.py):**
-- DETERMINISTIC (use rules/lookup): {deterministic_str}
-- AMBIGUOUS (use neural): {ambiguous_str}
-
-**RECOMMENDED ARCHITECTURE:**
-1. **Component 1 (Lookup Baseline)**: Handle deterministic classes with O(1) lookup
-   - Use `LookupBaseline` from `kaggle_agents/utils/text_normalization.py`
-   - Expected coverage: 80%+ of tokens
-   - Impact: 0.30-0.40
-
-2. **Component 2 (Neural Seq2Seq)**: Handle ambiguous classes only
-   - Train ONLY on ~20% of data (ambiguous tokens)
-   - Use T5-small with `get_neural_training_config()` for time-aware training
-   - Impact: 0.20-0.30
-
-3. **Component 3 (Hybrid Pipeline)**: Combine lookup + neural
-   - Use `create_hybrid_pipeline()` utility
-   - Lookup first, neural fallback for ambiguous
-   - Impact: 0.10-0.15
-
-**AVAILABLE UTILITIES (USE THESE!):**
-```python
-from kaggle_agents.utils.text_normalization import (
-    LookupBaseline,              # Frequency-based lookup table
-    create_hybrid_pipeline,      # Returns lookup + ambiguous_df + neural_config
-    get_neural_training_config,  # Time-aware training config with max_steps guard
-    DETERMINISTIC_CLASSES,       # Complete set of deterministic classes
-    AMBIGUOUS_CLASSES,           # Complete set of ambiguous classes
-)
-```
-
-**MANDATORY FOR SEQ2SEQ:**
-- At least ONE component must use `LookupBaseline` or equivalent lookup approach
-- At least ONE component must generate the actual "after" text (not just predict class)
-- Neural training MUST use `max_steps` guard to prevent timeout
-- Component impacts must be REALISTIC (sum should be ≤ 0.70 for a 3-component plan)
-"""
-
-        # Add detected patterns if any
-        if patterns.get("uses_hybrid_lookup"):
-            coverage = patterns.get("lookup_coverage_estimate", 0.8)
-            insights += f"\n**DETECTED FROM SOTA:** Hybrid lookup strategy confirmed (est. {coverage:.0%} coverage)"
-
-        if patterns.get("neural_models"):
-            models = ", ".join(patterns["neural_models"])
-            insights += f"\n**DETECTED NEURAL MODELS:** {models}"
-
-        return insights
+        """Format seq2seq insights using locally validated routing guidance."""
+        return format_seq2seq_insights(patterns)
 
     def _extract_curriculum_insights(self, state: KaggleState) -> str:
         """
@@ -737,10 +627,12 @@ Domain: {domain}
         domain_guidance = get_domain_guidance(domain)
 
         # Resolve max components (allow override via env)
-        run_mode = state.get("run_mode", "")
-        objective = state.get("objective", "") or ""
-        fast_mode = bool(state.get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
-        max_components = 3 if fast_mode else 6
+        run_mode = str(state.get("run_mode", "")).lower()
+        fast_mode = bool(state.get("fast_mode"))
+        default_max_components = 3 if run_mode == "mlebench" else 3 if fast_mode else 6
+        max_components = int(
+            state.get("max_components") or default_max_components
+        )
         override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
         if override:
             try:
@@ -814,7 +706,7 @@ IMPORTANT: Use the curriculum insights above to:
 3. Learn from common error patterns and component success rates
 4. Build upon successful patterns while exploring new improvements
 
-Generate a plan that leverages proven successful strategies and avoids known pitfalls.
+Generate a plan using strategies supported by allowed evidence and local validation.
 
 Return a JSON array with up to {max_components} components. Each component must have:
 - name: unique identifier
@@ -858,8 +750,8 @@ Return a JSON array with up to {max_components} components. Each component must 
                     except Exception:
                         plan_text = str(plan_text)
                 plan_data = self._parse_llm_plan_response(plan_text, sota_analysis)
-                if len(plan_data) < 3:
-                    print(f"  ⚠️ LLM generated only {len(plan_data)} components, using fallback")
+                if not plan_data:
+                    print("  ⚠️ LLM generated no components, using fallback")
                     plan_data = self._create_fallback_plan(
                         domain, sota_analysis, curriculum_insights, state=state
                     )
@@ -870,9 +762,6 @@ Return a JSON array with up to {max_components} components. Each component must 
                 )
 
         components = self._coerce_components(plan_data)
-
-        # Sort by estimated impact (descending)
-        components.sort(key=lambda x: x.estimated_impact, reverse=True)
 
         return components
 
@@ -1110,9 +999,6 @@ Return a JSON array with up to {max_components} components. Each component must 
             )
             components.append(component)
 
-        # Sort by estimated impact
-        components.sort(key=lambda x: x.estimated_impact, reverse=True)
-
         # FIX: Plan diversity check - detect and avoid repeating same plan
         previous_plan_hashes = state.get("previous_plan_hashes", [])
         plan_hash = hash(tuple(sorted(c.name for c in components)))
@@ -1149,7 +1035,6 @@ Return a JSON array with up to {max_components} components. Each component must 
                 )
                 components.append(component)
 
-            components.sort(key=lambda x: x.estimated_impact, reverse=True)
             plan_hash = hash(tuple(sorted(c.name for c in components)))
 
         # FIX: Force exploration if plan is still a duplicate after max retries
@@ -1172,7 +1057,6 @@ Return a JSON array with up to {max_components} components. Each component must 
                             estimated_impact=item.get("estimated_impact", 0.15),
                         )
                         components.append(component)
-                    components.sort(key=lambda x: x.estimated_impact, reverse=True)
                     plan_hash = hash(tuple(sorted(c.name for c in components)))
                     print(f"   [Planner] ✓ Forced exploration plan: {[c.name for c in components]}")
 
@@ -1251,8 +1135,6 @@ Return a JSON array with up to {max_components} components. Each component must 
             Exploration plan with novel components
         """
         domain = str(state.get("domain_detected", "tabular")).lower()
-        competition_name = state.get("competition_name", "")
-
         # Extract SOTA guidance if available
         sota_guidance = {}
         if state:
@@ -1660,18 +1542,28 @@ final_preds = np.mean(tta_preds, axis=0)""",
         Returns:
             Refined plan as list of dicts
         """
-        # Bandit-lite: keep top-2 successful arms by reward, explore one new arm
+        # Compatibility path: use only scores independently recomputed from
+        # canonical OOF artifacts. Generated stdout and declared impact are not
+        # selection evidence.
+        trusted_scores = state.get("trusted_component_scores", {})
+        if not isinstance(trusted_scores, dict):
+            trusted_scores = {}
         arms = []
         for idx, comp in enumerate(previous_plan):
-            score = None
-            if idx < len(dev_results):
-                score = self._extract_validation_score(dev_results[idx].stdout)
-            reward = score if score is not None else comp.estimated_impact
-            success = idx < len(dev_results) and dev_results[idx].success
+            raw_score = trusted_scores.get(comp.name)
+            try:
+                reward = float(raw_score)
+            except (TypeError, ValueError):
+                reward = None
+            success = (
+                idx < len(dev_results)
+                and dev_results[idx].success
+                and reward is not None
+            )
             arms.append(
                 {
                     "component": comp,
-                    "reward": reward if reward is not None else 0.0,
+                    "reward": reward,
                     "success": success,
                 }
             )
@@ -1731,7 +1623,10 @@ final_preds = np.mean(tta_preds, axis=0)""",
                     "component_type": "feature_engineering",
                     "description": "Polynomial + interaction features with leak-safe pipelines (imputer/encoder in CV)",
                     "estimated_impact": 0.15,
-                    "rationale": "Consistently strong FE baseline",
+                    "rationale": (
+                        "Leakage-safe feature candidate retained only when its ablation "
+                        "improves held-out performance."
+                    ),
                     "code_outline": "Pipeline with ColumnTransformer, SimpleImputer, OneHot/TargetEncoder, interactions",
                 }
             )
@@ -1767,15 +1662,15 @@ final_preds = np.mean(tta_preds, axis=0)""",
             # NLP-specific fallback models
             if model_count < 2:
                 plan.append(
-                    {
-                        "name": "tfidf_logreg_baseline",
-                        "component_type": "model",
-                        "description": "TF-IDF (1-3 ngrams) + LogisticRegression, 5-fold StratifiedKFold",
-                        "estimated_impact": 0.22,
-                        "rationale": "Strong NLP baseline - fast and interpretable",
-                        "code_outline": "TfidfVectorizer(ngram_range=(1,3), max_features=50000) + LogisticRegression(C=1.0, solver='saga')",
-                    }
-                )
+                {
+                    "name": "tfidf_logreg_baseline",
+                    "component_type": "model",
+                    "description": "TF-IDF (1-3 ngrams) + LogisticRegression on the injected canonical folds",
+                    "estimated_impact": 0.22,
+                    "rationale": "Strong NLP baseline - fast and interpretable",
+                    "code_outline": "Fit TF-IDF + LogisticRegression independently inside every injected canonical fold",
+                }
+            )
                 model_count += 1
 
             if model_count < 2:
@@ -1783,26 +1678,26 @@ final_preds = np.mean(tta_preds, axis=0)""",
                     {
                         "name": "tfidf_svm_classifier",
                         "component_type": "model",
-                        "description": "TF-IDF + LinearSVC with calibration for probability outputs",
-                        "estimated_impact": 0.18,
-                        "rationale": "Adds diversity for text ensemble",
-                        "code_outline": "TfidfVectorizer + CalibratedClassifierCV(LinearSVC(), cv=3)",
-                    }
-                )
+                    "description": "TF-IDF + LinearSVC with calibration for probability outputs",
+                    "estimated_impact": 0.18,
+                    "rationale": "Adds diversity for text ensemble",
+                    "code_outline": "Fit TF-IDF + calibrated LinearSVC wholly inside each injected canonical training partition",
+                }
+            )
 
         elif domain in IMAGE_DOMAINS:
             # Image-specific fallback models
             if model_count < 2:
                 plan.append(
-                    {
-                        "name": "efficientnet_b0_baseline",
-                        "component_type": "model",
-                        "description": "EfficientNet-B0 pretrained, fine-tune all layers, 5-fold CV",
-                        "estimated_impact": 0.22,
-                        "rationale": "Strong pretrained CNN baseline",
-                        "code_outline": "timm.create_model('efficientnet_b0', pretrained=True, num_classes=N)",
-                    }
-                )
+                {
+                    "name": "efficientnet_b0_baseline",
+                    "component_type": "model",
+                    "description": "EfficientNet-B0 pretrained, fine-tuned on the injected canonical folds",
+                    "estimated_impact": 0.22,
+                    "rationale": "Strong pretrained CNN baseline",
+                    "code_outline": "Train timm EfficientNet-B0 independently on every injected canonical fold",
+                }
+            )
                 model_count += 1
 
             if model_count < 2:
@@ -1848,28 +1743,28 @@ final_preds = np.mean(tta_preds, axis=0)""",
             # Default tabular fallback models
             if model_count < 2:
                 plan.append(
-                    {
-                        "name": "lightgbm_fast_cv",
-                        "component_type": "model",
-                        "description": "LightGBM with OHE pipeline, 5-fold StratifiedKFold, early stopping via callbacks",
-                        "estimated_impact": 0.20,
-                        "rationale": "High-ROI baseline model",
-                        "code_outline": "ColumnTransformer + LGBMClassifier(num_leaves=63, learning_rate=0.03, n_estimators=1200)",
-                    }
-                )
+                {
+                    "name": "lightgbm_fast_cv",
+                    "component_type": "model",
+                    "description": "LightGBM with fold-local OHE and early stopping on the injected canonical folds",
+                    "estimated_impact": 0.20,
+                    "rationale": "High-ROI baseline model",
+                    "code_outline": "Fit the task-appropriate LightGBM pipeline independently inside every injected canonical fold with budget-derived capacity",
+                }
+            )
                 model_count += 1
 
             if model_count < 2:
                 plan.append(
-                    {
-                        "name": "xgboost_fast_cv",
-                        "component_type": "model",
-                        "description": "XGBoost with OHE pipeline, 5-fold CV, moderate depth",
-                        "estimated_impact": 0.18,
-                        "rationale": "Adds diversity for ensemble",
-                        "code_outline": "XGBClassifier(max_depth=6, learning_rate=0.05, n_estimators=800, subsample=0.8)",
-                    }
-                )
+                {
+                    "name": "xgboost_fast_cv",
+                    "component_type": "model",
+                    "description": "XGBoost with fold-local OHE on the injected canonical folds",
+                    "estimated_impact": 0.18,
+                    "rationale": "Adds diversity for ensemble",
+                    "code_outline": "Fit the task-appropriate XGBoost pipeline independently inside every injected canonical fold with budget-derived capacity",
+                }
+            )
 
         # Exploration arm if capacity allows
         if len(plan) < 4:
@@ -1917,200 +1812,16 @@ final_preds = np.mean(tta_preds, axis=0)""",
         Returns:
             Validated plan
         """
-        # Normalize any raw dict entries before applying validation rules.
-        plan = self._coerce_components(plan)
+        from .planner.validation import validate_plan
 
-        run_mode = str((state or {}).get("run_mode", "")).lower()
-        objective = str((state or {}).get("objective", "")).lower()
-        domain = str((state or {}).get("domain_detected", "tabular")).lower()
-        timeout_cap = (state or {}).get("timeout_per_component")
-
-        if isinstance(timeout_cap, str):
-            try:
-                timeout_cap = int(timeout_cap)
-            except ValueError:
-                timeout_cap = None
-
-        fast_mode = (
-            bool((state or {}).get("fast_mode")) or run_mode == "mlebench" or "medal" in objective
+        return validate_plan(
+            plan,
+            state=state,
+            coerce_components_fn=self._coerce_components,
+            is_image_competition_without_features_fn=(
+                self._is_image_competition_without_features
+            ),
         )
-        if isinstance(timeout_cap, int) and timeout_cap <= 1200:
-            fast_mode = True
-
-        # In fast mode, allow smaller-impact but cheap components (e.g., TTA inference).
-        min_impact = 0.05 if fast_mode else 0.10
-
-        # Filter out invalid components
-        valid_plan = [c for c in plan if c.estimated_impact >= min_impact]
-
-        # Validate and normalize impact sum
-        # Planner LLM often generates optimistic impacts (e.g., 0.45 + 0.35 + 0.25 = 1.05)
-        # Normalizing keeps relative ordering but makes values realistic
-        MAX_REALISTIC_IMPACT = 0.85
-        total_impact = sum(c.estimated_impact for c in valid_plan)
-        if total_impact > MAX_REALISTIC_IMPACT and valid_plan:
-            print(f"  ⚠️ Impact sum {total_impact:.2f} exceeds {MAX_REALISTIC_IMPACT:.2f}, normalizing...")
-            scale_factor = MAX_REALISTIC_IMPACT / total_impact
-            for component in valid_plan:
-                original = component.estimated_impact
-                component.estimated_impact = round(original * scale_factor, 3)
-                if abs(original - component.estimated_impact) > 0.001:
-                    print(f"     {component.name}: {original:.2f} → {component.estimated_impact:.3f}")
-
-        # Guardrail: block tabular models for image competitions without features.
-        if self._is_image_competition_without_features(state):
-            tabular_signals = [
-                "lightgbm",
-                "lgbm",
-                "xgboost",
-                "catboost",
-                "randomforest",
-                "logistic",
-                "svm",
-                "naive",
-                "optuna",
-                "stacking",
-                "ridge",
-            ]
-            filtered_plan = []
-            removed = []
-            for comp in valid_plan:
-                text = f"{comp.name} {comp.code}".lower()
-                if any(sig in text for sig in tabular_signals):
-                    removed.append(comp.name)
-                    continue
-                filtered_plan.append(comp)
-            if removed:
-                print(
-                    f"  ⚠️  Removed tabular components for image competition without features: {', '.join(removed)}"
-                )
-                valid_plan = filtered_plan
-
-        # NOTE: NN-dominant tree removal logic REMOVED (was harmful for tabular tasks).
-        # Tree models (LightGBM, XGBoost, CatBoost) are typically the best performers
-        # for tabular classification/regression. Removing them when an MLP happened
-        # to score well in one iteration caused severe performance degradation.
-        # Tree models should ALWAYS be available for tabular competitions.
-
-        # Limit components (quality over quantity)
-        max_components = 3 if fast_mode else 6
-        override = os.getenv("KAGGLE_AGENTS_MAX_COMPONENTS")
-        if override:
-            try:
-                override_val = int(override)
-                if override_val >= 2:
-                    max_components = override_val
-            except ValueError:
-                print(f"  ⚠️ Invalid KAGGLE_AGENTS_MAX_COMPONENTS='{override}', using default")
-        if len(valid_plan) > max_components:
-            print(
-                f"  ⚠️  Plan has {len(valid_plan)} components - limiting to top {max_components} by impact"
-            )
-            valid_plan = sorted(valid_plan, key=lambda x: x.estimated_impact, reverse=True)[
-                :max_components
-            ]
-
-        # Ensure we have enough model components to produce predictions.
-        model_count = sum(1 for c in valid_plan if c.component_type == "model")
-        tabular_domain = domain.startswith("tabular") or domain in {
-            "tabular",
-            "tabular_classification",
-            "tabular_regression",
-        }
-        require_two_models = tabular_domain and not fast_mode
-
-        if model_count == 0:
-            print("  ⚠️  No 'model' components found - adding a baseline model")
-            if domain == "image_to_image" or domain == "image_segmentation":
-                # CRITICAL: Use encoder-decoder for image-to-image, not classifier
-                baseline = AblationComponent(
-                    name="baseline_unet_encoder_decoder",
-                    component_type="model",
-                    code="U-Net encoder-decoder for pixel-level prediction. Output must be same size as input. Flatten to pixel-level CSV format.",
-                    estimated_impact=0.30 if not fast_mode else 0.20,
-                    tested=False,
-                    actual_impact=None,
-                )
-            elif domain.startswith("image_"):
-                baseline = AblationComponent(
-                    name="baseline_resnet18",
-                    component_type="model",
-                    code="",
-                    estimated_impact=0.20 if not fast_mode else 0.10,
-                    tested=False,
-                    actual_impact=None,
-                )
-            elif avoid_tree_models and tabular_domain:
-                baseline = AblationComponent(
-                    name="baseline_tabular_mlp",
-                    component_type="model",
-                    code="Tabular MLP with StandardScaler, Dropout, softmax for multiclass.",
-                    estimated_impact=0.18 if not fast_mode else 0.12,
-                    tested=False,
-                    actual_impact=None,
-                )
-            else:
-                baseline = AblationComponent(
-                    name="baseline_lightgbm",
-                    component_type="model",
-                    code="",
-                    estimated_impact=0.20,
-                    tested=False,
-                    actual_impact=None,
-                )
-            valid_plan.append(baseline)
-            print(f"     Added: {baseline.name}")
-
-        elif model_count == 1 and require_two_models:
-            print("  ⚠️  Only 1 'model' component found - adding second baseline model")
-            if avoid_tree_models and tabular_domain:
-                baseline_model = AblationComponent(
-                    name="baseline_tabular_mlp_2",
-                    component_type="model",
-                    code="Tabular MLP variant with wider layers or batchnorm.",
-                    estimated_impact=0.16 if not fast_mode else 0.10,
-                    tested=False,
-                    actual_impact=None,
-                )
-            else:
-                baseline_model = AblationComponent(
-                    name="baseline_xgboost",
-                    component_type="model",
-                    code="",
-                    estimated_impact=0.18,
-                    tested=False,
-                    actual_impact=None,
-                )
-            valid_plan.append(baseline_model)
-            print(f"     Added: {baseline_model.name}")
-
-        # Ensure 2-5 components total (fast mode allows 2)
-        if len(valid_plan) < 2:
-            print("  ⚠️  Plan has fewer than 2 components")
-        elif len(valid_plan) > 5 and not fast_mode:
-            print(f"  ⚠️  Plan still has {len(valid_plan)} components after filtering")
-
-        # Sort by type: preprocessing first, then models, then ensembles
-        # This ensures data is prepared before models are trained
-        preprocessing_components = [
-            c for c in valid_plan if c.component_type in ["preprocessing", "feature_engineering"]
-        ]
-        model_components = [c for c in valid_plan if c.component_type == "model"]
-        other_components = [
-            c
-            for c in valid_plan
-            if c.component_type not in ["preprocessing", "feature_engineering", "model"]
-        ]
-
-        # Reorder: preprocessing first, then models, then ensembles
-        valid_plan = preprocessing_components + model_components + other_components
-
-        # Debug log: Show final plan composition
-        print(
-            f"  📊 Final plan: {len(preprocessing_components)} FE + {len(model_components)} models + {len(other_components)} ensemble = {len(valid_plan)} total"
-        )
-
-        return valid_plan
 
     def _analyze_gaps(
         self, state: KaggleState, previous_plan_str: str, test_results_str: str
@@ -2134,7 +1845,7 @@ final_preds = np.mean(tta_preds, axis=0)""",
             test_results=test_results_str,
             metric=competition_info.evaluation_metric,
             current_score=current_score,
-            target_score="SOTA (typically Top 10%)",
+            target_score="Improve the held-out validation metric",
             memory_summary=get_memory_summary_for_planning(state),
         )
 
@@ -2311,7 +2022,7 @@ final_preds = np.mean(tta_preds, axis=0)""",
         """
         Detect if competition has both images AND rich tabular features.
 
-        Multi-modal competitions (like leaf-classification) have:
+        Multi-modal datasets can have:
         - Images in train/ or test/ directories
         - Rich tabular features in train.csv (>10 columns)
 
@@ -2361,8 +2072,20 @@ final_preds = np.mean(tta_preds, axis=0)""",
             if train_path.exists():
                 try:
                     train_df = pd.read_csv(train_path, nrows=5)
-                    # Count non-ID, non-target columns
-                    exclude_cols = {"id", "target", "species", "label", "class", "image", "image_id"}
+                    # Count features from explicit public-data roles instead of
+                    # target-name recipes.
+                    canonical_contract = state.get("canonical_contract") or {}
+                    contract_targets = canonical_contract.get("target_cols") or []
+                    exclude_cols = {
+                        str(value).lower()
+                        for value in (
+                            state.get("target_col"),
+                            canonical_contract.get("target_col"),
+                            canonical_contract.get("id_col"),
+                            *contract_targets,
+                        )
+                        if isinstance(value, str) and value
+                    }
                     feature_cols = [
                         c for c in train_df.columns if c.lower() not in exclude_cols
                     ]
@@ -2387,13 +2110,13 @@ final_preds = np.mean(tta_preds, axis=0)""",
                 "recommendation": (
                     "Use Keras Functional API with multi-input model: "
                     "CNN branch (EfficientNet) for images + MLP branch for tabular features. "
-                    "Alternatively, the pre-extracted tabular features may be sufficient "
-                    "for competitive performance with LightGBM/XGBoost alone."
+                    "Compare the hybrid model with a tabular-only baseline on identical "
+                    "folds before selecting either path."
                 ),
                 "priority_models": [
-                    "LightGBM with all tabular features (fast, often competitive)",
+                    "LightGBM with all tabular features",
                     "XGBoost with all tabular features",
-                    "Hybrid CNN+Tabular (best but slower)",
+                    "Hybrid CNN+Tabular candidate",
                 ],
             }
         if has_images:
@@ -2520,8 +2243,6 @@ final_preds = np.mean(tta_preds, axis=0)""",
                 "image_classification", sota_analysis, fast_mode=False
             )
 
-        run_mode = str((state or {}).get("run_mode", "")).lower()
-        objective = str((state or {}).get("objective", "")).lower()
         timeout_cap = (state or {}).get("timeout_per_component")
         if isinstance(timeout_cap, str):
             try:
@@ -2529,10 +2250,9 @@ final_preds = np.mean(tta_preds, axis=0)""",
             except ValueError:
                 timeout_cap = None
 
-        # Speed-first when optimizing for MLE-bench medals or tight component caps.
+        # Speed-first is an explicit runtime/budget decision.
         fast_mode = (
-            run_mode == "mlebench"
-            or "medal" in objective
+            bool((state or {}).get("fast_mode"))
             or (isinstance(timeout_cap, int) and timeout_cap <= 1200)
         )
 
@@ -2567,7 +2287,10 @@ final_preds = np.mean(tta_preds, axis=0)""",
             # Includes object_detection which uses CNN-based approaches
             return self._create_image_fallback_plan(domain, sota_analysis, fast_mode=fast_mode)
         if domain in TEXT_DOMAINS or domain.startswith("text_"):
-            return self._create_text_fallback_plan(domain, sota_analysis)
+            return self._create_text_fallback_plan(
+                domain,
+                sota_analysis,
+            )
         if domain in AUDIO_DOMAINS or domain.startswith("audio_"):
             return self._create_audio_fallback_plan(domain, sota_analysis)
         # Tabular (existing logic)
@@ -2639,7 +2362,7 @@ final_preds = np.mean(tta_preds, axis=0)""",
                 ["catboost_fast_cv", "lightgbm_tuned_cv"],
                 # Iteration 2: Neural Network + Random Forest (different model families)
                 ["neural_network_mlp", "random_forest_fast"],
-                # Iteration 3: Feature Engineering + CatBoost (FE can improve score significantly)
+                # Iteration 3: evaluate feature engineering with CatBoost.
                 ["target_encoding_fe", "catboost_fast_cv"],
                 # Iteration 4: Intensive training - more folds/epochs
                 ["lightgbm_intensive", "catboost_fast_cv"],
@@ -2687,7 +2410,10 @@ final_preds = np.mean(tta_preds, axis=0)""",
                     "component_type": "model",
                     "description": "LightGBM with light Optuna tuning (5 trials). Better than defaults, still fast.",
                     "estimated_impact": 0.19,
-                    "rationale": "Quick hyperparameter search often finds 2-5% improvement.",
+                    "rationale": (
+                        "A small search tests whether the default configuration is locally "
+                        "suboptimal; keep the result only when held-out validation improves."
+                    ),
                     "code_outline": "LGBMClassifier/Regressor with Optuna (5 trials), tune learning_rate/num_leaves, 3-fold CV",
                 },
                 "neural_network_mlp": {
@@ -2719,7 +2445,10 @@ test_preds += model.predict_proba(X_test_scaled)[:, 1] / n_folds""",
                     "component_type": "model",
                     "description": "Random Forest baseline with limited trees (n_estimators=200) for speed.",
                     "estimated_impact": 0.13,
-                    "rationale": "Robust tree ensemble that rarely fails; good fallback option.",
+                    "rationale": (
+                        "A dependency-light tree ensemble candidate; it must still pass "
+                        "held-out and submission validation."
+                    ),
                     "code_outline": "RandomForestClassifier/Regressor with n_estimators=200, 3-fold CV, save OOF/test preds",
                 },
                 "stacking_ensemble": {
@@ -2727,15 +2456,21 @@ test_preds += model.predict_proba(X_test_scaled)[:, 1] / n_folds""",
                     "component_type": "ensemble",
                     "description": "Stack OOF predictions from available models with LogisticRegression/Ridge meta-learner.",
                     "estimated_impact": 0.10,
-                    "rationale": "Cheap ensemble step that often improves generalization.",
+                    "rationale": (
+                        "A cheap ensemble is worth evaluating when base-model OOF errors "
+                        "differ; retain it only if held-out performance improves."
+                    ),
                     "code_outline": "Load models/oof_*.npy + models/test_*.npy, fit meta-model on OOF, predict test, write submission",
                 },
                 "simple_ridge_baseline": {
                     "name": "simple_ridge_baseline",
                     "component_type": "model",
-                    "description": "Simple Ridge regression baseline with StandardScaler. Cannot fail, always produces predictions.",
+                    "description": "Simple Ridge regression baseline with StandardScaler.",
                     "estimated_impact": 0.08,
-                    "rationale": "Failsafe baseline that always works.",
+                    "rationale": (
+                        "Low-complexity fallback when optional libraries are unavailable; "
+                        "it must still pass validation and submission checks."
+                    ),
                     "code_outline": "StandardScaler + Ridge, 3-fold CV, save OOF/test preds",
                 },
                 "target_encoding_fe": {
@@ -2743,7 +2478,10 @@ test_preds += model.predict_proba(X_test_scaled)[:, 1] / n_folds""",
                     "component_type": "feature_engineering",
                     "description": "Target encoding with K-fold CV to prevent leakage. Creates powerful features from categoricals.",
                     "estimated_impact": 0.16,
-                    "rationale": "Target encoding often provides 2-5% improvement on tabular competitions with categoricals.",
+                    "rationale": (
+                        "Leakage-safe target encoding can represent categorical signal; "
+                        "compare it with the existing encoding on identical folds."
+                    ),
                     "code_outline": """Target encoding with CV to prevent leakage:
 # Install category_encoders if not available
 try:
@@ -2778,7 +2516,10 @@ np.save(MODELS_DIR / 'X_test_encoded.npy', X_test_encoded.values)""",
                     "component_type": "model",
                     "description": "LightGBM with MORE folds (5-7) and iterations for better score. Uses timeout-aware training.",
                     "estimated_impact": 0.20,
-                    "rationale": "More folds and iterations reduce variance and often improve leaderboard score by 1-3%.",
+                    "rationale": (
+                        "Additional folds and iterations may reduce estimation variance; "
+                        "use them only when the time budget and validation results justify it."
+                    ),
                     "code_outline": """INTENSIVE training with timeout awareness:
 import time
 import os
@@ -2835,22 +2576,16 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 else:
                     print(f"      ⚠️ Skipping {name} (failed or unavailable)")
 
-            # If both models filtered out, try fallback models
-            if len(models) < 2:
+            # Ensure the plan remains executable; diversity is optional.
+            if not models:
                 fallback_order = ["catboost_fast_cv", "lightgbm_fast_cv", "xgboost_fast_cv", "random_forest_fast", "simple_ridge_baseline"]
                 for fallback_name in fallback_order:
                     if fallback_name not in failed_names and fallback_name not in [m["name"] for m in models]:
                         models.append(component_defs[fallback_name])
-                        if len(models) >= 2:
-                            break
+                        break
 
-            # Ensure we have at least 2 models
-            if len(models) < 2:
-                print("   ⚠️ Less than 2 models available. Adding simple baseline.")
-                models.append(component_defs["simple_ridge_baseline"])
-
-            # Always add ensemble at the end
-            ensemble = [component_defs["stacking_ensemble"]]
+            # Ensembling requires at least two validated prediction sources.
+            ensemble = [component_defs["stacking_ensemble"]] if len(models) >= 2 else []
             final_plan = models[:2] + ensemble
             print(f"   ✅ Final plan: {[c['name'] for c in final_plan]}")
             return final_plan
@@ -2864,7 +2599,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 "component_type": "feature_engineering",
                 "description": "Create polynomial features (degree 2), feature interactions (ratio, diff, product), statistical transformations (log, sqrt), and target encoding for categorical features",
                 "estimated_impact": 0.15,
-                "rationale": "Comprehensive feature engineering improves scores by 10-20% in tabular competitions",
+                "rationale": (
+                    "Feature engineering is a candidate source of tabular signal; retain "
+                    "transformations only when leakage-safe validation improves."
+                ),
                 "code_outline": "Use PolynomialFeatures(degree=2), create ratio/diff/product features, apply log/sqrt transforms, use TargetEncoder",
             }
         )
@@ -2877,7 +2615,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                     "component_type": "model",
                     "description": "LightGBM with Optuna hyperparameter optimization: 15 trials, tuning learning_rate, num_leaves, max_depth, min_child_samples",
                     "estimated_impact": 0.22,
-                    "rationale": "LightGBM consistently wins tabular competitions. Optuna finds better parameters than manual tuning.",
+                    "rationale": (
+                        "LightGBM is an efficient nonlinear baseline. Compare tuned parameters "
+                        "against the untuned baseline using the same validation folds."
+                    ),
                     "code_outline": "LGBMRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=100",
                 },
                 {
@@ -2885,7 +2626,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                     "component_type": "model",
                     "description": "XGBoost with Optuna hyperparameter optimization: 15 trials, tuning max_depth, learning_rate, subsample, colsample_bytree",
                     "estimated_impact": 0.20,
-                    "rationale": "XGBoost provides different regularization than LightGBM. Optuna ensures optimal capacity.",
+                    "rationale": (
+                        "XGBoost offers a different regularization profile. Retain tuned "
+                        "parameters only when nested validation improves over its baseline."
+                    ),
                     "code_outline": "XGBRegressor/Classifier with OptunaSearchCV, 5-fold CV, early_stopping_rounds=50",
                 },
                 {
@@ -2893,7 +2637,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                     "component_type": "model",
                     "description": "CatBoost with Optuna hyperparameter optimization: 15 trials, tuning depth, learning_rate, l2_leaf_reg",
                     "estimated_impact": 0.19,
-                    "rationale": "CatBoost handles categorical features natively. Tuning depth is critical for performance.",
+                    "rationale": (
+                        "CatBoost provides native categorical handling. Select depth and "
+                        "regularization using the same leakage-safe folds as other models."
+                    ),
                     "code_outline": "CatBoostRegressor/Classifier with OptunaSearchCV, cat_features parameter, 5-fold CV",
                 },
                 {
@@ -2901,7 +2648,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                     "component_type": "model",
                     "description": "Simple MLP Neural Network using Scikit-Learn or PyTorch (if available). Standard scaling is CRITICAL.",
                     "estimated_impact": 0.15,
-                    "rationale": "Neural Networks capture different patterns than tree-based models, adding valuable diversity to the ensemble.",
+                    "rationale": (
+                        "An MLP is a complementary candidate. Include it in an ensemble only "
+                        "when its out-of-fold errors add validated diversity."
+                    ),
                     "code_outline": "MLPClassifier/Regressor or PyTorch simple net. Must use StandardScaler/MinMaxScaler on inputs. Early stopping.",
                 },
             ]
@@ -2914,7 +2664,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 "component_type": "ensemble",
                 "description": "Stack LightGBM, XGBoost, CatBoost, and NN predictions using Ridge/Logistic regression as meta-learner",
                 "estimated_impact": 0.25,
-                "rationale": "Stacking combines diverse models (Trees + NN) and typically improves scores by 5-10%",
+                "rationale": (
+                    "Stacking can exploit complementary out-of-fold errors. Keep the "
+                    "meta-model only when it improves over the best base model."
+                ),
                 "code_outline": "StackingRegressor/Classifier with base_estimators=[lgb, xgb, cat, nn], final_estimator=Ridge/LogisticRegression, cv=5",
             }
         )
@@ -2929,9 +2682,12 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 plan.insert(0, {
                     "name": "simple_ridge_baseline",
                     "component_type": "model",
-                    "description": "Simple Ridge regression baseline. Cannot fail, always produces predictions.",
+                    "description": "Simple Ridge regression baseline with a minimal preprocessing pipeline.",
                     "estimated_impact": 0.08,
-                    "rationale": "Failsafe baseline that always works.",
+                    "rationale": (
+                        "Low-complexity fallback when other candidates fail; it must still "
+                        "pass validation and submission checks."
+                    ),
                     "code_outline": "StandardScaler + Ridge, 5-fold CV, save OOF/test preds",
                 })
 
@@ -2968,7 +2724,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                     "component_type": "model",
                     "description": "EfficientNet-B0 with FROZEN backbone. Only train classifier head for 2-3 epochs. Use 2-fold CV (KAGGLE_AGENTS_CV_FOLDS=2). Mixed precision training. Lightweight augmentations only (flip, normalize). IMPLEMENT soft-deadline pattern.",
                     "estimated_impact": 0.30,
-                    "rationale": "Frozen backbone = fastest training. 2 epochs is enough for head fine-tuning. This prioritizes getting a valid submission quickly.",
+                    "rationale": (
+                        "A frozen backbone bounds training cost. Use the time budget and "
+                        "validation curve to choose the number of head-training epochs."
+                    ),
                     "code_outline": "efficientnet_b0(pretrained=True), freeze all backbone layers, train head only, 2 epochs, 2-fold CV, save best checkpoint, implement _check_deadline() pattern",
                 },
                 {
@@ -2976,7 +2735,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                     "component_type": "ensemble",
                     "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained model and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
                     "estimated_impact": 0.05,
-                    "rationale": "Free accuracy boost without additional training time. Just inference with multiple transforms.",
+                    "rationale": (
+                        "TTA adds inference cost but no training. Retain it only when an OOF "
+                        "simulation improves the declared metric."
+                    ),
                     "code_outline": "Load models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
                 },
             ]
@@ -2988,7 +2750,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 "component_type": "model",
                 "description": f"EfficientNet-B0 pre-trained fine-tuned for {task}. PyTorch DataLoader with ImageFolder or custom Dataset. Data augmentation (rotation, flip, color jitter). Use transfer learning from ImageNet weights.",
                 "estimated_impact": 0.28,
-                "rationale": "EfficientNet achieves SOTA on ImageNet with excellent efficiency. Transfer learning transfers learned features. Data augmentation prevents overfitting on small datasets.",
+                "rationale": (
+                    "An efficient pretrained backbone is a practical transfer-learning "
+                    "candidate. Select augmentation and fine-tuning depth from validation."
+                ),
                 "code_outline": "torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with CrossEntropyLoss/MSELoss, CV folds via KAGGLE_AGENTS_CV_FOLDS, save OOF predictions for ensemble",
             },
             {
@@ -3004,7 +2769,10 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 "component_type": "ensemble",
                 "description": "Test-time augmentation (TTA) + weighted ensemble of EfficientNet and ResNet predictions. Apply multiple transforms to test images and average predictions.",
                 "estimated_impact": 0.15,
-                "rationale": "TTA averages predictions over multiple augmented views of each test image, reducing variance. Weighted ensemble (by CV score) combines different architectures. Typical +2-5% improvement.",
+                "rationale": (
+                    "TTA and model blending can reduce variance, but both must be evaluated "
+                    "on held-out predictions and disabled when they do not improve the metric."
+                ),
                 "code_outline": "For each test image: apply 5 transforms (original, hflip, vflip, rotate90, rotate270), get predictions from each model, average TTA predictions per model, then weighted average models by CV score",
             },
         ]
@@ -3020,7 +2788,8 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
         Create fallback plan for image-to-image tasks (denoising, super-resolution, style transfer).
 
         CRITICAL: These tasks require PIXEL-LEVEL predictions, not per-image predictions.
-        The submission format is typically one row per pixel: id=image_row_col, value=pixel_intensity.
+        Infer the submission schema and row mapping from sample_submission.csv; never
+        synthesize identifiers or assume a coordinate encoding or index base.
 
         Args:
             domain: Competition domain (image_to_image)
@@ -3054,33 +2823,52 @@ Training:
 
 SUBMISSION FORMAT (CRITICAL - MUST FOLLOW):
 ```python
+from kaggle_agents.utils.target_inference import infer_target_columns
+
 sample_sub = pd.read_csv(sample_submission_path)
-expected_rows = len(sample_sub)  # Typically MILLIONS of rows
+submission_contract = infer_target_columns(sample_submission_path)
+identifier_columns = [submission_contract.id_col]
+prediction_columns = submission_contract.target_cols
 
-submission_rows = []
-for img_path in sorted(test_images):
-    img_id = img_path.stem  # e.g., "1" from "1.png"
-    pred = model(preprocess(img))  # OUTPUT: (H, W) image
-    H, W = pred.shape
-    for row in range(H):
-        for col in range(W):
-            pixel_id = f"{img_id}_{row+1}_{col+1}"
-            submission_rows.append({"id": pixel_id, "value": float(pred[row, col])})
+# Build one record per sample key by joining model outputs to supplied test
+# metadata. Never parse or synthesize identifiers from filenames/coordinates.
+prediction_table = build_prediction_table(model_outputs, test_metadata)
+expected_keys = list(
+    sample_sub[identifier_columns].itertuples(index=False, name=None)
+)
+candidate_keys = list(
+    prediction_table[identifier_columns].itertuples(index=False, name=None)
+)
+assert len(expected_keys) == len(set(expected_keys))
+assert len(candidate_keys) == len(set(candidate_keys))
+assert set(candidate_keys) == set(expected_keys)
 
-assert len(submission_rows) == expected_rows
-pd.DataFrame(submission_rows).to_csv("submission.csv", index=False)
+predictions_by_key = dict(
+    zip(
+        candidate_keys,
+        prediction_table[prediction_columns].to_numpy(),
+        strict=True,
+    )
+)
+submission = sample_sub.copy()
+submission[prediction_columns] = [
+    predictions_by_key[key] for key in expected_keys
+]
+assert list(submission.columns) == list(sample_sub.columns)
+assert submission[identifier_columns].equals(sample_sub[identifier_columns])
+submission.to_csv("submission.csv", index=False)
 ```""",
                     "estimated_impact": 0.35,
                     "rationale": "Simple autoencoder is fast to train and provides baseline for denoising. Pixel-level output is critical for correct submission format.",
-                    "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, flatten to pixel-level CSV",
+                    "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, align keyed predictions to sample_submission",
                 },
                 {
                     "name": "submission_format_validator",
                     "component_type": "ensemble",
-                    "description": "Validate pixel-level submission format matches sample_submission.csv exactly.",
+                    "description": "Validate submission columns, identifier set, and identifier order against sample_submission.csv.",
                     "estimated_impact": 0.05,
                     "rationale": "Critical validation to catch format errors before submission.",
-                    "code_outline": "Load sample_sub, verify row count matches, verify ID format matches exactly",
+                    "code_outline": "Load sample_sub, verify exact columns and key set, reorder predictions to sample order, then verify identifiers are unchanged",
                 },
             ]
 
@@ -3103,11 +2891,15 @@ U-Net Architecture:
 - Output: Conv2d(1, 1, 1) for single-channel grayscale output
 
 SUBMISSION FORMAT (CRITICAL):
-Read sample_submission.csv to get expected row count (millions of rows).
-Flatten each output image to pixel format: {img_id}_{row}_{col} -> value""",
+Read sample_submission.csv as the schema and ordering contract. Map model outputs
+to identifiers through supplied test metadata, validate exact key-set equality,
+then reorder to sample order. Do not synthesize or parse identifier strings.""",
                 "estimated_impact": 0.40,
-                "rationale": "U-Net is SOTA for image-to-image tasks. Skip connections preserve fine details crucial for denoising/super-resolution.",
-                "code_outline": "PyTorch U-Net with skip connections, MSE loss, 3-5 epochs, output full image, flatten to pixel CSV",
+                "rationale": (
+                    "U-Net is a suitable image-to-image candidate because skip connections "
+                    "preserve spatial detail; compare it with the baseline on validation."
+                ),
+                "code_outline": "PyTorch U-Net with skip connections, validation-selected loss and training budget, output full image, align keyed predictions to sample_submission",
             },
             {
                 "name": "residual_autoencoder",
@@ -3121,8 +2913,11 @@ Architecture:
 
 This provides model diversity for ensemble.""",
                 "estimated_impact": 0.35,
-                "rationale": "Residual learning (predicting noise) often works better than direct denoising. Provides ensemble diversity.",
-                "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, same pixel-level submission format",
+                "rationale": (
+                    "Residual learning tests a complementary target parameterization. Compare "
+                    "it with direct prediction before using it in an ensemble."
+                ),
+                "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, align keyed predictions to sample_submission",
             },
             {
                 "name": "pixel_ensemble_average",
@@ -3131,11 +2926,14 @@ This provides model diversity for ensemble.""",
 
 1. Load predictions from both models
 2. Average pixel values: final[i,j] = (unet[i,j] + residual[i,j]) / 2
-3. Flatten to submission format
-4. Validate row count matches sample_submission.csv""",
+3. Associate outputs with identifiers from supplied test metadata
+4. Validate exact key-set equality and reorder to sample_submission order""",
                 "estimated_impact": 0.10,
-                "rationale": "Ensembling reduces prediction variance. Simple average works well for image tasks.",
-                "code_outline": "Load both model outputs, pixel-wise average, flatten to CSV, validate format",
+                "rationale": (
+                    "Pixel-level averaging is an inexpensive ensemble candidate; retain it "
+                    "only when held-out image metrics improve."
+                ),
+                "code_outline": "Load both model outputs, average dense predictions, build keyed records, align to sample_submission, validate columns and identifier order",
             },
         ]
 
@@ -3143,6 +2941,7 @@ This provides model diversity for ensemble.""",
         self,
         domain: str,
         sota_analysis: dict[str, Any],
+        competition_name: str = "",
     ) -> list[dict[str, Any]]:
         """
         Create fallback plan for text/NLP competitions (HuggingFace transformers).
@@ -3152,155 +2951,30 @@ This provides model diversity for ensemble.""",
         Args:
             domain: Competition domain (text_classification, seq_to_seq, etc.)
             sota_analysis: SOTA analysis results
+            competition_name: Deprecated compatibility argument; ignored
 
         Returns:
-            List of component dictionaries (3 components for classification, 1 for seq2seq)
+            Domain-appropriate component list
         """
-        if domain == "seq_to_seq":
-            # Sequence-to-sequence tasks (translation, text normalization, summarization)
-            # Use hybrid lookup-first strategy proven in SOTA solutions
-            return [
-                {
-                    "name": "lookup_baseline_deterministic",
-                    "component_type": "model",
-                    "description": """LookupBaseline for deterministic semiotic classes.
-Uses frequency-based mapping from training data for PLAIN, PUNCT, LETTERS, VERBATIM.
-Expected coverage: 80%+ of tokens with zero inference cost.""",
-                    "estimated_impact": 0.35,
-                    "rationale": "SOTA pattern: lookup handles majority of tokens deterministically. Proven in text normalization competitions to achieve 99%+ accuracy on deterministic classes.",
-                    "code_outline": """from kaggle_agents.utils.text_normalization import LookupBaseline, DETERMINISTIC_CLASSES
-
-lookup = LookupBaseline()
-lookup.fit(train_df, class_col='class', before_col='before', after_col='after')
-predictions = lookup.predict_batch(test_df)
-# Use predictions['prediction'] for deterministic classes""",
-                },
-                {
-                    "name": "t5_seq2seq_ambiguous",
-                    "component_type": "model",
-                    "description": """T5-small fine-tuned ONLY on ambiguous tokens (CARDINAL, DATE, TIME, MONEY, MEASURE).
-Uses create_hybrid_pipeline() to identify which tokens need neural processing.
-Input format: "class: DATE before: 1/2/2023"
-Output: "january second twenty twenty three" """,
-                    "estimated_impact": 0.25,
-                    "rationale": "Neural model for context-dependent transformations that lookup cannot handle. Training only on ambiguous tokens (20% of data) makes training 5x faster.",
-                    "code_outline": """from kaggle_agents.utils.text_normalization import create_hybrid_pipeline, get_neural_training_config
-
-pipeline = create_hybrid_pipeline(train_df, fast_mode=True, timeout_s=1800)
-ambiguous_df = pipeline['ambiguous_df']
-neural_config = pipeline['neural_config']
-
-# Train T5 only on ambiguous samples with max_steps guard
-from transformers import T5ForConditionalGeneration, Trainer
-model = T5ForConditionalGeneration.from_pretrained('t5-small')
-# Use neural_config['max_steps'] to prevent timeout""",
-                },
-                {
-                    "name": "hybrid_ensemble",
-                    "component_type": "ensemble",
-                    "description": """Combines lookup baseline with T5 neural predictions.
-Uses lookup for confident predictions, T5 for ambiguous cases.""",
-                    "estimated_impact": 0.10,
-                    "rationale": "Hybrid approach proven in SOTA to achieve 99%+ accuracy. Lookup provides fast, deterministic results for common cases; neural handles edge cases.",
-                    "code_outline": """from kaggle_agents.utils.text_normalization import apply_hybrid_predictions
-
-final_predictions = apply_hybrid_predictions(
-    test_df, lookup, neural_predictions, neural_indices
-)""",
-                },
-            ]
-        # Classification or regression tasks
-        return [
-            {
-                "name": "roberta_classifier",
-                "component_type": "model",
-                "description": "RoBERTa-base fine-tuned for text classification with learning rate warmup and linear decay schedule.",
-                "estimated_impact": 0.28,
-                "rationale": "RoBERTa improves on BERT with dynamic masking and larger training corpus. Achieves SOTA on GLUE, SuperGLUE, and many NLP benchmarks. Warmup stabilizes training.",
-                "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with TrainingArguments, AdamW optimizer with warmup_steps=500, 5-fold StratifiedKFold CV, save OOF predictions",
-            },
-            {
-                "name": "distilbert_classifier",
-                "component_type": "model",
-                "description": "DistilBERT fine-tuned (60% faster than BERT, lighter for ensemble diversity).",
-                "estimated_impact": 0.22,
-                "rationale": "DistilBERT is 60% faster and 40% smaller than BERT while retaining 97% of performance through knowledge distillation. Provides architectural diversity for ensemble while being computationally efficient.",
-                "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'), similar training setup to RoBERTa, 5-fold CV",
-            },
-            {
-                "name": "transformer_ensemble",
-                "component_type": "ensemble",
-                "description": "Weighted average of RoBERTa and DistilBERT predictions using CV scores as weights.",
-                "estimated_impact": 0.12,
-                "rationale": "Different architectures (RoBERTa vs DistilBERT) capture different linguistic patterns. Ensemble reduces variance and overfitting to specific model biases.",
-                "code_outline": "Load OOF predictions from both models, compute optimal weights via Ridge regression on validation fold, apply weighted average to test predictions",
-            },
-        ]
+        del competition_name
+        if domain in {"seq_to_seq", "text_normalization"}:
+            return create_seq2seq_fallback_plan(
+                domain,
+                sota_analysis,
+            )
+        return create_text_fallback_plan(domain, sota_analysis)
 
     def _create_audio_fallback_plan(
         self,
         domain: str,
         sota_analysis: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """
-        Create fallback plan for audio competitions (mel-spectrograms + CNNs).
-
-        Converts audio to spectrograms, then uses image models.
-
-        Args:
-            domain: Competition domain (audio_classification, audio_regression)
-            sota_analysis: SOTA analysis results
-
-        Returns:
-            List of component dictionaries (4 components: 1 preprocessing + 2 models + 1 ensemble)
-        """
-        return [
-            {
-                "name": "mel_spectrogram_preprocessing",
-                "component_type": "preprocessing",
-                "description": "Convert audio files to mel-spectrograms using librosa. Save as PNG images for CNN input.",
-                "estimated_impact": 0.20,
-                "rationale": "Mel-spectrograms are the standard time-frequency representation for audio. Convert audio problem to computer vision problem, enabling use of powerful pre-trained image models.",
-                "code_outline": "Use librosa.feature.melspectrogram(y=audio, sr=22050, n_mels=128), convert to dB scale with librosa.power_to_db(), normalize to [0, 255], save as 3-channel PNG to spectrograms/ directory",
-            },
-            {
-                "name": "efficientnet_audio",
-                "component_type": "model",
-                "description": "EfficientNet-B0 trained on mel-spectrogram images. Transfer learning from ImageNet.",
-                "estimated_impact": 0.25,
-                "rationale": "CNNs excel at recognizing patterns in spectrograms (frequency bands, temporal patterns). EfficientNet provides excellent accuracy with computational efficiency.",
-                "code_outline": "Load mel-spectrogram images with PyTorch DataLoader, torchvision.models.efficientnet_b0(pretrained=True), replace classifier, train with data augmentation on spectrograms",
-            },
-            {
-                "name": "resnet_audio",
-                "component_type": "model",
-                "description": "ResNet50 for architectural diversity in ensemble.",
-                "estimated_impact": 0.20,
-                "rationale": "ResNet learns different features than EfficientNet due to different architecture (residual connections). Ensemble benefits from this diversity.",
-                "code_outline": "Similar pipeline to EfficientNet but with torchvision.models.resnet50(pretrained=True)",
-            },
-            {
-                "name": "audio_ensemble",
-                "component_type": "ensemble",
-                "description": "Weighted average of EfficientNet and ResNet predictions.",
-                "estimated_impact": 0.12,
-                "rationale": "Ensemble reduces overfitting to specific architecture biases and improves generalization.",
-                "code_outline": "Load OOF predictions, compute weights by CV score, weighted average for test predictions",
-            },
-        ]
+        """Delegate to the shared benchmark-neutral audio fallback."""
+        return create_audio_fallback_plan(domain, sota_analysis)
 
     def _format_sota_solutions(self, solutions: list[SOTASolution]) -> str:
-        """Format SOTA solutions for prompts (summary version without code)."""
-        formatted = []
-        for sol in solutions[:5]:  # Top 5
-            formatted.append(f"""
-Title: {sol.title}
-Votes: {sol.votes}
-Models: {", ".join(sol.models_used) if sol.models_used else "N/A"}
-Features: {", ".join(sol.feature_engineering) if sol.feature_engineering else "N/A"}
-Ensemble: {sol.ensemble_approach or "N/A"}
-""")
-        return "\n---\n".join(formatted)
+        """Format external facts through the shared untrusted-data boundary."""
+        return format_external_sota_solutions(solutions)
 
     def _estimate_complexity(self, sol: SOTASolution) -> str:
         """
@@ -3381,37 +3055,7 @@ Ensemble: {sol.ensemble_approach or "N/A"}
         Returns:
             Formatted string with detailed solution info including code snippets
         """
-        if not solutions:
-            return "No SOTA solutions found. Create a baseline plan using domain best practices."
-
-        details = []
-        for i, sol in enumerate(solutions[:3], 1):  # Top 3 to save tokens
-            # Estimate complexity based on code patterns
-            complexity = self._estimate_complexity(sol)
-
-            # Get code snippet (truncated to 1500 chars as per user preference)
-            code_snippet = ""
-            if sol.code_snippets:
-                code_snippet = sol.code_snippets[0][:1500]
-                if len(sol.code_snippets[0]) > 1500:
-                    code_snippet += "\n... (truncated)"
-
-            details.append(f"""
-### Candidate {i}: {sol.title}
-- **Votes**: {sol.votes} (Quality Signal - higher is better)
-- **Estimated Complexity**: {complexity}
-- **Models Used**: {", ".join(sol.models_used) if sol.models_used else "N/A"}
-- **Feature Engineering**: {", ".join(sol.feature_engineering) if sol.feature_engineering else "N/A"}
-- **Ensemble Approach**: {sol.ensemble_approach or "N/A"}
-- **Key Strategies**: {", ".join(sol.strategies[:3]) if sol.strategies else "N/A"}
-
-**Code Snippet** (use this as reference for your implementation):
-```python
-{code_snippet if code_snippet else "# No code available"}
-```
-""")
-
-        return "\n".join(details)
+        return format_external_sota_details(solutions)
 
     def _print_summary(self, plan: list[AblationComponent]) -> None:
         """Print plan summary."""
@@ -3478,12 +3122,19 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             strategies = [
                 {
                     "name": "conservative",
-                    "prompt_modifier": "Use proven CNN architectures: EfficientNet-B0/B3, ResNet50. Focus on stable training with pretrained ImageNet weights.",
+                    "prompt_modifier": (
+                        "Evaluate efficient pretrained CNN baselines such as "
+                        "EfficientNet-B0/B3 or ResNet50. Select by local validation."
+                    ),
                     "model_preference": ["efficientnet_b0", "resnet50", "efficientnet_b3"],
                 },
                 {
                     "name": "aggressive",
-                    "prompt_modifier": "Use SOTA architectures: ResNet200d, EfficientNet-B5/B7, ConvNeXt. Apply heavy augmentation (Cutmix, Mixup). Full fine-tuning.",
+                    "prompt_modifier": (
+                        "Evaluate higher-capacity CNN candidates such as ResNet200d, "
+                        "EfficientNet-B5/B7, or ConvNeXt. Validate augmentation and full "
+                        "fine-tuning rather than assuming they help."
+                    ),
                     "model_preference": ["resnet200d", "efficientnet_b5", "convnext", "swin"],
                 },
                 {
@@ -3497,12 +3148,18 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             strategies = [
                 {
                     "name": "conservative",
-                    "prompt_modifier": "Use proven segmentation architectures: U-Net with ResNet34 encoder, FPN. Focus on stable training with pretrained encoders.",
+                    "prompt_modifier": (
+                        "Evaluate stable segmentation baselines such as U-Net with a ResNet34 "
+                        "encoder or FPN, and select them using held-out masks."
+                    ),
                     "model_preference": ["unet_resnet34", "fpn", "deeplabv3"],
                 },
                 {
                     "name": "aggressive",
-                    "prompt_modifier": "Use SOTA segmentation: U-Net++ with EfficientNet-B5 encoder, HRNet, Mask R-CNN. Apply heavy augmentation.",
+                    "prompt_modifier": (
+                        "Evaluate higher-capacity segmentation candidates such as U-Net++, "
+                        "HRNet, or Mask R-CNN. Keep heavy augmentation only if validated."
+                    ),
                     "model_preference": ["unet_plusplus", "hrnet", "mask_rcnn", "segformer"],
                 },
                 {
@@ -3516,7 +3173,10 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             strategies = [
                 {
                     "name": "conservative",
-                    "prompt_modifier": "Use proven NLP models: DistilBERT, RoBERTa-base. Focus on stable training.",
+                    "prompt_modifier": (
+                        "Evaluate compact pretrained text baselines such as DistilBERT and "
+                        "RoBERTa-base using the supplied validation split."
+                    ),
                     "model_preference": ["distilbert", "roberta_base", "bert_base"],
                 },
                 {
@@ -3535,18 +3195,31 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             strategies = [
                 {
                     "name": "conservative",
-                    "prompt_modifier": "Use proven audio models: mel-spectrogram + EfficientNet, simple CNN. Focus on stable preprocessing.",
-                    "model_preference": ["efficientnet_audio", "resnet_audio", "simple_cnn"],
+                    "prompt_modifier": (
+                        "Evaluate a summary-feature baseline and a compact "
+                        "time-frequency model on the same verified folds."
+                    ),
+                    "model_preference": [
+                        "summary_feature_baseline",
+                        "compact_spectrogram_model",
+                    ],
                 },
                 {
                     "name": "aggressive",
-                    "prompt_modifier": "Use SOTA audio: AST (Audio Spectrogram Transformer), wav2vec2, PANN. Heavy augmentation (SpecAugment, mixup).",
-                    "model_preference": ["ast", "wav2vec2", "pann", "whisper"],
+                    "prompt_modifier": (
+                        "Evaluate installed higher-capacity audio candidates only "
+                        "when input compatibility and remaining budget permit. "
+                        "Keep augmentation only when trusted CV improves."
+                    ),
+                    "model_preference": ["pretrained_audio_candidate"],
                 },
                 {
                     "name": "balanced",
-                    "prompt_modifier": "Use mid-size audio models: EfficientNet-B2 on mel-specs. Balance preprocessing with model complexity.",
-                    "model_preference": ["efficientnet_b2_audio", "sed_model", "cnn_transformer"],
+                    "prompt_modifier": (
+                        "Select a medium-capacity model from observed feature "
+                        "shape, sample count, installed resources, and budget."
+                    ),
+                    "model_preference": ["budget_matched_audio_model"],
                 },
             ]
         else:
@@ -3554,7 +3227,10 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             strategies = [
                 {
                     "name": "conservative",
-                    "prompt_modifier": "Focus on proven, reliable approaches. Use well-established models like XGBoost, LightGBM. Prioritize stability over novelty.",
+                    "prompt_modifier": (
+                        "Start with reliable baselines such as XGBoost or LightGBM and "
+                        "prioritize stable held-out performance over novelty."
+                    ),
                     "model_preference": ["xgboost", "lightgbm", "random_forest"],
                 },
                 {
@@ -3564,7 +3240,10 @@ Ensemble: {sol.ensemble_approach or "N/A"}
                 },
                 {
                     "name": "balanced",
-                    "prompt_modifier": "Mix proven models with creative features. Balance stability with innovation.",
+                    "prompt_modifier": (
+                        "Combine validated baseline models with new features, retaining each "
+                        "addition only when its ablation improves held-out performance."
+                    ),
                     "model_preference": ["xgboost", "lightgbm", "catboost"],
                 },
             ]
@@ -3611,14 +3290,18 @@ Ensemble: {sol.ensemble_approach or "N/A"}
             if strategy.get("inherit_from_best") and current_iteration >= 2:
                 plan = self._mutate_plan_hyperparameters(plan, state)
 
-            # Evaluate fitness
+            # Record a measured actual-impact proxy, never self-declared impact.
             fitness = self._evaluate_plan_fitness(plan, state)
 
             candidate_plans.append((plan, strategy["name"], fitness))
-            print(f"     Fitness: {fitness:.3f}")
+            print(f"     Measured impact proxy: {fitness:.3f}")
 
-        # Sort by fitness (highest first)
-        candidate_plans.sort(key=lambda x: x[2], reverse=True)
+        from .planner.eureka import _plan_selection_key
+
+        candidate_plans.sort(
+            key=lambda item: _plan_selection_key(item[0], state),
+            reverse=True,
+        )
 
         return candidate_plans
 
@@ -3639,16 +3322,7 @@ Ensemble: {sol.ensemble_approach or "N/A"}
         Returns:
             List of ablation components
         """
-        competition_info = state["competition_info"]
         domain = state.get("domain_detected", "tabular")
-
-        # Create strategy-modified prompt
-        strategy_prompt = f"""
-Strategy: {strategy["name"].upper()}
-{strategy["prompt_modifier"]}
-
-Preferred approaches: {", ".join(strategy["model_preference"])}
-"""
 
         # Use fallback plan generation with strategy bias
         plan = self._create_fallback_plan(domain, sota_analysis, state=state)
@@ -3665,12 +3339,6 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
                     for m in ["xgboost", "lightgbm", "random", "logistic", "baseline"]
                 )
             ] or plan[:2]
-
-        elif strategy["name"] == "aggressive":
-            # Boost feature engineering and ensemble components
-            for comp in plan:
-                if comp.component_type in ["feature_engineering", "ensemble"]:
-                    comp.estimated_impact = min(comp.estimated_impact * 1.3, 1.0)
 
         return plan
 
@@ -3693,149 +3361,25 @@ Preferred approaches: {", ".join(strategy["model_preference"])}
         Returns:
             Plan with mutated hyperparameters
         """
-        iteration_memory = state.get("iteration_memory", [])
+        from .planner.eureka import mutate_plan_hyperparameters
 
-        # Get best hyperparameters from previous iterations
-        best_hyperparams = {}
-        if iteration_memory:
-            for memory in iteration_memory:
-                if hasattr(memory, "best_hyperparameters") and memory.best_hyperparameters:
-                    best_hyperparams.update(memory.best_hyperparameters)
-
-        mutated_plan = []
-        for comp in plan:
-            # Only mutate model components with some probability
-            if comp.component_type == "model" and random.random() < mutation_rate:
-                # Create a mutated version
-                mutated_name = f"{comp.name}_hp_variant"
-
-                # Define mutation suggestions for common hyperparameters
-                mutation_hints = self._get_hyperparameter_mutations(comp.name)
-
-                # Add mutation hint to code description
-                mutation_note = f"\n# HYPERPARAMETER VARIANT: {mutation_hints}"
-
-                mutated_comp = AblationComponent(
-                    name=mutated_name,
-                    component_type=comp.component_type,
-                    description=f"{comp.description} (hyperparameter variant: {mutation_hints})",
-                    code=comp.code,  # Code will be regenerated by Developer
-                    estimated_impact=comp.estimated_impact * 0.95,  # Slight uncertainty penalty
-                    dependencies=comp.dependencies,
-                    ablatable=comp.ablatable,
-                )
-                mutated_plan.append(mutated_comp)
-            else:
-                mutated_plan.append(comp)
-
-        return mutated_plan
+        return mutate_plan_hyperparameters(plan, state, mutation_rate)
 
     def _get_hyperparameter_mutations(self, model_name: str) -> str:
-        """Get suggested hyperparameter mutations for a model type."""
-        model_lower = model_name.lower()
+        """Return validation-gated mutation guidance without numeric recipes."""
+        from .planner.eureka import _get_hyperparameter_mutations
 
-        if "lightgbm" in model_lower or "lgb" in model_lower:
-            mutations = [
-                "learning_rate: [0.01, 0.03, 0.05]",
-                "num_leaves: [31, 63, 127]",
-                "max_depth: [5, 7, 9]",
-                "reg_alpha: [0, 0.1, 0.5]",
-            ]
-            return random.choice(mutations)
-
-        if "xgboost" in model_lower or "xgb" in model_lower:
-            mutations = [
-                "learning_rate: [0.01, 0.05, 0.1]",
-                "max_depth: [4, 6, 8]",
-                "subsample: [0.7, 0.8, 0.9]",
-                "colsample_bytree: [0.7, 0.8, 0.9]",
-            ]
-            return random.choice(mutations)
-
-        if "catboost" in model_lower:
-            mutations = [
-                "learning_rate: [0.01, 0.03, 0.1]",
-                "depth: [4, 6, 8]",
-                "l2_leaf_reg: [1, 3, 5]",
-            ]
-            return random.choice(mutations)
-
-        if "neural" in model_lower or "mlp" in model_lower or "tabnet" in model_lower:
-            mutations = [
-                "learning_rate: [1e-4, 1e-3, 1e-2]",
-                "dropout: [0.1, 0.2, 0.3]",
-                "hidden_dims: [128, 256, 512]",
-            ]
-            return random.choice(mutations)
-
-        # Generic mutations
-        return "try different hyperparameter values"
+        return _get_hyperparameter_mutations(model_name)
 
     def _evaluate_plan_fitness(
         self,
         plan: list[AblationComponent],
         state: KaggleState,
     ) -> float:
-        """
-        Eureka-style: Evaluate fitness of a plan based on history.
+        """Return the shared measured actual-impact proxy."""
+        from .planner.eureka import evaluate_plan_fitness
 
-        Considers:
-        - Past success/failure patterns from iteration_memory
-        - Component type diversity
-        - Estimated impact scores
-        - Crossover guidance from meta-evaluator
-
-        Args:
-            plan: Candidate plan to evaluate
-            state: Current workflow state
-
-        Returns:
-            Fitness score (0-1)
-        """
-        score = 0.0
-        iteration_memory = state.get("iteration_memory", [])
-        crossover_guidance = state.get("crossover_guidance", {})
-
-        # 1. Historical success/failure (40% weight)
-        historical_score = 0.0
-        for comp in plan:
-            for memory in iteration_memory:
-                # Reward components similar to what worked
-                if comp.component_type in memory.what_worked:
-                    historical_score += 0.2
-                # Penalize components similar to what failed
-                if comp.component_type in memory.what_failed:
-                    historical_score -= 0.1
-
-        historical_score = max(0, min(historical_score, 1.0))
-        score += 0.4 * historical_score
-
-        # 2. Diversity bonus (20% weight)
-        unique_types = len(set(c.component_type for c in plan))
-        diversity_score = min(unique_types / 4.0, 1.0)  # Target: 4 different types
-        score += 0.2 * diversity_score
-
-        # 3. Estimated impact (25% weight)
-        if plan:
-            avg_impact = sum(c.estimated_impact for c in plan) / len(plan)
-            score += 0.25 * avg_impact
-
-        # 4. Crossover guidance alignment (15% weight)
-        if crossover_guidance:
-            preserve_components = crossover_guidance.get("preserve_components", [])
-            avoid_components = crossover_guidance.get("avoid_components", [])
-
-            alignment_score = 0.0
-            for comp in plan:
-                if comp.component_type in preserve_components:
-                    alignment_score += 0.3
-                if comp.component_type in avoid_components:
-                    alignment_score -= 0.2
-
-            alignment_score = max(0, min(alignment_score, 1.0))
-            score += 0.15 * alignment_score
-
-        return min(max(score, 0.0), 1.0)
+        return evaluate_plan_fitness(plan, state)
 
     def _select_best_plan(
         self,

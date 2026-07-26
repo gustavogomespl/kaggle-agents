@@ -10,6 +10,27 @@ import numpy as np
 from ...core.state import KaggleState
 from ...core.state.contracts import CanonicalDataContract
 from ...utils.data_contract import prepare_canonical_data
+from ...utils.target_inference import TargetInferenceError
+
+
+def _filename_label_pattern_from_state(state: KaggleState) -> str | None:
+    """Return an explicit public-data parsing contract, if discovery supplied one."""
+    parsing_info = state.get("parsing_info") or {}
+    if not isinstance(parsing_info, dict):
+        return None
+
+    filename_labels = parsing_info.get("filename_labels")
+    if isinstance(filename_labels, dict):
+        value = filename_labels.get("pattern") or filename_labels.get("regex")
+        evidence = filename_labels.get("evidence")
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and isinstance(evidence, str)
+            and evidence.strip()
+        ):
+            return value.strip()
+    return None
 
 
 def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
@@ -36,6 +57,20 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
     working_dir = Path(state["working_directory"])
     data_files = state.get("data_files", {})
     target_col = state.get("target_col", "target")
+    submission_contract = state.get("submission_contract") or {}
+    target_cols = state.get("target_cols") or submission_contract.get(
+        "target_cols"
+    )
+    explicit_target_type = state.get("target_type")
+    expected_test_rows = state.get("expected_test_rows")
+    if expected_test_rows is None and state.get("test_rec_ids"):
+        expected_test_rows = len(state["test_rec_ids"])
+    submission_format = state.get("submission_format_info") or {}
+    if (
+        expected_test_rows is None
+        and submission_format.get("format_type") != "long"
+    ):
+        expected_test_rows = submission_contract.get("expected_rows")
 
     # Get train and test paths
     train_path = data_files.get("train_csv") or data_files.get("train")
@@ -74,7 +109,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             }
 
     # For audio: try filename-based label extraction if no train.csv
-    if data_type == "audio":
+    if data_type in {"audio", "audio_classification"}:
         train_csv_path = working_dir / "train.csv"
         if not train_csv_path.exists():
             print("   Audio competition without train.csv detected")
@@ -84,8 +119,9 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             from ...mlebench.data_adapter.detection import DetectionMixin
 
             detector = DetectionMixin()
+            filename_label_pattern = _filename_label_pattern_from_state(state)
 
-            # Use actual train path from data_files if available (e.g., train2/ for whale competition)
+            # Use the train path discovered from the supplied local files.
             train_path_from_state = data_files.get("train")
             if train_path_from_state and Path(train_path_from_state).exists():
                 train_dir = Path(train_path_from_state)
@@ -99,6 +135,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                     audio_dir=train_dir,
                     canonical_dir=working_dir / "canonical",
                     n_folds=5,
+                    explicit_pattern=filename_label_pattern,
                 )
 
                 if result.get("success"):
@@ -111,6 +148,10 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                         "canonical_folds_path": result["folds_path"],
                         "canonical_metadata": result["metadata"],
                         "canonical_data_skipped_reason": None,
+                        "expected_train_rows": int(
+                            result["metadata"]["canonical_rows"]
+                        ),
+                        "expected_test_rows": expected_test_rows,
                         "last_updated": datetime.now(),
                     }
                 else:
@@ -152,36 +193,50 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
 
     # Detect task type from domain for seq2seq handling
     domain = state.get("domain_detected", "tabular")
-    competition_name = state.get("competition_name", "").lower()
     seq2seq_domains = {"seq_to_seq", "text_normalization", "translation", "summarization"}
 
-    # Determine task_type with priority:
-    # 1. Specific text_normalization detection from competition name
-    # 2. Domain detected as seq_to_seq variant
-    # 3. Default to tabular
-    text_norm_keywords = ["normalization", "normalize", "text-norm", "tts"]
-    is_text_norm = any(kw in competition_name for kw in text_norm_keywords)
-
-    if is_text_norm:
-        task_type = "text_normalization"
-        print("   Task type: text_normalization (detected from competition name)")
-    elif domain in seq2seq_domains:
+    # The task family is inferred from inspected data/domain metadata, never
+    # from a benchmark competition name.
+    if domain in seq2seq_domains:
         # Map generic seq_to_seq to specific type if possible
         task_type = domain if domain != "seq_to_seq" else "seq2seq"
         print(f"   Task type from domain: {task_type}")
     else:
-        task_type = "tabular"
+        task_type = str(domain or "tabular")
+        if "classification" not in task_type and "regression" not in task_type:
+            competition_info = state.get("competition_info")
+            declared_problem = str(
+                getattr(competition_info, "problem_type", "") or ""
+            ).lower()
+            if "classification" in declared_problem:
+                task_type = f"{task_type}_classification"
+            elif "regression" in declared_problem:
+                task_type = f"{task_type}_regression"
+        print(f"   Task type from public contract: {task_type}")
 
     try:
         canonical_result = prepare_canonical_data(
             train_path=train_path,
             test_path=test_path if test_path and Path(test_path).exists() else train_path,
             target_col=target_col,
+            target_cols=target_cols,
+            target_type=(
+                explicit_target_type
+                if explicit_target_type
+                in {"single", "multi_label", "multi_target"}
+                else None
+            ),
             output_dir=working_dir,
             max_rows=max_rows,
             fast_mode=fast_mode,
             timeout_s=timeout_s,
             task_type=task_type,
+            temporal_col=state.get("temporal_col"),
+            sample_submission=(
+                data_files.get("sample_submission")
+                or state.get("sample_submission_path")
+            ),
+            column_contract=state.get("column_contract"),
         )
 
         # CRITICAL: Validate canonical data is not empty
@@ -194,6 +249,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             from ...mlebench.data_adapter.detection import DetectionMixin
 
             detector = DetectionMixin()
+            filename_label_pattern = _filename_label_pattern_from_state(state)
             train_dir = working_dir / "train"
 
             if train_dir.exists():
@@ -201,6 +257,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                     audio_dir=train_dir,
                     canonical_dir=working_dir / "canonical",
                     n_folds=5,
+                    explicit_pattern=filename_label_pattern,
                 )
 
                 if fallback_result.get("success"):
@@ -212,6 +269,10 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                         "canonical_y_path": fallback_result["y_path"],
                         "canonical_folds_path": fallback_result["folds_path"],
                         "canonical_metadata": fallback_result["metadata"],
+                        "expected_train_rows": int(
+                            fallback_result["metadata"]["canonical_rows"]
+                        ),
+                        "expected_test_rows": expected_test_rows,
                         "last_updated": datetime.now(),
                     }
 
@@ -267,11 +328,25 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             n_folds=metadata["n_folds"],
             id_col=metadata["id_col"],
             target_col=metadata["target_col"],
+            target_cols=list(
+                metadata.get("target_cols") or [metadata["target_col"]]
+            ),
+            target_type=metadata.get("target_type", "single"),
             is_classification=metadata["is_classification"],
             folds_hash=folds_hash,
             y_hash=y_hash,
             train_ids_hash=train_ids_hash,
             train_schema_hash=train_schema_hash,
+            cv_strategy=metadata["cv_strategy"],
+            temporal_splits_path=canonical_result.get(
+                "temporal_splits_path"
+            ),
+            oof_eligible_mask_path=canonical_result.get(
+                "oof_eligible_mask_path"
+            ),
+            temporal_order_path=canonical_result.get(
+                "temporal_order_path"
+            ),
         )
 
         print(f"      folds_hash: {folds_hash[:8]}...")
@@ -287,11 +362,52 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             "canonical_feature_cols_path": canonical_result["feature_cols_path"],
             "canonical_metadata": canonical_result["metadata"],
             "canonical_contract": canonical_contract.to_dict(),
+            "target_col": metadata["target_col"],
+            "target_cols": list(
+                metadata.get("target_cols") or [metadata["target_col"]]
+            ),
+            "target_type": metadata.get("target_type", "single"),
+            "expected_train_rows": int(metadata["canonical_rows"]),
+            "expected_test_rows": expected_test_rows,
             "last_updated": datetime.now(),
         }
 
     except Exception as e:
         print(f"\n   Error preparing canonical data: {e}")
+        if (
+            str(state.get("run_mode", "")).strip().lower() == "mlebench"
+            and isinstance(e, TargetInferenceError)
+        ):
+            raise RuntimeError(
+                "MLE-bench target contract is ambiguous or incompatible with "
+                "the public training labels/submission schema"
+            ) from e
+        if (
+            str(state.get("run_mode", "")).strip().lower() == "mlebench"
+            and any(
+                marker in str(task_type).strip().lower()
+                for marker in ("time_series", "forecast", "temporal")
+            )
+        ):
+            raise RuntimeError(
+                "MLE-bench temporal task cannot proceed without a trustworthy "
+                "forward-chaining canonical CV contract"
+            ) from e
+        if (
+            str(state.get("run_mode", "")).strip().lower() == "mlebench"
+            and isinstance(e, ValueError)
+            and any(
+                marker in str(task_type).strip().lower()
+                for marker in ("seq2seq", "seq_to_seq", "sequence")
+            )
+        ):
+            # Seq2seq generation depends on the canonical column contract;
+            # continuing without it burns the whole budget on components that
+            # are guaranteed to fail their own contract checks.
+            raise RuntimeError(
+                "MLE-bench seq2seq canonical contract could not be inferred "
+                "unambiguously from the observed schemas"
+            ) from e
         print("   Continuing without canonical data contract...")
         return {
             "canonical_data_prepared": False,

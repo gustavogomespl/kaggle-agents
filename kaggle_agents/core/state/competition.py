@@ -25,6 +25,12 @@ class CompetitionInfo:
     submission_format_type: SubmissionFormatType | None = None
     submission_format_metadata: dict[str, Any] = field(default_factory=dict)
     deadline: datetime | None = None
+    # Complete public identities used only by the MLE-bench contamination
+    # guard.  Values are derived deterministically from the competition slug
+    # and an explicit public description title; individual words are never
+    # expanded into aliases.
+    identity_aliases: list[str] = field(default_factory=list)
+    identity_alias_evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -40,6 +46,10 @@ class SOTASolution:
     models_used: list[str] = field(default_factory=list)
     feature_engineering: list[str] = field(default_factory=list)
     ensemble_approach: str | None = None
+    # Hash of the complete downloaded source when external retrieval can
+    # provide it. This supports stable cross-attempt deduplication without
+    # treating titles, votes, or LLM summaries as source identity.
+    source_sha256: str | None = None
 
 
 @dataclass
@@ -52,6 +62,10 @@ class AblationComponent:
     estimated_impact: float = 0.0
     tested: bool = False
     actual_impact: float | None = None
+    # Opaque IDs of eligible external sources that the planner declares
+    # inspired this component. This is audit lineage, not evidence that a
+    # source caused an improvement; trusted OOF remains a separate measurement.
+    external_source_ids: list[str] = field(default_factory=list)
 
 
 def merge_competition_info(
@@ -80,4 +94,12 @@ def merge_competition_info(
         if new.submission_format_metadata
         else existing.submission_format_metadata,
         deadline=new.deadline if new.deadline is not None else existing.deadline,
+        identity_aliases=(
+            new.identity_aliases if new.identity_aliases else existing.identity_aliases
+        ),
+        identity_alias_evidence=(
+            new.identity_alias_evidence
+            if new.identity_alias_evidence
+            else existing.identity_alias_evidence
+        ),
     )

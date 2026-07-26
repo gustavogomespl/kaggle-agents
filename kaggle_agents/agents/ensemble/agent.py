@@ -13,6 +13,12 @@ from ...core.config import get_config, is_metric_minimization
 from ...core.state import KaggleState
 from ...utils.csv_utils import read_csv_auto
 from ...utils.llm_utils import get_text_content
+from ...utils.submission_artifacts import (
+    sha256_file,
+    verified_accepted_submission,
+    verified_best_candidate_submission,
+)
+from ...utils.submission_format import infer_submission_logic
 from ...utils.telemetry import make_event
 from .alignment import align_oof_by_canonical_ids, load_and_align_oof, validate_oof_alignment
 from .fallback import (
@@ -29,7 +35,11 @@ from .meta_model import (
 from .prediction_pairs import find_prediction_pairs, validate_prediction_artifacts_contract
 from .scoring import compute_oof_score, filter_by_score_threshold, score_predictions
 from .stacking import load_cv_folds, stack_from_prediction_pairs
-from .submission import safe_restore_submission, validate_and_align_submission
+from .submission import (
+    format_ensemble_predictions,
+    safe_restore_submission,
+    validate_and_align_submission,
+)
 from .utils import class_orders_match, encode_labels
 
 
@@ -47,6 +57,117 @@ def _truncate_pred_cols(preds: np.ndarray, expected_cols: int) -> np.ndarray:
         return preds[:, 1:]
     # General case: take last expected_cols columns
     return preds[:, -expected_cols:]
+
+
+def _load_temporal_oof_mask(
+    models_dir: Path,
+    n_rows: int,
+) -> np.ndarray | None:
+    """Load and validate the canonical temporal OOF eligibility mask."""
+    mask_path = models_dir.parent / "canonical" / "oof_eligible_mask.npy"
+    if not mask_path.is_file():
+        return None
+    mask = np.asarray(np.load(mask_path, allow_pickle=False), dtype=bool)
+    if mask.shape != (n_rows,) or not mask.any():
+        raise ValueError(
+            "Canonical temporal OOF eligibility mask is invalid or unaligned"
+        )
+    return mask
+
+
+def _eligible_temporal_oof(
+    oof: np.ndarray,
+    mask: np.ndarray | None,
+) -> np.ndarray:
+    """Return honest OOF rows and reject fabricated temporal warm-up values."""
+    if mask is None:
+        return oof
+    if len(oof) != len(mask):
+        raise ValueError("OOF artifact is not aligned with the temporal mask")
+    warmup = oof[~mask]
+    if warmup.size and not np.isnan(warmup).all():
+        raise ValueError("Temporal warm-up OOF rows must remain NaN")
+    eligible = oof[mask]
+    if not np.all(np.isfinite(eligible)):
+        raise ValueError("Temporal OOF-eligible rows contain NaN or Inf")
+    return eligible
+
+
+def _align_test_predictions_to_submission(
+    predictions: np.ndarray,
+    model_ids: np.ndarray,
+    submission_ids: np.ndarray,
+) -> np.ndarray | None:
+    """Align record-level predictions to the exact submission row order.
+
+    Most competitions use one submission row per test record, but some encode
+    one row per ``(record, class)`` pair. The latter must be expanded using a
+    relationship inferred from the supplied IDs and then verified against the
+    *complete* submission ID set. No positional fallback is allowed.
+    """
+    model_ids_str = np.asarray(model_ids).astype(str)
+    submission_ids_str = np.asarray(submission_ids).astype(str)
+    model_id_set = set(model_ids_str.tolist())
+    submission_id_set = set(submission_ids_str.tolist())
+
+    if (
+        len(model_ids_str) == len(submission_ids_str)
+        and model_id_set == submission_id_set
+    ):
+        position_by_id = {
+            model_id: idx for idx, model_id in enumerate(model_ids_str.tolist())
+        }
+        reorder = np.fromiter(
+            (position_by_id[submission_id] for submission_id in submission_ids_str),
+            dtype=np.int64,
+            count=len(submission_ids_str),
+        )
+        return predictions[reorder]
+
+    if (
+        predictions.ndim != 2
+        or predictions.shape[1] <= 1
+        or len(submission_ids_str) != len(model_ids_str) * predictions.shape[1]
+    ):
+        return None
+
+    logic = infer_submission_logic(
+        model_ids_str.tolist(),
+        submission_ids_str.tolist(),
+        num_classes=predictions.shape[1],
+    )
+    pattern = logic.get("pattern")
+    multiplier = logic.get("multiplier")
+    prediction_by_submission_id: dict[str, float] = {}
+
+    for row_idx, model_id in enumerate(model_ids_str):
+        for class_idx in range(predictions.shape[1]):
+            if pattern == "multiplier" and isinstance(multiplier, int):
+                try:
+                    submission_id = str(int(model_id) * multiplier + class_idx)
+                except ValueError:
+                    return None
+            elif pattern == "underscore_concat":
+                submission_id = f"{model_id}_{class_idx}"
+            elif pattern == "dash_concat":
+                submission_id = f"{model_id}-{class_idx}"
+            else:
+                return None
+
+            if submission_id in prediction_by_submission_id:
+                return None
+            prediction_by_submission_id[submission_id] = float(
+                predictions[row_idx, class_idx]
+            )
+
+    # Inference only proposes a mapping. Full-set equality is the safety gate.
+    if set(prediction_by_submission_id) != submission_id_set:
+        return None
+
+    return np.asarray(
+        [prediction_by_submission_id[submission_id] for submission_id in submission_ids_str],
+        dtype=np.float64,
+    ).reshape(-1, 1)
 
 
 class EnsembleAgent:
@@ -93,8 +214,137 @@ class EnsembleAgent:
     def _validate_and_align_submission(self, submission_path, sample_submission_path, output_path=None):
         return validate_and_align_submission(submission_path, sample_submission_path, output_path)
 
-    def _safe_restore_submission(self, source_path, dest_path, sample_submission_path):
-        return safe_restore_submission(source_path, dest_path, sample_submission_path)
+    def _safe_restore_submission(
+        self,
+        source_path,
+        dest_path,
+        sample_submission_path,
+        *,
+        expected_sha256=None,
+        require_hash=False,
+    ):
+        return safe_restore_submission(
+            source_path,
+            dest_path,
+            sample_submission_path,
+            expected_sha256=expected_sha256,
+            require_hash=require_hash,
+        )
+
+    @staticmethod
+    def _is_mlebench(state: KaggleState) -> bool:
+        return (
+            isinstance(state, dict)
+            and str(state.get("run_mode", "")).strip().lower() == "mlebench"
+        )
+
+    def _restore_preserved_submission(
+        self,
+        state: KaggleState,
+        working_dir: Path,
+        output_path: Path,
+        sample_submission_path: Path,
+    ) -> bool:
+        """Restore the best artifact under the trust policy for the run mode."""
+        if not self._is_mlebench(state):
+            return self._safe_restore_submission(
+                working_dir / "submission_best.csv",
+                output_path,
+                sample_submission_path,
+            )
+
+        snapshot_owner = str(
+            state.get("best_candidate_submission_component_name") or ""
+        )
+        approvals = state.get("robustness_approved_components") or {}
+        oof_claims = state.get("oof_availability") or {}
+        owner_approved = (
+            isinstance(approvals, dict)
+            and approvals.get(snapshot_owner) is True
+        )
+        # Unscored-fallback lane: an owner that never claimed OOF evidence and
+        # was never reviewed (canonical-less domains) has nothing for
+        # robustness to approve. Its snapshot is restorable as an
+        # artifact-only candidate — score provenance still requires approval
+        # plus a trusted score, so no CV is ever reported for it. An owner
+        # explicitly rejected (approvals[owner] is False) stays blocked.
+        owner_unscored_fallback = bool(
+            snapshot_owner
+            and not (
+                isinstance(oof_claims, dict)
+                and oof_claims.get(snapshot_owner)
+            )
+            and (
+                not isinstance(approvals, dict)
+                or snapshot_owner not in approvals
+            )
+        )
+        best_snapshot = None
+        if snapshot_owner and (owner_approved or owner_unscored_fallback):
+            best_snapshot = verified_best_candidate_submission(
+                state, working_dir
+            )
+        snapshot_candidates = (
+            (
+                best_snapshot,
+                state.get("best_candidate_submission_sha256"),
+                "best candidate",
+            ),
+            (
+                verified_accepted_submission(state, working_dir),
+                state.get("accepted_submission_sha256"),
+                "accepted",
+            ),
+        )
+        for snapshot, digest, label in snapshot_candidates:
+            if snapshot is None:
+                continue
+            if self._safe_restore_submission(
+                snapshot,
+                output_path,
+                sample_submission_path,
+                expected_sha256=digest,
+                require_hash=True,
+            ):
+                print(f"      OK: Restored verified immutable {label} snapshot")
+                return True
+
+        print(
+            "      Warning: No hash-verified immutable submission snapshot "
+            "could be restored"
+        )
+        return False
+
+    @staticmethod
+    def _fail_closed_restore(
+        output_path: Path,
+        *,
+        reason: str,
+        current_iteration: int,
+    ) -> dict[str, Any]:
+        """Remove any mutable output when a required MLE snapshot is unavailable."""
+        try:
+            if output_path.is_symlink() or output_path.is_file():
+                output_path.unlink(missing_ok=True)
+        except OSError:
+            # State validity, not successful deletion, is the authoritative
+            # submission gate; SubmissionAgent also refuses invalid workflows.
+            pass
+        message = f"MLE-bench submission restore blocked: {reason}"
+        return {
+            "ensemble_skipped": True,
+            "skip_reason": "verified_snapshot_unavailable",
+            "workflow_valid": False,
+            "submission_validation_error": message,
+            "telemetry_events": [
+                make_event(
+                    "ensemble",
+                    "snapshot_restore_blocked",
+                    iteration=current_iteration,
+                    reason=reason,
+                )
+            ],
+        }
 
     def _load_and_align_oof(self, oof_path, train_ids_path, reference_ids):
         return load_and_align_oof(oof_path, train_ids_path, reference_ids)
@@ -132,8 +382,24 @@ class EnsembleAgent:
 
         print(f"   Creating OOF weighted blend with {n_models} models...")
 
-        oof_list = [np.load(oof) for oof, _ in prediction_pairs.values()]
-        test_list = [np.load(test) for _, test in prediction_pairs.values()]
+        oof_list = [
+            np.load(oof, allow_pickle=False)
+            for oof, _ in prediction_pairs.values()
+        ]
+        test_list = [
+            np.load(test, allow_pickle=False)
+            for _, test in prediction_pairs.values()
+        ]
+        temporal_mask = _load_temporal_oof_mask(
+            next(iter(prediction_pairs.values()))[0].parent,
+            len(oof_list[0]),
+        )
+        oof_list = [
+            _eligible_temporal_oof(np.asarray(oof), temporal_mask)
+            for oof in oof_list
+        ]
+        if temporal_mask is not None:
+            y_true = np.asarray(y_true)[temporal_mask]
         oof_stack = np.stack(oof_list, axis=0)
         test_stack = np.stack(test_list, axis=0)
 
@@ -196,7 +462,10 @@ class EnsembleAgent:
             return False, "sample_submission.csv not found"
 
         try:
-            saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+            saved_order = np.load(
+                class_order_path,
+                allow_pickle=False,
+            ).tolist()
             sample_sub = read_csv_auto(sample_submission_path)
             expected_order = sample_sub.columns[1:].tolist()
 
@@ -219,11 +488,12 @@ class EnsembleAgent:
     ) -> bool:
         """Create a simple average ensemble directly from saved predictions.
 
-        Uses ID-based merging when shapes don't match to handle models trained
-        on different subsets of data.
+        Every prediction array is aligned to ``sample_submission`` by its
+        persisted test IDs before averaging. Missing, duplicate, partial, or
+        extra IDs fail closed; positional averaging is never used.
 
         Args:
-            expected_n_test: If provided (from CVfolds), validates test count matches.
+            expected_n_test: Optional canonical test count used as an audit signal.
         """
         if not sample_submission_path.exists():
             print("   Sample submission not found")
@@ -231,163 +501,119 @@ class EnsembleAgent:
 
         sample_sub = read_csv_auto(sample_submission_path)
         n_test = len(sample_sub)
+        if sample_sub.shape[1] < 2:
+            print("   ERROR: sample_submission must contain an ID and prediction column")
+            return False
+        if n_test == 0:
+            print("   ERROR: sample_submission is empty")
+            return False
+        if (
+            expected_n_test is not None
+            and expected_n_test > 0
+            and expected_n_test != n_test
+        ):
+            print(
+                f"   INFO: canonical test count ({expected_n_test}) differs from "
+                f"submission rows ({n_test}); exact artifact IDs remain authoritative"
+            )
+        if models_dir is None:
+            print("   ERROR: models_dir is required for ID-safe ensembling")
+            return False
 
-        # Validate test count against CVfolds expectation if available
-        if expected_n_test is not None and expected_n_test > 0:
-            n_cols = len(sample_sub.columns) - 1  # Exclude ID column
-            # Check if n_test matches expected directly OR is a multiple (MLSP long format)
-            is_direct_match = (n_test == expected_n_test)
-            is_mlsp_format = (n_cols == 1 and n_test % expected_n_test == 0)  # Long format: multiple rows per sample
-            if not is_direct_match and not is_mlsp_format:
-                print(f"   WARNING: sample_submission has {n_test} rows, CVfolds expects {expected_n_test}")
-                print(f"   (This may be normal for multi-label formats with {n_test // expected_n_test} classes per sample)")
-        preds_dict: dict[str, np.ndarray] = {}
-        ids_dict: dict[str, np.ndarray | None] = {}
+        reference_ids = sample_sub.iloc[:, 0]
+        if reference_ids.isna().any() or reference_ids.astype(str).duplicated().any():
+            print("   ERROR: sample_submission IDs must be non-null and unique")
+            return False
+        reference_ids_str = reference_ids.astype(str).to_numpy()
+        reference_id_set = set(reference_ids_str.tolist())
 
+        aligned_predictions: list[np.ndarray] = []
         for name, (_, test_path) in prediction_pairs.items():
-            preds = np.load(test_path)
-            preds = np.asarray(preds, dtype=np.float32)
+            try:
+                preds = np.asarray(
+                    np.load(test_path, allow_pickle=False),
+                    dtype=np.float64,
+                )
+            except Exception as exc:
+                print(f"   ERROR: Failed to load test predictions for {name}: {exc}")
+                return False
+
             if preds.ndim == 1:
                 preds = preds.reshape(-1, 1)
-            preds_dict[name] = preds
+            if preds.ndim != 2 or preds.shape[0] == 0 or preds.shape[1] == 0:
+                print(f"   ERROR: Invalid prediction shape for {name}: {preds.shape}")
+                return False
+            if not np.all(np.isfinite(preds)):
+                print(f"   ERROR: Non-finite test predictions for {name}")
+                return False
 
-            # Try to load test IDs if available
-            if models_dir:
-                test_ids_path = models_dir / f"test_ids_{name}.npy"
-                if test_ids_path.exists():
-                    ids_dict[name] = np.load(test_ids_path, allow_pickle=True)
-                else:
-                    ids_dict[name] = None
-            else:
-                ids_dict[name] = None
+            test_ids_path = models_dir / f"test_ids_{name}.npy"
+            if not test_ids_path.exists():
+                print(f"   ERROR: Missing test_ids_{name}.npy; refusing positional ensemble")
+                return False
+            try:
+                model_ids = np.asarray(
+                    np.load(test_ids_path, allow_pickle=False)
+                ).reshape(-1)
+            except Exception as exc:
+                print(f"   ERROR: Failed to load test IDs for {name}: {exc}")
+                return False
 
-        if len(preds_dict) < 1:
+            if len(model_ids) != len(preds):
+                print(
+                    f"   ERROR: ID/prediction row mismatch for {name}: "
+                    f"{len(model_ids)} vs {len(preds)}"
+                )
+                return False
+
+            model_ids_series = pd.Series(model_ids)
+            if model_ids_series.isna().any():
+                print(f"   ERROR: Null test IDs for {name}")
+                return False
+            model_ids_str = model_ids_series.astype(str)
+            if model_ids_str.duplicated().any():
+                print(f"   ERROR: Duplicate test IDs for {name}")
+                return False
+
+            aligned = _align_test_predictions_to_submission(
+                preds,
+                model_ids_str.to_numpy(),
+                reference_ids_str,
+            )
+            if aligned is None:
+                model_id_set = set(model_ids_str.tolist())
+                missing = len(reference_id_set - model_id_set)
+                extra = len(model_id_set - reference_id_set)
+                print(
+                    f"   ERROR: Could not prove complete ID coverage for {name}: "
+                    f"missing={missing}, extra={extra}, rows={len(model_ids)}/{n_test}"
+                )
+                return False
+
+            aligned_predictions.append(aligned)
+            print(f"      {name}: ID-aligned {n_test}/{n_test}")
+
+        if not aligned_predictions:
             print("   No prediction pairs found")
             return False
 
-        names = list(preds_dict.keys())
-        preds_list = list(preds_dict.values())
-
-        if len(preds_list) == 1:
-            name = names[0]
-            ensemble_preds = preds_list[0]
-            if ensemble_preds.shape[0] != n_test:
-                print(f"   Row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
-                return False
-
-            # CRITICAL: Warn if no test_ids file - assuming alignment is risky!
-            if ids_dict.get(name) is None:
-                print(f"   WARNING: No test_ids_{name}.npy - assuming alignment with sample_submission (risk of score=0.50)")
-
-            # Validate column count matches submission template
-            expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
-            if ensemble_preds.shape[1] > expected_cols:
-                print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
-
-            from .submission import format_ensemble_predictions
-            ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
-
-            if ensemble_preds.shape[1] == 1:
-                sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
-            elif ensemble_preds.shape[1] == expected_cols:
-                sample_sub.iloc[:, 1:] = ensemble_preds
-            else:
-                # Fewer prediction columns than expected - pad with 0.5
-                print(f"   WARNING: Padding {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                padded = np.full((n_test, expected_cols), 0.5)
-                padded[:, :ensemble_preds.shape[1]] = ensemble_preds
-                sample_sub.iloc[:, 1:] = padded
-
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            sample_sub.to_csv(output_path, index=False)
-            return True
-
-        shapes = {p.shape for p in preds_list}
+        shapes = {preds.shape for preds in aligned_predictions}
         if len(shapes) != 1:
-            print(f"   Shape mismatch detected: {shapes}")
-            print("   Attempting ID-based merging with nanmean...")
+            print(f"   ERROR: Prediction shape mismatch after ID alignment: {shapes}")
+            return False
 
-            # Use ID-based merging instead of filtering
-            # Get sample_sub IDs as reference
-            test_ids_ref = sample_sub.iloc[:, 0].astype(str).values
-
-            # CRITICAL: Use sample submission's expected column count, not max from predictions
-            # This prevents ValueError when predictions have more columns than submission expects
-            expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
-            pred_cols = max(p.shape[1] for p in preds_list)
-
-            if pred_cols > expected_cols:
-                print(f"   WARNING: Predictions have {pred_cols} cols, submission expects {expected_cols}")
-                print(f"   Truncating predictions to {expected_cols} columns")
-            n_cols = min(pred_cols, expected_cols) if expected_cols > 0 else pred_cols
-
-            # Initialize merged array with NaN
-            merged = np.full((n_test, len(names), n_cols), np.nan)
-
-            models_contributed = 0
-            for model_idx, name in enumerate(names):
-                preds = preds_dict[name]
-                model_ids = ids_dict.get(name)
-
-                # Truncate prediction columns if needed
-                if preds.shape[1] > n_cols:
-                    preds = _truncate_pred_cols(preds, n_cols)
-
-                if model_ids is not None and len(model_ids) == len(preds):
-                    # Use ID-based mapping
-                    id_to_pred = {str(id_): preds[i] for i, id_ in enumerate(model_ids)}
-                    matched = 0
-                    for ref_idx, ref_id in enumerate(test_ids_ref):
-                        if ref_id in id_to_pred:
-                            pred = id_to_pred[ref_id]
-                            cols_to_copy = min(pred.shape[0] if pred.ndim > 0 else 1, n_cols)
-                            merged[ref_idx, model_idx, :cols_to_copy] = pred[:cols_to_copy] if pred.ndim > 0 else pred
-                            matched += 1
-                    print(f"      {name}: ID-matched {matched}/{n_test} ({100*matched/n_test:.1f}%)")
-                    if matched > 0:
-                        models_contributed += 1
-                elif len(preds) == n_test:
-                    # Assume aligned order - RISKY! May cause ID misalignment
-                    cols_to_copy = min(preds.shape[1], n_cols)
-                    merged[:, model_idx, :cols_to_copy] = preds[:, :cols_to_copy]
-                    print(f"      {name}: Assumed aligned ({len(preds)} rows) - no test_ids file (risk of score=0.50)")
-                    models_contributed += 1
-                else:
-                    print(f"      {name}: SKIPPED (shape {preds.shape}, no IDs)")
-
-            # CRITICAL: Fail fast if no models contributed predictions
-            if models_contributed == 0:
-                print("   ERROR: No models contributed valid predictions - cannot create ensemble")
-                return False
-
-            # Check if merged array has any valid (non-NaN) values
-            valid_count = np.count_nonzero(~np.isnan(merged))
-            if valid_count == 0:
-                print("   ERROR: Merged array is entirely NaN - no valid predictions")
-                return False
-
-            print(f"   {models_contributed}/{len(names)} models contributed, {valid_count} valid predictions")
-
-            # Compute nanmean across models
-            ensemble_preds = np.nanmean(merged, axis=1)
-
-            # Fill any remaining NaN with 0.5 (neutral for binary classification)
-            ensemble_preds = np.where(np.isnan(ensemble_preds), 0.5, ensemble_preds)
-
-            # Squeeze if single column
-            if ensemble_preds.shape[1] == 1:
-                ensemble_preds = ensemble_preds.squeeze(axis=1)
-        else:
-            stacked = np.stack(preds_list, axis=0)
-            ensemble_preds = stacked.mean(axis=0)
+        ensemble_preds = np.stack(aligned_predictions, axis=0).mean(axis=0)
+        if not np.all(np.isfinite(ensemble_preds)):
+            print("   ERROR: Ensemble predictions contain NaN or Inf")
+            return False
 
         # CRITICAL: Check for constant/near-constant predictions (ID alignment bug indicator)
-        pred_std = np.std(ensemble_preds)
+        pred_std = float(np.max(np.std(ensemble_preds, axis=0)))
 
         if pred_std < 1e-6:
             print("   ERROR: Predictions are constant (std<1e-6) - likely test ID misalignment! Check test_ids_*.npy files.")
-        elif pred_std < 0.01:
+            return False
+        if pred_std < 0.01:
             print(f"   WARNING: Very low variance (std={pred_std:.6f}) - possible ID alignment issue or broken model.")
         else:
             print(f"   Predictions: min={ensemble_preds.min():.4f}, max={ensemble_preds.max():.4f}, std={pred_std:.4f}")
@@ -395,34 +621,58 @@ class EnsembleAgent:
         # Validate and assign predictions to sample submission
         expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
 
-        if ensemble_preds.ndim == 1:
-            if len(ensemble_preds) != n_test:
-                print(f"   Final row count mismatch: {len(ensemble_preds)} vs {n_test}")
-                return False
-            sample_sub.iloc[:, 1] = ensemble_preds
-        else:
-            if ensemble_preds.shape[0] != n_test:
-                print(f"   Final row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
-                return False
+        if ensemble_preds.shape[0] != n_test:
+            print(f"   Final row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
+            return False
 
-            # Validate column count matches submission template
-            if ensemble_preds.shape[1] > expected_cols:
-                print(f"   WARNING: Truncating {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
+        metric_lower = metric_name.lower()
+        label_metric = any(
+            token in metric_lower
+            for token in (
+                "accuracy",
+                "f1",
+                "precision",
+                "recall",
+                "kappa",
+                "qwk",
+                "mcc",
+            )
+        )
+        if (
+            ensemble_preds.shape[1] == 2
+            and expected_cols == 1
+            and not label_metric
+        ):
+            ensemble_preds = _truncate_pred_cols(ensemble_preds, expected_cols)
+        elif ensemble_preds.shape[1] != expected_cols and not (
+            label_metric and expected_cols == 1
+        ):
+            print(
+                f"   ERROR: Prediction column mismatch: "
+                f"{ensemble_preds.shape[1]} vs {expected_cols}"
+            )
+            return False
 
-            from .submission import format_ensemble_predictions
-            ensemble_preds = format_ensemble_predictions(ensemble_preds, sample_sub, problem_type, metric_name)
+        formatted = np.asarray(
+            format_ensemble_predictions(
+                ensemble_preds, sample_sub, problem_type, metric_name
+            )
+        )
+        if formatted.ndim == 1:
+            formatted = formatted.reshape(-1, 1)
+        if formatted.shape != (n_test, expected_cols):
+            print(
+                f"   ERROR: Formatted prediction shape mismatch: "
+                f"{formatted.shape} vs {(n_test, expected_cols)}"
+            )
+            return False
+        if not np.issubdtype(formatted.dtype, np.number) or not np.all(
+            np.isfinite(formatted)
+        ):
+            print("   ERROR: Formatted predictions must be finite and numeric")
+            return False
 
-            if ensemble_preds.shape[1] == 1:
-                sample_sub.iloc[:, 1] = ensemble_preds[:, 0]
-            elif ensemble_preds.shape[1] == expected_cols:
-                sample_sub.iloc[:, 1:] = ensemble_preds
-            else:
-                # Fewer prediction columns than expected - pad with 0.5
-                print(f"   WARNING: Padding {ensemble_preds.shape[1]} pred cols to {expected_cols} submission cols")
-                padded = np.full((n_test, expected_cols), 0.5)
-                padded[:, :ensemble_preds.shape[1]] = ensemble_preds
-                sample_sub.iloc[:, 1:] = padded
+        sample_sub.iloc[:, 1:] = formatted
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sample_sub.to_csv(output_path, index=False)
@@ -448,6 +698,14 @@ class EnsembleAgent:
         print(f"  Creating stacking ensemble with {len(models)} base models...")
 
         models_dir = working_dir / "models"
+        temporal_mask_path = (
+            working_dir / "canonical" / "oof_eligible_mask.npy"
+        )
+        if temporal_mask_path.is_file():
+            raise RuntimeError(
+                "Cross-sectional stacking/cross_val_predict is disabled for "
+                "temporal canonical CV; use ID-safe test-prediction averaging"
+            )
         prediction_pairs = {
             name: (models_dir / f"oof_{name}.npy", models_dir / f"test_{name}.npy")
             for name in model_names
@@ -501,7 +759,7 @@ class EnsembleAgent:
         for model, name in zip(models, model_names, strict=False):
             oof_path = working_dir / "models" / f"oof_{name}.npy"
             if oof_path.exists():
-                oof_preds = np.load(oof_path)
+                oof_preds = np.load(oof_path, allow_pickle=False)
                 meta_features.append(oof_preds)
                 valid_models.append(model)
                 valid_names.append(name)
@@ -611,13 +869,24 @@ class EnsembleAgent:
         for model, name in zip(models, model_names, strict=False):
             oof_path = working_dir / "models" / f"oof_{name}.npy"
             if oof_path.exists():
-                preds = np.load(oof_path)
+                preds = np.load(oof_path, allow_pickle=False)
                 oof_preds.append(preds)
                 valid_models.append(model)
                 valid_names.append(name)
 
         if not oof_preds:
             raise ValueError("No OOF predictions found for Caruana ensemble")
+
+        temporal_mask = _load_temporal_oof_mask(
+            working_dir / "models",
+            len(oof_preds[0]),
+        )
+        oof_preds = [
+            _eligible_temporal_oof(np.asarray(preds), temporal_mask)
+            for preds in oof_preds
+        ]
+        if temporal_mask is not None:
+            y = pd.Series(np.asarray(y)[temporal_mask])
 
         oof_preds = np.column_stack(oof_preds)
         n_models = oof_preds.shape[1]
@@ -684,7 +953,7 @@ class EnsembleAgent:
         for name, (_, test_path) in prediction_pairs.items():
             if test_path.exists():
                 try:
-                    preds = np.load(test_path)
+                    preds = np.load(test_path, allow_pickle=False)
                     if np.isfinite(preds).all():
                         test_preds[name] = preds
                 except Exception:
@@ -925,7 +1194,7 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
 
     def _load_canonical_training_data(
         self, state: KaggleState
-    ) -> tuple[pd.Series | None, np.ndarray | None, Path | None]:
+    ) -> tuple[np.ndarray | pd.Series | None, np.ndarray | None, Path | None]:
         """Load y / train_ids / folds path from the canonical contract (single source of truth)."""
         contract = state.get("canonical_contract") if isinstance(state, dict) else None
         if not isinstance(contract, dict):
@@ -934,7 +1203,8 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             y_path = contract.get("y_path")
             if not y_path or not Path(y_path).exists():
                 return None, None, None
-            y = pd.Series(np.load(y_path, allow_pickle=True))
+            y_array = np.asarray(np.load(y_path, allow_pickle=True))
+            y = pd.Series(y_array) if y_array.ndim == 1 else y_array
 
             train_ids = None
             train_ids_path = contract.get("train_ids_path")
@@ -993,6 +1263,28 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             print("   No canonical y.npy - using simple average ensemble")
             return None
 
+        canonical_contract = (
+            state.get("canonical_contract")
+            if isinstance(state, dict)
+            else None
+        ) or {}
+        temporal_mask_path = Path(
+            canonical_contract.get("oof_eligible_mask_path")
+            or Path(state["working_directory"])
+            / "canonical"
+            / "oof_eligible_mask.npy"
+        )
+        if temporal_mask_path.is_file():
+            # The current meta-model uses cross-sectional nested CV. Running it
+            # on expanding-window OOF would reintroduce future leakage at the
+            # ensemble layer. Test-prediction averaging remains available and
+            # does not fit a second-level model on temporal OOF.
+            print(
+                "   Temporal OOF mask detected - disabling cross-sectional "
+                "stacking and using the ID-safe prediction averaging path"
+            )
+            return None
+
         try:
             sample_sub = read_csv_auto(sample_path)
         except Exception as e:
@@ -1008,9 +1300,26 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             is_classification = "class" in (problem_type or "").lower()
         norm_problem = "classification" if is_classification else "regression"
 
-        # Class order / n_targets from the submission template (source of truth)
+        # Class order / target shape from the submission template. A two-column
+        # file can still be a long multiclass grid, so infer that relationship
+        # from canonical test IDs and the complete submission IDs.
         expected_class_order = sample_sub.columns[1:].tolist() if expected_cols > 1 else None
         n_targets = expected_cols
+        canonical_test_ids = (
+            state.get("test_rec_ids", []) if isinstance(state, dict) else []
+        )
+        if expected_cols == 1 and canonical_test_ids:
+            submission_logic = infer_submission_logic(
+                list(canonical_test_ids),
+                sample_sub.iloc[:, 0].tolist(),
+            )
+            inferred_classes = submission_logic.get("inferred_classes")
+            if (
+                submission_logic.get("pattern") != "direct"
+                and isinstance(inferred_classes, int)
+                and inferred_classes > 1
+            ):
+                n_targets = inferred_classes
 
         enable_calibration = os.getenv(
             "KAGGLE_AGENTS_STACKING_CALIBRATION", "1"
@@ -1036,6 +1345,7 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                 enable_post_calibration=enable_post_calibration,
                 n_targets=n_targets,
                 calibration_method=calibration_method,
+                require_identity_artifacts=self._is_mlebench(state),
             )
         except Exception as e:
             print(f"   OOF stacking failed ({e}) - using simple average")
@@ -1048,12 +1358,22 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         final_test_preds = np.asarray(final_test_preds, dtype=float)
         if final_test_preds.ndim == 1:
             final_test_preds = final_test_preds.reshape(-1, 1)
-        if final_test_preds.shape[0] != n_test:
+        ensemble_test_ids = ensemble.get("test_ids")
+        if ensemble_test_ids is None:
+            print("   Stacking did not preserve test IDs - using ID-safe fallback")
+            return None
+        aligned_test_preds = _align_test_predictions_to_submission(
+            final_test_preds,
+            np.asarray(ensemble_test_ids),
+            sample_sub.iloc[:, 0].astype(str).to_numpy(),
+        )
+        if aligned_test_preds is None:
             print(
-                f"   Stacked predictions have {final_test_preds.shape[0]} rows, "
-                f"sample expects {n_test} - using simple average (ID merging)"
+                "   Could not prove stacked prediction alignment to every "
+                "submission ID - using ID-safe fallback"
             )
             return None
+        final_test_preds = aligned_test_preds
 
         n_models = len(ensemble.get("base_model_names", []))
         strategy = f"stacking_{ensemble.get('stacking_method', 'unknown')}"
@@ -1072,8 +1392,9 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         # Only compare OOF with an internal score measured on comparable CV data.
         # Never compare it with state.best_score (leaderboard/private holdout).
         best_existing, best_existing_source = self._get_comparable_cv_score(state)
+        mlebench_mode = self._is_mlebench(state)
         if (
-            output_path.exists()
+            (output_path.exists() or mlebench_mode)
             and raw_oof_score is not None
             and best_existing is not None
         ):
@@ -1087,6 +1408,22 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                     f"vs component CV {float(best_existing):.6f} "
                     f"from {best_existing_source} ({metric_name})"
                 )
+                if mlebench_mode:
+                    working_dir = Path(state["working_directory"])
+                    if not self._restore_preserved_submission(
+                        state,
+                        working_dir,
+                        output_path,
+                        sample_path,
+                    ):
+                        return self._fail_closed_restore(
+                            output_path,
+                            reason=(
+                                "inferior stacked candidate has no verified "
+                                "snapshot to restore"
+                            ),
+                            current_iteration=current_iteration,
+                        )
                 return {
                     "ensemble_created": True,
                     "ensemble_strategy": strategy,
@@ -1191,11 +1528,31 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             if weights
             else {}
         )
+        ensemble_digest = None
+        ensemble_score_source = None
+        ensemble_owner = None
+        if raw_oof_score is not None:
+            try:
+                ensemble_digest = sha256_file(output_path)
+            except OSError as exc:
+                print(
+                    "   Could not bind ensemble OOF score to submission bytes "
+                    f"({exc}); the artifact will remain unscored"
+                )
+            else:
+                ensemble_score_source = "host_oof_ensemble"
+                ensemble_owner = "ensemble"
 
         return {
             "ensemble_created": True,
             "ensemble_strategy": strategy,
             "ensemble_weights": ensemble_weights,
+            "ensemble_oof_score": (
+                raw_oof_score if ensemble_digest is not None else None
+            ),
+            "ensemble_submission_sha256": ensemble_digest,
+            "ensemble_submission_owner": ensemble_owner,
+            "ensemble_score_source": ensemble_score_source,
             "n_models": n_models,
             "telemetry_events": [
                 make_event(
@@ -1234,6 +1591,26 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         toggles = getattr(get_config(), "ablation_toggles", None)
         if toggles and toggles.disable_ensemble:
             print("   ABLATION: Ensemble disabled - keeping best single-model submission")
+            if self._is_mlebench(state):
+                working_dir = Path(str(state.get("working_directory") or ""))
+                output_path = working_dir / "submission.csv"
+                sample_value = state.get("sample_submission_path")
+                sample_path = (
+                    Path(str(sample_value))
+                    if sample_value
+                    else working_dir / "sample_submission.csv"
+                )
+                if not self._restore_preserved_submission(
+                    state,
+                    working_dir,
+                    output_path,
+                    sample_path,
+                ):
+                    return self._fail_closed_restore(
+                        output_path,
+                        reason="ensemble disabled but no verified snapshot exists",
+                        current_iteration=current_iteration,
+                    )
             return {
                 "ensemble_skipped": True,
                 "skip_reason": "ablation_disabled",
@@ -1276,36 +1653,78 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             sample_path = Path(sample_submission_path) if sample_submission_path else working_dir / "sample_submission.csv"
             output_path = working_dir / "submission.csv"
             best_submission = working_dir / "submission_best.csv"
+            mlebench_mode = self._is_mlebench(state)
 
             # Find prediction pairs
             prediction_pairs = self._find_prediction_pairs(models_dir)
             print(f"   Found {len(prediction_pairs)} prediction pairs")
 
-            # Only ensemble components accepted by the hill-climb: oof_available_*
-            # is set solely for kept components (developer/agent.py). No keys means
-            # a resumed/legacy state - keep the glob results (rollback quarantine
-            # already hides rejected files on disk).
-            accepted = (
-                {
-                    key.replace("oof_available_", "", 1)
-                    for key in state.keys()
-                    if isinstance(key, str) and key.startswith("oof_available_")
-                }
+            # Only ensemble artifacts explicitly accepted by the hill-climb.
+            # Filesystem presence is not evidence of acceptance: a rejected or
+            # stale component can leave well-formed arrays behind.
+            availability = (
+                state.get("oof_availability", {})
                 if isinstance(state, dict)
-                else set()
+                else {}
             )
-            if accepted:
-                dropped = sorted(set(prediction_pairs) - accepted)
-                prediction_pairs = {
-                    name: pair for name, pair in prediction_pairs.items() if name in accepted
-                }
-                if dropped:
-                    print(f"   Excluding non-accepted prediction pairs: {', '.join(dropped)}")
+            robustness_approvals = (
+                state.get("robustness_approved_components", {})
+                if isinstance(state, dict)
+                else {}
+            )
+            trusted_scores = (
+                state.get("trusted_component_scores", {})
+                if isinstance(state, dict)
+                else {}
+            )
+            trusted_names: set[str] = set()
+            if isinstance(trusted_scores, dict):
+                for name, value in trusted_scores.items():
+                    raw_score = (
+                        value.get("score", value.get("cv_score"))
+                        if isinstance(value, dict)
+                        else value
+                    )
+                    try:
+                        score = float(raw_score)
+                    except (TypeError, ValueError):
+                        continue
+                    if np.isfinite(score):
+                        trusted_names.add(str(name))
+            accepted = {
+                str(name)
+                for name, is_available in availability.items()
+                if is_available is True
+                and robustness_approvals.get(str(name)) is True
+                and (not mlebench_mode or str(name) in trusted_names)
+            }
+            dropped = sorted(set(prediction_pairs) - accepted)
+            prediction_pairs = {
+                name: pair
+                for name, pair in prediction_pairs.items()
+                if name in accepted
+            }
+            if dropped:
+                print(
+                    "   Excluding prediction pairs without OOF, robustness "
+                    "acceptance, and (for MLE-bench) a trusted score: "
+                    + ", ".join(dropped)
+                )
 
             if len(prediction_pairs) < 1:
                 print("   No prediction pairs found, skipping ensemble")
-                if best_submission.exists():
-                    self._safe_restore_submission(best_submission, output_path, sample_path)
+                restored = self._restore_preserved_submission(
+                    state,
+                    working_dir,
+                    output_path,
+                    sample_path,
+                )
+                if mlebench_mode and not restored:
+                    return self._fail_closed_restore(
+                        output_path,
+                        reason="no prediction pairs and no verified snapshot",
+                        current_iteration=current_iteration,
+                    )
                 return {
                     "ensemble_skipped": True,
                     "skip_reason": "no_prediction_pairs",
@@ -1343,30 +1762,54 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             # The simple average below is UNSCORED - never let it overwrite a
             # scored hill-climb best.
             best_existing, best_source = self._get_comparable_cv_score(state)
-            if best_existing is not None and best_submission.exists():
+            if best_existing is not None and (
+                mlebench_mode or best_submission.exists()
+            ):
                 print(
                     f"   Unscored fallback blocked: keeping scored best "
                     f"({best_source}={best_existing:.6f})"
                 )
-                self._safe_restore_submission(best_submission, output_path, sample_path)
-                return {
-                    "ensemble_skipped": True,
-                    "skip_reason": "unscored_fallback_kept_scored_best",
-                    "telemetry_events": [
-                        make_event(
-                            "ensemble",
-                            "skipped",
-                            iteration=current_iteration,
-                            reason="unscored_fallback_kept_scored_best",
-                            best_score=float(best_existing),
-                            score_source=best_source,
-                        )
-                    ],
-                }
+                restored = self._restore_preserved_submission(
+                    state,
+                    working_dir,
+                    output_path,
+                    sample_path,
+                )
+                if mlebench_mode and not restored:
+                    return self._fail_closed_restore(
+                        output_path,
+                        reason="scored best has no verified snapshot",
+                        current_iteration=current_iteration,
+                    )
+                if restored:
+                    return {
+                        "ensemble_skipped": True,
+                        "skip_reason": "unscored_fallback_kept_scored_best",
+                        "telemetry_events": [
+                            make_event(
+                                "ensemble",
+                                "skipped",
+                                iteration=current_iteration,
+                                reason="unscored_fallback_kept_scored_best",
+                                best_score=float(best_existing),
+                                score_source=best_source,
+                            )
+                        ],
+                    }
+                print(
+                    "   Preserved submission could not be validated; "
+                    "continuing to the ID-safe fallback"
+                )
 
             if self._ensemble_from_predictions(prediction_pairs, sample_path, output_path, models_dir, expected_n_test, problem_type=problem_type, metric_name=metric_name):
                 return {
                     "ensemble_created": True,
+                    # This fallback has no host-side OOF measurement. Clear any
+                    # prior ensemble provenance so it cannot inherit a stale score.
+                    "ensemble_oof_score": None,
+                    "ensemble_submission_sha256": None,
+                    "ensemble_submission_owner": None,
+                    "ensemble_score_source": None,
                     "n_models": len(prediction_pairs),
                     "telemetry_events": [
                         make_event(

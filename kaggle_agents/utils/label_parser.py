@@ -1,13 +1,14 @@
 """
 Robust label file parser for non-standard competition formats.
 
-Handles various delimiters, encodings, and multi-label formats like MLSP 2013 Birds.
+Handles various delimiters, encodings, and sparse multi-label formats.
 """
 
 from __future__ import annotations
 
 import csv
 import re
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,7 @@ class RobustLabelParser:
     - csv.Sniffer for automatic delimiter detection
     - Multiple fallback patterns (space, tab, comma, semicolon)
     - Header detection
-    - Multi-label formats (MLSP 2013 Birds style: rec_id, label pairs)
+    - Sparse multi-label formats with record IDs and variable-width label lists
     - Various encodings (utf-8, latin-1, cp1252)
     """
 
@@ -270,11 +271,11 @@ class RobustLabelParser:
     def parse_multi_label(
         self,
         file_path: Path,
-        id_column: str = "rec_id",
-        label_column: str = "label",
+        id_column: str = "record_id",
+        label_column: str = "target",
     ) -> pd.DataFrame:
         """
-        Parse multi-label format (e.g., MLSP 2013 Birds style).
+        Parse a sparse, variable-width multi-label format.
 
         Handles format where each row is (id, label) and same id can have multiple labels.
 
@@ -325,42 +326,42 @@ def sniff_and_read(file_path: Path) -> pd.DataFrame:
 
 def read_id_mapping(
     file_path: Path,
-    id_col: str = "rec_id",
-    filename_col: str = "filename",
+    id_col: str = "record_id",
+    filename_col: str = "file_path",
     audio_dir: Path | None = None,
     extensions: list[str] | None = None,
     resolve_extensions: bool = True,
 ) -> pd.DataFrame:
     """
-    Read an ID-to-filename mapping file (common in audio competitions).
+    Read a generic record-ID-to-file mapping.
 
     Supports automatic extension resolution: if filenames don't include extensions,
     tries to find matching audio files with common extensions (.wav, .mp3, .flac).
 
     Args:
         file_path: Path to mapping file
-        id_col: Name for ID column
-        filename_col: Name for filename column
+        id_col: Canonical name for the record identifier column
+        filename_col: Canonical name for the file path/name column
         audio_dir: Directory containing audio files (for extension resolution)
         extensions: List of extensions to try (default: ['.wav', '.mp3', '.flac', '.ogg'])
         resolve_extensions: Whether to automatically resolve missing extensions
 
     Returns:
-        DataFrame with id and filename columns (with resolved extensions if applicable)
+        DataFrame with record ID and file path columns
 
     Example:
         Mapping file without extensions:
         ```
-        rec_id,filename
-        0,PC1_20100705_050000_0010
-        1,PC1_20100705_050000_0020
+        record_id,file_path
+        a,clip_alpha
+        b,clip_beta
         ```
 
         After resolution (if audio_dir contains .wav files):
         ```
-        rec_id,filename
-        0,PC1_20100705_050000_0010.wav
-        1,PC1_20100705_050000_0020.wav
+        record_id,file_path
+        a,clip_alpha.wav
+        b,clip_beta.wav
         ```
     """
     if extensions is None:
@@ -386,6 +387,132 @@ def read_id_mapping(
     return df
 
 
+def infer_filename_label_table(
+    file_paths: list[Path] | tuple[Path, ...],
+    *,
+    explicit_pattern: str | None = None,
+) -> pd.DataFrame:
+    """Build a canonical label table from filenames using auditable evidence.
+
+    An explicit regular expression is accepted only when it contains exactly
+    one capture group (or a named ``target`` group) and matches every file.
+    Without an explicit pattern, inference is deliberately conservative: the
+    immediate parent directory and the final delimiter-separated stem token
+    are considered, and exactly one repeated class partition must remain.
+
+    This avoids assigning targets from a benchmark-shaped filename regex. If
+    the filenames do not provide a unique structural interpretation, callers
+    must use a public annotation artifact or an explicit parsing contract.
+    """
+    paths = sorted(
+        (Path(path) for path in file_paths if Path(path).is_file()),
+        key=lambda path: str(path),
+    )
+    if not paths:
+        raise ValueError("No existing files were supplied for filename-label inference")
+
+    if explicit_pattern:
+        try:
+            pattern = re.compile(explicit_pattern)
+        except re.error as exc:
+            raise ValueError(f"Invalid explicit filename-label pattern: {exc}") from exc
+
+        if "target" in pattern.groupindex:
+            target_group: str | int = "target"
+        elif pattern.groups == 1:
+            target_group = 1
+        else:
+            raise ValueError(
+                "Explicit filename-label pattern must define one capture group "
+                "or a named 'target' group"
+            )
+
+        targets: list[str] = []
+        for path in paths:
+            match = pattern.search(path.name)
+            if match is None:
+                raise ValueError(
+                    "Explicit filename-label pattern does not match every file; "
+                    f"first mismatch: {path.name}"
+                )
+            value = str(match.group(target_group)).strip()
+            if not value:
+                raise ValueError(
+                    "Explicit filename-label pattern produced an empty target "
+                    f"for {path.name}"
+                )
+            targets.append(value)
+        evidence = f"explicit_pattern:{explicit_pattern}"
+        mode = "explicit_pattern"
+    else:
+        candidates: dict[str, list[str]] = {}
+
+        parent_targets = [path.parent.name for path in paths]
+        if len(set(parent_targets)) > 1:
+            candidates["immediate_parent_directory"] = parent_targets
+
+        terminal_targets: list[str] = []
+        has_terminal_token = True
+        for path in paths:
+            tokens = [
+                token
+                for token in re.split(r"[^A-Za-z0-9]+", path.stem)
+                if token
+            ]
+            if len(tokens) < 2:
+                has_terminal_token = False
+                break
+            terminal_targets.append(tokens[-1])
+        if has_terminal_token:
+            candidates["terminal_delimited_stem_token"] = terminal_targets
+
+        viable: dict[str, list[str]] = {}
+        for source, values in candidates.items():
+            counts = Counter(values)
+            # Every inferred class must repeat. Unique suffixes are much more
+            # likely record identifiers than target evidence.
+            if len(counts) >= 2 and min(counts.values()) >= 2:
+                viable[source] = values
+
+        # Collapse duplicate evidence paths that produce exactly the same
+        # labels, but fail closed if distinct interpretations remain.
+        unique_partitions: dict[tuple[str, ...], list[str]] = {}
+        for source, values in viable.items():
+            unique_partitions.setdefault(tuple(values), []).append(source)
+
+        if len(unique_partitions) != 1:
+            sources = sorted(viable)
+            reason = "none" if not sources else ", ".join(sources)
+            raise ValueError(
+                "Filename targets are not uniquely supported by structure "
+                f"(viable interpretations: {reason}). Use a public annotation "
+                "artifact or explicit filename-label pattern."
+            )
+
+        target_tuple, evidence_sources = next(iter(unique_partitions.items()))
+        targets = list(target_tuple)
+        evidence = "+".join(sorted(evidence_sources))
+        mode = "unique_filename_structure"
+
+    record_ids = [path.stem for path in paths]
+    if len(set(record_ids)) != len(record_ids):
+        record_ids = [str(path) for path in paths]
+
+    table = pd.DataFrame(
+        {
+            "record_id": record_ids,
+            "file_path": [str(path) for path in paths],
+            "target": targets,
+        }
+    )
+    table.attrs["target_inference"] = {
+        "mode": mode,
+        "evidence": evidence,
+        "files_evaluated": len(paths),
+    }
+    return table
+
+
 def _resolve_filename_extensions(
     df: pd.DataFrame,
     filename_col: str,
@@ -408,27 +535,32 @@ def _resolve_filename_extensions(
     missing_count = 0
 
     for idx, row in df.iterrows():
-        filename = str(row[filename_col])
-
-        # Skip if filename already has an extension
-        if any(filename.lower().endswith(ext.lower()) for ext in extensions):
+        file_ref = str(row[filename_col]).strip()
+        supplied_path = Path(file_ref).expanduser()
+        direct_path = supplied_path if supplied_path.is_absolute() else audio_dir / supplied_path
+        if direct_path.is_file():
+            df.at[idx, filename_col] = str(direct_path)
+            resolved_count += 1
             continue
 
-        # Try each extension
+        # A supplied extension that does not exist must not be accepted as a
+        # resolved file path.
+        if any(file_ref.lower().endswith(ext.lower()) for ext in extensions):
+            missing_count += 1
+            continue
+
         found = False
         for ext in extensions:
-            # Try exact case
-            candidate = audio_dir / f"{filename}{ext}"
+            candidate = audio_dir / f"{file_ref}{ext}"
             if candidate.exists():
-                df.at[idx, filename_col] = f"{filename}{ext}"
+                df.at[idx, filename_col] = str(candidate)
                 resolved_count += 1
                 found = True
                 break
 
-            # Try uppercase extension
-            candidate_upper = audio_dir / f"{filename}{ext.upper()}"
+            candidate_upper = audio_dir / f"{file_ref}{ext.upper()}"
             if candidate_upper.exists():
-                df.at[idx, filename_col] = f"{filename}{ext.upper()}"
+                df.at[idx, filename_col] = str(candidate_upper)
                 resolved_count += 1
                 found = True
                 break
@@ -442,49 +574,44 @@ def _resolve_filename_extensions(
     return df
 
 
-def parse_mlsp_multilabel(
+def parse_sparse_multilabel(
     file_path: Path | str,
     outer_delimiter: str = ";",
     inner_delimiter: str = ",",
     num_classes: int | None = None,
     hidden_marker: str = "?",
 ) -> tuple:
-    """Parse MLSP 2013 Birds style multi-label format.
+    """Parse a two-level-delimiter sparse multi-label format.
 
-    This function handles the two-level delimiter format used by MLSP 2013 Birds
-    and similar competitions:
-    - Outer delimiter (semicolon) separates rec_id from labels
+    Parsing is entirely driven by the supplied file and arguments:
+    - Outer delimiter (semicolon) separates record ID from labels
     - Inner delimiter (comma) separates individual label indices
 
     Format examples:
-        rec_id;label1,label2,label3   (semicolon outer)
+        record_id;label1,label2,label3   (semicolon outer)
         0,3,7,12                      (comma-only: first is ID, rest are labels)
         42,?                          (hidden test labels marked with ?)
 
     Args:
         file_path: Path to the label file
-        outer_delimiter: Delimiter between rec_id and label section (default: ";")
+        outer_delimiter: Delimiter between record ID and label section
         inner_delimiter: Delimiter between individual labels (default: ",")
         num_classes: Number of classes (auto-detected if None)
         hidden_marker: Marker for hidden test labels (default: "?")
 
     Returns:
-        Tuple of (rec_ids, labels):
-            - rec_ids: numpy array of record IDs (int)
+        Tuple of (record_ids, labels):
+            - record_ids: numpy array of record IDs (int)
             - labels: numpy array of shape (n_samples, num_classes) with binary indicators
 
     Example:
         >>> import numpy as np
-        >>> rec_ids, labels = parse_mlsp_multilabel(
-        ...     "rec_labels_test_hidden.txt",
-        ...     num_classes=19,
-        ... )
-        >>> print(labels.shape)  # (645, 19)
-        >>> print(f"Detected {labels.shape[1]} target columns")  # 19
+        >>> record_ids, labels = parse_sparse_multilabel("labels.txt", num_classes=None)
+        >>> print(f"Detected {labels.shape[1]} target columns")
 
     Note:
         This function automatically handles the case where the file uses comma-only
-        format (e.g., "0,3,7,12" where first element is rec_id and rest are labels).
+        format (e.g., "0,3,7,12" where first element is the record ID).
     """
     import numpy as np
 
@@ -497,7 +624,7 @@ def parse_mlsp_multilabel(
     if lines and lines[0].strip() and not lines[0].strip()[0].isdigit():
         lines = lines[1:]
 
-    rec_ids = []
+    record_ids = []
     all_labels = []
 
     for line in lines:
@@ -511,17 +638,17 @@ def parse_mlsp_multilabel(
             # Fallback: might be comma-only format (e.g., "0,3,7,12")
             parts = line.split(inner_delimiter)
 
-        # First element is rec_id
-        rec_id_str = parts[0].strip()
-        if not rec_id_str or rec_id_str == hidden_marker:
+        # First element is the record ID.
+        record_id_str = parts[0].strip()
+        if not record_id_str or record_id_str == hidden_marker:
             continue
 
         try:
-            rec_id = int(rec_id_str)
+            record_id = int(record_id_str)
         except ValueError:
             continue
 
-        rec_ids.append(rec_id)
+        record_ids.append(record_id)
 
         # Remaining elements are labels
         row_labels = []
@@ -551,10 +678,10 @@ def parse_mlsp_multilabel(
         num_classes = max_label + 1
 
     # Create binary indicator matrix
-    label_matrix = np.zeros((len(rec_ids), num_classes), dtype=np.float32)
+    label_matrix = np.zeros((len(record_ids), num_classes), dtype=np.float32)
     for i, row_labels in enumerate(all_labels):
         for label in row_labels:
             if 0 <= label < num_classes:
                 label_matrix[i, label] = 1.0
 
-    return np.array(rec_ids), label_matrix
+    return np.array(record_ids), label_matrix

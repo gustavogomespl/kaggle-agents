@@ -30,9 +30,18 @@ def _exec_result(stdout: str) -> SimpleNamespace:
 
 
 class TestScorePlausibility:
-    def test_zero_or_negative_lower_better_is_implausible(self):
+    def test_zero_lower_better_needs_a_trusted_recompute(self):
+        # A stdout-declared 0.0 loss is almost always a broken validation calc
+        # (the incident that poisoned hill-climbing); only a score recomputed
+        # from canonical OOF artifacts may legitimately be exactly 0.0.
         assert ValidationMixin._is_score_implausible(0.0, "rmse") is True
+        assert ValidationMixin._is_score_implausible(0.0, "rmse", trusted=True) is False
         assert ValidationMixin._is_score_implausible(-0.1, "mae") is True
+        assert (
+            ValidationMixin._is_score_implausible(-0.1, "mae", trusted=True) is True
+        )
+        assert ValidationMixin._is_score_implausible(float("inf"), "rmse") is True
+        assert ValidationMixin._is_score_implausible(float("nan"), "auc") is True
 
     def test_perfect_higher_better_is_plausible(self):
         # Saturated comps legitimately reach AUC ~1.0 (higher is better).
@@ -40,7 +49,9 @@ class TestScorePlausibility:
         assert ValidationMixin._is_score_implausible(0.0, "accuracy") is False
         assert ValidationMixin._is_score_implausible(None, "rmse") is False
 
-    def test_zero_rmse_component_rejected(self):
+    def test_zero_rmse_from_stdout_is_rejected(self):
+        # Default (kaggle) mode promotes stdout-declared scores, so the exact
+        # failure from the incident log must reject before touching baselines.
         keep, score = _Validator()._validate_component_improvement(
             COMPONENT,
             _exec_result("Final Validation Performance: 0.000000\n"),
@@ -91,18 +102,22 @@ class TestQuarantineArtifacts:
             "train_ids_bad.npy",
         ]
         assert set(find_prediction_pairs(models)) == {"good"}
-        assert (models / "rejected_oof_bad.npy").exists()
+        quarantined = list((models / ".rejected" / "bad").glob("*/oof_bad.npy"))
+        assert len(quarantined) == 1
 
-    def test_quarantine_overwrites_previous_quarantine(self, tmp_path):
+    def test_quarantine_preserves_previous_rejections(self, tmp_path):
         models = tmp_path / "models"
         models.mkdir()
-        np.save(models / "rejected_oof_bad.npy", np.zeros(1))
         np.save(models / "oof_bad.npy", np.ones(2))
 
-        renamed = quarantine_component_artifacts(models, "bad")
+        first = quarantine_component_artifacts(models, "bad")
+        np.save(models / "oof_bad.npy", np.ones(3))
+        second = quarantine_component_artifacts(models, "bad")
 
-        assert renamed == ["oof_bad.npy"]
-        assert len(np.load(models / "rejected_oof_bad.npy")) == 2
+        assert first == ["oof_bad.npy"]
+        assert second == ["oof_bad.npy"]
+        quarantined = list((models / ".rejected" / "bad").glob("*/oof_bad.npy"))
+        assert sorted(len(np.load(path)) for path in quarantined) == [2, 3]
 
     def test_quarantine_noop_without_artifacts(self, tmp_path):
         models = tmp_path / "models"

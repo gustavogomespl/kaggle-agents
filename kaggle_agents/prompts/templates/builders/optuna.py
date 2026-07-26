@@ -55,8 +55,10 @@ def build_optuna_tuning_instructions(
         "    - Add 'import gc; gc.collect()' inside objective() after computing score",
         "    - Delete model object explicitly: 'del model' before gc.collect()",
         "    - If memory errors persist, reduce train_size from 0.25 → 0.15 (15% of data)",
-        "  - **ROBUST TRIALS**: Wrap objective logic in try/except; on exception log and return 0.0 so trials finish",
-        "  - **NO-COMPLETION GUARD**: After study.optimize, if NO trials completed, fall back to safe default params instead of study.best_params",
+        "  - **FAIL-CLOSED TRIALS**: NEVER return 0.0, infinity, or another numeric sentinel when objective evaluation fails",
+        "    - For an expected resource/deadline failure: record the reason with trial.set_user_attr() and raise optuna.TrialPruned()",
+        "    - Let data, metric, shape, and implementation errors raise so Optuna marks the trial FAIL; do not convert them into scores",
+        "  - **NO-COMPLETION GUARD**: Select only finite COMPLETE trials after study.optimize; if none exist, raise RuntimeError instead of inventing params or a score",
     ]
 
     # Add multi-fidelity pruning instructions if requested

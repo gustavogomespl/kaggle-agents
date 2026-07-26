@@ -128,6 +128,7 @@ def create_workflow() -> StateGraph:
         {
             "retry_developer": "developer",
             "continue": "performance_evaluation",
+            "fail": "reporting",
         },
     )
 

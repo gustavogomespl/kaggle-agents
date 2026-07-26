@@ -7,14 +7,17 @@ with automatic retry and debugging capabilities.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
 import shutil
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from ...core.config import (
@@ -48,7 +51,7 @@ from .code_generator import (
 from .dspy_modules import CodeFixerModule, CodeGeneratorModule
 from .grpo import GRPOMixin
 from .quiet_star import QuietStarMixin
-from .refinement import RefinementMixin
+from .refinement import REFINEMENT_TRUST_BOUNDARY, RefinementMixin
 from .retry import RetryMixin
 from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin, quarantine_component_artifacts
@@ -165,7 +168,9 @@ class DeveloperAgent(
             "expected_artifacts": expected,
             "missing_expected_artifacts": missing_expected,
             "artifacts_created": exec_result.artifacts_created,
-            "cv_score": self._extract_cv_score(exec_result.stdout),
+            # This value is diagnostic only. Promotion in MLE-bench uses an
+            # independently recomputed metric from canonical labels and OOF.
+            "declared_cv_score": self._extract_cv_score(exec_result.stdout),
             "submission_exists": (working_dir / "submission.csv").exists(),
             "oof_exists": (working_dir / "models" / f"oof_{component.name}.npy").exists(),
             "test_preds_exists": (working_dir / "models" / f"test_{component.name}.npy").exists(),
@@ -205,6 +210,424 @@ class DeveloperAgent(
 
         return log_path, manifest_path
 
+    def _reject_model_candidate(
+        self,
+        *,
+        state: KaggleState,
+        component: AblationComponent,
+        working_dir: Path,
+        current_index: int,
+        attempt_records: list[CodeAttempt],
+        reason: str,
+        retry_invalid: bool,
+    ) -> dict[str, Any]:
+        """Quarantine a rejected candidate and restore only a verified snapshot."""
+        from ...utils.submission_artifacts import (
+            restore_accepted_submission,
+            restore_best_candidate_submission,
+        )
+
+        rejected_dir = working_dir / ".rejected_submissions"
+        rejected_dir.mkdir(parents=True, exist_ok=True)
+        current_submission = working_dir / "submission.csv"
+        safe_component = "".join(
+            char if char.isalnum() or char in {"-", "_"} else "_"
+            for char in component.name
+        )
+        artifact_component = (
+            component.name
+            if Path(component.name).name == component.name
+            and component.name not in {".", ".."}
+            else safe_component
+        )
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        candidate_submissions = (
+            (current_submission, "current"),
+            (
+                working_dir / f"submission_{artifact_component}.csv",
+                "component",
+            ),
+        )
+        for candidate_submission, label in candidate_submissions:
+            if not candidate_submission.is_file():
+                continue
+            candidate_submission.replace(
+                rejected_dir
+                / f"{safe_component}_{label}_{timestamp}.csv"
+            )
+
+        snapshot_owner = str(
+            state.get("best_candidate_submission_component_name") or ""
+        )
+        owner_score: Any = (
+            (state.get("trusted_component_scores") or {}).get(snapshot_owner)
+            if snapshot_owner
+            and isinstance(state.get("trusted_component_scores"), dict)
+            else None
+        )
+        if isinstance(owner_score, dict):
+            owner_score = owner_score.get("score", owner_score.get("cv_score"))
+        try:
+            owner_score_is_finite = math.isfinite(float(owner_score))
+        except (TypeError, ValueError):
+            owner_score_is_finite = False
+        best_snapshot_still_eligible = (
+            bool(snapshot_owner)
+            and snapshot_owner != component.name
+            and owner_score_is_finite
+        )
+
+        restored = (
+            restore_best_candidate_submission(state, working_dir)
+            if best_snapshot_still_eligible
+            else None
+        )
+        if restored is None:
+            restored = restore_accepted_submission(state, working_dir)
+        if restored is not None:
+            print(f"   Restored verified accepted submission: {restored}")
+        else:
+            print("   No verified accepted submission exists; submission.csv remains absent")
+
+        quarantined = quarantine_component_artifacts(
+            working_dir / "models", component.name
+        )
+        if quarantined:
+            print(f"   Quarantined rejected artifacts: {', '.join(quarantined)}")
+
+        oof_availability = dict(state.get("oof_availability") or {})
+        oof_availability[component.name] = False
+        robustness_approvals = dict(
+            state.get("robustness_approved_components") or {}
+        )
+        robustness_approvals[component.name] = False
+        component_results = dict(state.get("component_results") or {})
+        component_results.pop(component.name, None)
+        trusted_scores = dict(state.get("trusted_component_scores") or {})
+        trusted_scores.pop(component.name, None)
+
+        try:
+            retry_count = max(0, int(state.get("code_retry_count") or 0))
+        except (TypeError, ValueError):
+            retry_count = 0
+        try:
+            configured_retries = int(
+                os.getenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES", "3")
+            )
+        except ValueError:
+            configured_retries = 3
+        max_retries = max(1, configured_retries)
+        retry_count = retry_count + 1 if retry_invalid else max_retries
+        exhausted = retry_count >= max_retries
+
+        updates: dict[str, Any] = {
+            "development_results": [],
+            "current_component_index": (
+                current_index + 1 if exhausted else current_index
+            ),
+            "component_rollback": component.name,
+            "rollback_reason": reason,
+            "code_retry_count": 0 if exhausted else retry_count,
+            "code_attempts": attempt_records,
+            "oof_availability": oof_availability,
+            "robustness_approved_components": robustness_approvals,
+            "component_results": component_results,
+            "trusted_component_scores": trusted_scores,
+            "last_updated": datetime.now(),
+        }
+        if not best_snapshot_still_eligible:
+            updates.update(
+                {
+                    "best_candidate_submission_snapshot_path": None,
+                    "best_candidate_submission_sha256": None,
+                    "best_candidate_submission_component_name": None,
+                }
+            )
+        if str(state.get("best_single_model_name") or "") == component.name:
+            updates.update(
+                {
+                    "best_single_model_name": None,
+                    "best_single_model_score": None,
+                    "baseline_cv_score": None,
+                    "current_performance_score": None,
+                }
+            )
+        if exhausted:
+            existing_failed = set(state.get("failed_component_names") or [])
+            if component.name not in existing_failed:
+                updates["failed_component_names"] = [component.name]
+        return updates
+
+    @staticmethod
+    def _artifact_sha256(path: Path) -> str:
+        """Hash one artifact without loading potentially large arrays in memory."""
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @classmethod
+    def _snapshot_approved_component_artifacts(
+        cls,
+        state: KaggleState,
+        working_dir: Path,
+        *,
+        active_component_name: str,
+    ) -> dict[str, Any] | None:
+        """Snapshot every other trusted component before generated code runs.
+
+        Generated code for component B executes in the shared models directory
+        and can accidentally overwrite component A's artifacts. The snapshot is
+        kept outside the generated-code workspace and records both present and
+        absent canonical component paths, so cross-component creation is also
+        detected. Robustness approval happens only after the complete developer
+        loop, so ``robustness_approved_components`` alone is too late to protect
+        model A while model B is being implemented.
+        """
+        approvals = state.get("robustness_approved_components") or {}
+        availability = state.get("oof_availability") or {}
+        trusted_scores = state.get("trusted_component_scores") or {}
+
+        protected_names_set: set[str] = set()
+        if isinstance(approvals, dict):
+            protected_names_set.update(
+                str(name)
+                for name, approved in approvals.items()
+                if approved is True and str(name)
+            )
+        if isinstance(availability, dict):
+            protected_names_set.update(
+                str(name)
+                for name, available in availability.items()
+                if available is True and str(name)
+            )
+        if isinstance(trusted_scores, dict):
+            for name, value in trusted_scores.items():
+                raw_score = (
+                    value.get("score", value.get("cv_score"))
+                    if isinstance(value, dict)
+                    else value
+                )
+                try:
+                    score = float(raw_score)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(score) and str(name):
+                    protected_names_set.add(str(name))
+
+        protected_names = sorted(
+            name
+            for name in protected_names_set
+            if name != active_component_name
+        )
+        if not protected_names:
+            return None
+
+        snapshot_root = Path(
+            tempfile.mkdtemp(prefix="kaggle_agents_approved_artifacts_")
+        )
+        records: list[dict[str, Any]] = []
+        models_dir = working_dir / "models"
+        prefixes = (
+            "oof_",
+            "test_",
+            "test_ids_",
+            "train_ids_",
+            "class_order_",
+        )
+        for component_name in protected_names:
+            if (
+                Path(component_name).name != component_name
+                or component_name in {".", ".."}
+            ):
+                continue
+            safe_component = "".join(
+                char if char.isalnum() or char in {"-", "_"} else "_"
+                for char in component_name
+            )
+            for prefix in prefixes:
+                path = models_dir / f"{prefix}{component_name}.npy"
+                exists = path.is_file()
+                snapshot_path = (
+                    snapshot_root
+                    / safe_component
+                    / f"{prefix}{safe_component}.npy"
+                )
+                sha256 = None
+                if exists:
+                    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(path, snapshot_path)
+                    sha256 = cls._artifact_sha256(snapshot_path)
+                records.append(
+                    {
+                        "component_name": component_name,
+                        "path": path,
+                        "existed": exists,
+                        "snapshot_path": snapshot_path,
+                        "sha256": sha256,
+                    }
+                )
+        if not records:
+            shutil.rmtree(snapshot_root, ignore_errors=True)
+            return None
+        return {"root": snapshot_root, "records": records}
+
+    @classmethod
+    def _verify_and_restore_approved_component_artifacts(
+        cls,
+        snapshot: dict[str, Any] | None,
+        working_dir: Path,
+        *,
+        active_component_name: str,
+    ) -> tuple[list[str], list[str]]:
+        """Restore cross-component mutations and report unrecoverable owners."""
+        if not snapshot:
+            return [], []
+
+        changed_components: set[str] = set()
+        unrecovered_components: set[str] = set()
+        safe_active = "".join(
+            char if char.isalnum() or char in {"-", "_"} else "_"
+            for char in active_component_name
+        )
+        audit_root = (
+            working_dir
+            / "models"
+            / ".rejected_cross_component"
+            / safe_active
+            / datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        )
+        try:
+            for record in snapshot.get("records", []):
+                component_name = str(record["component_name"])
+                path = Path(record["path"])
+                existed = bool(record["existed"])
+                expected_hash = record.get("sha256")
+                currently_exists = path.is_file()
+                unchanged = (
+                    existed
+                    and currently_exists
+                    and cls._artifact_sha256(path) == expected_hash
+                ) or (not existed and not currently_exists)
+                if unchanged:
+                    continue
+
+                changed_components.add(component_name)
+                if currently_exists:
+                    destination = (
+                        audit_root
+                        / "".join(
+                            char
+                            if char.isalnum() or char in {"-", "_"}
+                            else "_"
+                            for char in component_name
+                        )
+                        / path.name
+                    )
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    path.replace(destination)
+
+                if existed:
+                    snapshot_path = Path(record["snapshot_path"])
+                    try:
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(snapshot_path, path)
+                        if cls._artifact_sha256(path) != expected_hash:
+                            raise OSError("restored artifact hash mismatch")
+                    except Exception as exc:
+                        unrecovered_components.add(component_name)
+                        print(
+                            "   ❌ Could not restore approved artifact "
+                            f"{path.name}: {exc}"
+                        )
+
+            if changed_components:
+                print(
+                    "   ❌ Cross-component artifact mutation detected from "
+                    f"{active_component_name}; restored owners: "
+                    f"{sorted(changed_components - unrecovered_components)}"
+                )
+        finally:
+            shutil.rmtree(Path(snapshot["root"]), ignore_errors=True)
+
+        return sorted(changed_components), sorted(unrecovered_components)
+
+    @staticmethod
+    def _state_with_revoked_component_evidence(
+        state: KaggleState,
+        component_names: list[str],
+    ) -> KaggleState:
+        """Return a shallow state copy with unrecoverable evidence revoked."""
+        updated: dict[str, Any] = dict(state)
+        availability = dict(state.get("oof_availability") or {})
+        approvals = dict(state.get("robustness_approved_components") or {})
+        component_results = dict(state.get("component_results") or {})
+        trusted_scores = dict(state.get("trusted_component_scores") or {})
+        for component_name in component_names:
+            availability[component_name] = False
+            approvals[component_name] = False
+            component_results.pop(component_name, None)
+            trusted_scores.pop(component_name, None)
+        updated["oof_availability"] = availability
+        updated["robustness_approved_components"] = approvals
+        updated["component_results"] = component_results
+        updated["trusted_component_scores"] = trusted_scores
+        return updated  # type: ignore[return-value]
+
+    @staticmethod
+    def _begin_candidate_transaction(
+        working_dir: Path,
+        component_name: str,
+    ) -> tuple[Path, tuple[Path, ...]]:
+        """Snapshot mutable candidate artifacts before a refinement attempt."""
+        safe_component = "".join(
+            char if char.isalnum() or char in {"-", "_"} else "_"
+            for char in component_name
+        )
+        transaction_dir = (
+            working_dir
+            / ".candidate_transactions"
+            / f"{safe_component}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}"
+        )
+        transaction_dir.mkdir(parents=True, exist_ok=False)
+        relative_paths = (
+            Path("submission.csv"),
+            Path("models") / f"oof_{component_name}.npy",
+            Path("models") / f"test_{component_name}.npy",
+            Path("models") / f"train_ids_{component_name}.npy",
+            Path("models") / f"test_ids_{component_name}.npy",
+            Path("models") / f"class_order_{component_name}.npy",
+            Path("models") / "class_order.npy",
+        )
+        for relative in relative_paths:
+            source = working_dir / relative
+            if source.is_file():
+                backup = transaction_dir / relative
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, backup)
+        return transaction_dir, relative_paths
+
+    @staticmethod
+    def _finish_candidate_transaction(
+        working_dir: Path,
+        transaction: tuple[Path, tuple[Path, ...]],
+        *,
+        commit: bool,
+    ) -> None:
+        """Commit or atomically restore the candidate files in a transaction."""
+        transaction_dir, relative_paths = transaction
+        if not commit:
+            for relative in relative_paths:
+                current = working_dir / relative
+                backup = transaction_dir / relative
+                if current.is_file() or current.is_symlink():
+                    current.unlink()
+                if backup.is_file():
+                    current.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(backup, current)
+        shutil.rmtree(transaction_dir, ignore_errors=True)
+
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
         Execute the developer agent.
@@ -240,6 +663,15 @@ class DeveloperAgent(
             return {"current_component_index": len(ablation_plan)}
 
         run_mode = str(state.get("run_mode", "")).lower()
+        # Persist mode on the executor so refinement/debug calls remain under
+        # the same MLE-bench filesystem boundary even after temporary
+        # environment overrides are restored.
+        executor = getattr(self, "executor", None)
+        if executor is not None:
+            executor.run_mode = run_mode
+            executor.mlebench_cache_path = str(
+                state.get("mlebench_cache_path") or ""
+            )
         component = ablation_plan[current_index]
 
         # Defense in depth for resumed/checkpointed states whose plan predates
@@ -331,14 +763,50 @@ class DeveloperAgent(
             self.executor.timeout = desired_timeout
             print(f"Component timeout set to: {desired_timeout}s ({desired_timeout / 60:.1f} min)")
 
-        result, attempt_records = self._implement_component(component, state)
+        approved_artifact_snapshot = (
+            self._snapshot_approved_component_artifacts(
+                state,
+                working_dir,
+                active_component_name=component.name,
+            )
+        )
+        try:
+            result, attempt_records = self._implement_component(component, state)
+        except Exception:
+            self._verify_and_restore_approved_component_artifacts(
+                approved_artifact_snapshot,
+                working_dir,
+                active_component_name=component.name,
+            )
+            raise
+
+        changed_approved, unrecovered_approved = (
+            self._verify_and_restore_approved_component_artifacts(
+                approved_artifact_snapshot,
+                working_dir,
+                active_component_name=component.name,
+            )
+        )
+        if changed_approved:
+            integrity_error = (
+                "Cross-component artifact mutation blocked: "
+                + ", ".join(changed_approved)
+            )
+            result.success = False
+            result.errors = [*(result.errors or []), integrity_error]
+            result.stderr = (
+                f"{result.stderr}\n{integrity_error}".strip()
+            )
+        if unrecovered_approved:
+            state = self._state_with_revoked_component_evidence(
+                state,
+                unrecovered_approved,
+            )
 
         should_keep_component = True
         new_cv_score: float | None = None
         primary_score: float | None = None
         primary_score_source: str | None = None
-        force_retry = False
-
         if result.success and component.component_type == "model":
             exec_result = ExecutionResult(
                 success=result.success,
@@ -356,19 +824,15 @@ class DeveloperAgent(
 
             if not should_keep_component:
                 print("\nROLLBACK: Component did not improve score - discarding")
-                quarantined = quarantine_component_artifacts(
-                    working_dir / "models", component.name
+                return self._reject_model_candidate(
+                    state=state,
+                    component=component,
+                    working_dir=working_dir,
+                    current_index=current_index,
+                    attempt_records=attempt_records,
+                    reason="No independently recomputed OOF improvement",
+                    retry_invalid=False,
                 )
-                if quarantined:
-                    print(f"   Quarantined rejected artifacts: {', '.join(quarantined)}")
-                return {
-                    "development_results": [],
-                    "current_component_index": current_index + 1,
-                    "component_rollback": component.name,
-                    "rollback_reason": "No CV improvement detected (Ablation Study)",
-                    "code_retry_count": 0,
-                    "code_attempts": attempt_records,
-                }
 
         code_retry_count = _coerce_int(state.get("code_retry_count"), 0)
         max_component_retries = _coerce_int(os.getenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES"), 3)
@@ -381,42 +845,51 @@ class DeveloperAgent(
             except ValueError:
                 print(f"⚠️ Invalid KAGGLE_AGENTS_MIN_COMPONENT_SCORE='{min_component_score_env}'")
                 min_component_score = None
-        skip_due_to_retries = False
-
         if not result.success:
-            code_retry_count = max(0, code_retry_count) + 1
-            if code_retry_count >= max_component_retries:
-                skip_due_to_retries = True
-                print(
-                    f"⚠️ Max component retries reached ({code_retry_count}/{max_component_retries}) "
-                    f"for {component.name}. Skipping."
-                )
-                # Track failed component for planner to avoid in future iterations
-                # Note: state uses Annotated[list, add] reducer, so we only return the new component
-                existing_failed = set(state.get("failed_component_names", []))
-                if component.name not in existing_failed:
-                    state["_new_failed_component"] = component.name  # Track for state_updates
-                    print(f"   📝 Recorded {component.name} as failed component")
+            failure_detail = next(
+                (
+                    str(value).strip()
+                    for value in (result.errors or [])
+                    if str(value).strip()
+                ),
+                "",
+            )
+            if not failure_detail:
+                failure_detail = (result.stderr or "Component execution failed").strip()
+            print(
+                f"⚠️ Component execution failed; invalidating candidate before "
+                f"retry: {component.name}"
+            )
+            return self._reject_model_candidate(
+                state=state,
+                component=component,
+                working_dir=working_dir,
+                current_index=current_index,
+                attempt_records=attempt_records,
+                reason=failure_detail[:1000],
+                retry_invalid=True,
+            )
 
-        data_not_found = not result.success and "Data files not found" in (result.stderr or "")
-        should_advance = result.success or data_not_found or skip_due_to_retries
         state_updates: dict[str, Any] = {
             "development_results": [result] if should_keep_component else [],
             "current_code": result.code,
-            "code_retry_count": 0 if should_advance else code_retry_count,
-            "current_component_index": current_index + 1 if should_advance else current_index,
+            "code_retry_count": 0,
+            "current_component_index": current_index + 1,
             "last_updated": datetime.now(),
             "code_attempts": attempt_records,
         }
+        if run_mode == "mlebench" and component.component_type == "model":
+            trusted_scores = dict(state.get("trusted_component_scores") or {})
+            trusted_score = _coerce_score(new_cv_score)
+            if result.success and trusted_score is not None:
+                trusted_scores[component.name] = trusted_score
+            else:
+                trusted_scores.pop(component.name, None)
+            state_updates["trusted_component_scores"] = trusted_scores
 
         # Save original train row count for data loss detection
         if n_train_original_to_save is not None:
             state_updates["n_train_original"] = n_train_original_to_save
-
-        # Persist new failed component name (add reducer will accumulate)
-        if state.get("_new_failed_component"):
-            state_updates["failed_component_names"] = [state["_new_failed_component"]]
-            del state["_new_failed_component"]  # Clean up temp key
 
         # GRPO: Persist reasoning trace in state
         if self._last_reasoning_trace is not None:
@@ -446,17 +919,39 @@ class DeveloperAgent(
             )
 
             validation_config = StrictValidationConfig.from_env()
+            if run_mode == "mlebench":
+                validation_config.strict_mode = True
+                validation_config.require_train_ids = True
+                validation_config.require_test_ids = True
 
             # Get expected values from state
-            expected_n_train = state.get("n_train_samples")
-            expected_n_test = state.get("n_test_samples")
-            expected_class_order = state.get("class_order")
+            expected_n_train = state.get("expected_train_rows")
+            expected_n_test = state.get("expected_test_rows")
             # Get problem_type from competition_info first, then fallback to state
             competition_info = state.get("competition_info")
             if competition_info and hasattr(competition_info, "problem_type") and competition_info.problem_type:
                 problem_type = competition_info.problem_type
             else:
                 problem_type = state.get("problem_type", "classification")
+            submission_contract = state.get("submission_contract") or {}
+            expected_class_order = submission_contract.get("class_order")
+            if (
+                expected_class_order is None
+                and "multiclass" in str(problem_type).lower()
+            ):
+                target_columns = submission_contract.get("target_cols") or []
+                expected_class_order = target_columns if len(target_columns) > 1 else None
+            if run_mode == "mlebench" and expected_class_order is not None:
+                validation_config.require_class_order = True
+                validation_config.require_component_class_order = True
+            canonical_contract = state.get("canonical_contract") or {}
+            expected_train_ids = None
+            canonical_train_ids_path = canonical_contract.get("train_ids_path")
+            if canonical_train_ids_path and Path(canonical_train_ids_path).is_file():
+                expected_train_ids = np.load(
+                    canonical_train_ids_path, allow_pickle=True
+                ).reshape(-1)
+            expected_test_ids = state.get("test_rec_ids") or None
 
             # Run comprehensive validation
             validation_result = validate_model_artifacts(
@@ -465,6 +960,8 @@ class DeveloperAgent(
                 expected_n_train=expected_n_train,
                 expected_n_test=expected_n_test,
                 expected_class_order=expected_class_order,
+                expected_train_ids=expected_train_ids,
+                expected_test_ids=expected_test_ids,
                 problem_type=problem_type,
                 config=validation_config,
             )
@@ -497,32 +994,63 @@ class DeveloperAgent(
             oof_file = working_dir / "models" / f"oof_{component.name}.npy"
             if oof_file.exists():
                 try:
-                    import numpy as np
-                    oof_preds = np.load(oof_file)
+                    oof_preds = np.load(oof_file, allow_pickle=False)
+                    oof_eligible_mask_path = Path(
+                        canonical_contract.get("oof_eligible_mask_path")
+                        or working_dir / "canonical" / "oof_eligible_mask.npy"
+                    )
+                    if oof_eligible_mask_path.is_file():
+                        oof_eligible_mask = np.asarray(
+                            np.load(
+                                oof_eligible_mask_path,
+                                allow_pickle=False,
+                            ),
+                            dtype=bool,
+                        )
+                        if oof_eligible_mask.shape != (len(oof_preds),):
+                            raise ValueError(
+                                "Canonical OOF eligibility mask is not "
+                                "prediction-aligned"
+                            )
+                        warmup_oof = oof_preds[~oof_eligible_mask]
+                        if warmup_oof.size and not np.isnan(warmup_oof).all():
+                            raise ValueError(
+                                "Temporal warm-up OOF rows must remain NaN"
+                            )
+                        quality_oof = oof_preds[oof_eligible_mask]
+                    else:
+                        quality_oof = oof_preds
 
-                    # CRITICAL FIX: Check for empty OOF rows (unfilled predictions)
-                    # This can cause random-chance MLE-bench scores (0.50 AUC)
+                    # Check for empty OOF rows (unfilled predictions), which
+                    # invalidates held-out evaluation and downstream ensembles.
                     # NOTE: Only check multiclass problems where OOF is a probability distribution
                     # For binary/regression, zero is a legitimate prediction value
-                    if problem_type == "multiclass" and oof_preds.ndim > 1:
+                    if (
+                        "multiclass" in str(problem_type).lower()
+                        and quality_oof.ndim > 1
+                    ):
                         # Multiclass OOF should be probability distributions summing to ~1
                         # Rows summing to 0 are definitely unfilled
-                        empty_rows = int(np.sum(oof_preds.sum(axis=1) == 0))
+                        empty_rows = int(
+                            np.sum(quality_oof.sum(axis=1) == 0)
+                        )
 
                         if empty_rows > 0:
-                            empty_pct = empty_rows / oof_preds.shape[0] * 100
+                            empty_pct = (
+                                empty_rows / quality_oof.shape[0] * 100
+                            )
                             print(f"   ⚠️ Empty OOF rows detected: {empty_rows} ({empty_pct:.2f}%)")
 
                             # In MLE-bench mode, block submissions with >1% empty rows
                             if run_mode == "mlebench" and empty_pct > 1.0:
-                                print(f"   ❌ BLOCKING: Too many empty OOF rows ({empty_pct:.2f}% > 1.0%) - would cause random-chance MLE-bench score")
+                                print(f"   ❌ BLOCKING: Too many empty OOF rows ({empty_pct:.2f}% > 1.0%) - held-out predictions are incomplete")
                                 result.success = False
                                 if not hasattr(result, 'errors') or result.errors is None:
                                     result.errors = []
                                 result.errors.append(f"Empty OOF rows: {empty_rows} ({empty_pct:.2f}%) - blocking submission")
 
                     is_quality_ok, quality_issues = validate_prediction_quality(
-                        oof_preds, problem_type=problem_type
+                        quality_oof, problem_type=problem_type
                     )
                     if not is_quality_ok:
                         print(f"   Prediction quality issues for {component.name}:")
@@ -537,6 +1065,17 @@ class DeveloperAgent(
                     print(f"   Warning: Could not check prediction quality: {e}")
             # === END STRICT VALIDATION ===
 
+            if not result.success:
+                return self._reject_model_candidate(
+                    state=state,
+                    component=component,
+                    working_dir=working_dir,
+                    current_index=current_index,
+                    attempt_records=attempt_records,
+                    reason="Model artifact validation failed",
+                    retry_invalid=True,
+                )
+
             submission_candidates = [
                 working_dir / "submission.csv",
                 Path(state.get("submission_path"))
@@ -550,8 +1089,6 @@ class DeveloperAgent(
             if submission_path:
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
-                shutil.copy(submission_path, backup_path)
-                print(f"Backup submission saved: {backup_name}")
 
                 # Validate submission structure without exposing test-set feedback.
                 sample_sub_path = (
@@ -565,22 +1102,98 @@ class DeveloperAgent(
                     if inner_csvs:
                         sample_sub_path = inner_csvs[0]
                         print(f"   📂 Resolved directory to file: {sample_sub_path.name}")
+                submission_is_valid = False
+                submission_validation_message = "Sample submission contract is unavailable"
                 if sample_sub_path and sample_sub_path.exists() and sample_sub_path.is_file():
                     is_valid, validation_msg = self.executor.validate_submission_format(
                         submission_path=submission_path,
                         sample_submission_path=sample_sub_path,
                         component_type=component.component_type,
                     )
+                    submission_is_valid = is_valid
+                    submission_validation_message = validation_msg
                     if not is_valid:
                         print(f"   ❌ Submission validation FAILED: {validation_msg}")
                     else:
                         print(f"   {validation_msg}")
+
+                if run_mode == "mlebench" and not submission_is_valid:
+                    if not hasattr(result, "errors") or result.errors is None:
+                        result.errors = []
+                    result.errors.append(submission_validation_message)
+                    result.success = False
+                    return self._reject_model_candidate(
+                        state=state,
+                        component=component,
+                        working_dir=working_dir,
+                        current_index=current_index,
+                        attempt_records=attempt_records,
+                        reason=f"Submission validation failed: {submission_validation_message}",
+                        retry_invalid=True,
+                    )
+
+                shutil.copy(submission_path, backup_path)
+                print(f"Backup submission saved: {backup_name}")
 
                 primary_score = _coerce_score(new_cv_score)
                 if primary_score is not None:
                     primary_score_source = "cv"
 
                 current_best_score = state.get("best_single_model_score")
+                if run_mode == "mlebench" and primary_score is None:
+                    previous_candidate = state.get(
+                        "best_candidate_submission_snapshot_path"
+                    ) or state.get("accepted_submission_snapshot_path")
+                    if previous_candidate:
+                        return self._reject_model_candidate(
+                            state=state,
+                            component=component,
+                            working_dir=working_dir,
+                            current_index=current_index,
+                            attempt_records=attempt_records,
+                            reason=(
+                                "Candidate has no independently reproducible OOF "
+                                "score and cannot replace a preserved candidate"
+                            ),
+                            retry_invalid=False,
+                        )
+                    if not state.get("run_id"):
+                        return self._reject_model_candidate(
+                            state=state,
+                            component=component,
+                            working_dir=working_dir,
+                            current_index=current_index,
+                            attempt_records=attempt_records,
+                            reason="Unscored candidate cannot be preserved without run_id",
+                            retry_invalid=False,
+                        )
+
+                    # Keep the first structurally valid model as a deterministic
+                    # fallback, but do not assign it a fabricated CV score.
+                    from ...utils.submission_artifacts import (
+                        snapshot_best_candidate_submission,
+                    )
+
+                    snapshot, digest = snapshot_best_candidate_submission(
+                        working_dir,
+                        submission_path,
+                        run_id=str(state["run_id"]),
+                        iteration=int(state.get("current_iteration") or 0),
+                    )
+                    state_updates["best_candidate_submission_snapshot_path"] = str(
+                        snapshot
+                    )
+                    state_updates["best_candidate_submission_sha256"] = digest
+                    state_updates[
+                        "best_candidate_submission_component_name"
+                    ] = component.name
+                    state_updates["best_single_model_name"] = component.name
+                    shutil.copy(submission_path, working_dir / "submission_best.csv")
+                    print(
+                        "Preserved first valid candidate as an unscored fallback; "
+                        "it is not treated as a CV improvement"
+                    )
+
                 if min_component_score is not None and not state_updates.get(
                     "skip_remaining_components"
                 ):
@@ -591,12 +1204,6 @@ class DeveloperAgent(
                         if cv_score is not None:
                             score_for_gate = cv_score
                             score_source = "cv"
-                    if score_for_gate is None:
-                        extracted = self._extract_cv_score(result.stdout)
-                        score_for_gate = _coerce_score(extracted)
-                        if score_for_gate is not None:
-                            score_source = "cv"
-
                     if score_for_gate is None:
                         is_minimize = is_metric_minimization(metric_name)
                         score_for_gate = float("inf") if is_minimize else float("-inf")
@@ -610,26 +1217,32 @@ class DeveloperAgent(
                     )
                     if below_threshold:
                         retry_next = code_retry_count + 1
-                        if retry_next >= max_component_retries:
-                            print(
-                                f"⚠️ Score {score_for_gate} ({score_source}) below threshold "
-                                f"{min_component_score:.5f}, but max retries reached "
-                                f"({retry_next}/{max_component_retries}). Proceeding."
-                            )
-                        else:
-                            force_retry = True
-                            state_updates["code_retry_count"] = retry_next
-                            state_updates["current_component_index"] = current_index
-                            state_updates["development_results"] = []
-                            print(
-                                f"🔄 Score {score_for_gate} ({score_source}) below threshold "
-                                f"{min_component_score:.5f}; retrying component "
-                                f"({retry_next}/{max_component_retries})."
-                            )
+                        action = (
+                            "rejecting component after retry exhaustion"
+                            if retry_next >= max_component_retries
+                            else "retrying component"
+                        )
+                        print(
+                            f"🔄 Score {score_for_gate} ({score_source}) below threshold "
+                            f"{min_component_score:.5f}; {action} "
+                            f"({retry_next}/{max_component_retries})."
+                        )
+                        return self._reject_model_candidate(
+                            state=state,
+                            component=component,
+                            working_dir=working_dir,
+                            current_index=current_index,
+                            attempt_records=attempt_records,
+                            reason=(
+                                f"Trusted score {score_for_gate} ({score_source}) "
+                                f"below required threshold {min_component_score}"
+                            ),
+                            retry_invalid=True,
+                        )
 
                 is_best = False
                 if primary_score is not None and not self._is_score_implausible(
-                    primary_score, metric_name
+                    primary_score, metric_name, trusted=run_mode == "mlebench"
                 ):
                     best_str = f"{current_best_score:.5f}" if current_best_score is not None else "None"
                     print(f"[SCORE COMPARISON] Current best: {best_str}, New score: {primary_score:.5f} (source: {primary_score_source})")
@@ -649,9 +1262,35 @@ class DeveloperAgent(
                             print("[SCORE COMPARISON] Action: KEEP existing submission_best (no improvement)")
 
                 if is_best:
+                    if run_mode == "mlebench" and not state.get("run_id"):
+                        print(
+                            "❌ Refusing best-candidate promotion without a run_id"
+                        )
+                        is_best = False
+
+                if is_best:
                     print(f"✅ New Best Single Model! ({primary_score:.4f}, source: {primary_score_source})")
                     state_updates["best_single_model_score"] = primary_score
                     state_updates["best_single_model_name"] = component.name
+
+                    if run_mode == "mlebench":
+                        from ...utils.submission_artifacts import (
+                            snapshot_best_candidate_submission,
+                        )
+
+                        snapshot, digest = snapshot_best_candidate_submission(
+                            working_dir,
+                            submission_path,
+                            run_id=str(state["run_id"]),
+                            iteration=int(state.get("current_iteration") or 0),
+                        )
+                        state_updates["best_candidate_submission_snapshot_path"] = str(
+                            snapshot
+                        )
+                        state_updates["best_candidate_submission_sha256"] = digest
+                        state_updates[
+                            "best_candidate_submission_component_name"
+                        ] = component.name
 
                     best_path = working_dir / "submission_best.csv"
                     shutil.copy(submission_path, best_path)
@@ -693,12 +1332,21 @@ class DeveloperAgent(
                             print(f"⚠️ Failed to save best model checkpoint: {e}")
             else:
                 print("Warning: submission.csv not found after successful execution")
+                if run_mode == "mlebench":
+                    return self._reject_model_candidate(
+                        state=state,
+                        component=component,
+                        working_dir=working_dir,
+                        current_index=current_index,
+                        attempt_records=attempt_records,
+                        reason="Model did not produce submission.csv",
+                        retry_invalid=True,
+                    )
 
             if (
                 result.success
                 and should_keep_component
                 and (primary_score is not None or new_cv_score is not None)
-                and not force_retry
             ):
                 baseline_candidate = _coerce_score(new_cv_score)
                 if baseline_candidate is not None:
@@ -718,26 +1366,61 @@ class DeveloperAgent(
             if baseline_score is None:
                 baseline_score = _coerce_score(state.get("best_single_model_score"))
 
+            def restore_preserved_submission(reason: str) -> bool:
+                """Restore a mutable legacy best only outside MLE-bench."""
+                if run_mode == "mlebench":
+                    from ...utils.submission_artifacts import (
+                        restore_accepted_submission,
+                        restore_best_candidate_submission,
+                    )
+
+                    restored = restore_best_candidate_submission(state, working_dir)
+                    if restored is None:
+                        restored = restore_accepted_submission(state, working_dir)
+                    if restored is None:
+                        submission_path.unlink(missing_ok=True)
+                        state_updates["workflow_valid"] = False
+                        state_updates["submission_validation_error"] = (
+                            f"Candidate rejected ({reason}); no verified immutable "
+                            "submission snapshot exists"
+                        )
+                        print(
+                            "No verified immutable submission snapshot exists; "
+                            "submission.csv removed"
+                        )
+                        return False
+                    print(
+                        "Restored submission.csv from a hash-verified immutable "
+                        f"snapshot ({reason})"
+                    )
+                    return True
+
+                if not best_submission.is_file():
+                    return False
+                shutil.copy(best_submission, submission_path)
+                print(
+                    f"Restored submission.csv from submission_best.csv ({reason})"
+                )
+                return True
+
             score_for_gate = primary_score
-            if score_for_gate is None:
+            if score_for_gate is None and run_mode != "mlebench":
                 # Strict marker only: the lenient _extract_cv_score also matches
                 # decorated lines like "Final Validation Performance (rmse): ..."
                 # and once promoted a mocked score into submission_best.csv.
                 extracted = self.executor.extract_performance_metric(result.stdout)
                 score_for_gate = _coerce_score(extracted)
             if score_for_gate is not None and self._is_score_implausible(
-                score_for_gate, metric_name
+                score_for_gate, metric_name, trusted=run_mode == "mlebench"
             ):
                 print(
                     f"Implausible {metric_name} score {score_for_gate}; "
                     "ignoring for submission gating"
                 )
                 score_for_gate = None
-                if submission_path.exists() and best_submission.exists():
-                    shutil.copy(best_submission, submission_path)
-                    print(
-                        "Restored submission.csv from submission_best.csv (implausible score)"
-                    )
+                if submission_path.exists() and restore_preserved_submission(
+                    "implausible score"
+                ):
                     state_updates["submission_reverted"] = True
                     state_updates["submission_revert_reason"] = "implausible_score"
 
@@ -745,7 +1428,7 @@ class DeveloperAgent(
                 isinstance(baseline_score, (int, float))
                 and isinstance(score_for_gate, (int, float))
                 and submission_path.exists()
-                and best_submission.exists()
+                and (run_mode == "mlebench" or best_submission.exists())
             ):
                 is_minimize = is_metric_minimization(metric_name)
                 is_worse = (
@@ -754,12 +1437,11 @@ class DeveloperAgent(
                     else score_for_gate < float(baseline_score)
                 )
                 if is_worse:
-                    shutil.copy(best_submission, submission_path)
-                    print(
-                        "Restored submission.csv from submission_best.csv (score worse than baseline)"
-                    )
-                    state_updates["submission_reverted"] = True
-                    state_updates["submission_revert_reason"] = "worse_than_baseline"
+                    if restore_preserved_submission("score worse than baseline"):
+                        state_updates["submission_reverted"] = True
+                        state_updates["submission_revert_reason"] = (
+                            "worse_than_baseline"
+                        )
 
             if (
                 run_mode == "mlebench"
@@ -780,30 +1462,59 @@ class DeveloperAgent(
                     state_updates["current_performance_score"] = float(score_for_gate)
                     print("Updated submission_best.csv with improved CV/OOF score")
 
-        # Track OOF availability for ensemble (even if ablation study rejected the model)
+        # Persist explicit mappings declared in KaggleState. LangGraph drops
+        # undeclared dynamic keys such as ``oof_available_<component>``.
         if result.success and component.component_type == "model":
             oof_file = working_dir / "models" / f"oof_{component.name}.npy"
-            if oof_file.exists():
-                oof_key = f"oof_available_{component.name}"
-                state_updates[oof_key] = True
+            # In mlebench, an OOF file without a trusted recomputed score is
+            # not ensemble evidence: marking it eligible would send the
+            # component into the robustness evidence check, which rejects and
+            # quarantines it — destroying the unscored fallback on
+            # canonical-less domains.
+            oof_is_evidence = run_mode != "mlebench" or new_cv_score is not None
+            if oof_file.exists() and oof_is_evidence:
+                oof_availability = dict(state.get("oof_availability") or {})
+                oof_availability[component.name] = True
+                state_updates["oof_availability"] = oof_availability
+                robustness_approvals = dict(
+                    state.get("robustness_approved_components") or {}
+                )
+                robustness_approvals[component.name] = False
+                state_updates["robustness_approved_components"] = (
+                    robustness_approvals
+                )
                 print(f"   OOF file available for ensemble: {component.name}")
 
-        if result.success and should_keep_component and not force_retry:
-            cache_key = f"component_result_{component.name}"
-            state_updates[cache_key] = result
+        if result.success and should_keep_component:
+            component_results = dict(state.get("component_results") or {})
+            component_results[component.name] = result
+            state_updates["component_results"] = component_results
             print(f"Cached successful result for: {component.name}")
 
-            if component.component_type == "model" and self._should_run_refinement(
-                component,
-                state,
-                new_cv_score,
-                execution_time_s=result.execution_time,
-                component_timeout_s=desired_timeout,
+            if (
+                component.component_type == "model"
+                and (run_mode != "mlebench" or new_cv_score is not None)
+                and self._should_run_refinement(
+                    component,
+                    state,
+                    new_cv_score,
+                    execution_time_s=result.execution_time,
+                    component_timeout_s=desired_timeout,
+                )
             ):
                 print("\nADK Refinement Loop: Trying to improve score...")
                 best_code = result.code
-                best_score = new_cv_score if new_cv_score is not None else 0.0
+                # None when the component was kept without a comparable score;
+                # a refined score then improves on nothing measurable, so it
+                # may become the local baseline but must not claim the global
+                # best by "beating" a fabricated 0.0.
+                best_score = new_cv_score
                 best_stdout = result.stdout
+                desired_direction = (
+                    "LOWER"
+                    if is_metric_minimization(metric_name)
+                    else "HIGHER"
+                )
 
                 refinement_iters = self._get_refinement_iterations(state)
                 for i in range(refinement_iters):
@@ -834,14 +1545,17 @@ class DeveloperAgent(
                             for s in suggestions[:3]:
                                 print(f"   - {s[:80]}...")
 
+                    best_score_text = (
+                        f"{best_score:.6f}" if best_score is not None else "not measured"
+                    )
                     refine_prompt = f"""
 ## Current Performance
-- CV Score: {best_score:.6f}
+- CV Score: {best_score_text}
 
 {formatted_feedback if formatted_feedback else "No structured training logs available."}
 
 ## Improvement Task
-Based on the training results above, improve the model to achieve a HIGHER CV score.
+Based on the training results above, improve the model to achieve a {desired_direction} CV score.
 
 **Improvement Guidelines**:
 1. If CV std > 0.02: Add regularization or reduce model complexity
@@ -857,7 +1571,10 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
 - Focus on the most impactful change based on the feedback above
 """
 
-                    system_prompt = f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}"
+                    system_prompt = (
+                        f"{DEVELOPER_CORE_IDENTITY}\n\n{HARD_CONSTRAINTS}\n\n"
+                        f"{REFINEMENT_TRUST_BOUNDARY}"
+                    )
                     refine_messages = [
                         SystemMessage(content=system_prompt),
                         HumanMessage(
@@ -865,28 +1582,130 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                         ),
                     ]
 
+                    transaction: tuple[Path, tuple[Path, ...]] | None = None
+                    transaction_committed = False
                     try:
                         refined_response = self.llm.invoke(refine_messages)
                         refined_code = self._extract_code_from_response(
                             get_text_content(refined_response.content)
                         )
 
-                        print("Executing refined code...")
-                        refined_exec = self.executor.execute(
-                            refined_code, working_dir, component_type=component.component_type
+                        transaction = self._begin_candidate_transaction(
+                            working_dir, component.name
                         )
+                        print("Executing refined code...")
+                        approved_refinement_snapshot = (
+                            self._snapshot_approved_component_artifacts(
+                                state,
+                                working_dir,
+                                active_component_name=component.name,
+                            )
+                        )
+                        try:
+                            refined_exec = self.executor.execute(
+                                refined_code,
+                                working_dir,
+                                component_type=component.component_type,
+                            )
+                        except Exception:
+                            self._verify_and_restore_approved_component_artifacts(
+                                approved_refinement_snapshot,
+                                working_dir,
+                                active_component_name=component.name,
+                            )
+                            raise
+                        (
+                            changed_during_refinement,
+                            unrecovered_during_refinement,
+                        ) = self._verify_and_restore_approved_component_artifacts(
+                            approved_refinement_snapshot,
+                            working_dir,
+                            active_component_name=component.name,
+                        )
+                        if changed_during_refinement:
+                            refined_exec.success = False
+                            refined_exec.errors = [
+                                *(refined_exec.errors or []),
+                                (
+                                    "Cross-component artifact mutation blocked: "
+                                    + ", ".join(changed_during_refinement)
+                                ),
+                            ]
+                        if unrecovered_during_refinement:
+                            revoked_state = (
+                                self._state_with_revoked_component_evidence(
+                                    state,
+                                    unrecovered_during_refinement,
+                                )
+                            )
+                            for key in (
+                                "oof_availability",
+                                "robustness_approved_components",
+                                "component_results",
+                                "trusted_component_scores",
+                            ):
+                                state_updates[key] = revoked_state[key]
 
                         if refined_exec.success:
-                            refined_score = self._extract_cv_score(refined_exec.stdout)
-                            if refined_score is not None:
-                                improvement = calculate_score_improvement(
-                                    refined_score,
-                                    best_score,
-                                    competition_info.evaluation_metric,
+                            if run_mode == "mlebench":
+                                refined_validation = validate_model_artifacts(
+                                    working_dir=working_dir,
+                                    component_name=component.name,
+                                    expected_n_train=expected_n_train,
+                                    expected_n_test=expected_n_test,
+                                    expected_class_order=expected_class_order,
+                                    expected_train_ids=expected_train_ids,
+                                    expected_test_ids=expected_test_ids,
+                                    problem_type=problem_type,
+                                    config=validation_config,
                                 )
-                                if improvement > 0:
+                                refined_submission = working_dir / "submission.csv"
+                                format_valid = False
+                                if (
+                                    refined_submission.is_file()
+                                    and sample_sub_path
+                                    and sample_sub_path.is_file()
+                                ):
+                                    format_valid, format_message = (
+                                        self.executor.validate_submission_format(
+                                            submission_path=refined_submission,
+                                            sample_submission_path=sample_sub_path,
+                                            component_type=component.component_type,
+                                        )
+                                    )
+                                    if not format_valid:
+                                        print(
+                                            "Refined submission validation failed: "
+                                            f"{format_message}"
+                                        )
+                                if not refined_validation.is_valid or not format_valid:
+                                    refined_score = None
                                     print(
-                                        f"🚀 Improvement found: {refined_score:.6f} (was {best_score:.6f})"
+                                        "Refined candidate failed fail-closed artifact "
+                                        "validation"
+                                    )
+                                else:
+                                    refined_score = self._compute_trusted_oof_score(
+                                        component, state
+                                    )
+                            else:
+                                refined_score = self._extract_cv_score(
+                                    refined_exec.stdout
+                                )
+                            if refined_score is not None:
+                                improved_locally = (
+                                    best_score is None
+                                    or calculate_score_improvement(
+                                        refined_score,
+                                        best_score,
+                                        competition_info.evaluation_metric,
+                                    )
+                                    > 0
+                                )
+                                if improved_locally:
+                                    print(
+                                        f"🚀 Improvement found: {refined_score:.6f} "
+                                        f"(was {best_score_text})"
                                     )
                                     best_score = refined_score
                                     best_code = refined_code
@@ -895,6 +1714,71 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                                     result.stdout = refined_exec.stdout
                                     state_updates["current_code"] = best_code
                                     state_updates["baseline_cv_score"] = best_score
+                                    state_updates["current_performance_score"] = best_score
+                                    if run_mode == "mlebench":
+                                        trusted_scores = dict(
+                                            state_updates.get(
+                                                "trusted_component_scores",
+                                                state.get(
+                                                    "trusted_component_scores"
+                                                )
+                                                or {},
+                                            )
+                                        )
+                                        trusted_scores[component.name] = float(
+                                            refined_score
+                                        )
+                                        state_updates[
+                                            "trusted_component_scores"
+                                        ] = trusted_scores
+                                    # The global best belongs to whichever
+                                    # component actually holds it; a refined
+                                    # candidate must beat that score, not just
+                                    # its own pre-refinement score.
+                                    global_best = _coerce_score(
+                                        state.get("best_single_model_score")
+                                    )
+                                    promote_global = (
+                                        global_best is None
+                                        or calculate_score_improvement(
+                                            refined_score,
+                                            global_best,
+                                            competition_info.evaluation_metric,
+                                        )
+                                        > 0
+                                    )
+                                    if promote_global:
+                                        state_updates["best_single_model_score"] = best_score
+                                        state_updates["best_single_model_name"] = component.name
+                                        if run_mode == "mlebench":
+                                            from ...utils.submission_artifacts import (
+                                                snapshot_best_candidate_submission,
+                                            )
+
+                                            snapshot, digest = (
+                                                snapshot_best_candidate_submission(
+                                                    working_dir,
+                                                    working_dir / "submission.csv",
+                                                    run_id=str(state["run_id"]),
+                                                    iteration=int(
+                                                        state.get("current_iteration") or 0
+                                                    ),
+                                                )
+                                            )
+                                            state_updates[
+                                                "best_candidate_submission_snapshot_path"
+                                            ] = str(snapshot)
+                                            state_updates[
+                                                "best_candidate_submission_sha256"
+                                            ] = digest
+                                            state_updates[
+                                                "best_candidate_submission_component_name"
+                                            ] = component.name
+                                        shutil.copy(
+                                            working_dir / "submission.csv",
+                                            working_dir / "submission_best.csv",
+                                        )
+                                    transaction_committed = True
                                 else:
                                     print(
                                         f"No improvement ({refined_score:.6f} vs {best_score:.6f})"
@@ -905,6 +1789,13 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                             print("Refined code failed to execute")
                     except Exception as e:
                         print(f"Refinement failed: {e}")
+                    finally:
+                        if transaction is not None:
+                            self._finish_candidate_transaction(
+                                working_dir,
+                                transaction,
+                                commit=transaction_committed,
+                            )
 
             if component.component_type == "feature_engineering":
                 eng_train = working_dir / "train_engineered.csv"
@@ -981,26 +1872,8 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             str(working_dir / "test.zip"),
         ]
 
-        # Add common non-standard directories (prioritized for audio/image competitions)
-        # These are used by MLE-bench competitions like mlsp-2013-birds
-        nonstandard_data_dirs = [
-            "essential_data",
-            "supplemental_data",
-            "data",
-            "audio",
-            "audio_data",
-            "raw_data",
-        ]
-        for subdir_name in nonstandard_data_dirs:
-            subdir = working_dir / subdir_name
-            if subdir.is_dir():
-                train_candidates.append(str(subdir))
-                # For audio/image competitions, test might be in same dir as train
-                if str(domain).startswith(("image", "audio")):
-                    test_candidates.append(str(subdir))
-
         # Dynamic fallback: scan ALL subdirectories for train/test data
-        # This handles non-standard competition structures (e.g., essential_data/, data/)
+        # based on the actual workspace contents.
         exclude_dirs = {"models", "__pycache__", ".git", ".ipynb_checkpoints"}
         if working_dir.exists():
             for subdir in working_dir.iterdir():
@@ -1276,7 +2149,12 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
         is_valid, syntax_error = self.executor.validate_syntax(code)
         if not is_valid:
             print(f"Syntax error detected: {syntax_error}")
-            code = self._fix_syntax_error(code, syntax_error, component.component_type)
+            code = self._fix_syntax_error(
+                code,
+                syntax_error,
+                component.component_type,
+                state=state,
+            )
 
         # Quiet-STaR: ITERATIVE self-evaluation loop before execution
         use_quiet_star = run_mode != "mlebench" and not state.get("fast_mode", False)
@@ -1373,6 +2251,13 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             "KAGGLE_AGENTS_FAST_MODE": "1" if fast_mode else "0",
             "KAGGLE_AGENTS_CV_FOLDS": str(cv_folds),
         }
+
+        def attempt_diagnostic_score(stdout: str) -> float | None:
+            """Keep candidate-declared scores out of MLE-bench memory."""
+            if run_mode == "mlebench":
+                return None
+            return self._extract_cv_score(stdout)
+
         prev_env: dict[str, str | None] = {k: os.getenv(k) for k in env_overrides}
         require_oof_env = os.getenv("KAGGLE_AGENTS_REQUIRE_OOF", "1").lower() not in {
             "0",
@@ -1420,7 +2305,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                         stage="generate" if attempt == 0 else "fix",
                         attempt=attempt + 1,
                         success=True,
-                        cv_score=self._extract_cv_score(exec_result.stdout),
+                        cv_score=attempt_diagnostic_score(exec_result.stdout),
                         code_excerpt="\n".join(code.splitlines()[:140]),
                         stdout_tail=(exec_result.stdout or "")[-2000:],
                         stderr_tail=(exec_result.stderr or "")[-2000:],
@@ -1443,10 +2328,24 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
             print(f"Execution failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}")
 
             if attempt == 0:
-                print("\nGetting meta-evaluator feedback...")
-                error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
-                meta_feedback = self._get_meta_feedback(code, error_msg, component.name)
-                print(f"Meta-Feedback:\n{meta_feedback}\n")
+                if run_mode == "mlebench":
+                    print(
+                        "\nFormal evaluation: using deterministic execution "
+                        "diagnostics without recursive meta-feedback."
+                    )
+                else:
+                    print("\nGetting meta-evaluator feedback...")
+                    error_msg = (
+                        exec_result.errors[0]
+                        if exec_result.errors
+                        else exec_result.stderr
+                    )
+                    meta_feedback = self._get_meta_feedback(
+                        code,
+                        error_msg,
+                        component.name,
+                    )
+                    print(f"Meta-Feedback:\n{meta_feedback}\n")
 
             error_msg = exec_result.errors[0] if exec_result.errors else exec_result.stderr
             attempt_records.append(
@@ -1456,7 +2355,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                     stage="generate" if attempt == 0 else "fix",
                     attempt=attempt + 1,
                     success=False,
-                    cv_score=self._extract_cv_score(exec_result.stdout),
+                    cv_score=attempt_diagnostic_score(exec_result.stdout),
                     error=error_msg[:800] if error_msg else None,
                     meta_feedback=meta_feedback,
                     code_excerpt="\n".join(code.splitlines()[:140]),
@@ -1507,7 +2406,7 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 stage="debug",
                 attempt=max_retries + 1,
                 success=bool(debug_success and exec_result.success),
-                cv_score=self._extract_cv_score(exec_result.stdout),
+                cv_score=attempt_diagnostic_score(exec_result.stdout),
                 error=(exec_result.errors[0] if exec_result.errors else exec_result.stderr)[:800]
                 if (exec_result.errors or exec_result.stderr)
                 else None,
@@ -1544,5 +2443,8 @@ def developer_agent_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
-    agent = DeveloperAgent()
+    # Keep formal MLE-bench runs independent from globally optimized DSPy
+    # pickles produced by any earlier competition in the same process.
+    is_mlebench = str(state.get("run_mode", "")).strip().lower() == "mlebench"
+    agent = DeveloperAgent(use_dspy=not is_mlebench)
     return agent(state)
