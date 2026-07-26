@@ -238,8 +238,11 @@ class DetectionMixin:
         for fold_idx, (_, val_idx) in enumerate(skf.split(train_ids, y)):
             folds[val_idx] = fold_idx
 
-        # Save artifacts
-        np.save(canonical_dir / "train_ids.npy", train_ids)
+        # Save artifacts. IDs stay str dtype (not object) so candidate code
+        # can re-save them with allow_pickle=False.
+        if train_ids.dtype == object:
+            train_ids = np.asarray([str(v) for v in train_ids])
+        np.save(canonical_dir / "train_ids.npy", train_ids, allow_pickle=False)
         np.save(canonical_dir / "y.npy", y)
         np.save(canonical_dir / "folds.npy", folds)
 

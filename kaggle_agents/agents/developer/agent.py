@@ -60,13 +60,15 @@ from .validation import ValidationMixin, quarantine_component_artifacts
 def _expected_model_artifacts(
     component: AblationComponent,
     working_dir: Path,
+    run_mode: str = "",
 ) -> list[str] | None:
     """Artifacts the executor must see before a model run counts as success.
 
-    ``train_ids_<name>.npy`` is required whenever the canonical contract
-    exists: trusted-OOF promotion cannot verify row alignment without it, so
-    enforcing it at execution keeps the failure inside the fix/retry loop
-    instead of surfacing as a silent post-training rollback.
+    This mirrors the strict post-acceptance validation: mlebench requires
+    train_ids and test_ids unconditionally, and trusted-OOF promotion cannot
+    verify row alignment without train_ids. Enforcing the same files at
+    execution keeps the failure inside the fix/retry loop instead of
+    surfacing as a silent post-training rollback.
     """
     if component.component_type != "model" or not require_oof_artifacts():
         return None
@@ -74,8 +76,11 @@ def _expected_model_artifacts(
         f"models/oof_{component.name}.npy",
         f"models/test_{component.name}.npy",
     ]
-    if (working_dir / "canonical" / "metadata.json").is_file():
+    mlebench = str(run_mode).strip().lower() == "mlebench"
+    if mlebench or (working_dir / "canonical" / "metadata.json").is_file():
         expected.append(f"models/train_ids_{component.name}.npy")
+    if mlebench:
+        expected.append(f"models/test_ids_{component.name}.npy")
     return expected
 
 
@@ -2320,7 +2325,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
             return self._extract_cv_score(stdout)
 
         prev_env: dict[str, str | None] = {k: os.getenv(k) for k in env_overrides}
-        expected_artifacts = _expected_model_artifacts(component, working_dir)
+        expected_artifacts = _expected_model_artifacts(component, working_dir, run_mode)
 
         for attempt in range(max_retries):
             print(f"\nAttempt {attempt + 1}/{max_retries}")
@@ -2448,6 +2453,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
             component_type=component.component_type,
             state=state,  # Pass state for Meta-Evaluator guidance injection
             paths=getattr(self, "_resolved_paths", None),  # Pass paths for path-related error fixes
+            expected_artifacts=expected_artifacts,
         )
 
         attempt_records.append(

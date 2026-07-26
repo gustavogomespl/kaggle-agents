@@ -58,8 +58,11 @@ _MISSING_ARTIFACT_HINT = (
     "first check models/ for fold checkpoints or partial prediction arrays "
     "saved by the previous run and load them to produce the missing files. "
     "Either way, the script MUST create every artifact listed in the error "
-    "above; train_ids_<component>.npy must contain the train IDs in canonical "
-    "row order, saved with allow_pickle=False."
+    "above. train_ids_<component>.npy holds the train IDs in canonical row "
+    "order and test_ids_<component>.npy one test ID per prediction row; save "
+    "ID arrays as plain strings — "
+    "np.save(path, np.asarray([str(v) for v in ids]), allow_pickle=False) — "
+    "because object-dtype arrays cannot be saved with allow_pickle=False."
 )
 
 
@@ -704,6 +707,7 @@ Output Dir: {paths.get('output_dir', '.')}"""
         component_type: str = "",
         state: dict | None = None,
         paths: dict | None = None,
+        expected_artifacts: list[str] | None = None,
     ) -> tuple[str, ExecutionResult, bool]:
         """
         Debug code iteratively with loop-safety, configurable timeouts, and dynamic temperature.
@@ -833,8 +837,13 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 return code, exec_result, False
             debugged_code = self._extract_code_from_response(get_text_content(response.content))
 
+            # Same artifact contract as the main attempts: a debug "success"
+            # that skips required artifacts only dies later at promotion.
             test_result = self.executor.execute(
-                debugged_code, working_dir, component_type=component_type
+                debugged_code,
+                working_dir,
+                expected_artifacts=expected_artifacts,
+                component_type=component_type,
             )
 
             if test_result.success:

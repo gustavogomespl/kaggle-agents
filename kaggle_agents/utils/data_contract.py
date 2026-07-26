@@ -1325,11 +1325,15 @@ def prepare_canonical_data(
 
     print(f"   CV strategy: {n_folds} folds ({cv_config['strategy']})")
 
-    # Extract canonical data
+    # Extract canonical data. String IDs must be stored as str dtype, not
+    # object: candidate code re-saves these IDs with allow_pickle=False and
+    # the trusted scorer refuses to load pickled artifacts.
     train_ids = train_df[id_col].values
+    if train_ids.dtype == object:
+        train_ids = np.asarray([str(v) for v in train_ids])
 
     # Save canonical artifacts
-    np.save(canonical_dir / "train_ids.npy", train_ids)
+    np.save(canonical_dir / "train_ids.npy", train_ids, allow_pickle=False)
 
     # Save targets - use allow_pickle=True for string/object arrays (seq2seq tasks)
     if target_is_string or y.dtype == object:

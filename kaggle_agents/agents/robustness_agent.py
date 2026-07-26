@@ -654,7 +654,12 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
         if status == "NO" and (
             result["code_block"].strip() or line_numbers
         ):
-            raise ValueError("NO must not identify a code block or line numbers")
+            # Reviewers routinely cite the lines they inspected on a clean
+            # verdict. That is formatting noise, not a contradiction; keep
+            # the NO and drop the pointers instead of zeroing the component.
+            # Direct leakage is still caught by the deterministic AST pass.
+            result["code_block"] = ""
+            result["line_numbers"] = []
         return result
 
     @staticmethod

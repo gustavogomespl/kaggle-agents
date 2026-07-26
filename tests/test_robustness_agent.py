@@ -422,6 +422,22 @@ def test_leakage_review_parses_markdown_fenced_json():
     assert review["leakage_status"] == "NO"
 
 
+def test_leakage_review_keeps_clean_verdict_with_incidental_pointers():
+    # Reviewers routinely cite the lines they inspected on a clean verdict;
+    # raising here zeroed valid components and blocked grading fail-closed.
+    from kaggle_agents.agents.robustness_agent import RobustnessAgent
+
+    noisy = (
+        '{"leakage_status": "NO", "code_block": "for fold in range(5): ...",'
+        ' "line_numbers": [12, 40], "explanation": "checked CV loop, clean"}'
+    )
+    review = RobustnessAgent._parse_leakage_review(noisy)
+
+    assert review["leakage_status"] == "NO"
+    assert review["code_block"] == ""
+    assert review["line_numbers"] == []
+
+
 def test_hyperparameter_review_parses_markdown_fenced_json():
     from kaggle_agents.agents.robustness_agent import RobustnessAgent
 

@@ -45,6 +45,22 @@ def test_model_artifacts_require_train_ids_when_canonical_exists(
     (tmp_path / "canonical" / "metadata.json").write_text("{}", encoding="utf-8")
     expected = _expected_model_artifacts(component, tmp_path)
     assert "models/train_ids_candidate.npy" in expected
+    assert "models/test_ids_candidate.npy" not in expected
+
+
+def test_mlebench_model_artifacts_match_strict_validation(tmp_path: Path) -> None:
+    # Strict post-acceptance validation requires train_ids AND test_ids in
+    # mlebench mode regardless of canonical presence; the executor must
+    # enforce the same set or components die after training with no retry.
+    component = AblationComponent("candidate", "model", "train")
+
+    expected = _expected_model_artifacts(component, tmp_path, "mlebench")
+    assert expected == [
+        "models/oof_candidate.npy",
+        "models/test_candidate.npy",
+        "models/train_ids_candidate.npy",
+        "models/test_ids_candidate.npy",
+    ]
 
 
 def test_non_model_components_have_no_expected_artifacts(
@@ -118,6 +134,72 @@ def test_missing_artifact_error_gets_reuse_hint() -> None:
         "Missing expected artifacts: models/test_candidate.npy"
     )
     assert "Do NOT retrain from scratch" in hinted
+    assert "allow_pickle=False" in hinted
 
     untouched = _maybe_add_artifact_hint("ValueError: shapes do not match")
     assert untouched == "ValueError: shapes do not match"
+
+
+def _write_csv(path: Path, ids: list, target: list | None = None) -> None:
+    import pandas as pd
+
+    data = {"id": ids}
+    if target is not None:
+        data["has_cactus"] = target
+    pd.DataFrame(data).to_csv(path, index=False)
+
+
+def test_canonical_string_train_ids_survive_unpickled_resave(tmp_path: Path) -> None:
+    # String IDs from pandas arrive as object dtype; stored raw they poison
+    # the whole artifact chain (np.save(..., allow_pickle=False) crashes and
+    # pickled saves are refused by the trusted scorer).
+    from kaggle_agents.utils.data_contract import prepare_canonical_data
+
+    _write_csv(
+        tmp_path / "train.csv",
+        [f"img_{i}.jpg" for i in range(10)],
+        [i % 2 for i in range(10)],
+    )
+    _write_csv(tmp_path / "test.csv", ["t_0.jpg", "t_1.jpg"])
+
+    prepare_canonical_data(
+        train_path=tmp_path / "train.csv",
+        test_path=tmp_path / "test.csv",
+        target_col="has_cactus",
+        output_dir=tmp_path,
+        id_col="id",
+        n_folds=2,
+    )
+
+    saved = np.load(tmp_path / "canonical" / "train_ids.npy", allow_pickle=False)
+    assert saved.dtype.kind == "U"
+    # The exact operation generated code performs with the loaded IDs.
+    np.save(tmp_path / "resaved.npy", saved, allow_pickle=False)
+
+
+def test_canonical_integer_train_ids_keep_numeric_dtype(tmp_path: Path) -> None:
+    from kaggle_agents.utils.data_contract import prepare_canonical_data
+
+    _write_csv(tmp_path / "train.csv", list(range(10)), [i % 2 for i in range(10)])
+    _write_csv(tmp_path / "test.csv", [100, 101])
+
+    prepare_canonical_data(
+        train_path=tmp_path / "train.csv",
+        test_path=tmp_path / "test.csv",
+        target_col="has_cactus",
+        output_dir=tmp_path,
+        id_col="id",
+        n_folds=2,
+    )
+
+    saved = np.load(tmp_path / "canonical" / "train_ids.npy", allow_pickle=False)
+    assert saved.dtype.kind in "iu"
+
+
+def test_preamble_normalizes_legacy_object_train_ids() -> None:
+    import inspect
+
+    from kaggle_agents.agents.developer import code_generator
+
+    src = inspect.getsource(code_generator)
+    assert "CANONICAL_TRAIN_IDS.dtype == object" in src

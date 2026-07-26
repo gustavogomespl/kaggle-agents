@@ -967,6 +967,10 @@ print(f"[LOG:INFO] Canonical data loaded: {{CANONICAL_METADATA.get('canonical_ro
 # === CANONICAL FOLDS (MANDATORY) ===
 CANONICAL_FOLDS = np.load(CANONICAL_FOLDS_PATH)
 CANONICAL_TRAIN_IDS = np.load(CANONICAL_TRAIN_IDS_PATH, allow_pickle=True)
+if CANONICAL_TRAIN_IDS.dtype == object:
+    # Legacy canonical dirs stored IDs as object dtype; normalize so that
+    # np.save(..., CANONICAL_TRAIN_IDS, allow_pickle=False) works downstream.
+    CANONICAL_TRAIN_IDS = np.asarray([str(_v) for _v in CANONICAL_TRAIN_IDS])
 CANONICAL_Y = np.load(CANONICAL_Y_PATH, allow_pickle=True)
 if not (
     len(CANONICAL_FOLDS)
