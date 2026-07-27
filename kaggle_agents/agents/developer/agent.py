@@ -64,6 +64,11 @@ from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin, quarantine_component_artifacts
 
 
+# Injected into every model script by the code generator; one call writes all
+# four evidence artifacts under the correct component name.
+_ARTIFACT_HELPER = "save_component_artifacts"
+
+
 def unsaved_expected_artifacts(
     code: str,
     expected_artifacts: list[str] | None,
@@ -90,8 +95,28 @@ def unsaved_expected_artifacts(
     except SyntaxError:
         return []
 
+    # The injected helper is defined in every model script, so the saves inside
+    # its body prove nothing about the program that was generated. Exclude that
+    # subtree, then treat a call to it as satisfying the whole contract.
+    helper_body_nodes = {
+        id(sub)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == _ARTIFACT_HELPER
+        for sub in ast.walk(node)
+    }
+
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") == _ARTIFACT_HELPER
+            and id(node) not in helper_body_nodes
+        ):
+            return []
+
     saved_targets: list[str] = []
     for node in ast.walk(tree):
+        if id(node) in helper_body_nodes:
+            continue
         if not isinstance(node, ast.Call):
             continue
         func = node.func
@@ -124,7 +149,11 @@ def unsaved_expected_artifacts(
             return []
 
     if not saved_targets:
-        return []
+        # Only model components have expected artifacts, and the scan walks the
+        # whole tree -- including the script's own wrapper functions -- for
+        # np.save/torch.save/savez/tofile. Zero matches means nothing is being
+        # persisted at all, which is a finding rather than an inconclusive read.
+        return list(expected_artifacts)
 
     haystack = " ".join(saved_targets)
     missing = []

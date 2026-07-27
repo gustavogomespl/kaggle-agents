@@ -153,10 +153,13 @@ class TestArtifactContractCheckedBeforeTraining:
     def test_unparseable_code_is_never_blocked(self):
         assert unsaved_expected_artifacts("def (", EXPECTED, COMPONENT) == []
 
-    def test_code_without_save_calls_is_never_blocked(self):
-        """Absence of evidence is not evidence of absence: only report when
-        save calls exist and demonstrably omit an artifact."""
-        assert unsaved_expected_artifacts("x = 1\n", EXPECTED, COMPONENT) == []
+    def test_code_without_any_save_call_is_flagged(self):
+        """The scan walks the whole tree, including the script's own wrapper
+        functions, for np.save/torch.save/savez/tofile. Zero matches in a model
+        component means nothing is persisted -- a finding, not an unknown."""
+        assert sorted(unsaved_expected_artifacts("x = 1\n", EXPECTED, COMPONENT)) == sorted(
+            EXPECTED
+        )
 
     def test_no_expectations_means_no_findings(self):
         code = self._code(['f"oof_{COMPONENT_NAME}.npy"'])
@@ -259,3 +262,72 @@ class TestSaveTargetIsFoundInAnyArgument:
         code = "import torch\ntorch.save(obj, dest)\n"
 
         assert unsaved_expected_artifacts(code, EXPECTED, COMPONENT) == []
+
+
+class TestEvidenceArtifactHelper:
+    """Four separate np.save calls with exact filenames had to be reconstructed
+    from a 238-line instruction block containing eight np.save mentions. Four
+    out of four model components across two runs saved only `oof_`. The
+    contract is now one call."""
+
+    def _helper_source(self) -> str:
+        from kaggle_agents.agents.developer.code_generator import (
+            _EVIDENCE_ARTIFACT_HELPER,
+        )
+
+        return _EVIDENCE_ARTIFACT_HELPER
+
+    def test_helper_is_valid_python(self):
+        import ast
+
+        ast.parse(self._helper_source())
+
+    def test_helper_writes_all_four_artifacts(self):
+        source = self._helper_source()
+
+        for kind in ("oof_", "test_", "train_ids_", "test_ids_"):
+            assert f'{kind}{{COMPONENT_NAME}}.npy' in source
+
+    def test_calling_the_helper_satisfies_the_contract(self):
+        code = self._helper_source() + "\nsave_component_artifacts(oof, test, test_ids=ids)\n"
+
+        assert unsaved_expected_artifacts(code, EXPECTED, COMPONENT) == []
+
+    def test_defining_without_calling_does_not_satisfy_it(self):
+        """The helper is injected into every script, so its body proves nothing
+        about the program the model actually wrote."""
+        code = self._helper_source() + "\nprint('trained but never saved')\n"
+
+        missing = unsaved_expected_artifacts(code, EXPECTED, COMPONENT)
+
+        assert sorted(missing) == sorted(EXPECTED)
+
+    def test_helper_body_does_not_mask_a_partial_hand_rolled_save(self):
+        code = (
+            self._helper_source()
+            + "\nimport numpy as np\n"
+            + 'np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", oof)\n'
+        )
+
+        missing = unsaved_expected_artifacts(code, EXPECTED, COMPONENT)
+
+        assert f"models/test_{COMPONENT}.npy" in missing
+        assert f"models/oof_{COMPONENT}.npy" not in missing
+
+    def test_helper_is_only_injected_for_model_components(self):
+        from kaggle_agents.agents.developer.code_generator import (
+            _EVIDENCE_ARTIFACT_HELPER,
+        )
+
+        # Guard against the helper leaking into preprocessing/ensemble headers,
+        # where MODELS_DIR/COMPONENT_NAME semantics differ.
+        from pathlib import Path
+
+        source = Path(
+            "kaggle_agents/agents/developer/code_generator.py"
+        ).read_text(encoding="utf-8")
+        injection = source.index("_EVIDENCE_ARTIFACT_HELPER\n", source.index("path_header +="))
+        window = source[max(0, injection - 200) : injection]
+
+        assert 'component_type == "model"' in window
+        assert _EVIDENCE_ARTIFACT_HELPER

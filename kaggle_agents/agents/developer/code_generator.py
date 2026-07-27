@@ -65,6 +65,90 @@ IMMUTABLE_PATH_VARS = [
 ]
 
 
+# The four evidence artifacts were being written by four separate np.save calls
+# whose exact filenames the model had to reconstruct from a 238-line, 14 KB
+# instruction block containing eight different np.save mentions. Across two
+# smoke runs, four out of four model components saved only `oof_` and were
+# failed after full training. Emphasis was not the problem -- the instructions
+# already said MANDATORY, CRITICAL and DO NOT REMOVE.
+#
+# Collapsing the contract into a single call removes the extraction problem,
+# and with it the filename, dtype, and allow_pickle mistakes. The helper closes
+# over the injected COMPONENT_NAME, so rebinding that name can no longer
+# misdirect the artifacts either. This follows the header's existing pattern of
+# shipping helpers (smart_locate_file, iter_canonical_cv_splits).
+_EVIDENCE_ARTIFACT_HELPER = '''
+# === EVIDENCE ARTIFACTS (MANDATORY - call this exactly once, at the end) ===
+def save_component_artifacts(
+    oof_preds,
+    test_preds,
+    train_ids=None,
+    test_ids=None,
+    class_order=None,
+):
+    """Persist the evidence this component is judged on. One call, four files.
+
+    Writes models/{oof,test,train_ids,test_ids}_<COMPONENT_NAME>.npy using the
+    injected component name. A run that skips this call is failed regardless of
+    how good its validation score was, because nothing can be verified.
+
+    Args:
+        oof_preds: Out-of-fold predictions, one row per canonical training row.
+        test_preds: Test predictions, one row per test entity.
+        train_ids: Training row IDs in OOF order. Defaults to CANONICAL_TRAIN_IDS.
+        test_ids: Test entity IDs in test_preds order. Required.
+        class_order: Optional class labels for multiclass outputs.
+    """
+    import numpy as _np
+
+    _oof = _np.asarray(oof_preds)
+    _test = _np.asarray(test_preds)
+    if train_ids is None:
+        # CANONICAL_TRAIN_IDS only exists when the canonical contract was
+        # prepared; on domains without it the caller must pass train_ids.
+        train_ids = globals().get("CANONICAL_TRAIN_IDS")
+        if train_ids is None:
+            raise ValueError(
+                "train_ids is required: no canonical contract was prepared for "
+                "this competition, so there is no default row order"
+            )
+    _train_ids = _np.asarray([str(_v) for _v in _np.asarray(train_ids).reshape(-1)])
+    if test_ids is None:
+        raise ValueError(
+            "test_ids is required: the ensemble aligns predictions by semantic "
+            "test ID and refuses positional alignment"
+        )
+    _test_ids = _np.asarray([str(_v) for _v in _np.asarray(test_ids).reshape(-1)])
+
+    if len(_oof) != len(_train_ids):
+        raise ValueError(
+            f"OOF rows ({len(_oof)}) must match train IDs ({len(_train_ids)})"
+        )
+    if len(_test) != len(_test_ids):
+        raise ValueError(
+            f"Test rows ({len(_test)}) must match test IDs ({len(_test_ids)})"
+        )
+    if _np.asarray(_test_ids).size != len(set(_test_ids.tolist())):
+        raise ValueError("Test IDs must be unique")
+
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", _oof)
+    _np.save(MODELS_DIR / f"test_{COMPONENT_NAME}.npy", _test)
+    _np.save(MODELS_DIR / f"train_ids_{COMPONENT_NAME}.npy", _train_ids, allow_pickle=False)
+    _np.save(MODELS_DIR / f"test_ids_{COMPONENT_NAME}.npy", _test_ids, allow_pickle=False)
+    if class_order is not None:
+        _np.save(
+            MODELS_DIR / f"class_order_{COMPONENT_NAME}.npy",
+            _np.asarray([str(_v) for _v in class_order], dtype=str),
+            allow_pickle=False,
+        )
+    print(
+        f"[LOG:INFO] Saved evidence artifacts for {COMPONENT_NAME}: "
+        f"oof={_oof.shape}, test={_test.shape}"
+    )
+'''
+
+
 def _protected_vars_in_header(header: str) -> list[str]:
     """Immutable path constants actually defined in the injected header.
 
@@ -1573,6 +1657,9 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
             else data_files.get("submission_format_info", {})
         )
         path_header += _build_submission_format_header(submission_format)
+
+        if component.component_type == "model":
+            path_header += _EVIDENCE_ARTIFACT_HELPER
 
         path_header += "\n# === END PATH CONSTANTS ===\n"
 
