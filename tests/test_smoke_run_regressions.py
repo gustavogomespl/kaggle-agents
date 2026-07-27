@@ -174,3 +174,88 @@ class TestArtifactContractCheckedBeforeTraining:
         code = "import numpy as np\nfor p in paths:\n    np.save(p, arr)\n"
 
         assert unsaved_expected_artifacts(code, EXPECTED, COMPONENT) == []
+
+
+class TestComponentNameIsImmutable:
+    """Every evidence artifact is named after COMPONENT_NAME. The generated
+    code rebound it to the architecture ("baseline_densenet121"), so the saves
+    landed under a name the contract does not look for and 25 minutes of
+    correct training were failed for "missing artifacts"."""
+
+    def test_component_name_is_protected(self):
+        from kaggle_agents.agents.developer.code_generator import IMMUTABLE_PATH_VARS
+
+        assert "COMPONENT_NAME" in IMMUTABLE_PATH_VARS
+
+    def test_rebinding_is_detected_and_stripped(self):
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = (
+            'COMPONENT_NAME = "baseline_cnn_transfer_learning"\n'
+            "# === END PATH CONSTANTS ===\n"
+            'COMPONENT_NAME = "baseline_densenet121"\n'
+            'np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", oof)\n'
+        )
+        mixin = CodeGeneratorMixin()
+
+        is_valid, violations = mixin._validate_no_path_redefinition(code)
+        assert is_valid is False
+        assert any("COMPONENT_NAME" in v for v in violations)
+
+        stripped = mixin._strip_path_redefinitions(code)
+        assert 'COMPONENT_NAME = "baseline_densenet121"' not in stripped.replace(
+            "# STRIPPED (path constant): ", ""
+        ) or "STRIPPED" in stripped
+        # The header definition survives.
+        assert 'COMPONENT_NAME = "baseline_cnn_transfer_learning"' in stripped
+
+
+class TestSaveTargetIsFoundInAnyArgument:
+    """np.save(path, arr) puts the destination first; torch.save(obj, path)
+    puts it second. Reading only argument 0 made the check bail out on every
+    component that uses torch.save -- that is, nearly all of them."""
+
+    def test_torch_save_does_not_disable_the_check(self):
+        code = (
+            "import numpy as np, torch\n"
+            'torch.save(model.state_dict(), MODELS_DIR / f"{COMPONENT_NAME}_fold0.pth")\n'
+            'np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", oof)\n'
+        )
+
+        missing = unsaved_expected_artifacts(code, EXPECTED, COMPONENT)
+
+        assert sorted(missing) == sorted(
+            [
+                f"models/test_{COMPONENT}.npy",
+                f"models/train_ids_{COMPONENT}.npy",
+                f"models/test_ids_{COMPONENT}.npy",
+            ]
+        )
+
+    def test_the_second_smoke_run_program_is_caught(self):
+        """Exactly the shape that burned 1553s: one OOF save plus checkpoints."""
+        code = (
+            "import numpy as np, torch\n"
+            "for fold in range(5):\n"
+            '    torch.save(model.state_dict(), MODELS_DIR / f"{COMPONENT_NAME}_fold{fold}.pth")\n'
+            'np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", oof_preds)\n'
+        )
+
+        assert unsaved_expected_artifacts(code, EXPECTED, COMPONENT)
+
+    def test_a_complete_program_still_passes(self):
+        code = (
+            "import numpy as np, torch\n"
+            'torch.save(model.state_dict(), MODELS_DIR / f"{COMPONENT_NAME}_fold0.pth")\n'
+            'np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", oof)\n'
+            'np.save(MODELS_DIR / f"test_{COMPONENT_NAME}.npy", test)\n'
+            'np.save(MODELS_DIR / f"train_ids_{COMPONENT_NAME}.npy", tr_ids)\n'
+            'np.save(MODELS_DIR / f"test_ids_{COMPONENT_NAME}.npy", te_ids)\n'
+        )
+
+        assert unsaved_expected_artifacts(code, EXPECTED, COMPONENT) == []
+
+    def test_fully_opaque_saves_still_disable_the_check(self):
+        code = "import torch\ntorch.save(obj, dest)\n"
+
+        assert unsaved_expected_artifacts(code, EXPECTED, COMPONENT) == []

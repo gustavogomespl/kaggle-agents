@@ -57,6 +57,11 @@ IMMUTABLE_PATH_VARS = [
     "BASE_DIR",
     "DATA_DIR",
     "WORKING_DIR",
+    # Not a path, but every evidence artifact is named after it. Rebinding it
+    # (e.g. to a model architecture) writes oof_/test_/train_ids_/test_ids_
+    # files under a name the artifact contract does not look for, so a run that
+    # trained correctly for 25 minutes is failed for "missing artifacts".
+    "COMPONENT_NAME",
 ]
 
 

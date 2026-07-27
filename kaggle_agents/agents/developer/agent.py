@@ -98,18 +98,28 @@ def unsaved_expected_artifacts(
         call_name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
         if call_name not in {"save", "savez", "savez_compressed", "tofile"} or not node.args:
             continue
-        target = node.args[0]
-        # A destination assembled through a variable cannot be read statically.
-        # One opaque save makes the whole picture inconclusive, so report
-        # nothing rather than risk blocking a correct program.
-        if not any(
-            isinstance(sub, ast.JoinedStr)
-            or (isinstance(sub, ast.Constant) and isinstance(sub.value, str))
-            for sub in ast.walk(target)
-        ):
+
+        # The destination is not always the first argument: np.save(path, arr)
+        # puts it first, torch.save(obj, path) puts it second. Scan every
+        # argument and keep the ones that carry a string, rather than assuming
+        # a position -- assuming arg 0 made this check silently no-op on any
+        # component using torch.save, which is nearly all of them.
+        string_args = [
+            arg
+            for arg in node.args
+            if any(
+                isinstance(sub, ast.JoinedStr)
+                or (isinstance(sub, ast.Constant) and isinstance(sub.value, str))
+                for sub in ast.walk(arg)
+            )
+        ]
+        # A destination assembled entirely through variables cannot be read
+        # statically. One opaque save makes the whole picture inconclusive, so
+        # report nothing rather than risk blocking a correct program.
+        if not string_args:
             return []
         try:
-            saved_targets.append(ast.unparse(target))
+            saved_targets.extend(ast.unparse(arg) for arg in string_args)
         except Exception:
             return []
 
