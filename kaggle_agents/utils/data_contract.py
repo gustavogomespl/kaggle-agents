@@ -629,6 +629,51 @@ def _supplied_test_columns(test_path: str | Path | None) -> set[str]:
     }
 
 
+def _resolve_canonical_test_ids(
+    test_path: str | Path | None,
+    id_col: str | None,
+) -> tuple[np.ndarray | None, bool]:
+    """Name every public test row exactly once.
+
+    Prefers a unique key the test table already provides; falls back to row
+    position when it provides none, which is the only identity such a
+    competition actually has.
+
+    Returns:
+        Tuple of (ids as strings, whether they are positional). ``(None, False)``
+        when the test table cannot be read as a table at all.
+    """
+    if not test_path:
+        return None, False
+    try:
+        test_df = pd.read_csv(Path(test_path))
+    except Exception:
+        return None, False
+
+    # Only a declared or conventionally named identifier counts. A free-text
+    # field can be incidentally unique without being an identifier, and naming
+    # rows by it would break the moment two rows share the same text.
+    preferred = [str(id_col)] if id_col else []
+    preferred += [
+        str(column)
+        for column in test_df.columns
+        if str(column).lower() in {"id", "index", "key", "row_id"}
+    ]
+    for column in preferred:
+        if column not in test_df.columns:
+            continue
+        values = test_df[column]
+        if values.isna().any():
+            continue
+        as_text = values.astype(str)
+        if as_text.duplicated().any():
+            continue
+        return np.asarray(as_text.tolist(), dtype=str), False
+
+    positional = np.asarray([str(i) for i in range(len(test_df))], dtype=str)
+    return positional, True
+
+
 def _resolve_supervised_target_contract(
     train_df: pd.DataFrame,
     test_path: Path,
@@ -1381,6 +1426,17 @@ def prepare_canonical_data(
     # Save canonical artifacts
     np.save(canonical_dir / "train_ids.npy", train_ids, allow_pickle=False)
 
+    # Every component must name its test rows the same way, or the ensemble
+    # cannot align them. Competitions whose public test table carries no unique
+    # key leave each component to invent one, and the ones they reach for
+    # (a repeated date, a placeholder target) are not unique - the artifacts
+    # are then rejected however good the model was.
+    test_ids, test_ids_are_positional = _resolve_canonical_test_ids(
+        test_path, id_col
+    )
+    if test_ids is not None:
+        np.save(canonical_dir / "test_ids.npy", test_ids, allow_pickle=False)
+
     # Save targets - use allow_pickle=True for string/object arrays (seq2seq tasks)
     if target_is_string or y.dtype == object:
         np.save(canonical_dir / "y.npy", y, allow_pickle=True)
@@ -1402,6 +1458,8 @@ def prepare_canonical_data(
         "cv_strategy": cv_config["strategy"],
         "id_col": id_col,
         "id_is_synthetic": is_synthetic_id,
+        "test_ids_are_positional": bool(test_ids_are_positional),
+        "n_test": int(len(test_ids)) if test_ids is not None else None,
         "target_col": target_col,
         "target_cols": resolved_target_cols,
         "target_type": resolved_target_type,

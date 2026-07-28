@@ -326,9 +326,10 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             feature_cols_path=canonical_result["feature_cols_path"],
             metadata_path=str(Path(canonical_result["canonical_dir"]) / "metadata.json"),
             n_train=metadata["canonical_rows"],
-            n_test=0,  # Will be updated when test data is processed
+            n_test=int(metadata.get("n_test") or 0),
             n_folds=metadata["n_folds"],
             id_col=metadata["id_col"],
+            id_is_synthetic=bool(metadata.get("id_is_synthetic", False)),
             target_col=metadata["target_col"],
             target_cols=list(
                 metadata.get("target_cols") or [metadata["target_col"]]

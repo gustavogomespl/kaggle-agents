@@ -182,6 +182,10 @@ class CanonicalDataContract:
     target_cols: list[str] = field(default_factory=list)
     target_type: Literal["single", "multi_label", "multi_target"] = "single"
 
+    # True when ``id_col`` names row positions rather than a column the public
+    # data supplies. Consumers must not expect to find it in any CSV.
+    id_is_synthetic: bool = False
+
     # Evaluation protocol metadata. Temporal fields are mandatory when
     # ``cv_strategy`` is ``temporal_forward_chaining`` and absent otherwise.
     cv_strategy: str = ""
@@ -265,6 +269,7 @@ class CanonicalDataContract:
             "n_test": self.n_test,
             "n_folds": self.n_folds,
             "id_col": self.id_col,
+            "id_is_synthetic": self.id_is_synthetic,
             "target_col": self.target_col,
             "target_cols": self.target_cols or [self.target_col],
             "target_type": self.target_type,

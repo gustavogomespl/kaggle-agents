@@ -32,21 +32,11 @@ COMPONENT_GUIDANCE = {
       missing_targets = [col for col in target_cols if col not in train_df.columns]
       if missing_targets:
           raise ValueError(f"Canonical target columns are absent: {missing_targets!r}")
-      canonical_ids = [str(v) for v in np.asarray(CANONICAL_TRAIN_IDS).reshape(-1)]
-      if len(train_df) != len(canonical_ids):
-          # The contract may cover a sampled subset of train rows: reindex the
-          # frame to the contract rows by the observed ID column BEFORE
-          # extracting targets; never compare against the full frame.
-          id_col = next(
-              col
-              for col in train_df.columns
-              if set(canonical_ids) <= set(train_df[col].astype(str))
-          )
-          train_df = (
-              train_df.set_index(train_df[id_col].astype(str))
-              .loc[canonical_ids]
-              .reset_index(drop=True)
-          )
+      # Put the frame in canonical row order before extracting targets. The
+      # helper handles both a real ID column and the positional naming used
+      # when the competition supplies none - do NOT index by ID_COL yourself,
+      # because that name may not exist in any CSV.
+      train_df = align_train_to_canonical(train_df)
       y = (
           train_df[target_cols[0]].to_numpy()
           if TARGET_TYPE == "single"

@@ -1,0 +1,321 @@
+"""Components must be able to name their rows.
+
+A competition whose public data has no identifier column gets a synthetic one
+(`_row_id`) that exists only inside the canonical artifacts. The injected header
+still advertised it as ``ID_COL``, so generated code indexed by a column no CSV
+contains and died with KeyError before training anything. The same gap left test
+rows unnamed: components invented their own test IDs, reached for a repeated
+date or a placeholder target, and had their artifacts rejected as duplicates
+however good the model was.
+
+These tests pin the canonical row identity: an alignment helper that works with
+or without a real ID column, and canonical test IDs that are always unique.
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from kaggle_agents.utils.data_contract import (
+    _resolve_canonical_test_ids,
+    prepare_canonical_data,
+)
+
+HEADER_SOURCE = Path("kaggle_agents/agents/developer/code_generator.py").read_text()
+
+
+def _extract_header_function(name: str) -> str:
+    """Pull a helper out of the injected header template, as it ships.
+
+    The header is an f-string, so its literal braces are doubled; undo that so
+    the extracted source is the code components actually receive.
+    """
+    match = re.search(
+        rf"^def {name}\(.*?(?=^\S|\Z)",
+        HEADER_SOURCE,
+        re.DOTALL | re.MULTILINE,
+    )
+    if match is None:
+        raise AssertionError(f"{name} is not part of the injected header")
+    return match.group(0).replace("{{", "{").replace("}}", "}")
+
+
+def _align_namespace(train_ids, *, id_col: str, synthetic: bool) -> dict:
+    namespace = {
+        "np": np,
+        "pd": pd,
+        "ID_COL": id_col,
+        "ID_IS_SYNTHETIC": synthetic,
+        "CANONICAL_TRAIN_IDS": np.asarray([str(v) for v in train_ids]),
+    }
+    exec(  # noqa: S102 - executing our own shipped header text is the point
+        compile(_extract_header_function("align_train_to_canonical"), "<hdr>", "exec"),
+        namespace,
+    )
+    return namespace
+
+
+class TestAlignTrainToCanonical:
+    """The helper that replaces df.set_index(ID_COL)."""
+
+    def test_synthetic_ids_select_rows_by_position(self):
+        frame = pd.DataFrame({"text": ["a", "b", "c", "d"], "label": [0, 1, 0, 1]})
+        namespace = _align_namespace(["0", "2", "3"], id_col="_row_id", synthetic=True)
+
+        aligned = namespace["align_train_to_canonical"](frame)
+
+        assert aligned["text"].tolist() == ["a", "c", "d"]
+        assert aligned["label"].tolist() == [0, 0, 1]
+
+    def test_real_id_column_is_reordered_to_canonical(self):
+        frame = pd.DataFrame({"id": [7, 3, 9], "label": [1, 2, 3]})
+        namespace = _align_namespace(["3", "9", "7"], id_col="id", synthetic=False)
+
+        aligned = namespace["align_train_to_canonical"](frame)
+
+        assert aligned["id"].tolist() == ["3", "9", "7"]
+        assert aligned["label"].tolist() == [2, 3, 1]
+
+    def test_missing_canonical_rows_are_reported(self):
+        frame = pd.DataFrame({"id": [1, 2], "label": [0, 1]})
+        namespace = _align_namespace(["1", "2", "3"], id_col="id", synthetic=False)
+
+        with pytest.raises(ValueError, match="missing 1 canonical rows"):
+            namespace["align_train_to_canonical"](frame)
+
+    def test_duplicate_ids_are_rejected(self):
+        frame = pd.DataFrame({"id": [1, 1], "label": [0, 1]})
+        namespace = _align_namespace(["1"], id_col="id", synthetic=False)
+
+        with pytest.raises(ValueError, match="not unique"):
+            namespace["align_train_to_canonical"](frame)
+
+    def test_truncated_table_is_reported_not_silently_wrong(self):
+        frame = pd.DataFrame({"text": ["a", "b"]})
+        namespace = _align_namespace(["0", "5"], id_col="_row_id", synthetic=True)
+
+        with pytest.raises(ValueError, match="beyond the 2 rows"):
+            namespace["align_train_to_canonical"](frame)
+
+    def test_absent_id_without_synthetic_naming_is_an_error(self):
+        # Never guess row order when the contract says IDs are semantic.
+        frame = pd.DataFrame({"text": ["a", "b"]})
+        namespace = _align_namespace(["x", "y"], id_col="id", synthetic=False)
+
+        with pytest.raises(ValueError, match="not positional"):
+            namespace["align_train_to_canonical"](frame)
+
+
+class TestCanonicalTestIds:
+    """Every public test row gets exactly one name."""
+
+    def test_declared_id_column_is_used(self, tmp_path):
+        test_csv = tmp_path / "test.csv"
+        pd.DataFrame({"id": [10, 11], "f": [0.1, 0.2]}).to_csv(test_csv, index=False)
+
+        ids, positional = _resolve_canonical_test_ids(test_csv, "id")
+
+        assert ids.tolist() == ["10", "11"]
+        assert positional is False
+
+    def test_conventional_id_name_is_found_without_a_declaration(self, tmp_path):
+        test_csv = tmp_path / "test.csv"
+        pd.DataFrame({"f": [0.1, 0.2], "Id": [5, 6]}).to_csv(test_csv, index=False)
+
+        ids, positional = _resolve_canonical_test_ids(test_csv, None)
+
+        assert ids.tolist() == ["5", "6"]
+        assert positional is False
+
+    def test_keyless_test_table_falls_back_to_row_position(self, tmp_path):
+        test_csv = tmp_path / "test.csv"
+        pd.DataFrame(
+            {"Date": ["2012", "2012", "2012"], "Comment": ["a", "b", "c"]}
+        ).to_csv(test_csv, index=False)
+
+        ids, positional = _resolve_canonical_test_ids(test_csv, "_row_id")
+
+        assert ids.tolist() == ["0", "1", "2"]
+        assert positional is True
+
+    def test_free_text_is_not_treated_as_an_identifier(self, tmp_path):
+        # Incidentally unique text is not a key: two identical comments would
+        # silently collapse two test rows into one.
+        test_csv = tmp_path / "test.csv"
+        pd.DataFrame({"Comment": ["unique a", "unique b"]}).to_csv(
+            test_csv, index=False
+        )
+
+        ids, positional = _resolve_canonical_test_ids(test_csv, None)
+
+        assert ids.tolist() == ["0", "1"]
+        assert positional is True
+
+    def test_duplicated_declared_id_falls_back_to_position(self, tmp_path):
+        test_csv = tmp_path / "test.csv"
+        pd.DataFrame({"id": [1, 1], "f": [0.1, 0.2]}).to_csv(test_csv, index=False)
+
+        ids, positional = _resolve_canonical_test_ids(test_csv, "id")
+
+        assert ids.tolist() == ["0", "1"]
+        assert positional is True
+
+    def test_unreadable_test_path_is_not_an_error(self, tmp_path):
+        assert _resolve_canonical_test_ids(tmp_path / "absent.csv", "id") == (None, False)
+        assert _resolve_canonical_test_ids(None, "id") == (None, False)
+
+
+class TestCanonicalPreparationEmitsRowIdentity:
+    """The artifacts components actually read."""
+
+    @staticmethod
+    def _prepare(tmp_path):
+        rows = 40
+        pd.DataFrame(
+            {
+                "Label": [index % 2 for index in range(rows)],
+                "Context": ["2012" for _ in range(rows)],
+                "Body": [f"document {index}" for index in range(rows)],
+            }
+        ).to_csv(tmp_path / "train.csv", index=False)
+        pd.DataFrame(
+            {
+                "Context": ["2013" for _ in range(10)],
+                "Body": [f"held out {index}" for index in range(10)],
+            }
+        ).to_csv(tmp_path / "test.csv", index=False)
+        return prepare_canonical_data(
+            train_path=tmp_path / "train.csv",
+            test_path=tmp_path / "test.csv",
+            target_col="Label",
+            target_cols=["Label"],
+            output_dir=tmp_path / "work",
+            task_type="text_classification",
+        )
+
+    def test_synthetic_identity_is_declared_in_metadata(self, tmp_path):
+        metadata = self._prepare(tmp_path)["metadata"]
+
+        assert metadata["id_col"] == "_row_id"
+        assert metadata["id_is_synthetic"] is True
+        assert metadata["test_ids_are_positional"] is True
+        assert metadata["n_test"] == 10
+
+    def test_test_ids_are_written_and_unique(self, tmp_path):
+        self._prepare(tmp_path)
+
+        test_ids = np.load(
+            tmp_path / "work" / "canonical" / "test_ids.npy", allow_pickle=False
+        )
+
+        assert len(test_ids) == 10
+        assert len(set(test_ids.tolist())) == 10
+
+
+class TestProblemTypeDetection:
+    """Template introspection must survive echoed text columns."""
+
+    @staticmethod
+    def _detector():
+        from kaggle_agents.tools.code_executor.submission import (
+            SubmissionValidationMixin,
+        )
+
+        class _Detector(SubmissionValidationMixin):
+            pass
+
+        return _Detector()
+
+    def test_target_first_template_no_longer_raises(self, tmp_path):
+        # Summing the positional slice here means adding text to integers,
+        # which aborted the whole run at the first submission check.
+        sample = tmp_path / "sample_submission_null.csv"
+        pd.DataFrame(
+            {
+                "Insult": [0, 0],
+                "Date": ["20120618192155Z", "20120618192156Z"],
+                "Comment": ["a", "b"],
+            }
+        ).to_csv(sample, index=False)
+
+        assert self._detector()._detect_problem_type(sample) == "binary"
+
+    def test_conventional_binary_template_is_unchanged(self, tmp_path):
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame({"id": [1, 2], "target": [0, 0]}).to_csv(sample, index=False)
+
+        assert self._detector()._detect_problem_type(sample) == "binary"
+
+    def test_wide_probability_template_is_unchanged(self, tmp_path):
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {"id": [1, 2], "a": [0.5, 0.25], "b": [0.5, 0.75]}
+        ).to_csv(sample, index=False)
+
+        assert self._detector()._detect_problem_type(sample) == "multiclass"
+
+    def test_wide_indicator_template_is_unchanged(self, tmp_path):
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame({"id": [1, 2], "a": [1, 1], "b": [1, 1]}).to_csv(
+            sample, index=False
+        )
+
+        assert self._detector()._detect_problem_type(sample) == "multilabel"
+
+
+class TestSyntheticIdContractPropagation:
+    """The robustness gate must not demand a column that cannot exist."""
+
+    def test_contract_carries_the_synthetic_flag(self):
+        from kaggle_agents.core.state.contracts import CanonicalDataContract
+
+        contract = CanonicalDataContract(
+            canonical_dir="d",
+            train_ids_path="t",
+            y_path="y",
+            folds_path="f",
+            feature_cols_path="fc",
+            metadata_path="m",
+            n_train=10,
+            n_test=5,
+            n_folds=5,
+            id_col="_row_id",
+            target_col="Label",
+            is_classification=True,
+            folds_hash="a",
+            y_hash="b",
+            train_ids_hash="c",
+            train_schema_hash="d",
+            id_is_synthetic=True,
+        )
+
+        assert contract.to_dict()["id_is_synthetic"] is True
+
+    def test_flag_defaults_to_false_for_older_checkpoints(self):
+        from kaggle_agents.core.state.contracts import CanonicalDataContract
+
+        contract = CanonicalDataContract(
+            canonical_dir="d",
+            train_ids_path="t",
+            y_path="y",
+            folds_path="f",
+            feature_cols_path="fc",
+            metadata_path="m",
+            n_train=10,
+            n_test=5,
+            n_folds=5,
+            id_col="id",
+            target_col="Label",
+            is_classification=True,
+            folds_hash="a",
+            y_hash="b",
+            train_ids_hash="c",
+            train_schema_hash="d",
+        )
+
+        assert contract.id_is_synthetic is False

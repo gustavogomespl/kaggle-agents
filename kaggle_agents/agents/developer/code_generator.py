@@ -114,10 +114,14 @@ def save_component_artifacts(
             )
     _train_ids = _np.asarray([str(_v) for _v in _np.asarray(train_ids).reshape(-1)])
     if test_ids is None:
-        raise ValueError(
-            "test_ids is required: the ensemble aligns predictions by semantic "
-            "test ID and refuses positional alignment"
-        )
+        # Fall back to the canonical naming of test rows, which exists even for
+        # competitions whose public test table carries no key of its own.
+        test_ids = globals().get("CANONICAL_TEST_IDS")
+        if test_ids is None:
+            raise ValueError(
+                "test_ids is required: no canonical test IDs were prepared, so "
+                "the ensemble has no way to align predictions to test rows"
+            )
     _test_ids = _np.asarray([str(_v) for _v in _np.asarray(test_ids).reshape(-1)])
 
     if len(_oof) != len(_train_ids):
@@ -1037,6 +1041,11 @@ if _missing_canonical_fields:
     )
 N_FOLDS = int(CANONICAL_METADATA["n_folds"])
 ID_COL = CANONICAL_METADATA["id_col"]
+# When the public data has no identifier column, canonical prep names rows by
+# their position in the original training table. That name exists ONLY in the
+# canonical artifacts - no CSV contains it - so looking it up raises KeyError.
+# Use align_train_to_canonical() instead of indexing by ID_COL directly.
+ID_IS_SYNTHETIC = bool(CANONICAL_METADATA.get("id_is_synthetic", False))
 TARGET_COL = CANONICAL_METADATA["target_col"]
 TARGET_COLS = tuple(CANONICAL_METADATA["target_cols"])
 TARGET_TYPE = str(CANONICAL_METADATA["target_type"])
@@ -1156,8 +1165,71 @@ def iter_canonical_cv_splits():
             raise ValueError(f"Invalid canonical partition for fold {{_fold}}")
         yield _fold, _train_idx, _val_idx
 
+def align_train_to_canonical(df):
+    """Return the training rows in canonical order, one row per canonical ID.
+
+    Use this instead of df.set_index(ID_COL): when ID_IS_SYNTHETIC the public
+    CSVs have no such column and indexing by it raises KeyError.
+
+    Args:
+        df: Training table loaded from TRAIN_PATH (or an engineered copy of it)
+
+    Returns:
+        A new DataFrame whose row i corresponds to CANONICAL_TRAIN_IDS[i],
+        so it lines up with CANONICAL_Y and CANONICAL_FOLDS.
+    """
+    if ID_COL in df.columns:
+        _keyed = df.copy()
+        _keyed[ID_COL] = _keyed[ID_COL].astype(str)
+        if _keyed[ID_COL].duplicated().any():
+            raise ValueError(f"Training ID column {{ID_COL!r}} is not unique")
+        _missing = set(CANONICAL_TRAIN_IDS.tolist()) - set(_keyed[ID_COL])
+        if _missing:
+            raise ValueError(
+                f"Training data is missing {{len(_missing)}} canonical rows"
+            )
+        return _keyed.set_index(ID_COL).loc[CANONICAL_TRAIN_IDS].reset_index()
+
+    if not ID_IS_SYNTHETIC:
+        raise ValueError(
+            f"Training data has no {{ID_COL!r}} column and the canonical IDs are "
+            "not positional; cannot establish canonical row order"
+        )
+
+    # Synthetic IDs are positions in the original training table.
+    _positions = np.asarray([int(_v) for _v in CANONICAL_TRAIN_IDS], dtype=np.int64)
+    if _positions.size and _positions.max() >= len(df):
+        raise ValueError(
+            f"Canonical row {{int(_positions.max())}} is beyond the {{len(df)}} "
+            "rows available; the training table was modified after preparation"
+        )
+    return df.iloc[_positions].reset_index(drop=True)
+
+# Canonical test IDs name every public test row exactly once, so components
+# agree on prediction order even when the competition supplies no test key.
+CANONICAL_TEST_IDS_PATH = CANONICAL_DIR / "test_ids.npy"
+if CANONICAL_TEST_IDS_PATH.is_file():
+    CANONICAL_TEST_IDS = np.asarray(
+        [str(_v) for _v in np.load(CANONICAL_TEST_IDS_PATH, allow_pickle=False)]
+    )
+else:
+    CANONICAL_TEST_IDS = None
+TEST_IDS_ARE_POSITIONAL = bool(
+    CANONICAL_METADATA.get("test_ids_are_positional", False)
+)
+
 CANONICAL_FOLDS_AVAILABLE = True
 print(f"[CANONICAL] Loaded folds.npy: {{len(CANONICAL_FOLDS)}} samples, {{N_FOLDS}} folds")
+if CANONICAL_TEST_IDS is not None:
+    print(
+        f"[CANONICAL] Test IDs available: {{len(CANONICAL_TEST_IDS)}} rows"
+        + (" (row positions)" if TEST_IDS_ARE_POSITIONAL else "")
+    )
+if ID_IS_SYNTHETIC:
+    print(
+        "[CANONICAL] No public ID column: canonical IDs are row positions. "
+        "Align with align_train_to_canonical(df); do not index by ID_COL."
+    )
 # Usage:
 # for fold, train_idx, val_idx in iter_canonical_cv_splits():
 #     train_ids = CANONICAL_TRAIN_IDS[train_idx]

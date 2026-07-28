@@ -66,8 +66,26 @@ class SubmissionValidationMixin:
 
         from kaggle_agents.utils.csv_utils import read_csv_auto
 
+        import pandas as pd
+
         sample_df = read_csv_auto(sample_submission_path)
         pred_cols = sample_df.columns[1:].tolist()
+        numeric_cols = [
+            column
+            for column in pred_cols
+            if pd.api.types.is_numeric_dtype(sample_df[column])
+        ]
+        if not numeric_cols:
+            # The positional slice landed entirely on echoed test input. Fall
+            # back to whichever columns the template actually asks for numbers
+            # in, so a template whose prediction comes first still resolves.
+            pred_cols = [
+                str(column)
+                for column in sample_df.columns
+                if pd.api.types.is_numeric_dtype(sample_df[column])
+            ] or pred_cols
+        else:
+            pred_cols = numeric_cols
 
         if len(pred_cols) == 1:
             # Single column: regression or binary
@@ -79,7 +97,10 @@ class SubmissionValidationMixin:
         # Multiple columns
         # Multilabel: values are 0/1 independent (don't sum to 1)
         # Multiclass: probabilities (sum to ~1)
-        row_sums = sample_df[pred_cols].sum(axis=1)
+        # Templates that echo test input alongside the prediction carry text
+        # columns; summing those raises instead of describing the task.
+        numeric = sample_df[pred_cols].apply(pd.to_numeric, errors="coerce")
+        row_sums = numeric.sum(axis=1)
         if np.allclose(row_sums, 1.0, atol=0.1):
             return "multiclass"
         return "multilabel"

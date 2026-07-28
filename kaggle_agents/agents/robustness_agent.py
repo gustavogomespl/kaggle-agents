@@ -1185,6 +1185,7 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
             )
 
         id_col = contract.get("id_col")
+        id_is_synthetic = bool(contract.get("id_is_synthetic", False))
         target_col = contract.get("target_col")
         raw_target_cols = contract.get("target_cols") or (
             [target_col] if isinstance(target_col, str) else []
@@ -1303,9 +1304,15 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 }
 
             if id_col not in engineered.columns:
-                issues.append(
-                    f"{engineered_path.name} is missing canonical ID column '{id_col}'."
-                )
+                # A synthetic ID names rows by position and lives only in the
+                # canonical artifacts, so demanding it from a CSV can never
+                # pass. Row count, checked above, is the alignment evidence
+                # such a competition actually has.
+                if not id_is_synthetic:
+                    issues.append(
+                        f"{engineered_path.name} is missing canonical ID column "
+                        f"'{id_col}'."
+                    )
             elif expected_ids is not None:
                 actual_ids = normalize_ids(engineered[id_col].tolist())
                 if actual_ids != expected_ids:
