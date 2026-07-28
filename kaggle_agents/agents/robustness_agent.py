@@ -940,10 +940,36 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 issues.append("Submission has fewer than 2 columns")
                 score *= 0.5
 
+            # Only the prediction columns are the model's responsibility.
+            # A template that echoes test input back can legitimately carry
+            # blanks there (an absent timestamp, an empty comment); counting
+            # those makes every correct submission unfixable, because the only
+            # way to "fill" them is to corrupt the columns the grader expects
+            # to receive unchanged.
+            from kaggle_agents.agents.ensemble.submission import (
+                prediction_positions,
+            )
+
+            submission_contract = (state or {}).get("submission_contract") or {}
+            declared_targets = [
+                str(column)
+                for column in (submission_contract.get("target_cols") or [])
+                if isinstance(column, str) and column
+            ]
+            pred_cols = [
+                submission_df.columns[position]
+                for position in prediction_positions(
+                    submission_df, declared_targets
+                )
+            ]
+
             # Check for missing values
-            if submission_df.isnull().any().any():
-                null_count = submission_df.isnull().sum().sum()
-                issues.append(f"Submission contains {null_count} missing values")
+            if submission_df[pred_cols].isnull().any().any():
+                null_count = int(submission_df[pred_cols].isnull().sum().sum())
+                issues.append(
+                    f"Submission contains {null_count} missing predictions in "
+                    f"{pred_cols}"
+                )
                 suggestions.append("Fill missing values before submission")
                 score *= 0.6
 
@@ -952,9 +978,16 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 issues.append("Submission file is empty")
                 score = 0.0
 
-            # Check for duplicate IDs (if first column looks like ID)
-            first_col = submission_df.columns[0]
-            if first_col.lower() in ["id", "index", "idx"]:
+            # Check for duplicate IDs (if a column looks like an ID). Position
+            # does not identify that column: some templates put the prediction
+            # first and the identifier after it.
+            id_candidates = [
+                column
+                for column in submission_df.columns
+                if column not in set(pred_cols)
+                and str(column).lower() in ["id", "index", "idx"]
+            ]
+            for first_col in id_candidates[:1]:
                 if submission_df[first_col].duplicated().any():
                     issues.append("Duplicate IDs found in submission")
                     score *= 0.7

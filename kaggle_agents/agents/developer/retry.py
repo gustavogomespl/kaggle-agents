@@ -27,8 +27,13 @@ from ...prompts.templates.developer_prompts import (
     HARD_CONSTRAINTS,
     format_error_info,
 )
+from ...tools.code_executor.dataclasses import ExecutionResult
 from ...utils.llm_utils import get_text_content, invoke_with_retry
 from ..planner.sota_analysis import sanitize_external_fact_for_prompt
+from .code_contracts import (
+    SUBMISSION_CONTRACT_ERROR,
+    handwritten_submission_write,
+)
 from .code_generator import get_dynamic_temperature
 
 
@@ -36,7 +41,7 @@ if TYPE_CHECKING:
     from langchain_core.language_models import BaseChatModel
 
     from ...optimization import PreferenceCollector
-    from ...tools.code_executor import CodeExecutor, ExecutionResult
+    from ...tools.code_executor import CodeExecutor
 
 _CATEGORICAL_ENCODING_HINT = (
     "\n\n## Encoding Hint (auto-detected from error):\n"
@@ -63,6 +68,20 @@ _MISSING_ARTIFACT_HINT = (
     "ID arrays as plain strings — "
     "np.save(path, np.asarray([str(v) for v in ids]), allow_pickle=False) — "
     "because object-dtype arrays cannot be saved with allow_pickle=False."
+)
+
+_SUBMISSION_CONTRACT_PATTERN = "must be written with write_submission"
+
+_SUBMISSION_CONTRACT_HINT = (
+    "\n\n## Submission Hint (auto-detected from error):\n"
+    "Replace the hand-written submission block with a single call to the "
+    "injected helper: write_submission(test_preds), or "
+    "write_submission(test_preds, test_ids=test_ids) when your predictions are "
+    "not already in template row order. Do NOT read sample_submission and "
+    "assign by column position: this competition's template can put the "
+    "prediction first and echo the test input after it, so columns[1] may be "
+    "an input column. Writing there produces a file that looks valid and "
+    "scores nothing, because the graded column keeps its placeholder."
 )
 
 
@@ -764,6 +783,10 @@ Output Dir: {paths.get('output_dir', '.')}"""
             meta_feedback = (meta_feedback or "") + _MISSING_ARTIFACT_HINT
             print("   📦 Injected missing-artifact hint into debug context")
 
+        if _SUBMISSION_CONTRACT_PATTERN in initial_errors.lower():
+            meta_feedback = (meta_feedback or "") + _SUBMISSION_CONTRACT_HINT
+            print("   📄 Injected submission-contract hint into debug context")
+
         # Get debug temperature (higher for creative problem-solving)
         debug_temperature = get_dynamic_temperature(
             context="debug",
@@ -839,8 +862,36 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 return code, exec_result, False
             debugged_code = self._extract_code_from_response(get_text_content(response.content))
 
-            # Same artifact contract as the main attempts: a debug "success"
-            # that skips required artifacts only dies later at promotion.
+            # Same contracts as the main attempts. Enforcing the artifact one
+            # through expected_artifacts was not enough: the submission
+            # contract had no equivalent here, so a debug "success" wrote its
+            # predictions into an input column, trained for real, and was
+            # rejected afterwards - which is how a run lost models at 0.90 AUC
+            # while keeping a weaker one that happened to get it right.
+            hand_written = (
+                handwritten_submission_write(debugged_code)
+                if component_type == "model"
+                else None
+            )
+            if hand_written:
+                print(
+                    f"   Debug iteration writes the submission by hand "
+                    f"({hand_written}); rejecting before training"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[SUBMISSION_CONTRACT_ERROR],
+                )
+                if _SUBMISSION_CONTRACT_HINT not in (meta_feedback or ""):
+                    meta_feedback = (meta_feedback or "") + _SUBMISSION_CONTRACT_HINT
+                code = debugged_code
+                continue
+
             test_result = self.executor.execute(
                 debugged_code,
                 working_dir,

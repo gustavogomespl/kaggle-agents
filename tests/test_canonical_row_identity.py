@@ -621,3 +621,134 @@ class TestHandwrittenSubmissionCheck:
 
     def test_unparseable_code_is_not_a_finding(self):
         assert self._check("def broken(:\n") is None
+
+
+class TestFormatGateCountsOnlyPredictions:
+    """The robustness gate that blocked grading on an accepted submission."""
+
+    @staticmethod
+    def _validate(tmp_path, submission, state):
+        from types import SimpleNamespace
+
+        from kaggle_agents.agents.robustness_agent import RobustnessAgent
+
+        submission.to_csv(tmp_path / "submission.csv", index=False)
+        agent = RobustnessAgent.__new__(RobustnessAgent)
+        result = SimpleNamespace(artifacts_created=["submission.csv"])
+        return RobustnessAgent._validate_format(agent, result, tmp_path, state)
+
+    def test_blank_echoed_column_does_not_fail_the_gate(self, tmp_path):
+        # The template itself ships blanks in Date; returning them unchanged is
+        # correct, and there is no way to "fill" them without corrupting the
+        # column the grader expects back verbatim.
+        submission = pd.DataFrame(
+            {
+                "Insult": [0.1, 0.8, 0.4],
+                "Date": ["20120618192155Z", None, "20120618192157Z"],
+                "Comment": ["a", "b", "c"],
+            }
+        )
+
+        result = self._validate(
+            tmp_path, submission, {"submission_contract": {"target_cols": ["Insult"]}}
+        )
+
+        assert result.passed, result.issues
+        assert result.score == 1.0
+
+    def test_missing_predictions_still_fail_the_gate(self, tmp_path):
+        submission = pd.DataFrame(
+            {
+                "Insult": [0.1, np.nan, 0.4],
+                "Date": ["a", "b", "c"],
+                "Comment": ["x", "y", "z"],
+            }
+        )
+
+        result = self._validate(
+            tmp_path, submission, {"submission_contract": {"target_cols": ["Insult"]}}
+        )
+
+        assert not result.passed
+        assert any("missing predictions" in issue for issue in result.issues)
+
+    def test_conventional_template_is_unaffected(self, tmp_path):
+        submission = pd.DataFrame({"id": [1, 2], "target": [0.3, 0.7]})
+
+        result = self._validate(tmp_path, submission, {})
+
+        assert result.passed, result.issues
+
+    def test_duplicate_ids_are_still_caught(self, tmp_path):
+        submission = pd.DataFrame({"id": [1, 1], "target": [0.3, 0.7]})
+
+        result = self._validate(tmp_path, submission, {})
+
+        assert any("Duplicate IDs" in issue for issue in result.issues)
+
+    def test_prediction_column_is_never_read_as_an_id(self, tmp_path):
+        # 'Insult' holds probabilities; duplicates there are not duplicate IDs.
+        submission = pd.DataFrame({"Insult": [0.5, 0.5], "id": [1, 2]})
+
+        result = self._validate(
+            tmp_path, submission, {"submission_contract": {"target_cols": ["Insult"]}}
+        )
+
+        assert not any("Duplicate IDs" in issue for issue in result.issues)
+
+
+class TestOofArtifactDigest:
+    """Telling new evidence apart from the previous program's evidence."""
+
+    @staticmethod
+    def _digest(tmp_path, name):
+        from kaggle_agents.agents.developer.agent import _oof_artifact_digest
+
+        return _oof_artifact_digest(tmp_path, name)
+
+    def test_absent_artifact_has_no_digest(self, tmp_path):
+        assert self._digest(tmp_path, "demo") is None
+
+    def test_digest_changes_when_the_file_changes(self, tmp_path):
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "oof_demo.npy", np.zeros(4))
+        before = self._digest(tmp_path, "demo")
+
+        np.save(models / "oof_demo.npy", np.ones(4))
+
+        assert before is not None
+        assert self._digest(tmp_path, "demo") != before
+
+    def test_digest_is_stable_for_identical_content(self, tmp_path):
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "oof_demo.npy", np.zeros(4))
+
+        assert self._digest(tmp_path, "demo") == self._digest(tmp_path, "demo")
+
+
+class TestDebugLoopEnforcesTheSubmissionContract:
+    """The debug path is where the contract used to be lost."""
+
+    def test_debug_rejects_handwritten_submissions_before_executing(self):
+        import inspect
+
+        from kaggle_agents.agents.developer import retry
+
+        source = inspect.getsource(retry.RetryMixin)
+        marker = source.index("handwritten_submission_write(debugged_code)")
+        execution = source.index("self.executor.execute(\n                debugged_code")
+
+        # The check must precede the execution it is meant to prevent.
+        assert marker < execution
+
+    def test_submission_hint_is_injected_from_the_contract_error(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            SUBMISSION_CONTRACT_ERROR,
+        )
+        from kaggle_agents.agents.developer.retry import (
+            _SUBMISSION_CONTRACT_PATTERN,
+        )
+
+        assert _SUBMISSION_CONTRACT_PATTERN in SUBMISSION_CONTRACT_ERROR.lower()

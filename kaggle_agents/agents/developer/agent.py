@@ -64,58 +64,26 @@ from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin, quarantine_component_artifacts
 
 
-# Injected into every model script by the code generator; one call writes all
-# four evidence artifacts under the correct component name.
-_ARTIFACT_HELPER = "save_component_artifacts"
+from .code_contracts import (
+    ARTIFACT_HELPER as _ARTIFACT_HELPER,
+    SUBMISSION_CONTRACT_ERROR,
+    SUBMISSION_HELPER as _SUBMISSION_HELPER,
+    handwritten_submission_write,
+)
 
-# Also injected into every model script; fills the template's prediction
-# columns without the caller having to identify them.
-_SUBMISSION_HELPER = "write_submission"
 
+def _oof_artifact_digest(working_dir: Path, component_name: str) -> str | None:
+    """Content digest of a component's OOF file, or None when it is absent.
 
-def handwritten_submission_write(code: str) -> str | None:
-    """Report a submission written by hand instead of through the helper.
-
-    Generated code reaches for ``sample_sub[sample_sub.columns[1]] = preds``,
-    which on a template whose first column is the prediction writes the model's
-    output into an input column and leaves the graded column holding its
-    placeholder. The result is structurally valid and scores nothing, and it is
-    only caught after training has already been paid for.
-
-    Reading is conservative: an unparseable program, or one that writes no
-    submission at all, yields no finding.
-
-    Returns:
-        The offending expression, or None when the contract is satisfied.
+    Used to tell "this program produced new evidence" apart from "this program
+    left the previous program's evidence in place", which the trusted scorer
+    cannot distinguish on its own.
     """
+    path = Path(working_dir) / "models" / f"oof_{component_name}.npy"
     try:
-        tree = ast.parse(code)
-    except SyntaxError:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
         return None
-
-    helper_body_nodes = {
-        id(sub)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == _SUBMISSION_HELPER
-        for sub in ast.walk(node)
-    }
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and getattr(node.func, "id", "") == _SUBMISSION_HELPER
-            and id(node) not in helper_body_nodes
-        ):
-            return None
-
-    for node in ast.walk(tree):
-        if id(node) in helper_body_nodes or not isinstance(node, ast.Call):
-            continue
-        if getattr(node.func, "attr", "") != "to_csv" or not node.args:
-            continue
-        destination = ast.unparse(node.args[0])
-        if "SUBMISSION_PATH" in destination or "submission.csv" in destination:
-            return destination
-    return None
 
 
 def unsaved_expected_artifacts(
@@ -1892,6 +1860,12 @@ Based on the training results above, improve the model to achieve a {desired_dir
                             self.executor.timeout,
                             reserve_s=FINALIZATION_RESERVE_S,
                         )
+                        # A refinement that never rewrites its OOF file is
+                        # scored on the accepted model's artifacts, so the gate
+                        # compares the incumbent against itself and can neither
+                        # accept a real gain nor notice a regression. Remember
+                        # the evidence it must replace.
+                        oof_before = _oof_artifact_digest(working_dir, component.name)
                         try:
                             refined_exec = self.executor.execute(
                                 refined_code,
@@ -1969,11 +1943,22 @@ Based on the training results above, improve the model to achieve a {desired_dir
                                             "Refined submission validation failed: "
                                             f"{format_message}"
                                         )
+                                oof_after = _oof_artifact_digest(
+                                    working_dir, component.name
+                                )
                                 if not refined_validation.is_valid or not format_valid:
                                     refined_score = None
                                     print(
                                         "Refined candidate failed fail-closed artifact "
                                         "validation"
+                                    )
+                                elif oof_after is not None and oof_after == oof_before:
+                                    refined_score = None
+                                    print(
+                                        "Refined candidate left oof_"
+                                        f"{component.name}.npy untouched; the trusted "
+                                        "score would describe the accepted model, not "
+                                        "this one"
                                     )
                                 else:
                                     refined_score = self._compute_trusted_oof_score(
@@ -2598,12 +2583,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     execution_time=0.0,
                     exit_code=-1,
                     artifacts_created=[],
-                    errors=[
-                        "Submission must be written with "
-                        f"{_SUBMISSION_HELPER}(test_preds): picking submission "
-                        "columns by position writes predictions into an input "
-                        "column and leaves the graded column unfilled"
-                    ],
+                    errors=[SUBMISSION_CONTRACT_ERROR],
                 )
             else:
                 exec_result = self.executor.execute(
