@@ -419,6 +419,24 @@ class TestSubmissionFormatValidation:
         assert not is_valid
         assert "WRONG ORDER" in message
 
+    def test_overwritten_echo_column_names_the_real_mistake(self, tmp_path):
+        # Predictions written into an input column: the message must point at
+        # the graded column, not read as an ID alignment bug.
+        sample = self._template(tmp_path)
+        submission = tmp_path / "submission.csv"
+        filled = pd.read_csv(sample)
+        filled[filled.columns[1]] = [0.1, 0.8, 0.4]
+        filled.to_csv(submission, index=False)
+
+        is_valid, message = self._validator().validate_submission_format(
+            submission, sample, component_type="model", target_cols=["Insult"]
+        )
+
+        assert not is_valid
+        assert "'Date'" in message
+        assert "['Insult']" in message
+        assert "write_submission" in message
+
     def test_nan_predictions_are_still_rejected(self, tmp_path):
         sample = self._template(tmp_path)
         submission = tmp_path / "submission.csv"
@@ -461,3 +479,145 @@ class TestSubmissionFormatValidation:
 
         assert not is_valid
         assert "WRONG ORDER" in message
+
+
+class TestWriteSubmissionHelper:
+    """The last place a component had to guess column semantics."""
+
+    @staticmethod
+    def _namespace(tmp_path, target_cols):
+        from kaggle_agents.agents.developer.code_generator import _SUBMISSION_HELPER
+
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {
+                "Insult": [0, 0, 0],
+                "Date": ["20120618192155Z", "20120618192156Z", "20120618192157Z"],
+                "Comment": ["a", "b", "c"],
+            }
+        ).to_csv(sample, index=False)
+        namespace = {
+            "SAMPLE_SUBMISSION_PATH": sample,
+            "SUBMISSION_PATH": tmp_path / "submission.csv",
+            "SUBMISSION_TARGET_COLS": target_cols,
+        }
+        exec(  # noqa: S102 - executing our own shipped header text is the point
+            compile(_SUBMISSION_HELPER, "<helper>", "exec"), namespace
+        )
+        return namespace
+
+    def test_predictions_land_in_the_graded_column(self, tmp_path):
+        namespace = self._namespace(tmp_path, ["Insult"])
+
+        namespace["write_submission"](np.array([0.1, 0.8, 0.4]))
+
+        written = pd.read_csv(tmp_path / "submission.csv")
+        assert written["Insult"].tolist() == [0.1, 0.8, 0.4]
+
+    def test_echoed_columns_are_returned_untouched(self, tmp_path):
+        namespace = self._namespace(tmp_path, ["Insult"])
+
+        namespace["write_submission"](np.array([0.1, 0.8, 0.4]))
+
+        written = pd.read_csv(tmp_path / "submission.csv")
+        sample = pd.read_csv(namespace["SAMPLE_SUBMISSION_PATH"])
+        assert written.columns.tolist() == sample.columns.tolist()
+        assert written["Date"].tolist() == sample["Date"].tolist()
+        assert written["Comment"].tolist() == sample["Comment"].tolist()
+
+    def test_test_ids_reorder_predictions_to_template_order(self, tmp_path):
+        namespace = self._namespace(tmp_path, ["Insult"])
+
+        namespace["write_submission"](
+            np.array([0.4, 0.1, 0.8]),
+            test_ids=["20120618192157Z", "20120618192155Z", "20120618192156Z"],
+        )
+
+        written = pd.read_csv(tmp_path / "submission.csv")
+        assert written["Insult"].tolist() == [0.1, 0.8, 0.4]
+
+    def test_row_count_mismatch_is_rejected(self, tmp_path):
+        namespace = self._namespace(tmp_path, ["Insult"])
+
+        with pytest.raises(ValueError, match="2 rows but the template has 3"):
+            namespace["write_submission"](np.array([0.1, 0.8]))
+
+    def test_column_count_mismatch_is_rejected(self, tmp_path):
+        namespace = self._namespace(tmp_path, ["Insult"])
+
+        with pytest.raises(ValueError, match="expects 1 prediction column"):
+            namespace["write_submission"](np.zeros((3, 2)))
+
+    def test_without_a_contract_it_keeps_the_positional_convention(self, tmp_path):
+        # Conventional templates must behave exactly as before.
+        from kaggle_agents.agents.developer.code_generator import _SUBMISSION_HELPER
+
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame({"id": [1, 2], "target": [0, 0]}).to_csv(sample, index=False)
+        namespace = {
+            "SAMPLE_SUBMISSION_PATH": sample,
+            "SUBMISSION_PATH": tmp_path / "submission.csv",
+            "SUBMISSION_TARGET_COLS": [],
+        }
+        exec(compile(_SUBMISSION_HELPER, "<helper>", "exec"), namespace)  # noqa: S102
+
+        namespace["write_submission"](np.array([0.3, 0.7]))
+
+        written = pd.read_csv(tmp_path / "submission.csv")
+        assert written["id"].tolist() == [1, 2]
+        assert written["target"].tolist() == [0.3, 0.7]
+
+
+class TestHandwrittenSubmissionCheck:
+    """The contract check that keeps the guess from reaching training."""
+
+    @staticmethod
+    def _check(code):
+        from kaggle_agents.agents.developer.agent import handwritten_submission_write
+
+        return handwritten_submission_write(code)
+
+    def test_positional_assignment_is_reported(self):
+        code = (
+            "sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)\n"
+            "target_col = sample_sub.columns[1]\n"
+            "sample_sub[target_col] = test_preds\n"
+            "sample_sub.to_csv(SUBMISSION_PATH, index=False)\n"
+        )
+
+        assert self._check(code) == "SUBMISSION_PATH"
+
+    def test_literal_submission_path_is_reported(self):
+        code = "sub.to_csv(OUTPUT_DIR / 'submission.csv', index=False)\n"
+
+        assert self._check(code) is not None
+
+    def test_calling_the_helper_satisfies_the_contract(self):
+        code = "write_submission(test_preds)\n"
+
+        assert self._check(code) is None
+
+    def test_helper_definition_alone_does_not_satisfy_it(self):
+        # The helper body is injected into every model script, so its own
+        # to_csv proves nothing about the generated program.
+        code = (
+            "def write_submission(test_preds, test_ids=None):\n"
+            "    _sample.to_csv(SUBMISSION_PATH, index=False)\n"
+            "\n"
+            "sub.to_csv(SUBMISSION_PATH, index=False)\n"
+        )
+
+        assert self._check(code) == "SUBMISSION_PATH"
+
+    def test_writing_no_submission_is_not_a_finding(self):
+        code = "np.save(MODELS_DIR / 'oof_x.npy', oof)\n"
+
+        assert self._check(code) is None
+
+    def test_unrelated_csv_writes_are_ignored(self):
+        code = "features.to_csv(OUTPUT_DIR / 'train_engineered.csv', index=False)\n"
+
+        assert self._check(code) is None
+
+    def test_unparseable_code_is_not_a_finding(self):
+        assert self._check("def broken(:\n") is None

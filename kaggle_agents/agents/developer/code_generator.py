@@ -77,6 +77,79 @@ IMMUTABLE_PATH_VARS = [
 # over the injected COMPONENT_NAME, so rebinding that name can no longer
 # misdirect the artifacts either. This follows the header's existing pattern of
 # shipping helpers (smart_locate_file, iter_canonical_cv_splits).
+# Choosing submission columns by position is the other half of the same
+# mistake. A template whose first column is the prediction and whose remaining
+# columns echo the test input makes `sample_sub[sample_sub.columns[1]] = preds`
+# write the model's output into an input column while the graded column keeps
+# its placeholder - a structurally valid file that scores nothing. Generated
+# code reached for that idiom in every component of a smoke run, discarding
+# models that had already reached 0.88 AUC.
+_SUBMISSION_HELPER = '''
+# === SUBMISSION (MANDATORY - the only supported way to write submission.csv) ===
+def write_submission(test_preds, test_ids=None):
+    """Fill the competition's template with predictions and save submission.csv.
+
+    Writes into the resolved prediction column(s) and leaves every other column
+    exactly as the template supplies it. Do NOT pick submission columns by
+    position: this competition's template may put the prediction first, so
+    columns[1] can be an input column that the grader ignores.
+
+    Args:
+        test_preds: Predictions, one row per test entity; shape (n,) or (n, k)
+            with k the number of prediction columns in the template.
+        test_ids: Optional IDs in test_preds order. When the template carries a
+            matching identifier, rows are reordered into template order.
+    """
+    import numpy as _np
+    import pandas as _pd
+
+    _sample = _pd.read_csv(SAMPLE_SUBMISSION_PATH)
+    _columns = [str(_c) for _c in _sample.columns]
+    _declared = [str(_c) for _c in SUBMISSION_TARGET_COLS if str(_c) in _columns]
+    _pred_cols = _declared or _columns[1:]
+    if not _pred_cols:
+        raise ValueError("Submission template has no prediction column")
+
+    _preds = _np.asarray(test_preds)
+    if _preds.ndim == 1:
+        _preds = _preds.reshape(-1, 1)
+    if _preds.ndim != 2 or _preds.shape[1] != len(_pred_cols):
+        raise ValueError(
+            f"Predictions have shape {_preds.shape} but the template expects "
+            f"{len(_pred_cols)} prediction column(s): {_pred_cols}"
+        )
+    if len(_preds) != len(_sample):
+        raise ValueError(
+            f"Predictions have {len(_preds)} rows but the template has "
+            f"{len(_sample)}"
+        )
+
+    if test_ids is not None:
+        _ids = [str(_v) for _v in _np.asarray(test_ids).reshape(-1)]
+        if len(_ids) != len(_preds):
+            raise ValueError("Need exactly one test ID per prediction row")
+        _echo = [_c for _c in _columns if _c not in set(_pred_cols)]
+        _key = None
+        for _candidate in _echo:
+            _values = _sample[_candidate].astype(str)
+            if not _values.duplicated().any() and set(_values) == set(_ids):
+                _key = _candidate
+                break
+        if _key is not None:
+            _order = {_v: _i for _i, _v in enumerate(_ids)}
+            _preds = _preds[[_order[_v] for _v in _sample[_key].astype(str)]]
+
+    for _offset, _column in enumerate(_pred_cols):
+        _sample[_column] = _preds[:, _offset]
+    SUBMISSION_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _sample.to_csv(SUBMISSION_PATH, index=False)
+    print(
+        f"[LOG:INFO] Wrote submission.csv: {len(_sample)} rows, "
+        f"predictions in {_pred_cols}"
+    )
+'''
+
+
 _EVIDENCE_ARTIFACT_HELPER = '''
 # === EVIDENCE ARTIFACTS (MANDATORY - call this exactly once, at the end) ===
 def save_component_artifacts(
@@ -1731,6 +1804,23 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
         path_header += _build_submission_format_header(submission_format)
 
         if component.component_type == "model":
+            submission_target_cols = [
+                str(column)
+                for column in (
+                    (state.get("submission_contract") or {}).get("target_cols")
+                    if state
+                    else None
+                )
+                or []
+                if isinstance(column, str) and column
+            ]
+            path_header += (
+                "\n# Prediction columns resolved from the public template. Empty "
+                "means\n# the roles could not be resolved; the helper then falls "
+                "back to position.\n"
+                f"SUBMISSION_TARGET_COLS = {submission_target_cols!r}\n"
+            )
+            path_header += _SUBMISSION_HELPER
             path_header += _EVIDENCE_ARTIFACT_HELPER
 
         path_header += "\n# === END PATH CONSTANTS ===\n"

@@ -315,19 +315,30 @@ class TestEvidenceArtifactHelper:
         assert f"models/oof_{COMPONENT}.npy" not in missing
 
     def test_helper_is_only_injected_for_model_components(self):
-        from kaggle_agents.agents.developer.code_generator import (
-            _EVIDENCE_ARTIFACT_HELPER,
-        )
-
-        # Guard against the helper leaking into preprocessing/ensemble headers,
-        # where MODELS_DIR/COMPONENT_NAME semantics differ.
+        # Guard against the helpers leaking into preprocessing/ensemble headers,
+        # where MODELS_DIR/COMPONENT_NAME semantics differ. Read the guard from
+        # the syntax tree rather than a text window, so unrelated edits between
+        # the branch and the injection cannot silently disable this check.
+        import ast
         from pathlib import Path
 
         source = Path(
             "kaggle_agents/agents/developer/code_generator.py"
         ).read_text(encoding="utf-8")
-        injection = source.index("_EVIDENCE_ARTIFACT_HELPER\n", source.index("path_header +="))
-        window = source[max(0, injection - 200) : injection]
+        tree = ast.parse(source)
 
-        assert 'component_type == "model"' in window
-        assert _EVIDENCE_ARTIFACT_HELPER
+        guarded: set[str] = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.If):
+                continue
+            if 'component_type == "model"' not in ast.unparse(node.test).replace(
+                "'", '"'
+            ):
+                continue
+            for statement in node.body:
+                for sub in ast.walk(statement):
+                    if isinstance(sub, ast.Name):
+                        guarded.add(sub.id)
+
+        assert "_EVIDENCE_ARTIFACT_HELPER" in guarded
+        assert "_SUBMISSION_HELPER" in guarded

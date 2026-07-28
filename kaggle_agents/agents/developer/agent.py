@@ -68,6 +68,55 @@ from .validation import ValidationMixin, quarantine_component_artifacts
 # four evidence artifacts under the correct component name.
 _ARTIFACT_HELPER = "save_component_artifacts"
 
+# Also injected into every model script; fills the template's prediction
+# columns without the caller having to identify them.
+_SUBMISSION_HELPER = "write_submission"
+
+
+def handwritten_submission_write(code: str) -> str | None:
+    """Report a submission written by hand instead of through the helper.
+
+    Generated code reaches for ``sample_sub[sample_sub.columns[1]] = preds``,
+    which on a template whose first column is the prediction writes the model's
+    output into an input column and leaves the graded column holding its
+    placeholder. The result is structurally valid and scores nothing, and it is
+    only caught after training has already been paid for.
+
+    Reading is conservative: an unparseable program, or one that writes no
+    submission at all, yields no finding.
+
+    Returns:
+        The offending expression, or None when the contract is satisfied.
+    """
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+
+    helper_body_nodes = {
+        id(sub)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef) and node.name == _SUBMISSION_HELPER
+        for sub in ast.walk(node)
+    }
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and getattr(node.func, "id", "") == _SUBMISSION_HELPER
+            and id(node) not in helper_body_nodes
+        ):
+            return None
+
+    for node in ast.walk(tree):
+        if id(node) in helper_body_nodes or not isinstance(node, ast.Call):
+            continue
+        if getattr(node.func, "attr", "") != "to_csv" or not node.args:
+            continue
+        destination = ast.unparse(node.args[0])
+        if "SUBMISSION_PATH" in destination or "submission.csv" in destination:
+            return destination
+    return None
+
 
 def unsaved_expected_artifacts(
     code: str,
@@ -2516,6 +2565,11 @@ Based on the training results above, improve the model to achieve a {desired_dir
             unsaved = unsaved_expected_artifacts(
                 code, expected_artifacts, component.name
             )
+            hand_written = (
+                handwritten_submission_write(code)
+                if component.component_type == "model"
+                else None
+            )
             if unsaved:
                 print(
                     "   Skipping execution: code never saves "
@@ -2530,6 +2584,26 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     exit_code=-1,
                     artifacts_created=[],
                     errors=[f"Missing expected artifacts: {', '.join(unsaved)}"],
+                )
+            elif hand_written:
+                print(
+                    f"   Skipping execution: writes the submission by hand "
+                    f"({hand_written}) instead of calling {_SUBMISSION_HELPER}() "
+                    "(contract check before training)"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[
+                        "Submission must be written with "
+                        f"{_SUBMISSION_HELPER}(test_preds): picking submission "
+                        "columns by position writes predictions into an input "
+                        "column and leaves the graded column unfilled"
+                    ],
                 )
             else:
                 exec_result = self.executor.execute(

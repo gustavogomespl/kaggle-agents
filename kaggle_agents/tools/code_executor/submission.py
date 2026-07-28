@@ -192,8 +192,18 @@ class SubmissionValidationMixin:
         for id_col in echo_cols[:1]:
             if not sub_df[id_col].equals(sample_df[id_col]):
                 if set(sub_df[id_col]) == set(sample_df[id_col]):
-                    return False, "ID values present but in WRONG ORDER"
-                return False, "ID column values don't match sample_submission"
+                    return False, f"'{id_col}' values present but in WRONG ORDER"
+                # Overwriting an echoed column is what happens when prediction
+                # columns are picked by position; say so, because "IDs don't
+                # match" reads like an alignment bug and sends the repair loop
+                # after the wrong thing.
+                return False, (
+                    f"'{id_col}' does not match sample_submission. This column "
+                    f"is supplied by the template and must be returned "
+                    f"unchanged; predictions belong in {pred_cols}. Write the "
+                    f"submission with write_submission(test_preds) instead of "
+                    f"choosing columns by position."
+                )
 
         # Check 4: No NaN values in prediction columns
         nan_cols = sub_df[pred_cols].isna().any()

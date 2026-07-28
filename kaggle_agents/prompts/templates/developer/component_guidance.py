@@ -57,36 +57,14 @@ COMPONENT_GUIDANCE = {
       # RUN_SEED. Never fabricate a validation score.
       pass
 
-  def write_submission(
-      sample_submission_path,
-      submission_id_col,
-      prediction_cols,
-      predictions,
-  ):
-      # Pass submission_id_col/prediction_cols as literal values copied from
-      # the injected submission_format_info. Do not derive them by position.
-      sample_sub = pd.read_csv(sample_submission_path)
-      prediction_cols = list(prediction_cols)
-      required_cols = [submission_id_col, *prediction_cols]
-      if not prediction_cols or any(
-          col not in sample_sub.columns for col in required_cols
-      ):
-          raise ValueError("Injected submission roles do not match template")
-      values = np.asarray(predictions)
-      if values.shape[0] != len(sample_sub):
-          raise ValueError("Prediction rows do not match sample_submission")
-      if len(prediction_cols) == 1:
-          if values.ndim == 2 and values.shape[1] == 1:
-              values = values[:, 0]
-          if values.ndim != 1:
-              raise ValueError("Single-output template requires one prediction per row")
-          sample_sub[prediction_cols[0]] = values
-      else:
-          if values.ndim != 2 or values.shape[1] != len(prediction_cols):
-              raise ValueError("Wide template requires one prediction per output column")
-          sample_sub.loc[:, prediction_cols] = values
-      sample_sub.to_csv("submission.csv", index=False)
+  # Write the submission with the injected helper. It fills the template's
+  # prediction column(s) and leaves every other column exactly as supplied:
+  write_submission(test_preds)                    # or write_submission(test_preds, test_ids=test_ids)
   ```
+  NEVER assemble the submission by hand. `sample_sub[sample_sub.columns[1]] = preds`
+  looks right and is wrong here: a template may put the prediction first and echo
+  the test input after it, so column 1 can be an input column. Writing there
+  produces a valid-looking file whose graded column still holds the placeholder.
 - ALWAYS print "Final Validation Performance: {score}" (a REAL computed score,
   never a fabricated one) even if stopped early due to deadline
 - SAVE PyTorch checkpoints with TorchScript for ensemble compatibility (see HARD_CONSTRAINTS #10):
