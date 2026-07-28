@@ -29,6 +29,7 @@ from .target_inference import (
     TargetInferenceError,
     TargetType,
     infer_target_type_from_train,
+    split_submission_schema,
 )
 
 
@@ -607,6 +608,27 @@ def validate_schema_parity(
     return sorted(common_str), sorted(missing_str)
 
 
+def _supplied_test_columns(test_path: str | Path | None) -> set[str]:
+    """Return public test columns that actually carry values.
+
+    A column the test set provides is model input, not a prediction. Columns
+    present but entirely empty are placeholders and carry no such evidence, so
+    they are excluded to keep templates that ship a blank target column from
+    being read as already-answered.
+    """
+    if not test_path:
+        return set()
+    try:
+        sample = pd.read_csv(Path(test_path), nrows=1000)
+    except Exception:
+        return set()
+    return {
+        str(column)
+        for column in sample.columns
+        if bool(sample[column].notna().any())
+    }
+
+
 def _resolve_supervised_target_contract(
     train_df: pd.DataFrame,
     test_path: Path,
@@ -622,7 +644,15 @@ def _resolve_supervised_target_contract(
     train_columns = [str(column) for column in train_df.columns]
     train_set = set(train_columns)
     sample_columns = _read_sample_submission_columns(sample_submission)
-    sample_targets = sample_columns[1:] if len(sample_columns) > 1 else []
+    # Columns the public test set supplies are inputs echoed back by the
+    # template, never predictions.
+    public_test_columns = _supplied_test_columns(test_path)
+    sample_targets: list[str] = []
+    if len(sample_columns) > 1:
+        _, sample_targets = split_submission_schema(
+            sample_columns,
+            public_test_columns,
+        )
 
     contract_targets: list[str] = []
     if column_contract:
@@ -640,6 +670,18 @@ def _resolve_supervised_target_contract(
     ]
     if len(declared_targets) != len(set(declared_targets)):
         raise TargetInferenceError("Declared target_cols contain duplicates")
+
+    # An upstream contract that names a supplied test column as a target was
+    # resolved positionally and is wrong. Drop those names so resolution falls
+    # through to schema evidence instead of scoring an input column.
+    if public_test_columns:
+        declared_targets = [
+            column
+            for column in declared_targets
+            if column not in public_test_columns
+        ]
+        if target_col and str(target_col) in public_test_columns:
+            target_col = None
 
     resolved_targets: list[str] = []
     if (
@@ -664,7 +706,11 @@ def _resolve_supervised_target_contract(
             "target_col",
             "output_col",
         )
-        if contract_target and contract_target in train_set:
+        if (
+            contract_target
+            and contract_target in train_set
+            and contract_target not in public_test_columns
+        ):
             resolved_targets = [contract_target]
 
     if not resolved_targets:

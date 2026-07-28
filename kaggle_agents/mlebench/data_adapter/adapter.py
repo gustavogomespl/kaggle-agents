@@ -225,22 +225,29 @@ class MLEBenchDataAdapter(
         )
         if sample_sub:
             info.sample_submission_path = sample_sub
-            info.target_columns = self._detect_target_columns(sample_sub)
-            info.target_column = info.target_columns[0]
-            info.id_column = self._detect_id_column(sample_sub)
             print(f"   Sample submission: {sample_sub.name}")
-            print(f"   Target column: {info.target_column}")
-            if len(info.target_columns) > 1:
-                print(
-                    "   Ordered submission targets: "
-                    f"{info.target_columns}"
-                )
 
         # Find train data - check both directories and CSVs regardless of data_type
         info = self._find_train_data(info, public_dir, data_type)
 
         # Find test data
         info = self._find_test_data(info, public_dir, data_type)
+
+        # Submission roles are resolved only once the public test schema is
+        # known: position alone misreads templates whose first column is the
+        # prediction and whose remaining columns echo the test input.
+        if sample_sub:
+            info.target_columns = self._detect_target_columns(
+                sample_sub, info.test_csv_path
+            )
+            info.target_column = info.target_columns[0]
+            info.id_column = self._detect_id_column(sample_sub, info.test_csv_path)
+            print(f"   Target column: {info.target_column}")
+            if len(info.target_columns) > 1:
+                print(
+                    "   Ordered submission targets: "
+                    f"{info.target_columns}"
+                )
 
         # Debug: list all files found
         all_files = list(public_dir.glob("*"))

@@ -11,6 +11,36 @@ from ...utils.submission_artifacts import sha256_file
 from .postprocessing import labels_from_oof_tuning
 
 
+def prediction_positions(
+    sample_sub: pd.DataFrame,
+    target_cols: list[str] | None = None,
+) -> list[int]:
+    """Return the template positions the model is expected to fill.
+
+    Templates that echo test input back to the grader, or that place the
+    prediction before its context columns, break the ``columns[1:]``
+    convention: predictions would be written over input columns while the
+    graded column keeps its placeholder value. The resolved submission
+    contract is authoritative whenever it names columns actually present.
+
+    Args:
+        sample_sub: The submission template
+        target_cols: Resolved prediction column names, when known
+
+    Returns:
+        Ordered positional indices into ``sample_sub.columns``
+    """
+    columns = [str(column) for column in sample_sub.columns]
+    positions = [
+        columns.index(str(column))
+        for column in (target_cols or [])
+        if str(column) in columns
+    ]
+    if positions:
+        return positions
+    return list(range(1, len(columns)))
+
+
 def format_ensemble_predictions(
     preds: np.ndarray,
     sample_sub: pd.DataFrame,
@@ -18,6 +48,7 @@ def format_ensemble_predictions(
     metric_name: str | None = None,
     oof_preds: np.ndarray | None = None,
     y_true: np.ndarray | None = None,
+    target_cols: list[str] | None = None,
 ) -> np.ndarray:
     """Format predictions for submission based on metric and problem type.
     Converts probabilities to class labels when the metric or sample sub expects integers.
@@ -37,7 +68,9 @@ def format_ensemble_predictions(
 
     sample_suggests_label = False
     if sample_sub.shape[1] >= 2:
-        sample_vals = sample_sub.iloc[:, 1]
+        sample_vals = sample_sub.iloc[
+            :, prediction_positions(sample_sub, target_cols)[0]
+        ]
         if pd.api.types.is_numeric_dtype(sample_vals):
             svals = sample_vals.to_numpy()
             if svals.size and np.allclose(svals, np.round(svals)):
@@ -83,6 +116,7 @@ def validate_and_align_submission(
     submission_path: Path,
     sample_submission_path: Path,
     output_path: Path | None = None,
+    target_cols: list[str] | None = None,
 ) -> tuple[bool, str, Path | None]:
     """Validate submission against sample_submission schema.
 
@@ -92,6 +126,9 @@ def validate_and_align_submission(
         submission_path: Path to submission to validate
         sample_submission_path: Path to sample_submission.csv
         output_path: Where to save aligned submission (if None, overwrites in place)
+        target_cols: Resolved prediction column names. Without them the first
+            column is assumed to identify rows, which rejects valid work on
+            templates whose first column is the prediction.
 
     Returns:
         Tuple of (is_valid, error_message, aligned_path)
@@ -112,8 +149,19 @@ def validate_and_align_submission(
     if len(sub_df) != len(sample_df):
         return False, f"Row count mismatch: {len(sub_df)} vs {len(sample_df)}", None
 
+    pred_positions = prediction_positions(sample_df, target_cols)
+    pred_cols = [sample_df.columns[position] for position in pred_positions]
+    echo_cols = [
+        column for column in sample_df.columns if column not in set(pred_cols)
+    ]
+
+    if not echo_cols:
+        # Nothing identifies a row; order is the only alignment available and
+        # the row count was already checked.
+        return _finalize_aligned_submission(sub_df, pred_cols, output_path)
+
     # Check ID column - same SET but possibly different order
-    id_col = sub_df.columns[0]
+    id_col = echo_cols[0]
     sub_ids = set(sub_df[id_col])
     sample_ids = set(sample_df[id_col])
 
@@ -122,14 +170,30 @@ def validate_and_align_submission(
         extra = sub_ids - sample_ids
         return False, f"ID mismatch: missing={len(missing)}, extra={len(extra)}", None
 
-    # If order differs, reorder to match sample
+    # If order differs, reorder to match sample. A non-unique identifier cannot
+    # drive a merge without inventing rows, so only order-preserving templates
+    # take this path.
     if not sub_df[id_col].equals(sample_df[id_col]):
+        if sample_df[id_col].duplicated().any():
+            return (
+                False,
+                f"Submission row order differs and '{id_col}' is not unique; "
+                "cannot realign without inventing rows",
+                None,
+            )
         print("      [LOG:INFO] Reordering submission to match sample_submission ID order")
         # Reorder using merge
         sub_df = sample_df[[id_col]].merge(sub_df, on=id_col, how='left')
 
-    # Check for NaN in predictions (after potential reorder)
-    pred_cols = sub_df.columns[1:]
+    return _finalize_aligned_submission(sub_df, pred_cols, output_path)
+
+
+def _finalize_aligned_submission(
+    sub_df: pd.DataFrame,
+    pred_cols: list[str],
+    output_path: Path,
+) -> tuple[bool, str, Path | None]:
+    """Reject unusable prediction values, then persist the aligned file."""
     nan_count = sub_df[pred_cols].isna().sum().sum()
     if nan_count > 0:
         return False, f"Submission contains {nan_count} NaN values", None
@@ -148,6 +212,7 @@ def safe_restore_submission(
     dest_path: Path,
     sample_submission_path: Path | None,
     *,
+    target_cols: list[str] | None = None,
     expected_sha256: str | None = None,
     require_hash: bool = False,
 ) -> bool:
@@ -157,6 +222,9 @@ def safe_restore_submission(
         source_path: Path to the preserved source submission.
         dest_path: Path to destination (e.g., submission.csv)
         sample_submission_path: Path to sample_submission.csv for validation
+        target_cols: Resolved prediction column names, so row order is checked
+            against a column the template supplies rather than one the model
+            fills in.
         expected_sha256: Optional immutable-snapshot digest.
         require_hash: Fail closed unless ``expected_sha256`` is supplied and
             matches both the source and restored destination.
@@ -207,6 +275,7 @@ def safe_restore_submission(
             source_path,
             sample_path,
             validation_path,
+            target_cols,
         )
         if not is_valid:
             print(f"      Warning: Submission validation failed: {error_msg}")
@@ -215,9 +284,20 @@ def safe_restore_submission(
         if expected_digest:
             # Immutable snapshots must already have canonical row order. An
             # alignment rewrite would sever the state digest from the bytes
-            # subsequently graded.
-            source_ids = pd.read_csv(source_path).iloc[:, 0]
-            sample_ids = pd.read_csv(sample_path).iloc[:, 0]
+            # subsequently graded. Compare a column the template supplies:
+            # a prediction column differs from its placeholder by design.
+            sample_df = pd.read_csv(sample_path)
+            source_df = pd.read_csv(source_path)
+            predicted = {
+                sample_df.columns[position]
+                for position in prediction_positions(sample_df, target_cols)
+            }
+            order_cols = [
+                column for column in sample_df.columns if column not in predicted
+            ]
+            order_col = order_cols[0] if order_cols else sample_df.columns[0]
+            source_ids = source_df[order_col]
+            sample_ids = sample_df[order_col]
             if not source_ids.equals(sample_ids):
                 print(
                     "      Warning: Immutable submission row order differs from "

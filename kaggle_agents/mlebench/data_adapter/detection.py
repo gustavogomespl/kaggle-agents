@@ -111,25 +111,57 @@ class DetectionMixin:
             pass
         return "target"
 
-    def _detect_target_columns(self, sample_sub_path: Path) -> list[str]:
+    def _detect_target_columns(
+        self,
+        sample_sub_path: Path,
+        test_csv_path: Path | None = None,
+    ) -> list[str]:
         """Read ordered prediction columns without inferring their semantics."""
+        from kaggle_agents.utils.target_inference import (
+            _read_schema_columns,
+            split_submission_schema,
+        )
+
         try:
             columns = [
                 str(column)
                 for column in pd.read_csv(sample_sub_path, nrows=0).columns
             ]
             if len(columns) >= 2:
-                return columns[1:]
+                _, predicted = split_submission_schema(
+                    columns,
+                    _read_schema_columns(test_csv_path),
+                )
+                return predicted
         except Exception:
             pass
         return ["target"]
 
-    def _detect_id_column(self, sample_sub_path: Path) -> str:
+    def _detect_id_column(
+        self,
+        sample_sub_path: Path,
+        test_csv_path: Path | None = None,
+    ) -> str:
         """Detect ID column from sample submission."""
+        from kaggle_agents.utils.target_inference import (
+            _read_schema_columns,
+            split_submission_schema,
+        )
+
         try:
-            df = pd.read_csv(sample_sub_path, nrows=1)
-            if len(df.columns) >= 1:
-                return df.columns[0]
+            columns = [
+                str(column)
+                for column in pd.read_csv(sample_sub_path, nrows=0).columns
+            ]
+            if len(columns) >= 2:
+                echoed, _ = split_submission_schema(
+                    columns,
+                    _read_schema_columns(test_csv_path),
+                )
+                if echoed:
+                    return echoed[0]
+            if columns:
+                return columns[0]
         except Exception:
             pass
         return "id"

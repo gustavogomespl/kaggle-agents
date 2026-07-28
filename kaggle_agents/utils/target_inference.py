@@ -14,6 +14,7 @@ The target type affects:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -195,10 +196,66 @@ def infer_target_type_from_train(
     )
 
 
+def _read_schema_columns(
+    source: str | Path | pd.DataFrame | None,
+) -> list[str]:
+    """Read column names only, tolerating unreadable or absent sources."""
+    if source is None:
+        return []
+    if isinstance(source, pd.DataFrame):
+        return [str(column) for column in source.columns]
+    try:
+        return [
+            str(column)
+            for column in pd.read_csv(Path(source), nrows=0).columns
+        ]
+    except Exception:
+        return []
+
+
+def split_submission_schema(
+    sample_columns: Sequence[str],
+    test_columns: Sequence[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Split submission columns into (echoed input columns, prediction columns).
+
+    A submission column that also exists in the public test schema is input
+    handed back to the grader, not something the model produces. That evidence
+    outranks column position: templates that place the prediction first are
+    otherwise read as predicting their own identifier columns, which resolves
+    the target to feature columns and poisons every downstream contract.
+
+    Falls back to the positional convention (first column identifies the row,
+    the rest are predictions) whenever the test schema is unavailable or does
+    not separate the two roles.
+
+    Args:
+        sample_columns: Ordered sample-submission columns
+        test_columns: Ordered public test columns, when known
+
+    Returns:
+        Tuple of (echoed columns, prediction columns), each in submission order
+    """
+    columns = [str(column) for column in sample_columns]
+    if len(columns) < 2:
+        return [], list(columns)
+
+    test_set = {str(column) for column in (test_columns or [])}
+    echoed = [column for column in columns if column in test_set]
+    predicted = [column for column in columns if column not in test_set]
+    # Both roles must be populated; otherwise the test schema shares no columns
+    # with the template (or all of them) and carries no role information.
+    if echoed and predicted:
+        return echoed, predicted
+
+    return columns[:1], columns[1:]
+
+
 def infer_target_columns(
     sample_submission_path: str | Path,
     *,
     train_data: str | Path | pd.DataFrame | None = None,
+    test_data: str | Path | pd.DataFrame | None = None,
     problem_type: str | None = None,
     target_col: str | None = None,
     target_cols: list[str] | None = None,
@@ -208,14 +265,18 @@ def infer_target_columns(
     Resolve ordered training targets from public submission/train contracts.
 
     Logic:
-    1. If only 1 target column (after ID) -> single target
-    2. Preserve sample-submission column order only when those columns exist in
+    1. Separate echoed input columns from prediction columns using the public
+       test schema when available, falling back to the positional convention
+    2. If only 1 prediction column -> single target
+    3. Preserve sample-submission column order only when those columns exist in
        real training labels
-    3. Classify multiple targets from training values/dtypes plus an optional
+    4. Classify multiple targets from training values/dtypes plus an optional
        public problem-type contract
 
     Args:
         sample_submission_path: Path to sample_submission.csv
+        test_data: Public test table/path, used to tell echoed input columns
+            apart from predictions instead of assuming the first column is an ID
 
     Returns:
         TargetInfo with detected target columns and type
@@ -233,8 +294,11 @@ def infer_target_columns(
             f"sample_submission must have at least 2 columns (id + target), got: {cols}"
         )
 
-    id_col = cols[0]
-    submission_target_cols = cols[1:]
+    echoed_cols, submission_target_cols = split_submission_schema(
+        cols,
+        _read_schema_columns(test_data),
+    )
+    id_col = echoed_cols[0] if echoed_cols else cols[0]
     explicit_cols = [
         str(column)
         for column in list(target_cols or [])

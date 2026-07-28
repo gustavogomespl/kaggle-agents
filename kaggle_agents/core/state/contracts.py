@@ -574,27 +574,39 @@ def create_metric_contract(
 
 def create_submission_contract_from_sample(
     sample_submission_path: str,
+    test_data_path: str | None = None,
 ) -> SubmissionContract:
     """Create a SubmissionContract from sample_submission.csv.
 
     Args:
         sample_submission_path: Path to sample_submission.csv
+        test_data_path: Path to the public test table. When given, columns the
+            test set supplies are treated as echoed inputs rather than
+            predictions, instead of assuming the first column identifies rows.
 
     Returns:
         SubmissionContract instance
     """
     import pandas as pd
 
+    from kaggle_agents.utils.target_inference import (
+        _read_schema_columns,
+        split_submission_schema,
+    )
+
     sample_sub = pd.read_csv(sample_submission_path)
-    cols = sample_sub.columns.tolist()
+    cols = [str(column) for column in sample_sub.columns]
 
     if len(cols) < 2:
         raise ValueError(
             f"sample_submission must have at least 2 columns (id + target), got: {cols}"
         )
 
-    id_col = cols[0]
-    target_cols = cols[1:]
+    echoed_cols, target_cols = split_submission_schema(
+        cols,
+        _read_schema_columns(test_data_path),
+    )
+    id_col = echoed_cols[0] if echoed_cols else cols[0]
     expected_rows = len(sample_sub)
 
     # Determine only the public layout. Template values are placeholders and

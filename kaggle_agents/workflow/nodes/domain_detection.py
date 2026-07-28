@@ -202,9 +202,19 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
         data_files.get("sample_submission", "")
         or state.get("sample_submission_path", "")
     )
+    test_csv_path = (
+        data_files.get("test_csv", "")
+        or data_files.get("test", "")
+        or state.get("test_data_path", "")
+    )
+    if test_csv_path and not Path(test_csv_path).is_file():
+        test_csv_path = ""
     if sample_sub_path and Path(sample_sub_path).exists():
         try:
-            submission_contract = create_submission_contract_from_sample(sample_sub_path)
+            submission_contract = create_submission_contract_from_sample(
+                sample_sub_path,
+                test_csv_path or None,
+            )
             submission_contract_dict = submission_contract.to_dict()
             print(f"\n   SubmissionContract created:")
             print(f"      id_col: {submission_contract.id_col}")

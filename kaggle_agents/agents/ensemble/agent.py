@@ -42,6 +42,7 @@ from .scoring import compute_oof_score, filter_by_score_threshold, score_predict
 from .stacking import load_cv_folds, stack_from_prediction_pairs
 from .submission import (
     format_ensemble_predictions,
+    prediction_positions,
     safe_restore_submission,
     validate_and_align_submission,
 )
@@ -216,8 +217,27 @@ class EnsembleAgent:
     def _dirichlet_weight_search(self, oof_stack, y_true, problem_type, metric_name, n_samples=300):
         return dirichlet_weight_search(oof_stack, y_true, problem_type, metric_name, n_samples)
 
-    def _validate_and_align_submission(self, submission_path, sample_submission_path, output_path=None):
-        return validate_and_align_submission(submission_path, sample_submission_path, output_path)
+    def _validate_and_align_submission(
+        self,
+        submission_path,
+        sample_submission_path,
+        output_path=None,
+        target_cols=None,
+    ):
+        return validate_and_align_submission(
+            submission_path, sample_submission_path, output_path, target_cols
+        )
+
+    @staticmethod
+    def _submission_target_cols(state) -> list[str]:
+        """Prediction column names resolved from the public submission schema.
+
+        Empty when no contract was established, which leaves every consumer on
+        the positional convention it used before.
+        """
+        contract = state.get("submission_contract") or {}
+        declared = contract.get("target_cols") or []
+        return [str(column) for column in declared if isinstance(column, str) and column]
 
     def _safe_restore_submission(
         self,
@@ -225,6 +245,7 @@ class EnsembleAgent:
         dest_path,
         sample_submission_path,
         *,
+        target_cols=None,
         expected_sha256=None,
         require_hash=False,
     ):
@@ -232,6 +253,7 @@ class EnsembleAgent:
             source_path,
             dest_path,
             sample_submission_path,
+            target_cols=target_cols,
             expected_sha256=expected_sha256,
             require_hash=require_hash,
         )
@@ -251,11 +273,13 @@ class EnsembleAgent:
         sample_submission_path: Path,
     ) -> bool:
         """Restore the best artifact under the trust policy for the run mode."""
+        submission_target_cols = self._submission_target_cols(state)
         if not self._is_mlebench(state):
             return self._safe_restore_submission(
                 working_dir / "submission_best.csv",
                 output_path,
                 sample_submission_path,
+                target_cols=submission_target_cols,
             )
 
         snapshot_owner = str(
@@ -308,6 +332,7 @@ class EnsembleAgent:
                 snapshot,
                 output_path,
                 sample_submission_path,
+                target_cols=submission_target_cols,
                 expected_sha256=digest,
                 require_hash=True,
             ):
@@ -492,6 +517,7 @@ class EnsembleAgent:
         metric_name: str = "",
         oof_preds: np.ndarray | None = None,
         y_true: np.ndarray | None = None,
+        target_cols: list[str] | None = None,
     ) -> bool:
         """Create a simple average ensemble directly from saved predictions.
 
@@ -626,7 +652,8 @@ class EnsembleAgent:
             print(f"   Predictions: min={ensemble_preds.min():.4f}, max={ensemble_preds.max():.4f}, std={pred_std:.4f}")
 
         # Validate and assign predictions to sample submission
-        expected_cols = len(sample_sub.columns) - 1  # Exclude ID column
+        pred_positions = prediction_positions(sample_sub, target_cols)
+        expected_cols = len(pred_positions)
 
         if ensemble_preds.shape[0] != n_test:
             print(f"   Final row count mismatch: {ensemble_preds.shape[0]} vs {n_test}")
@@ -671,6 +698,7 @@ class EnsembleAgent:
                 metric_name,
                 oof_preds=oof_preds,
                 y_true=y_true,
+                target_cols=target_cols,
             )
         )
         if formatted.ndim == 1:
@@ -687,7 +715,7 @@ class EnsembleAgent:
             print("   ERROR: Formatted predictions must be finite and numeric")
             return False
 
-        sample_sub.iloc[:, 1:] = formatted
+        sample_sub.iloc[:, pred_positions] = formatted
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sample_sub.to_csv(output_path, index=False)
@@ -1333,7 +1361,10 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             sample_sub = read_csv_auto(sample_path)
         except Exception:
             return None
-        if len(sample_sub.columns) - 1 != 1:
+        pred_positions = prediction_positions(
+            sample_sub, self._submission_target_cols(state)
+        )
+        if len(pred_positions) != 1:
             # Multi-column submissions are the stacking path's business.
             return None
 
@@ -1391,7 +1422,7 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         if aligned is None:
             return None
 
-        sample_sub.iloc[:, 1] = aligned
+        sample_sub.iloc[:, pred_positions[0]] = aligned
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sample_sub.to_csv(output_path, index=False)
         print(
@@ -1515,7 +1546,9 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             return None
 
         n_test = len(sample_sub)
-        expected_cols = len(sample_sub.columns) - 1
+        submission_target_cols = self._submission_target_cols(state)
+        pred_positions = prediction_positions(sample_sub, submission_target_cols)
+        expected_cols = len(pred_positions)
 
         contract = (state.get("canonical_contract") if isinstance(state, dict) else None) or {}
         is_classification = contract.get("is_classification")
@@ -1526,7 +1559,11 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
         # Class order / target shape from the submission template. A two-column
         # file can still be a long multiclass grid, so infer that relationship
         # from canonical test IDs and the complete submission IDs.
-        expected_class_order = sample_sub.columns[1:].tolist() if expected_cols > 1 else None
+        expected_class_order = (
+            [str(sample_sub.columns[position]) for position in pred_positions]
+            if expected_cols > 1
+            else None
+        )
         n_targets = expected_cols
         canonical_test_ids = (
             state.get("test_rec_ids", []) if isinstance(state, dict) else []
@@ -1701,15 +1738,15 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                     f"   [POSTPROC] {info['rule']}: OOF "
                     f"{info['oof_score_baseline']:.4f} -> {info['oof_score_tuned']:.4f}"
                 )
-                sample_sub.iloc[:, 1] = labels
+                sample_sub.iloc[:, pred_positions[0]] = labels
             else:
                 idx = np.argmax(final_test_preds, axis=1)
                 if class_order is not None and len(class_order) == final_test_preds.shape[1]:
                     # argmax gives encoded indices; map back to original labels
-                    sample_sub.iloc[:, 1] = np.asarray(class_order)[idx]
+                    sample_sub.iloc[:, pred_positions[0]] = np.asarray(class_order)[idx]
                     postproc_rule = "argmax_class_order"
                 else:
-                    sample_sub.iloc[:, 1] = idx
+                    sample_sub.iloc[:, pred_positions[0]] = idx
                     postproc_rule = "argmax"
         else:
             if final_test_preds.shape[1] > expected_cols:
@@ -1722,15 +1759,16 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                 metric_name,
                 oof_preds=selected_oof,
                 y_true=np.asarray(y),
+                target_cols=submission_target_cols,
             )
             formatted = np.asarray(formatted)
             if formatted.ndim == 1:
                 formatted = formatted.reshape(-1, 1)
 
             if formatted.shape[1] == 1:
-                sample_sub.iloc[:, 1] = formatted[:, 0]
+                sample_sub.iloc[:, pred_positions[0]] = formatted[:, 0]
             elif formatted.shape[1] == expected_cols:
-                sample_sub.iloc[:, 1:] = formatted
+                sample_sub.iloc[:, pred_positions] = formatted
             else:
                 print(f"   Unexpected formatted shape {formatted.shape} - using simple average")
                 return None
@@ -2058,6 +2096,7 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                     if fallback_oof is not None and fallback_y is not None
                     else None
                 ),
+                target_cols=self._submission_target_cols(state),
             ):
                 return {
                     "ensemble_created": True,
