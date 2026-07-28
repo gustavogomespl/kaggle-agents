@@ -203,7 +203,6 @@ class TestCanonicalPreparationEmitsRowIdentity:
 
         assert metadata["id_col"] == "_row_id"
         assert metadata["id_is_synthetic"] is True
-        assert metadata["test_ids_are_positional"] is True
         assert metadata["n_test"] == 10
 
     def test_test_ids_are_written_and_unique(self, tmp_path):
@@ -215,6 +214,51 @@ class TestCanonicalPreparationEmitsRowIdentity:
 
         assert len(test_ids) == 10
         assert len(set(test_ids.tolist())) == 10
+
+    def test_synthetic_id_is_materialized_into_the_staged_tables(self, tmp_path):
+        # A name in the contract that no file carries is what components kept
+        # crashing on; after preparation it must be loadable from the CSV.
+        self._prepare(tmp_path)
+
+        train = pd.read_csv(tmp_path / "train.csv")
+        test = pd.read_csv(tmp_path / "test.csv")
+
+        assert train["_row_id"].astype(str).tolist() == [str(i) for i in range(40)]
+        assert test["_row_id"].astype(str).tolist() == [str(i) for i in range(10)]
+        assert train["Label"].notna().all()
+
+    def test_materialized_ids_agree_with_the_canonical_contract(self, tmp_path):
+        self._prepare(tmp_path)
+
+        train_ids = np.load(
+            tmp_path / "work" / "canonical" / "train_ids.npy", allow_pickle=False
+        )
+        test_ids = np.load(
+            tmp_path / "work" / "canonical" / "test_ids.npy", allow_pickle=False
+        )
+        train = pd.read_csv(tmp_path / "train.csv")
+        test = pd.read_csv(tmp_path / "test.csv")
+
+        assert set(train_ids.tolist()) <= set(train["_row_id"].astype(str))
+        assert test_ids.tolist() == test["_row_id"].astype(str).tolist()
+
+    def test_preparation_is_idempotent(self, tmp_path):
+        self._prepare(tmp_path)
+        columns_after_first = pd.read_csv(tmp_path / "train.csv").columns.tolist()
+
+        second = prepare_canonical_data(
+            train_path=tmp_path / "train.csv",
+            test_path=tmp_path / "test.csv",
+            target_col="Label",
+            target_cols=["Label"],
+            output_dir=tmp_path / "work2",
+            task_type="text_classification",
+        )
+
+        assert pd.read_csv(tmp_path / "train.csv").columns.tolist() == columns_after_first
+        # The column is real now, so it is no longer reported as synthetic.
+        assert second["metadata"]["id_col"] == "_row_id"
+        assert second["metadata"]["id_is_synthetic"] is False
 
 
 class TestProblemTypeDetection:
@@ -319,3 +363,101 @@ class TestSyntheticIdContractPropagation:
         )
 
         assert contract.id_is_synthetic is False
+
+
+class TestSubmissionFormatValidation:
+    """The check that aborted the run right after the first model succeeded."""
+
+    @staticmethod
+    def _validator():
+        from kaggle_agents.tools.code_executor.submission import (
+            SubmissionValidationMixin,
+        )
+
+        class _Validator(SubmissionValidationMixin):
+            pass
+
+        return _Validator()
+
+    @staticmethod
+    def _template(tmp_path):
+        sample = tmp_path / "sample_submission_null.csv"
+        pd.DataFrame(
+            {
+                "Insult": [0, 0, 0],
+                "Date": ["20120618192155Z", "20120618192156Z", "20120618192157Z"],
+                "Comment": ["a", "b", "c"],
+            }
+        ).to_csv(sample, index=False)
+        return sample
+
+    def test_target_first_submission_is_accepted(self, tmp_path):
+        sample = self._template(tmp_path)
+        submission = tmp_path / "submission.csv"
+        filled = pd.read_csv(sample)
+        filled["Insult"] = [0.1, 0.8, 0.4]
+        filled.to_csv(submission, index=False)
+
+        is_valid, message = self._validator().validate_submission_format(
+            submission, sample, component_type="model", target_cols=["Insult"]
+        )
+
+        assert is_valid, message
+
+    def test_echoed_columns_must_be_returned_unchanged(self, tmp_path):
+        sample = self._template(tmp_path)
+        submission = tmp_path / "submission.csv"
+        filled = pd.read_csv(sample)
+        filled["Insult"] = [0.1, 0.8, 0.4]
+        filled["Date"] = filled["Date"][::-1].to_numpy()
+        filled.to_csv(submission, index=False)
+
+        is_valid, message = self._validator().validate_submission_format(
+            submission, sample, component_type="model", target_cols=["Insult"]
+        )
+
+        assert not is_valid
+        assert "WRONG ORDER" in message
+
+    def test_nan_predictions_are_still_rejected(self, tmp_path):
+        sample = self._template(tmp_path)
+        submission = tmp_path / "submission.csv"
+        filled = pd.read_csv(sample)
+        filled["Insult"] = [0.1, np.nan, 0.4]
+        filled.to_csv(submission, index=False)
+
+        is_valid, message = self._validator().validate_submission_format(
+            submission, sample, component_type="model", target_cols=["Insult"]
+        )
+
+        assert not is_valid
+        assert "NaN" in message
+
+    def test_conventional_submission_is_unaffected(self, tmp_path):
+        sample = tmp_path / "sample_submission.csv"
+        submission = tmp_path / "submission.csv"
+        pd.DataFrame({"id": [1, 2], "target": [0, 0]}).to_csv(sample, index=False)
+        pd.DataFrame({"id": [1, 2], "target": [0.3, 0.7]}).to_csv(
+            submission, index=False
+        )
+
+        is_valid, message = self._validator().validate_submission_format(
+            submission, sample, component_type="model", target_cols=["target"]
+        )
+
+        assert is_valid, message
+
+    def test_wrong_id_order_is_still_caught_conventionally(self, tmp_path):
+        sample = tmp_path / "sample_submission.csv"
+        submission = tmp_path / "submission.csv"
+        pd.DataFrame({"id": [1, 2], "target": [0, 0]}).to_csv(sample, index=False)
+        pd.DataFrame({"id": [2, 1], "target": [0.3, 0.7]}).to_csv(
+            submission, index=False
+        )
+
+        is_valid, message = self._validator().validate_submission_format(
+            submission, sample, component_type="model", target_cols=["target"]
+        )
+
+        assert not is_valid
+        assert "WRONG ORDER" in message

@@ -52,7 +52,11 @@ class SubmissionValidationMixin:
 
         return True
 
-    def _detect_problem_type(self, sample_submission_path: Path) -> str:
+    def _detect_problem_type(
+        self,
+        sample_submission_path: Path,
+        target_cols: list[str] | None = None,
+    ) -> str:
         """
         Detect problem type from sample_submission structure.
 
@@ -68,8 +72,13 @@ class SubmissionValidationMixin:
 
         import pandas as pd
 
+        from kaggle_agents.agents.ensemble.submission import prediction_positions
+
         sample_df = read_csv_auto(sample_submission_path)
-        pred_cols = sample_df.columns[1:].tolist()
+        pred_cols = [
+            sample_df.columns[position]
+            for position in prediction_positions(sample_df, target_cols)
+        ]
         numeric_cols = [
             column
             for column in pred_cols
@@ -111,6 +120,7 @@ class SubmissionValidationMixin:
         sample_submission_path: Path,
         component_type: str | None = None,
         problem_type: str | None = None,
+        target_cols: list[str] | None = None,
     ) -> tuple[bool, str]:
         """
         Validate submission matches expected format exactly.
@@ -122,6 +132,9 @@ class SubmissionValidationMixin:
             sample_submission_path: Path to sample_submission.csv
             component_type: Type of component (for gating)
             problem_type: Override problem type detection
+            target_cols: Resolved prediction column names. Without them the
+                first column is assumed to identify rows, which misreads
+                templates whose first column is the prediction.
 
         Returns:
             Tuple of (is_valid, message)
@@ -144,7 +157,9 @@ class SubmissionValidationMixin:
 
         # Auto-detect problem type if not provided
         if problem_type is None:
-            problem_type = self._detect_problem_type(sample_submission_path)
+            problem_type = self._detect_problem_type(
+                sample_submission_path, target_cols
+            )
 
         # Check 1: Columns match exactly (order matters!)
         if list(sub_df.columns) != list(sample_df.columns):
@@ -158,23 +173,37 @@ class SubmissionValidationMixin:
         if len(sub_df) != len(sample_df):
             return False, f"Row count mismatch: expected {len(sample_df)}, got {len(sub_df)}"
 
-        # Check 3: ID column matches exactly
-        id_col = sample_df.columns[0]
-        if not sub_df[id_col].equals(sample_df[id_col]):
-            if set(sub_df[id_col]) == set(sample_df[id_col]):
-                return False, "ID values present but in WRONG ORDER"
-            return False, "ID column values don't match sample_submission"
+        # Roles, not positions: a template may put the prediction first and echo
+        # the test input after it. Comparing the prediction column against the
+        # template's placeholders would reject every real submission, and
+        # running numeric checks over echoed text raises.
+        from kaggle_agents.agents.ensemble.submission import prediction_positions
+
+        predicted = {
+            sample_df.columns[position]
+            for position in prediction_positions(sample_df, target_cols)
+        }
+        pred_cols = [column for column in sample_df.columns if column in predicted]
+        echo_cols = [
+            column for column in sample_df.columns if column not in predicted
+        ]
+
+        # Check 3: echoed input columns are handed back unchanged and in order
+        for id_col in echo_cols[:1]:
+            if not sub_df[id_col].equals(sample_df[id_col]):
+                if set(sub_df[id_col]) == set(sample_df[id_col]):
+                    return False, "ID values present but in WRONG ORDER"
+                return False, "ID column values don't match sample_submission"
 
         # Check 4: No NaN values in prediction columns
-        pred_cols = sample_df.columns[1:].tolist()
         nan_cols = sub_df[pred_cols].isna().any()
         if nan_cols.any():
             bad_cols = nan_cols[nan_cols].index.tolist()
             return False, f"NaN values in columns: {bad_cols}"
 
         # Check 5: No Inf values
-        inf_mask = ~np.isfinite(sub_df[pred_cols].values)
-        if inf_mask.any():
+        numeric_predictions = sub_df[pred_cols].apply(pd.to_numeric, errors="coerce")
+        if bool(np.isinf(numeric_predictions.to_numpy(dtype=float)).any()):
             return False, "Inf values detected in predictions"
 
         # Check 6: Probabilities sum to ~1 ONLY for multiclass

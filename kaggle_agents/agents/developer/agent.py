@@ -1331,6 +1331,17 @@ class DeveloperAgent(
                         submission_path=submission_path,
                         sample_submission_path=sample_sub_path,
                         component_type=component.component_type,
+                        target_cols=[
+                            str(column)
+                            for column in (
+                                (state.get("submission_contract") or {}).get(
+                                    "target_cols"
+                                )
+                                or []
+                            )
+                            if isinstance(column, str) and column
+                        ]
+                        or None,
                     )
                     submission_is_valid = is_valid
                     submission_validation_message = validation_msg

@@ -629,6 +629,40 @@ def _supplied_test_columns(test_path: str | Path | None) -> set[str]:
     }
 
 
+def _materialize_synthetic_id(
+    table_path: str | Path | None,
+    id_col: str,
+) -> bool:
+    """Write the synthetic identifier into a staged table, in place.
+
+    The synthetic name is the row's position, so adding it is information the
+    table already carried implicitly. Writing it makes the contract honest:
+    every name components are told about is one they can actually look up.
+
+    Returns:
+        True when the column was added, False when it was already present or
+        the table could not be rewritten.
+    """
+    if not table_path:
+        return False
+    path = Path(table_path)
+    if not path.is_file():
+        return False
+    try:
+        frame = pd.read_csv(path)
+    except Exception:
+        return False
+    if id_col in frame.columns:
+        return False
+    frame.insert(0, id_col, [str(index) for index in range(len(frame))])
+    try:
+        frame.to_csv(path, index=False)
+    except Exception:
+        return False
+    print(f"   Materialized {id_col!r} into {path.name} ({len(frame):,} rows)")
+    return True
+
+
 def _resolve_canonical_test_ids(
     test_path: str | Path | None,
     id_col: str | None,
@@ -1183,6 +1217,12 @@ def prepare_canonical_data(
 
     if is_synthetic_id:
         print(f"   Using synthetic ID column: {id_col}")
+        # Materialize it in the staged tables. A name that appears in the
+        # contract but in no file is the single most expensive failure mode
+        # here: components index by it, raise KeyError, and burn their whole
+        # repair budget on a column that never existed.
+        _materialize_synthetic_id(train_path, id_col)
+        _materialize_synthetic_id(test_path, id_col)
     else:
         print(f"   Using ID column: {id_col}")
 
