@@ -654,6 +654,40 @@ def validate_schema_parity(
     return sorted(common_str), sorted(missing_str)
 
 
+def _is_independent_test_schema(
+    test_path: str | Path | None,
+    train_path: str | Path | None,
+    sample_submission: str | Path | pd.DataFrame | None,
+) -> bool:
+    """Whether ``test_path`` is a table other than the train file or template.
+
+    Callers without a real public test table sometimes pass the submission
+    template instead, because it does list the test rows in graded order. That
+    substitution is fine for row identity but must never be read as evidence
+    about column roles: a template's prediction column is a placeholder, and
+    treating it as a "column the test set supplies" deletes the only target
+    candidate the training table has. The train file is likewise not evidence
+    about itself.
+    """
+    if not test_path:
+        return False
+
+    try:
+        resolved_test = Path(test_path).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return True
+
+    for other in (train_path, sample_submission):
+        if other is None or isinstance(other, pd.DataFrame):
+            continue
+        try:
+            if Path(other).resolve() == resolved_test:
+                return False
+        except (OSError, RuntimeError, TypeError, ValueError):
+            continue
+    return True
+
+
 def _supplied_test_columns(test_path: str | Path | None) -> set[str]:
     """Return public test columns that actually carry values.
 
@@ -758,6 +792,7 @@ def _resolve_supervised_target_contract(
     train_df: pd.DataFrame,
     test_path: Path,
     *,
+    train_path: str | Path | None = None,
     target_col: str | None,
     target_cols: list[str] | None,
     target_type: TargetType | None,
@@ -770,8 +805,17 @@ def _resolve_supervised_target_contract(
     train_set = set(train_columns)
     sample_columns = _read_sample_submission_columns(sample_submission)
     # Columns the public test set supplies are inputs echoed back by the
-    # template, never predictions.
-    public_test_columns = _supplied_test_columns(test_path)
+    # template, never predictions. This only holds for an independent test
+    # table: when the caller substituted the template (or the train file), it
+    # carries no role evidence at all.
+    independent_test_schema = _is_independent_test_schema(
+        test_path,
+        train_path,
+        sample_submission,
+    )
+    public_test_columns = (
+        _supplied_test_columns(test_path) if independent_test_schema else set()
+    )
     sample_targets: list[str] = []
     if len(sample_columns) > 1:
         _, sample_targets = split_submission_schema(
@@ -837,6 +881,14 @@ def _resolve_supervised_target_contract(
             and contract_target not in public_test_columns
         ):
             resolved_targets = [contract_target]
+
+    if not resolved_targets and not independent_test_schema:
+        raise TargetInferenceError(
+            "Cannot resolve training targets: no independent public test table "
+            "is available to separate inputs from predictions, and neither the "
+            f"declared contract nor the submission outputs {sample_targets!r} "
+            f"name a column present in the training table {train_columns!r}."
+        )
 
     if not resolved_targets:
         try:
@@ -1212,6 +1264,7 @@ def prepare_canonical_data(
         ) = _resolve_supervised_target_contract(
             train_df,
             test_path,
+            train_path=train_path,
             target_col=target_col,
             target_cols=target_cols,
             target_type=target_type,
