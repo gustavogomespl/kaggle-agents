@@ -9,8 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
-
+from ...utils.csv_utils import read_csv_preview_and_count
+from ...utils.target_inference import infer_pixel_submission_schema
 from .constants import IMAGE_EXTS
 
 
@@ -59,44 +59,54 @@ class SubmissionFormatMixin:
             return "standard", metadata
 
         try:
-            sample_sub = pd.read_csv(sample_path)
+            sample_sub, n_rows = read_csv_preview_and_count(
+                sample_path,
+                preview_rows=200,
+            )
         except Exception:
             return "standard", metadata
 
-        n_rows = len(sample_sub)
         metadata["expected_rows"] = n_rows
 
         if len(sample_sub.columns) == 0:
             return "standard", metadata
 
-        id_col = sample_sub.columns[0]
+        pixel_roles = infer_pixel_submission_schema(sample_sub)
+        if pixel_roles is not None:
+            echoed_cols, predicted_cols = pixel_roles
+            id_col = echoed_cols[0]
+            value_columns = predicted_cols
+        else:
+            id_col = sample_sub.columns[0]
+            value_columns = list(sample_sub.columns[1:])
         metadata["id_column"] = id_col
-        metadata["value_columns"] = list(sample_sub.columns[1:])
+        metadata["value_columns"] = value_columns
 
         # Count test samples (images or files)
         n_test_samples = 0
-        has_image_test_files = False
         if test_path and test_path.exists():
             if test_path.is_dir():
                 # Count test images
-                test_files = list(test_path.glob("*"))
-                n_test_images = len(
-                    [f for f in test_files if f.is_file() and f.suffix.lower() in IMAGE_EXTS]
+                test_files = (
+                    file for file in test_path.rglob("*") if file.is_file()
                 )
+                n_test_images = 0
+                n_other_files = 0
+                for file in test_files:
+                    n_other_files += 1
+                    if file.suffix.lower() in IMAGE_EXTS:
+                        n_test_images += 1
                 n_test_samples = n_test_images
-                has_image_test_files = n_test_images > 0
                 # If no images found, count all files
                 if n_test_samples == 0:
-                    n_test_samples = len([f for f in test_files if f.is_file()])
+                    n_test_samples = n_other_files
 
         metadata["n_test_samples"] = n_test_samples
 
-        # Detect repeated sample prefixes followed by numeric coordinate/index
-        # suffixes. This uses only the observed template structure and never
-        # assumes a coordinate base. Structure alone is not enough: ordinary
-        # per-sample IDs such as "Test_0" or "ISIC_0052060" also match the
-        # prefix+numeric-suffix shape, so pixel-level additionally requires
-        # far more template rows than test samples (one row per pixel).
+        # Detect repeated sample prefixes followed by two numeric coordinate
+        # suffixes. The packed writer has a deliberately narrow
+        # ``image_row_col`` contract; a single flat index is not routed here
+        # because its relationship to image width/axis order is unproven.
         sample_ids = sample_sub[id_col].astype(str).head(200).tolist()
         parsed_prefixes: list[str] = []
         suffix_widths: set[int] = set()
@@ -123,7 +133,7 @@ class SubmissionFormatMixin:
             and n_test_samples > 0
             and len(set(parsed_prefixes)) <= n_test_samples
             and n_rows > n_test_samples * 100
-            and (suffix_width == 2 or has_image_test_files)
+            and suffix_width == 2
         ):
             metadata["id_pattern"] = (
                 "prefix_two_numeric_suffixes"

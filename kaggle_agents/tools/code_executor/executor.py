@@ -9,8 +9,10 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -140,44 +142,60 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
         working_path.mkdir(parents=True, exist_ok=True)
 
         canonical_snapshot = None
+        expected_artifact_transaction: tuple[
+            Path, list[tuple[Path, Path]]
+        ] | None = None
         process_group_id: int | None = None
 
         def finalize_execution_result(
             execution_result: ExecutionResult,
         ) -> ExecutionResult:
-            """Restore host canonical bytes and reject any mutating candidate."""
-            nonlocal canonical_snapshot
-            if canonical_snapshot is None:
-                return execution_result
+            """Restore host-owned inputs and commit only fresh candidate outputs."""
+            nonlocal canonical_snapshot, expected_artifact_transaction
+            if canonical_snapshot is not None:
+                try:
+                    changes = verify_and_restore_canonical_contract(
+                        canonical_snapshot
+                    )
+                except Exception as exc:
+                    changes = [
+                        "verification_or_restore_failed="
+                        f"{type(exc).__name__}:{exc}"
+                    ]
+                finally:
+                    canonical_snapshot = None
 
-            try:
-                changes = verify_and_restore_canonical_contract(
-                    canonical_snapshot
-                )
-            except Exception as exc:
-                changes = [
-                    "verification_or_restore_failed="
-                    f"{type(exc).__name__}:{exc}"
-                ]
-            finally:
-                canonical_snapshot = None
+                if changes:
+                    detail = "; ".join(changes)
+                    message = (
+                        "Canonical contract integrity violation: generated code "
+                        "changed host-owned evaluation artifacts "
+                        f"({detail}). The candidate is rejected and original "
+                        "canonical bytes were restored."
+                    )
+                    print(f"   ⚠️  {message}")
+                    execution_result.success = False
+                    execution_result.errors = list(
+                        execution_result.errors or []
+                    )
+                    execution_result.errors.append(message)
+                    execution_result.stderr = (
+                        f"{execution_result.stderr}\n{message}".strip()
+                    )
 
-            if not changes:
-                return execution_result
-
-            detail = "; ".join(changes)
-            message = (
-                "Canonical contract integrity violation: generated code changed "
-                f"host-owned evaluation artifacts ({detail}). The candidate is "
-                "rejected and original canonical bytes were restored."
-            )
-            print(f"   ⚠️  {message}")
-            execution_result.success = False
-            execution_result.errors = list(execution_result.errors or [])
-            execution_result.errors.append(message)
-            execution_result.stderr = (
-                f"{execution_result.stderr}\n{message}".strip()
-            )
+            if expected_artifact_transaction is not None:
+                backup_root, moved = expected_artifact_transaction
+                if not execution_result.success:
+                    for destination, backup in moved:
+                        if destination.is_dir():
+                            shutil.rmtree(destination)
+                        elif destination.exists() or destination.is_symlink():
+                            destination.unlink()
+                        if backup.exists():
+                            destination.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.move(str(backup), str(destination))
+                shutil.rmtree(backup_root, ignore_errors=True)
+                expected_artifact_transaction = None
             return execution_result
 
         runtime_guard_dir = None
@@ -202,6 +220,39 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                     source=execution_env,
                 )
 
+            if expected_artifacts:
+                # Evidence from a previous attempt must never satisfy this
+                # attempt's existence check. Move it out of the child-visible
+                # workspace, then restore it if the execution fails.
+                backup_root = Path(
+                    tempfile.mkdtemp(prefix="kaggle-agents-artifacts-")
+                )
+                moved: list[tuple[Path, Path]] = []
+                expected_artifact_transaction = (backup_root, moved)
+                root = working_path.resolve()
+                for index, raw_path in enumerate(expected_artifacts):
+                    relative = Path(str(raw_path))
+                    if (
+                        relative.is_absolute()
+                        or relative == Path(".")
+                        or ".." in relative.parts
+                    ):
+                        raise ValueError(
+                            f"Expected artifact path must be workspace-relative: "
+                            f"{raw_path!r}"
+                        )
+                    destination = (working_path / relative).resolve()
+                    try:
+                        destination.relative_to(root)
+                    except ValueError as exc:
+                        raise ValueError(
+                            "Expected artifact path escapes the workspace: "
+                            f"{raw_path!r}"
+                        ) from exc
+                    if destination.exists() or destination.is_symlink():
+                        backup = backup_root / str(index)
+                        shutil.move(str(destination), str(backup))
+                        moved.append((destination, backup))
             # Track artifacts before execution
             artifacts_before = self._get_artifacts(working_path)
 
@@ -529,6 +580,18 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                     verify_and_restore_canonical_contract(canonical_snapshot)
                 finally:
                     canonical_snapshot = None
+            if expected_artifact_transaction is not None:
+                backup_root, moved = expected_artifact_transaction
+                for destination, backup in moved:
+                    if destination.is_dir():
+                        shutil.rmtree(destination)
+                    elif destination.exists() or destination.is_symlink():
+                        destination.unlink()
+                    if backup.exists():
+                        destination.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(backup), str(destination))
+                shutil.rmtree(backup_root, ignore_errors=True)
+                expected_artifact_transaction = None
 
     def execute_with_retry(
         self,

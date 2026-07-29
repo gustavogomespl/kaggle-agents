@@ -13,6 +13,7 @@ still need a mount namespace without private labels.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import stat
 import uuid
@@ -20,13 +21,25 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-_REQUIRED_CANONICAL_FILES = frozenset(
+_REQUIRED_TABULAR_CANONICAL_FILES = frozenset(
     {
         "feature_cols.json",
         "folds.npy",
         "metadata.json",
         "train_ids.npy",
         "y.npy",
+    }
+)
+_REQUIRED_PACKED_IMAGE_CANONICAL_FILES = frozenset(
+    {
+        "feature_cols.json",
+        "folds.npy",
+        "image_input_paths.npy",
+        "image_targets.npz",
+        "image_test_input_paths.npy",
+        "metadata.json",
+        "test_ids.npy",
+        "train_ids.npy",
     }
 )
 
@@ -157,7 +170,22 @@ def snapshot_canonical_contract(
         for relative, contents in files.items()
     }
     modes = _directory_modes(canonical_dir)
-    missing = sorted(_REQUIRED_CANONICAL_FILES - set(manifest))
+    try:
+        metadata = json.loads(files["metadata.json"].decode("utf-8"))
+    except (KeyError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise CanonicalIntegrityError(
+            "Canonical metadata is missing or invalid before generated-code execution"
+        ) from exc
+    packed_image_contract = bool(
+        metadata.get("packed_image_contract")
+        or metadata.get("task_type") == "image_to_image"
+    )
+    required_files = (
+        _REQUIRED_PACKED_IMAGE_CANONICAL_FILES
+        if packed_image_contract
+        else _REQUIRED_TABULAR_CANONICAL_FILES
+    )
+    missing = sorted(required_files - set(manifest))
     if missing:
         raise CanonicalIntegrityError(
             "Canonical contract is incomplete before generated-code execution; "

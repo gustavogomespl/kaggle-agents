@@ -13,12 +13,23 @@ import pytest
 from kaggle_agents.agents.developer.agent import (
     _expected_model_artifacts,
     _has_combinable_model_predictions,
+    _model_validation_problem_type,
+    _oof_artifact_digest,
+    _requires_class_order_artifact,
+    _validation_class_order_for_state,
 )
 from kaggle_agents.agents.developer.retry import (
     RetryMixin,
     _maybe_add_artifact_hint,
 )
-from kaggle_agents.core.state import AblationComponent, DevelopmentResult
+from kaggle_agents.agents.developer.code_contracts import (
+    missing_class_order_helper_argument,
+)
+from kaggle_agents.core.state import (
+    AblationComponent,
+    CompetitionInfo,
+    DevelopmentResult,
+)
 
 
 class _Retry(RetryMixin):
@@ -63,6 +74,168 @@ def test_mlebench_model_artifacts_match_strict_validation(tmp_path: Path) -> Non
     ]
 
 
+@pytest.mark.parametrize(
+    ("call", "missing"),
+    [
+        ("save_component_artifacts(oof, test, train_ids, test_ids)", True),
+        (
+            "save_component_artifacts("
+            "oof, test, train_ids, test_ids, class_order=None)",
+            True,
+        ),
+        (
+            "save_component_artifacts("
+            "oof, test, train_ids, test_ids, class_order=class_order)",
+            False,
+        ),
+        (
+            "save_component_artifacts("
+            "oof, test, train_ids, test_ids, class_order)",
+            False,
+        ),
+    ],
+)
+def test_multiclass_preflight_requires_concrete_class_order(
+    call: str,
+    missing: bool,
+) -> None:
+    code = (
+        "def save_component_artifacts(*args, **kwargs):\n"
+        "    pass\n\n"
+        f"{call}\n"
+    )
+
+    assert missing_class_order_helper_argument(code) is missing
+
+
+def test_mlebench_image_model_expects_only_packed_artifacts(tmp_path: Path) -> None:
+    component = AblationComponent("candidate", "model", "train")
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    (canonical / "metadata.json").write_text(
+        '{"task_type": "image_to_image", "packed_image_contract": true}',
+        encoding="utf-8",
+    )
+
+    assert _expected_model_artifacts(component, tmp_path, "mlebench") == [
+        "models/oof_candidate.npz",
+        "models/test_candidate.npz",
+    ]
+
+
+def test_image_problem_type_wins_over_generic_regression_declaration() -> None:
+    state = {
+        "domain_detected": "image_to_image",
+        "problem_type": "regression",
+        "competition_info": CompetitionInfo("demo", "", "rmse", "regression"),
+    }
+
+    assert _model_validation_problem_type(state) == "image_to_image"
+
+
+def test_binary_single_probability_does_not_require_class_order_artifact() -> None:
+    state = {
+        "canonical_metadata": {"class_order": ["0", "1"]},
+        "submission_contract": {"class_order": None},
+    }
+
+    assert (
+        _validation_class_order_for_state(
+            state,
+            "binary_classification",
+        )
+        is None
+    )
+    assert _validation_class_order_for_state(
+        state,
+        "multiclass_classification",
+    ) == ["0", "1"]
+
+    wide_state = {
+        "submission_contract": {
+            "class_order": ["negative", "positive"],
+        },
+        "canonical_metadata": {"class_order": ["0", "1"]},
+    }
+    assert _validation_class_order_for_state(
+        wide_state,
+        "binary_classification",
+    ) == ["negative", "positive"]
+    assert _requires_class_order_artifact(
+        wide_state,
+        "binary_classification",
+    )
+    assert (
+        _validation_class_order_for_state(
+            wide_state,
+            "multi_target_regression",
+        )
+        is None
+    )
+    assert not _requires_class_order_artifact(
+        wide_state,
+        "multi_target_regression",
+    )
+
+
+def test_multi_label_uses_wide_target_order_without_class_order_artifact() -> None:
+    state = {
+        "submission_contract": {
+            "class_order": ["toxic", "insult", "threat"],
+        },
+        "canonical_metadata": {
+            "class_order": ["toxic", "insult", "threat"],
+        },
+    }
+
+    for problem_type in ("multi_label", "multi_label_classification"):
+        assert _validation_class_order_for_state(
+            state,
+            problem_type,
+        ) == ["toxic", "insult", "threat"]
+        assert not _requires_class_order_artifact(
+            state,
+            problem_type,
+        )
+
+
+def test_packed_oof_digest_and_cached_reuse(tmp_path: Path) -> None:
+    component = AblationComponent("candidate", "model", "train")
+    canonical = tmp_path / "canonical"
+    models = tmp_path / "models"
+    canonical.mkdir()
+    models.mkdir()
+    (canonical / "metadata.json").write_text(
+        '{"task_type": "image_to_image", "packed_image_contract": true}',
+        encoding="utf-8",
+    )
+    np.savez(
+        models / "oof_candidate.npz",
+        values=np.array([0.0], dtype=np.float32),
+        offsets=np.array([0, 1], dtype=np.int64),
+        shapes=np.array([[1, 1]], dtype=np.int32),
+        image_ids=np.array(["a.png"], dtype=str),
+    )
+    np.save(canonical / "train_ids.npy", np.array(["a.png"], dtype=str))
+    np.save(canonical / "test_ids.npy", np.array(["b.png"], dtype=str))
+    state = _cached_state(tmp_path, "print('candidate')")
+    state["domain_detected"] = "image_to_image"
+
+    assert _oof_artifact_digest(tmp_path, component.name) is not None
+    assert _Retry()._should_skip_component(component, state) is None
+
+    np.savez(
+        models / "test_candidate.npz",
+        values=np.array([0.5], dtype=np.float32),
+        offsets=np.array([0, 1], dtype=np.int64),
+        shapes=np.array([[1, 1]], dtype=np.int32),
+        image_ids=np.array(["b.png"], dtype=str),
+    )
+    reused = _Retry()._should_skip_component(component, state)
+    assert reused is not None
+    assert reused.success is True
+
+
 def test_non_model_components_have_no_expected_artifacts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -96,6 +269,17 @@ def test_cached_model_reuse_requires_oof_artifact_on_disk(tmp_path: Path) -> Non
 
     (tmp_path / "models").mkdir()
     np.save(tmp_path / "models" / "oof_candidate.npy", np.array([0.1, 0.9]))
+    assert _Retry()._should_skip_component(component, state) is None
+
+    np.save(tmp_path / "models" / "test_candidate.npy", np.array([0.2]))
+    np.save(
+        tmp_path / "models" / "train_ids_candidate.npy",
+        np.array(["a", "b"], dtype=str),
+    )
+    np.save(
+        tmp_path / "models" / "test_ids_candidate.npy",
+        np.array(["c"], dtype=str),
+    )
     reused = _Retry()._should_skip_component(component, state)
     assert reused is not None
     assert reused.success is True
@@ -119,7 +303,6 @@ def test_ensemble_component_needs_combinable_predictions(tmp_path: Path) -> None
         _has_combinable_model_predictions({"oof_availability": {"m": True}}, tmp_path)
         is True
     )
-
     models_dir = tmp_path / "models"
     models_dir.mkdir()
     np.save(models_dir / "rejected_oof_bad.npy", np.array([0.5]))
@@ -129,15 +312,77 @@ def test_ensemble_component_needs_combinable_predictions(tmp_path: Path) -> None
     assert _has_combinable_model_predictions({}, tmp_path) is True
 
 
+def test_generic_ensemble_is_not_offered_packed_image_artifacts(
+    tmp_path: Path,
+) -> None:
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "oof_image_model.npz").write_bytes(b"packed")
+
+    assert (
+        _has_combinable_model_predictions(
+            {
+                "domain_detected": "image_to_image",
+                "oof_availability": {"image_model": True},
+            },
+            tmp_path,
+        )
+        is False
+    )
+
+
 def test_missing_artifact_error_gets_reuse_hint() -> None:
     hinted = _maybe_add_artifact_hint(
         "Missing expected artifacts: models/test_candidate.npy"
     )
     assert "Do NOT retrain from scratch" in hinted
     assert "allow_pickle=False" in hinted
+    assert "save_component_artifacts(" in hinted
+    assert "np.save(path" not in hinted
 
     untouched = _maybe_add_artifact_hint("ValueError: shapes do not match")
     assert untouched == "ValueError: shapes do not match"
+
+
+def test_fallback_prompt_receives_dynamic_contract_requirements() -> None:
+    from kaggle_agents.core.state import CompetitionInfo
+    from kaggle_agents.prompts.templates.builders.context import DynamicContext
+    from kaggle_agents.prompts.templates.developer.prompt_composition import (
+        compose_generate_prompt,
+    )
+
+    component = AblationComponent("candidate", "model", "train")
+    prompt = compose_generate_prompt(
+        component=component,
+        competition_info=CompetitionInfo("demo", "", "auc", "classification"),
+        paths={"output_dir": "."},
+        context=DynamicContext(),
+        requirements="DYNAMIC CONTRACT: use the injected helpers only.",
+    )
+
+    assert "DYNAMIC CONTRACT: use the injected helpers only." in prompt
+
+
+def test_stacking_prompt_uses_declared_submission_target_roles() -> None:
+    from kaggle_agents.prompts.templates.builders.cv import (
+        build_stacking_oof_instructions,
+    )
+
+    prompt = "\n".join(build_stacking_oof_instructions(".", "candidate"))
+
+    assert "SUBMISSION_TARGET_COLS" in prompt
+    assert "columns[1:]" not in prompt
+    assert "columns[1:4]" not in prompt
+
+
+def test_tabular_constraints_never_derive_class_order_by_position() -> None:
+    from kaggle_agents.prompts.templates.constraints.tabular import (
+        TABULAR_CONSTRAINTS,
+    )
+
+    assert "submission_targets = list(SUBMISSION_TARGET_COLS)" in TABULAR_CONSTRAINTS
+    assert "if len(submission_targets) > 1" in TABULAR_CONSTRAINTS
+    assert "class_order = sample_sub.columns[1:]" not in TABULAR_CONSTRAINTS
 
 
 def _write_csv(path: Path, ids: list, target: list | None = None) -> None:

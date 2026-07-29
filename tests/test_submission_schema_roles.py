@@ -12,6 +12,7 @@ assumption, and keep the ordinary ``id, target`` layout unchanged.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -73,6 +74,262 @@ class TestSplitSubmissionSchema:
         assert echoed == ["id"]
         assert predicted == ["target"]
 
+
+class TestSubmissionOnlyRecovery:
+    """A malformed CSV must not discard independently valid prediction artifacts."""
+
+    def test_rebuilds_target_first_template_from_component_test_predictions(
+        self, tmp_path
+    ):
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {
+                "Insult": [0.0, 0.0, 0.0],
+                "Date": ["b", "a", "c"],
+                "Comment": ["two", "one", "three"],
+            }
+        ).to_csv(sample, index=False)
+        models = tmp_path / "models"
+        models.mkdir()
+        test_predictions = models / "test_model_a.npy"
+        np.save(test_predictions, np.array([0.1, 0.2, 0.3]))
+        np.save(models / "test_ids_model_a.npy", np.array(["a", "b", "c"]))
+        artifact_bytes = test_predictions.read_bytes()
+        (tmp_path / "submission.csv").write_text("wrong\n0\n", encoding="utf-8")
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["Insult"],
+            id_col="Date",
+            test_ids_are_positional=False,
+        )
+
+        assert rebuilt == tmp_path / "submission.csv"
+        written = pd.read_csv(rebuilt)
+        assert written.columns.tolist() == ["Insult", "Date", "Comment"]
+        assert written["Insult"].tolist() == [0.2, 0.1, 0.3]
+        assert written["Date"].tolist() == ["b", "a", "c"]
+        assert test_predictions.read_bytes() == artifact_bytes
+
+    def test_rebuild_reads_semicolon_template_and_emits_csv(self, tmp_path):
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text(
+            "id;value\nrow-a;0\nrow-b;0\n",
+            encoding="utf-8",
+        )
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "test_model_a.npy", np.array([0.2, 0.8]))
+        np.save(
+            models / "test_ids_model_a.npy",
+            np.array(["row-a", "row-b"], dtype=str),
+        )
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["value"],
+            id_col="id",
+        )
+
+        assert rebuilt is not None
+        assert rebuilt.read_text(encoding="utf-8").splitlines()[0] == "id,value"
+        written = pd.read_csv(rebuilt)
+        assert written["value"].tolist() == [0.2, 0.8]
+
+    def test_rebuild_keeps_row_order_for_canonical_positional_test_ids(
+        self, tmp_path
+    ):
+        """Synthetic canonical IDs name row positions, not an echoed column."""
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {
+                "Insult": [0.0, 0.0, 0.0],
+                "Date": ["2012-08-01", "2012-08-02", "2012-08-03"],
+                "Comment": ["first", "second", "third"],
+            }
+        ).to_csv(sample, index=False)
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "test_model_a.npy", np.array([0.1, 0.2, 0.3]))
+        np.save(models / "test_ids_model_a.npy", np.array(["0", "1", "2"]))
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["Insult"],
+            id_col="Date",
+            test_ids_are_positional=True,
+        )
+
+        assert rebuilt == tmp_path / "submission.csv"
+        written = pd.read_csv(rebuilt)
+        assert written["Insult"].tolist() == [0.1, 0.2, 0.3]
+        assert written["Date"].tolist() == [
+            "2012-08-01",
+            "2012-08-02",
+            "2012-08-03",
+        ]
+
+    def test_developer_recovers_when_submission_file_is_absent(self, tmp_path):
+        """Valid artifacts remain usable even when generated code wrote no CSV."""
+        from kaggle_agents.agents.developer.agent import DeveloperAgent
+
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {
+                "Insult": [0.0, 0.0],
+                "Date": ["first", "second"],
+            }
+        ).to_csv(sample, index=False)
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "test_model_a.npy", np.array([0.25, 0.75]))
+        np.save(models / "test_ids_model_a.npy", np.array(["0", "1"]))
+
+        recovered = DeveloperAgent._recover_missing_submission(
+            run_mode="mlebench",
+            submission_path=None,
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["Insult"],
+            id_col="Date",
+            test_ids_are_positional=True,
+        )
+
+        assert recovered == tmp_path / "submission.csv"
+        assert pd.read_csv(recovered)["Insult"].tolist() == [0.25, 0.75]
+
+    def test_numeric_real_ids_are_reordered_when_not_declared_positional(
+        self, tmp_path
+    ):
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {"target": [0.0, 0.0], "id": ["1", "0"]}
+        ).to_csv(sample, index=False)
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "test_model_a.npy", np.array([0.1, 0.9]))
+        np.save(models / "test_ids_model_a.npy", np.array(["0", "1"]))
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["target"],
+            id_col="id",
+            test_ids_are_positional=False,
+        )
+
+        assert pd.read_csv(rebuilt)["target"].tolist() == [0.9, 0.1]
+
+    def test_rebuild_preserves_leading_zero_echo_ids(self, tmp_path):
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text("target,id\n0,001\n0,002\n", encoding="utf-8")
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "test_model_a.npy", np.array([0.1, 0.9]))
+        np.save(models / "test_ids_model_a.npy", np.array(["001", "002"]))
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["target"],
+            id_col="id",
+            test_ids_are_positional=False,
+        )
+
+        written = pd.read_csv(rebuilt, dtype=str)
+        assert written["id"].tolist() == ["001", "002"]
+
+    def test_rebuild_preserves_na_like_echo_ids_literally(self, tmp_path):
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text("target,id\n0,NA\n0,NULL\n0,N/A\n", encoding="utf-8")
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(models / "test_model_a.npy", np.array([0.1, 0.2, 0.3]))
+        np.save(
+            models / "test_ids_model_a.npy",
+            np.array(["NA", "NULL", "N/A"]),
+        )
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["target"],
+            id_col="id",
+            test_ids_are_positional=False,
+        )
+
+        written = pd.read_csv(rebuilt, dtype=str, keep_default_na=False)
+        assert written["id"].tolist() == ["NA", "NULL", "N/A"]
+
+    def test_rebuilds_label_format_from_multiclass_probabilities(self, tmp_path):
+        from kaggle_agents.utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text("Cover_Type,id\n0,row-b\n0,row-a\n", encoding="utf-8")
+        models = tmp_path / "models"
+        models.mkdir()
+        np.save(
+            models / "test_model_a.npy",
+            np.array([[0.8, 0.1, 0.1], [0.1, 0.2, 0.7]]),
+        )
+        np.save(
+            models / "test_ids_model_a.npy",
+            np.array(["row-a", "row-b"]),
+        )
+        np.save(
+            models / "class_order_model_a.npy",
+            np.array(["forest", "grass", "water"]),
+        )
+
+        rebuilt = rebuild_submission_from_component_predictions(
+            working_dir=tmp_path,
+            component_name="model_a",
+            sample_submission_path=sample,
+            target_cols=["Cover_Type"],
+            id_col="id",
+            test_ids_are_positional=False,
+        )
+
+        written = pd.read_csv(rebuilt, dtype=str, keep_default_na=False)
+        assert written["Cover_Type"].tolist() == ["water", "forest"]
+        assert written["id"].tolist() == ["row-b", "row-a"]
+
     def test_falls_back_when_test_schema_covers_every_column(self):
         # Everything overlaps, so nothing would be left to predict.
         echoed, predicted = split_submission_schema(
@@ -86,6 +343,88 @@ class TestSplitSubmissionSchema:
         echoed, predicted = split_submission_schema(["target"], ["id"])
         assert echoed == []
         assert predicted == ["target"]
+
+
+def test_submission_validation_distinguishes_na_literal_from_blank_echo(
+    tmp_path,
+):
+    from kaggle_agents.tools.code_executor.submission import (
+        SubmissionValidationMixin,
+    )
+
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text("target,id\n0,NA\n0,NULL\n", encoding="utf-8")
+    submission.write_text("target,id\n0.2,\n0.8,\n", encoding="utf-8")
+
+    valid, message = SubmissionValidationMixin().validate_submission_format(
+        submission_path=submission,
+        sample_submission_path=sample,
+        component_type="model",
+        problem_type="regression",
+        target_cols=["target"],
+    )
+
+    assert valid is False
+    assert "'id' does not match sample_submission" in message
+
+
+def test_submission_validation_accepts_single_column_string_labels(
+    tmp_path,
+):
+    from kaggle_agents.tools.code_executor.submission import (
+        SubmissionValidationMixin,
+    )
+
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text(
+        "target,id\nunknown,a\nunknown,b\n",
+        encoding="utf-8",
+    )
+    submission.write_text(
+        "target,id\ncat,a\ndog,b\n",
+        encoding="utf-8",
+    )
+
+    valid, message = SubmissionValidationMixin().validate_submission_format(
+        submission_path=submission,
+        sample_submission_path=sample,
+        component_type="model",
+        problem_type="multiclass",
+        target_cols=["target"],
+    )
+
+    assert valid is True, message
+
+
+def test_multiclass_label_submission_accepts_numeric_template_placeholder(
+    tmp_path,
+):
+    from kaggle_agents.tools.code_executor.submission import (
+        SubmissionValidationMixin,
+    )
+
+    sample = tmp_path / "sample_submission.csv"
+    submission = tmp_path / "submission.csv"
+    sample.write_text(
+        "target,id\n0,a\n0,b\n",
+        encoding="utf-8",
+    )
+    submission.write_text(
+        "target,id\ncat,a\ndog,b\n",
+        encoding="utf-8",
+    )
+
+    valid, message = SubmissionValidationMixin().validate_submission_format(
+        submission_path=submission,
+        sample_submission_path=sample,
+        component_type="model",
+        problem_type="multiclass_classification",
+        target_cols=["target"],
+    )
+
+    assert valid is True, message
 
 
 class TestSuppliedTestColumns:
@@ -177,6 +516,44 @@ class TestSubmissionContractRoles:
         assert contract.format_type == "label"
         assert contract.class_order is None
         assert contract.expected_rows == 2
+
+    def test_target_first_roles_support_semicolon_test_schema(self, tmp_path):
+        sample = tmp_path / "sample_submission.csv"
+        test_csv = tmp_path / "test.csv"
+        pd.DataFrame(
+            {"Insult": [0], "Date": ["2012"], "Comment": ["a"]}
+        ).to_csv(sample, index=False)
+        test_csv.write_text("Date;Comment\n2012;a\n", encoding="utf-8")
+
+        contract = create_submission_contract_from_sample(
+            str(sample),
+            str(test_csv),
+        )
+
+        assert contract.target_cols == ["Insult"]
+        assert contract.id_col == "Date"
+
+    def test_prediction_first_pixel_template_uses_observed_coordinate_id(
+        self,
+        tmp_path,
+    ):
+        sample = tmp_path / "sample_submission.csv"
+        test_dir = tmp_path / "test"
+        test_dir.mkdir()
+        (test_dir / "page.png").write_bytes(b"image")
+        ids = [f"page_{row}_{col}" for row in range(2) for col in range(3)]
+        pd.DataFrame({"value": [0.0] * len(ids), "id": ids}).to_csv(
+            sample,
+            index=False,
+        )
+
+        contract = create_submission_contract_from_sample(
+            str(sample),
+            str(test_dir),
+        )
+
+        assert contract.id_col == "id"
+        assert contract.target_cols == ["value"]
 
     def test_wide_template_keeps_class_order(self, tmp_path):
         sample = tmp_path / "sample_submission.csv"
@@ -416,6 +793,31 @@ class TestEnsembleWritesToTheGradedColumn:
         assert realigned["id"].tolist() == [1, 2, 3]
         assert realigned["target"].tolist() == [0.1, 0.2, 0.3]
 
+    def test_validation_reads_semicolon_template_and_emits_csv(
+        self, tmp_path
+    ):
+        from kaggle_agents.agents.ensemble.submission import (
+            validate_and_align_submission,
+        )
+
+        sample = tmp_path / "sample_submission.csv"
+        submission = tmp_path / "submission.csv"
+        sample.write_text("id;value\na;0\nb;0\n", encoding="utf-8")
+        submission.write_text("id,value\nb,0.8\na,0.2\n", encoding="utf-8")
+
+        is_valid, error, aligned = validate_and_align_submission(
+            submission,
+            sample,
+            tmp_path / "aligned.csv",
+            ["value"],
+        )
+
+        assert is_valid, error
+        assert aligned.read_text(encoding="utf-8").splitlines()[0] == "id,value"
+        written = pd.read_csv(aligned)
+        assert written["id"].tolist() == ["a", "b"]
+        assert written["value"].tolist() == [0.2, 0.8]
+
     def test_duplicate_identifier_out_of_order_is_rejected(self, tmp_path):
         from kaggle_agents.agents.ensemble.submission import (
             validate_and_align_submission,
@@ -462,6 +864,83 @@ class TestEnsembleWritesToTheGradedColumn:
         )
 
         assert restored
+        assert sha256_file(tmp_path / "submission.csv") == digest
+
+    def test_hash_verified_restore_accepts_multiclass_string_labels_with_numeric_placeholder(
+        self, tmp_path
+    ):
+        from kaggle_agents.agents.ensemble.submission import safe_restore_submission
+        from kaggle_agents.utils.submission_artifacts import sha256_file
+
+        sample = tmp_path / "sample_submission.csv"
+        snapshot = tmp_path / "snapshot.csv"
+        sample.write_text("target,id\n0,a\n0,b\n", encoding="utf-8")
+        snapshot.write_text("target,id\ncat,a\ndog,b\n", encoding="utf-8")
+        digest = sha256_file(snapshot)
+
+        restored = safe_restore_submission(
+            snapshot,
+            tmp_path / "submission.csv",
+            sample,
+            target_cols=["target"],
+            problem_type="multiclass_classification",
+            expected_sha256=digest,
+            require_hash=True,
+        )
+
+        assert restored
+        assert sha256_file(tmp_path / "submission.csv") == digest
+
+    def test_hash_verified_restore_streams_large_snapshot(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from kaggle_agents.agents.ensemble.submission import safe_restore_submission
+        from kaggle_agents.tools.code_executor.submission import (
+            SubmissionValidationMixin,
+        )
+        from kaggle_agents.utils.submission_artifacts import sha256_file
+
+        sample = tmp_path / "sample_submission.csv"
+        snapshot = tmp_path / "snapshot.csv"
+        pd.DataFrame(
+            {
+                "value": [0.0] * 7,
+                "id": ["NA", "001", "002", "003", "004", "005", "006"],
+            }
+        ).to_csv(sample, index=False)
+        pd.DataFrame(
+            {
+                "value": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7],
+                "id": ["NA", "001", "002", "003", "004", "005", "006"],
+            }
+        ).to_csv(snapshot, index=False)
+        digest = sha256_file(snapshot)
+        monkeypatch.setattr(
+            SubmissionValidationMixin,
+            "CSV_VALIDATION_CHUNK_ROWS",
+            2,
+        )
+        original_read_csv = pd.read_csv
+
+        def guarded_read_csv(*args, **kwargs):
+            if "chunksize" not in kwargs and "nrows" not in kwargs:
+                raise AssertionError("immutable restore attempted a full CSV read")
+            return original_read_csv(*args, **kwargs)
+
+        monkeypatch.setattr(pd, "read_csv", guarded_read_csv)
+
+        restored = safe_restore_submission(
+            snapshot,
+            tmp_path / "submission.csv",
+            sample,
+            target_cols=["value"],
+            expected_sha256=digest,
+            require_hash=True,
+        )
+
+        assert restored is True
         assert sha256_file(tmp_path / "submission.csv") == digest
 
 
@@ -514,3 +993,50 @@ class TestAdapterRoleDetection:
 
         assert detector._detect_target_columns(tmp_path / "absent.csv") == ["target"]
         assert detector._detect_id_column(tmp_path / "absent.csv") == "id"
+
+
+def test_terminal_submission_validation_streams_target_first_template(
+    tmp_path,
+    monkeypatch,
+):
+    """The final workflow gate must not reload a pixel-scale CSV in memory."""
+    from kaggle_agents.agents.submission_agent import SubmissionAgent
+
+    sample_path = tmp_path / "sample_submission.csv"
+    submission_path = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "Insult": [0.0, 0.0, 0.0, 0.0],
+            "Date": ["NA", "", "001", "002"],
+            "Comment": ["a", "b", "c", "d"],
+        }
+    ).to_csv(sample_path, index=False)
+    pd.DataFrame(
+        {
+            "Insult": [0.1, 0.8, 0.2, 0.9],
+            "Date": ["NA", "", "001", "002"],
+            "Comment": ["a", "b", "c", "d"],
+        }
+    ).to_csv(submission_path, index=False)
+
+    original_read_csv = pd.read_csv
+    calls = []
+
+    def guarded_read_csv(*args, **kwargs):
+        calls.append(dict(kwargs))
+        if "chunksize" not in kwargs and "nrows" not in kwargs:
+            raise AssertionError("terminal validation attempted a full CSV read")
+        return original_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", guarded_read_csv)
+
+    valid, message = SubmissionAgent()._validate_submission(
+        submission_path,
+        sample_path,
+        problem_type="binary_classification",
+        metric_name="auc",
+        target_cols=["Insult"],
+    )
+
+    assert valid is True, message
+    assert any("chunksize" in call for call in calls)

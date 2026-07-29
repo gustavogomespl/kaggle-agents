@@ -45,6 +45,63 @@ def test_detects_observed_coordinate_structure_without_fixed_dimensions(
     assert metadata["pixel_format_detected"] is True
 
 
+def test_detection_streams_template_and_counts_nested_test_images(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    test_dir = tmp_path / "visual_assets"
+    _write_images(test_dir / "nested", ["case-alpha.png", "case-beta.png"])
+    row_keys = [
+        f"case-{case}_{row}_{col}"
+        for case in ("alpha", "beta")
+        for row in range(11)
+        for col in range(10)
+    ]
+    sample_path = tmp_path / "sample_submission.csv"
+    pd.DataFrame(
+        {"row_key": row_keys, "prediction": [0.0] * len(row_keys)}
+    ).to_csv(sample_path, index=False)
+    original_read_csv = pd.read_csv
+
+    def guarded_read_csv(*args, **kwargs):
+        if "chunksize" not in kwargs and "nrows" not in kwargs:
+            raise AssertionError("format detection attempted a full CSV read")
+        return original_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", guarded_read_csv)
+
+    format_type, metadata = SubmissionFormatMixin().detect_submission_format(
+        sample_path,
+        test_dir,
+    )
+
+    assert format_type == "pixel_level"
+    assert metadata["expected_rows"] == 220
+    assert metadata["n_test_samples"] == 2
+
+
+def test_pixel_detection_resolves_prediction_first_schema(
+    tmp_path: Path,
+) -> None:
+    test_dir = tmp_path / "images"
+    _write_images(test_dir, ["page.png"])
+    ids = [f"page_{row}_{col}" for row in range(11) for col in range(10)]
+    sample_path = tmp_path / "sample_submission.csv"
+    pd.DataFrame({"value": [0.0] * len(ids), "id": ids}).to_csv(
+        sample_path,
+        index=False,
+    )
+
+    format_type, metadata = SubmissionFormatMixin().detect_submission_format(
+        sample_path,
+        test_dir,
+    )
+
+    assert format_type == "pixel_level"
+    assert metadata["id_column"] == "id"
+    assert metadata["value_columns"] == ["value"]
+
+
 def test_does_not_treat_long_class_ids_as_pixel_coordinates(tmp_path: Path) -> None:
     sample_path = tmp_path / "sample_submission.csv"
     pd.DataFrame(
@@ -57,6 +114,28 @@ def test_does_not_treat_long_class_ids_as_pixel_coordinates(tmp_path: Path) -> N
     format_type, metadata = SubmissionFormatMixin().detect_submission_format(sample_path)
 
     assert format_type == "standard"
+    assert metadata["pixel_format_detected"] is False
+
+
+def test_flat_single_suffix_pixels_are_not_routed_to_row_col_mapper(
+    tmp_path: Path,
+) -> None:
+    test_dir = tmp_path / "images"
+    _write_images(test_dir, ["page.png"])
+    sample_path = tmp_path / "sample_submission.csv"
+    pd.DataFrame(
+        {
+            "id": [f"page_{index}" for index in range(110)],
+            "value": [0.0] * 110,
+        }
+    ).to_csv(sample_path, index=False)
+
+    format_type, metadata = SubmissionFormatMixin().detect_submission_format(
+        sample_path,
+        test_dir,
+    )
+
+    assert format_type != "pixel_level"
     assert metadata["pixel_format_detected"] is False
 
 

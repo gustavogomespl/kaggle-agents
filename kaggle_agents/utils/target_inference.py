@@ -22,6 +22,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from .csv_utils import read_csv_auto
 
 TargetType = Literal["single", "multi_label", "multi_target"]
 
@@ -207,7 +208,7 @@ def _read_schema_columns(
     try:
         return [
             str(column)
-            for column in pd.read_csv(Path(source), nrows=0).columns
+            for column in read_csv_auto(Path(source), nrows=0).columns
         ]
     except Exception:
         return []
@@ -249,6 +250,55 @@ def split_submission_schema(
         return echoed, predicted
 
     return columns[:1], columns[1:]
+
+
+def infer_pixel_submission_schema(
+    sample_preview: pd.DataFrame,
+) -> tuple[list[str], list[str]] | None:
+    """Infer roles only when one column proves a pixel-coordinate ID pattern.
+
+    Directory-only image competitions have no test CSV whose columns can
+    separate echoed IDs from predictions. In that case positional fallback is
+    unsafe because templates may place the numeric prediction first
+    (``value,id``). This detector accepts exactly one column whose observed
+    values are unique ``<image>_<row>_<col>`` identifiers with a repeated image
+    prefix; ambiguity fails closed.
+    """
+    if sample_preview.shape[1] < 2 or len(sample_preview) < 2:
+        return None
+
+    coordinate_columns: list[str] = []
+    for column in sample_preview.columns:
+        values = sample_preview[column].astype(str).tolist()
+        prefixes: list[str] = []
+        valid = True
+        for value in values:
+            parts = value.rsplit("_", 2)
+            if (
+                len(parts) != 3
+                or not parts[0]
+                or not parts[1].isdigit()
+                or not parts[2].isdigit()
+            ):
+                valid = False
+                break
+            prefixes.append(parts[0])
+        if (
+            valid
+            and len(set(values)) == len(values)
+            and len(set(prefixes)) < len(prefixes)
+        ):
+            coordinate_columns.append(str(column))
+
+    if len(coordinate_columns) != 1:
+        return None
+    id_col = coordinate_columns[0]
+    target_cols = [
+        str(column)
+        for column in sample_preview.columns
+        if str(column) != id_col
+    ]
+    return [id_col], target_cols
 
 
 def infer_target_columns(

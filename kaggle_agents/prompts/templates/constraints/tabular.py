@@ -91,8 +91,13 @@ Ensure target and class_order have the SAME type:
 # Check target type
 print(f"Target dtype: {y.dtype}, sample values: {y[:3]}")
 
-# If sample_submission columns are strings but y is int:
-class_order = sample_sub.columns[1:].tolist()
+# Wide target columns declare class order; a single label column does not:
+submission_targets = list(SUBMISSION_TARGET_COLS)
+class_order = (
+    submission_targets
+    if len(submission_targets) > 1
+    else le.classes_.tolist()
+)
 
 # Option 1: Convert y to string to match class_order
 y = y.astype(str)
@@ -246,53 +251,24 @@ params = {
 model = lgb.LGBMClassifier(**params)
 ```
 
-### 5. Submission Format Detection and Generation (CRITICAL)
-**ALWAYS detect submission format BEFORE generating submission!**
+### 5. Submission Generation (CRITICAL)
+**Use the injected schema-aware helper; it already knows the template roles.**
 
 ```python
-sample_sub = pd.read_csv(sample_submission_path)
-submission_cols = sample_sub.columns[1:].tolist()  # All columns except ID
-print(f"[LOG:INFO] Submission columns: {submission_cols}")
-
-# === FORMAT DETECTION ===
-if len(submission_cols) == 1:
-    # LABEL FORMAT: Single column for class labels (TPS, most classification)
-    # Example: Id,Cover_Type or Id,target
-    target_col = submission_cols[0]
-    print(f"[LOG:INFO] Label format detected - target column: {target_col}")
-
-    # For classification: convert probabilities to class labels
-    if predictions.ndim == 2:
-        # Multiclass: argmax to get predicted class index
-        predicted_labels = le.inverse_transform(np.argmax(predictions, axis=1))
-        sample_sub[target_col] = predicted_labels
-    else:
-        # Binary or regression: use predictions directly
-        sample_sub[target_col] = predictions
-
-elif len(submission_cols) > 1:
-    # WIDE FORMAT: Multiple columns for class probabilities
-    # Example: Id,class_0,class_1,class_2,...
-    print(f"[LOG:INFO] Wide format detected - {len(submission_cols)} probability columns")
-
-    if predictions.ndim != 2 or predictions.shape != (
-        len(sample_sub),
-        len(submission_cols),
-    ):
-        raise ValueError(
-            "Wide submission requires shape "
-            f"({len(sample_sub)}, {len(submission_cols)}), got {predictions.shape}"
-        )
-
-    # Assign one independently modeled probability column per output.
-    for i, col in enumerate(submission_cols):
-        sample_sub[col] = predictions[:, i]
-
-sample_sub.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
-print(f"[LOG:INFO] Submission saved with {len(submission_cols)} target column(s)")
+sample_rows = len(pd.read_csv(SAMPLE_SUBMISSION_PATH, usecols=[SUBMISSION_TARGET_COLS[0]]))
+predictions = np.asarray(predictions)
+if predictions.ndim == 1:
+    predictions = predictions.reshape(-1, 1)
+expected_shape = (sample_rows, len(SUBMISSION_TARGET_COLS))
+if predictions.shape != expected_shape:
+    raise ValueError(
+        f"Submission prediction shape {predictions.shape} != {expected_shape}"
+    )
+write_submission(predictions)  # pass test_ids=... only when reordering is needed
 ```
 
-**CRITICAL**: Do NOT assume submission format - always check `len(sample_sub.columns[1:])`!
+**CRITICAL**: Do NOT infer roles from `columns[1:]`, assign template columns by
+position, or call `to_csv` for submission.csv.
 
 ### 6. Optuna Hyperparameter Tuning
 ```python

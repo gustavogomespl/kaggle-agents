@@ -3,11 +3,13 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from kaggle_agents.agents.developer.agent import DeveloperAgent
 from kaggle_agents.agents.developer.validation import ValidationMixin
 from kaggle_agents.core.state import AblationComponent, CompetitionInfo
 from kaggle_agents.tools.code_executor import ExecutionResult
+from kaggle_agents.utils.image_to_image_contract import save_packed_images
 from kaggle_agents.utils.submission_artifacts import (
     snapshot_best_candidate_submission,
 )
@@ -194,6 +196,44 @@ def test_mlebench_does_not_infer_missing_metric_from_candidate_stdout(
 
 def test_bounded_metric_rejects_out_of_domain_score() -> None:
     assert _Validator._is_score_implausible(999.0, "auc") is True
+
+
+def test_image_to_image_trusted_oof_score_uses_packed_canonical_pixels(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "models").mkdir()
+    (tmp_path / "canonical").mkdir()
+    target_path = save_packed_images(
+        tmp_path / "canonical" / "image_targets.npz",
+        [
+            np.array([[0.0, 2.0]], dtype=np.float32),
+            np.array([[4.0]], dtype=np.float32),
+        ],
+        image_ids=["nested/a.png", "b.png"],
+    )
+    save_packed_images(
+        tmp_path / "models" / "oof_candidate.npz",
+        [
+            np.array([[1.0, 4.0]], dtype=np.float32),
+            np.array([[2.0]], dtype=np.float32),
+        ],
+        image_ids=["nested/a.png", "b.png"],
+    )
+    component = AblationComponent("candidate", "model", "train")
+
+    score = _Validator()._compute_trusted_oof_score(
+        component,
+        {
+            "working_directory": str(tmp_path),
+            "domain_detected": "image_to_image",
+            "canonical_contract": {"y_path": str(target_path)},
+            "competition_info": CompetitionInfo(
+                "demo", "", "rmse", "image_to_image"
+            ),
+        },
+    )
+
+    assert score == pytest.approx(np.sqrt(3.0), rel=1e-7)
 
 
 def test_rejected_candidate_restores_verified_previous_best(tmp_path: Path) -> None:

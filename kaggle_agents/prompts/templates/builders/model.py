@@ -979,14 +979,16 @@ def _build_audio_domain_instructions(state: dict) -> list[str]:
                 f"  - **Number of Classes:** {num_classes}",
                 "  - **CRITICAL SUBMISSION CODE:**",
                 "    ```python",
-                "    submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
+                "    from kaggle_agents.utils.csv_utils import read_csv_auto",
+                f"    submission_ids = read_csv_auto(SAMPLE_SUBMISSION_PATH)['{id_column}'].astype(str)",
                 "    pred_map = {}",
                 "    for i, record_id in enumerate(TEST_REC_IDS):",
+                "        record_id_int = int(record_id)  # observed numeric encoding",
                 f"        for class_id in range({num_classes}):",
-                f"            submission_id = record_id * {id_multiplier} + class_id",
-                "            pred_map[submission_id] = predictions[i, class_id]",
-                f"    submission['{target_columns[0] if target_columns else 'Probability'}'] = submission['{id_column}'].map(pred_map)",
-                "    submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)",
+                f"            submission_id = record_id_int * {id_multiplier} + class_id",
+                "            pred_map[str(submission_id)] = predictions[i, class_id]",
+                "    submission_predictions = np.asarray([pred_map[value] for value in submission_ids])",
+                "    write_submission(submission_predictions)",
                 "    ```",
             ])
         elif format_type == "wide":
@@ -994,10 +996,7 @@ def _build_audio_domain_instructions(state: dict) -> list[str]:
                 f"  - **Target Columns:** {target_columns}",
                 "  - **WIDE FORMAT:** One column per class, one row per sample",
                 "    ```python",
-                "    submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)",
-                f"    for i, col in enumerate({target_columns}):",
-                "        submission[col] = predictions[:, i]",
-                "    submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)",
+                "    write_submission(predictions)",
                 "    ```",
             ])
 

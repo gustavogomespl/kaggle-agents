@@ -148,7 +148,7 @@ def build_image_model_instructions(
             instructions.append(f"  - Clean target dir (paired with train/): {clean_path}")
 
         instructions.append(
-            "  - Output full-resolution (or resized) images, then flatten to pixel-level CSV using sample_submission IDs."
+            "  - Output full-resolution images, save the final packed test artifact, and call the injected write_submission(None) helper; the host maps that exact artifact to observed sample_submission IDs."
         )
 
         # Add critical data pipeline fixes for image-to-image
@@ -156,18 +156,21 @@ def build_image_model_instructions(
             [
                 "\n⚠️ DATA PIPELINE REQUIREMENTS (CRITICAL - SEE HARD_CONSTRAINTS):",
                 "  - **VARIABLE DIMENSIONS**: Images may have different native sizes",
-                "    - TRAINING: Use `transforms.RandomCrop(256, 256)` or `transforms.Resize((256, 256))` for consistent tensor sizes",
-                "    - VALIDATION/TEST: Use `batch_size=1` in DataLoader to avoid torch.stack() errors",
+                "    - TRAINING: sample crop coordinates ONCE and apply the identical crop to noisy input and clean target; if either is too small, apply identical padding and retain a valid-pixel mask",
+                "    - Never use independent random transforms for the two sides of a training pair",
+                "    - VALIDATION/TEST: use `batch_size=1`; pad one image only when required by model stride, preserve the valid-pixel mask, then unpad before scoring/saving",
                 "  - **NEGATIVE STRIDES**: Call `np.ascontiguousarray()` or `.copy()` after `np.flip()`/`np.rot90()` augmentations",
                 "  - **NO TRAIN.CSV**: Load image pairs directly from directories with `glob`/`pathlib`, NOT from CSV files:",
                 "    ```python",
-                "    noisy_files = sorted(train_dir.glob('*.png'))",
-                "    pairs = [(nf, clean_dir / nf.name) for nf in noisy_files]",
-                "    missing_targets = [clean for _, clean in pairs if not clean.is_file()]",
-                "    if missing_targets:",
-                "        raise FileNotFoundError(f'Missing paired targets: {missing_targets[:10]}')",
+                "    noisy = {p.relative_to(train_dir).as_posix(): p for p in train_dir.rglob('*') if p.is_file()}",
+                "    clean = {p.relative_to(clean_dir).as_posix(): p for p in clean_dir.rglob('*') if p.is_file()}",
+                "    if set(noisy) != set(clean):",
+                "        raise FileNotFoundError('Missing paired targets or inputs: noisy/clean relative-path coverage is not exactly 1:1')",
+                "    pairs = [(image_id, noisy[image_id], clean[image_id]) for image_id in sorted(noisy)]",
                 "    ```",
-                "  - **LARGER BATCH FOR TRAINING**: Once dimensions are fixed with RandomCrop, use batch_size=16 or 32 for faster training",
+                "  - **PACKED ARTIFACTS**: call the injected `save_component_artifacts(oof_images, test_images, train_ids=CANONICAL_TRAIN_IDS, test_ids=CANONICAL_TEST_IDS)` exactly once; it writes safe component-specific `.npz` files, so never import/redefine the helper or save variable images as object arrays",
+                "  - **SUBMISSION**: call injected `write_submission(None)` immediately after saving packed artifacts; do not flatten pixels or write a submission DataFrame directly",
+                "  - **LARGER BATCH FOR TRAINING**: only batch after paired crop/pad produces equal shapes; never stack native variable-sized images",
             ]
         )
 

@@ -72,6 +72,9 @@ Return exactly one JSON object and no markdown:
 The object must contain exactly those five fields. Be specific and actionable.
 The score is advisory and will be recomputed by the host from `severity`."""
 
+_FORMAT_VALIDATION_CHUNK_ROWS = 100_000
+_MAX_FORMAT_IDS_TRACKED = 100_000
+
 
 def _safe_advisory_text(value: Any, *, max_length: int) -> str:
     """Return bounded prompt-safe advisory text or an empty string."""
@@ -741,17 +744,13 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                     for candidate in concat_calls
                 )
                 is_tainted_alias = bool(value_names & tainted_names)
-                suspicious_container = bool(
-                    value_tokens & {"combined", "merged"}
-                    or (
-                        value_tokens & {"full", "all"}
-                        and "train" not in value_tokens
-                    )
+                is_held_out_alias = bool(
+                    value_tokens & {"test", "val", "valid", "validation"}
                 )
                 if (
                     is_mixed_concat
                     or is_tainted_alias
-                    or suspicious_container
+                    or is_held_out_alias
                 ) and not targets.issubset(tainted_names):
                     tainted_names.update(targets)
                     changed = True
@@ -785,14 +784,7 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 uses_held_out = bool(
                     name_tokens & {"test", "val", "valid", "validation"}
                 )
-                uses_combined = bool(
-                    name_tokens & {"combined", "merged"}
-                    or (
-                        name_tokens & {"full", "all"}
-                        and "train" not in name_tokens
-                    )
-                )
-                if not (uses_tainted or uses_held_out or uses_combined):
+                if not (uses_tainted or uses_held_out):
                     continue
                 input_names = ", ".join(sorted(names)) or "<expression>"
                 findings.append(
@@ -932,11 +924,19 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
             submission_path = working_dir / artifact_candidates[0]
 
         try:
-            # Read submission
-            submission_df = pd.read_csv(submission_path)
+            # Read only the schema up front. Pixel-level competitions can have
+            # millions of submission rows, so a full DataFrame here can undo
+            # the executor's streaming validation and exhaust memory.
+            submission_header = pd.read_csv(
+                submission_path,
+                nrows=0,
+                dtype=str,
+                keep_default_na=False,
+                na_filter=False,
+            )
 
             # Check for required columns (usually ID + prediction)
-            if len(submission_df.columns) < 2:
+            if len(submission_header.columns) < 2:
                 issues.append("Submission has fewer than 2 columns")
                 score *= 0.5
 
@@ -957,15 +957,62 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 if isinstance(column, str) and column
             ]
             pred_cols = [
-                submission_df.columns[position]
+                submission_header.columns[position]
                 for position in prediction_positions(
-                    submission_df, declared_targets
+                    submission_header, declared_targets
                 )
             ]
 
-            # Check for missing values
-            if submission_df[pred_cols].isnull().any().any():
-                null_count = int(submission_df[pred_cols].isnull().sum().sum())
+            # Position does not identify an ID column: some templates put the
+            # prediction first and context columns after it.
+            id_candidates = [
+                column
+                for column in submission_header.columns
+                if column not in set(pred_cols)
+                and str(column).lower() in ["id", "index", "idx"]
+            ]
+            id_col = id_candidates[0] if id_candidates else None
+
+            row_count = 0
+            null_count = 0
+            duplicate_ids = False
+            tracked_ids: set[str] = set()
+            track_cross_chunk_ids = True
+            chunks = pd.read_csv(
+                submission_path,
+                chunksize=_FORMAT_VALIDATION_CHUNK_ROWS,
+                dtype=str,
+                keep_default_na=False,
+                na_filter=False,
+            )
+            for chunk in chunks:
+                row_count += len(chunk)
+                null_count += int(chunk[pred_cols].eq("").sum().sum())
+
+                if id_col is not None and not duplicate_ids:
+                    ids = chunk[id_col].astype(str)
+                    if ids.duplicated().any():
+                        duplicate_ids = True
+                    elif track_cross_chunk_ids:
+                        chunk_ids = set(ids.tolist())
+                        if tracked_ids.intersection(chunk_ids):
+                            duplicate_ids = True
+                        elif (
+                            len(tracked_ids) + len(chunk_ids)
+                            <= _MAX_FORMAT_IDS_TRACKED
+                        ):
+                            tracked_ids.update(chunk_ids)
+                        else:
+                            # Exact echo/ID alignment is enforced by the
+                            # submission validator. Bound this advisory check
+                            # so it cannot consume unbounded Python-object
+                            # memory on pixel-level submissions.
+                            track_cross_chunk_ids = False
+                            tracked_ids.clear()
+
+            # Check for missing values only in prediction columns. Literal
+            # identifiers such as "NA" and leading-zero IDs stay strings.
+            if null_count:
                 issues.append(
                     f"Submission contains {null_count} missing predictions in "
                     f"{pred_cols}"
@@ -974,23 +1021,13 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 score *= 0.6
 
             # Check for empty submission
-            if len(submission_df) == 0:
+            if row_count == 0:
                 issues.append("Submission file is empty")
                 score = 0.0
 
-            # Check for duplicate IDs (if a column looks like an ID). Position
-            # does not identify that column: some templates put the prediction
-            # first and the identifier after it.
-            id_candidates = [
-                column
-                for column in submission_df.columns
-                if column not in set(pred_cols)
-                and str(column).lower() in ["id", "index", "idx"]
-            ]
-            for first_col in id_candidates[:1]:
-                if submission_df[first_col].duplicated().any():
-                    issues.append("Duplicate IDs found in submission")
-                    score *= 0.7
+            if duplicate_ids:
+                issues.append("Duplicate IDs found in submission")
+                score *= 0.7
 
         except Exception as e:
             issues.append(f"Error reading submission: {e!s}")

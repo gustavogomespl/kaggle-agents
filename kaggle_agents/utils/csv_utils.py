@@ -14,6 +14,7 @@ import pandas as pd
 
 
 DELIMITER_PRIORITY = [",", "\t", ";", " ", "|"]
+CSV_COUNT_CHUNK_ROWS = 100_000
 
 
 def detect_delimiter(file_path: Path | str, sample_lines: int = 5) -> str:
@@ -88,6 +89,44 @@ def read_csv_auto(file_path: Path | str, **kwargs) -> pd.DataFrame:
         kwargs["sep"] = detect_delimiter(file_path)
 
     return pd.read_csv(file_path, **kwargs)
+
+
+def read_csv_preview_and_count(
+    file_path: Path | str,
+    *,
+    preview_rows: int = 0,
+    chunk_rows: int = CSV_COUNT_CHUNK_ROWS,
+) -> tuple[pd.DataFrame, int]:
+    """Read a bounded preview and count rows without materializing the CSV.
+
+    Submission templates for pixel-level tasks can contain millions of rows.
+    Callers that only need schema, a small ID sample, and cardinality must use
+    this helper instead of loading the entire template into memory.
+    """
+    if preview_rows < 0:
+        raise ValueError("preview_rows must be non-negative")
+    if chunk_rows <= 0:
+        raise ValueError("chunk_rows must be positive")
+
+    path = Path(file_path)
+    preview = read_csv_auto(
+        path,
+        nrows=preview_rows,
+        dtype=str,
+        keep_default_na=False,
+        na_filter=False,
+    )
+    row_count = sum(
+        len(chunk)
+        for chunk in read_csv_auto(
+            path,
+            chunksize=chunk_rows,
+            dtype=str,
+            keep_default_na=False,
+            na_filter=False,
+        )
+    )
+    return preview, row_count
 
 
 def detect_and_report(file_path: Path | str) -> dict:

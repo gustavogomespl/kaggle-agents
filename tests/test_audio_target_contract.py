@@ -12,6 +12,9 @@ from kaggle_agents.prompts.templates.audio_template import get_audio_config
 from kaggle_agents.prompts.templates.builders.model import (
     _build_audio_domain_instructions,
 )
+from kaggle_agents.prompts.templates.builders.context import (
+    _build_audio_context,
+)
 from kaggle_agents.utils.label_parser import (
     infer_filename_label_table,
     read_id_mapping,
@@ -184,6 +187,27 @@ def test_multiple_classes_do_not_imply_multilabel_audio() -> None:
     assert "do not by themselves prove multi-label" in ordinary
     assert "BCEWithLogitsLoss" not in ordinary
     assert "BCEWithLogitsLoss" in multilabel
+
+
+def test_long_audio_submission_prompt_casts_observed_record_ids_explicitly() -> None:
+    state = {
+        "domain_type": "audio",
+        "submission_format_info": {
+            "format_type": "long",
+            "id_column": "Id",
+            "id_pattern": "record * 10 + class",
+            "id_multiplier": 10,
+            "num_classes": 4,
+            "target_columns": ["Probability"],
+        },
+    }
+
+    context = _build_audio_context(state)
+    model = "\n".join(_build_audio_domain_instructions(state))
+
+    for prompt in (context, model):
+        assert "record_id_int = int(record_id)" in prompt
+        assert "submission_id = record_id *" not in prompt
 
 
 def test_audio_config_is_derived_from_observations() -> None:

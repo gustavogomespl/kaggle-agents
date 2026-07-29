@@ -170,6 +170,56 @@ for fold in range(5):
     assert result.score == 1.0
 
 
+def test_train_only_variable_named_all_text_is_not_direct_leakage():
+    """Leakage depends on provenance, not the accidental name of a train corpus."""
+    findings = RobustnessAgent._find_direct_leakage(
+        """
+all_text = train_df["Comment"].fillna("")
+vectorizer.fit(all_text)
+"""
+    )
+
+    assert findings == []
+
+
+def test_concat_of_train_and_test_is_direct_leakage_even_with_neutral_alias():
+    """A corpus assembled from public test rows cannot be fitted during CV."""
+    findings = RobustnessAgent._find_direct_leakage(
+        """
+corpus = pd.concat([train_df["Comment"], test_df["Comment"]])
+vectorizer.fit(corpus)
+"""
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "fit_on_held_out_data"
+
+
+def test_held_out_series_alias_is_direct_leakage():
+    findings = RobustnessAgent._find_direct_leakage(
+        """
+heldout = test_df["Comment"]
+vectorizer.fit(heldout)
+"""
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "fit_on_held_out_data"
+
+
+def test_concat_through_held_out_alias_is_direct_leakage():
+    findings = RobustnessAgent._find_direct_leakage(
+        """
+heldout = test_df["Comment"]
+corpus = pd.concat([train_df["Comment"], heldout])
+vectorizer.fit(corpus)
+"""
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["kind"] == "fit_on_held_out_data"
+
+
 def test_hyperparameter_review_treats_candidate_artifacts_as_untrusted(tmp_path):
     review = json.dumps(
         {
@@ -450,3 +500,35 @@ def test_hyperparameter_review_parses_markdown_fenced_json():
     review = RobustnessAgent._parse_hyperparameter_review(fenced)
 
     assert review["severity"] == "info"
+
+
+def test_format_validation_streams_large_submission_without_full_read(
+    tmp_path,
+    monkeypatch,
+):
+    submission = tmp_path / "submission.csv"
+    pd.DataFrame(
+        {
+            "value": [0.1, 0.2, 0.3, 0.4, 0.5],
+            "id": ["NA", "001", "002", "003", "004"],
+        }
+    ).to_csv(submission, index=False)
+    original_read_csv = pd.read_csv
+    calls = []
+
+    def guarded_read_csv(*args, **kwargs):
+        calls.append(dict(kwargs))
+        if "chunksize" not in kwargs and "nrows" not in kwargs:
+            raise AssertionError("submission validation attempted a full CSV read")
+        return original_read_csv(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", guarded_read_csv)
+
+    result = _agent_with_llm()._validate_format(
+        _development("write_submission(test_preds)"),
+        tmp_path,
+        {"submission_contract": {"target_cols": ["value"]}},
+    )
+
+    assert result.passed is True
+    assert any("chunksize" in call for call in calls)

@@ -147,10 +147,9 @@ def create_seq2seq_fallback_plan(
                     "from kaggle_agents.utils.text_normalization import apply_hybrid_predictions; "
                     "lookup = LookupBaseline.load(MODELS_DIR / 'lookup_baseline.json'); "
                     "final_preds = apply_hybrid_predictions(test_df, lookup, neural_preds, neural_indices); "
-                    "submission = pd.read_csv(SAMPLE_SUBMISSION_PATH); "
-                    "target_cols = list(submission.columns[1:]); "
-                    "assert len(target_cols) == 1, 'hybrid output requires one submission target'; "
-                    "submission[target_cols[0]] = final_preds"
+                    "assert len(SUBMISSION_TARGET_COLS) == 1, "
+                    "'hybrid output requires one submission target'; "
+                    "write_submission(final_preds)"
                 ),
             },
         ]

@@ -59,17 +59,156 @@ from .dspy_modules import CodeFixerModule, CodeGeneratorModule
 from .grpo import GRPOMixin
 from .quiet_star import QuietStarMixin
 from .refinement import REFINEMENT_TRUST_BOUNDARY, RefinementMixin
-from .retry import RetryMixin, require_oof_artifacts
+from .retry import (
+    RetryMixin,
+    preserve_injected_header,
+    require_oof_artifacts,
+)
 from .utils import DeveloperUtilsMixin
 from .validation import ValidationMixin, quarantine_component_artifacts
 
 
 from .code_contracts import (
     ARTIFACT_HELPER as _ARTIFACT_HELPER,
+    HELPER_IMPORT_CONTRACT_ERROR,
+    MISSING_CLASS_ORDER_ERROR,
+    MISSING_SUBMISSION_HELPER_ERROR,
     SUBMISSION_CONTRACT_ERROR,
     SUBMISSION_HELPER as _SUBMISSION_HELPER,
     handwritten_submission_write,
+    missing_class_order_helper_argument,
+    missing_submission_helper_call,
+    requires_submission_helper,
+    untrusted_contract_helper_import,
 )
+
+
+def _uses_packed_image_artifacts(working_dir: Path) -> bool:
+    """Return whether the canonical metadata selects the packed image contract."""
+    metadata_path = Path(working_dir) / "canonical" / "metadata.json"
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(
+        metadata.get("packed_image_contract")
+        and str(metadata.get("task_type")) == "image_to_image"
+    )
+
+
+def _component_prediction_artifact(
+    working_dir: Path,
+    component_name: str,
+    kind: str,
+) -> Path:
+    """Resolve a component OOF/test path from the canonical artifact family."""
+    models_dir = Path(working_dir) / "models"
+    packed = models_dir / f"{kind}_{component_name}.npz"
+    dense = models_dir / f"{kind}_{component_name}.npy"
+    if _uses_packed_image_artifacts(working_dir) or (
+        packed.is_file() and not dense.is_file()
+    ):
+        return packed
+    return dense
+
+
+def _model_validation_problem_type(state: KaggleState) -> str:
+    """Resolve validation semantics, preserving explicit image-to-image domain."""
+    domain = str(state.get("domain_detected", "") or "").lower().replace("-", "_")
+    if domain == "image_to_image":
+        return "image_to_image"
+    competition_info = state.get("competition_info")
+    declared = (
+        getattr(competition_info, "problem_type", "")
+        if competition_info is not None
+        else ""
+    )
+    return str(declared or state.get("problem_type", "classification"))
+
+
+def _expected_class_order_for_state(
+    state: KaggleState,
+) -> list[str] | None:
+    """Resolve probability-column order from public or canonical evidence."""
+    submission_order = (
+        state.get("submission_contract") or {}
+    ).get("class_order")
+    canonical_metadata = state.get("canonical_metadata") or {}
+    canonical_order = canonical_metadata.get("class_order")
+    raw_order = submission_order or canonical_order
+    if raw_order is None:
+        metadata_path = (
+            state.get("canonical_contract") or {}
+        ).get("metadata_path")
+        if metadata_path and Path(metadata_path).is_file():
+            try:
+                raw_order = json.loads(
+                    Path(metadata_path).read_text(encoding="utf-8")
+                ).get("class_order")
+            except (OSError, TypeError, ValueError):
+                raw_order = None
+    if not isinstance(raw_order, (list, tuple)) or len(raw_order) < 2:
+        return None
+    normalized = [str(value) for value in raw_order]
+    if len(normalized) != len(set(normalized)):
+        return None
+    return normalized
+
+
+def _validation_class_order_for_state(
+    state: KaggleState,
+    problem_type: str,
+) -> list[str] | None:
+    """Resolve order for wide outputs or label-format multiclass outputs."""
+    normalized_problem = str(problem_type).lower()
+    compact_problem = normalized_problem.replace("_", "").replace("-", "")
+    is_classification = any(
+        marker in compact_problem
+        for marker in ("class", "binary", "multilabel")
+    )
+    if not is_classification:
+        return None
+    submission_order = (
+        state.get("submission_contract") or {}
+    ).get("class_order")
+    if isinstance(submission_order, (list, tuple)) and len(submission_order) > 1:
+        normalized = [str(value) for value in submission_order]
+        return (
+            normalized
+            if len(normalized) == len(set(normalized))
+            else None
+        )
+
+    canonical_metadata = state.get("canonical_metadata") or {}
+    try:
+        canonical_n_classes = int(
+            canonical_metadata.get("n_classes") or 0
+        )
+    except (TypeError, ValueError):
+        canonical_n_classes = 0
+    if (
+        "multiclass" not in compact_problem
+        and canonical_n_classes <= 2
+    ):
+        return None
+    return _expected_class_order_for_state(state)
+
+
+def _requires_class_order_artifact(
+    state: KaggleState,
+    problem_type: str,
+) -> bool:
+    """Whether probability columns encode mutually exclusive classes."""
+    normalized_problem = str(problem_type).lower()
+    compact_problem = normalized_problem.replace("_", "").replace("-", "")
+    if not any(
+        marker in compact_problem
+        for marker in ("class", "binary")
+    ):
+        return False
+    if _validation_class_order_for_state(state, problem_type) is None:
+        return False
+    return "multilabel" not in compact_problem
 
 
 def _oof_artifact_digest(working_dir: Path, component_name: str) -> str | None:
@@ -79,7 +218,7 @@ def _oof_artifact_digest(working_dir: Path, component_name: str) -> str | None:
     left the previous program's evidence in place", which the trusted scorer
     cannot distinguish on its own.
     """
-    path = Path(working_dir) / "models" / f"oof_{component_name}.npy"
+    path = _component_prediction_artifact(working_dir, component_name, "oof")
     try:
         return hashlib.sha256(path.read_bytes()).hexdigest()
     except OSError:
@@ -199,6 +338,11 @@ def _expected_model_artifacts(
     """
     if component.component_type != "model" or not require_oof_artifacts():
         return None
+    if _uses_packed_image_artifacts(working_dir):
+        return [
+            f"models/oof_{component.name}.npz",
+            f"models/test_{component.name}.npz",
+        ]
     expected = [
         f"models/oof_{component.name}.npy",
         f"models/test_{component.name}.npy",
@@ -220,10 +364,20 @@ def _has_combinable_model_predictions(
     Rejected candidates are quarantined under ``rejected_*`` names, so a plain
     ``oof_*.npy`` glob only sees artifacts that were never rolled back.
     """
+    domain = str(state.get("domain_detected", "") or "").lower().replace("-", "_")
+    if domain == "image_to_image":
+        # The current ensemble agent consumes fixed-shape .npy matrices.
+        # Feeding it variable-size packed images would either crash or silently
+        # lose ID/shape alignment, so keep packed blending disabled until it has
+        # a dedicated ID-aligned implementation.
+        return False
     if any(bool(flag) for flag in (state.get("oof_availability") or {}).values()):
         return True
     models_dir = working_dir / "models"
-    return models_dir.is_dir() and any(models_dir.glob("oof_*.npy"))
+    return models_dir.is_dir() and (
+        any(models_dir.glob("oof_*.npy"))
+        or any(models_dir.glob("oof_*.npz"))
+    )
 
 
 class DeveloperAgent(
@@ -296,6 +450,34 @@ class DeveloperAgent(
         # Quiet-STaR: Store last self-evaluation for state persistence
         self._last_self_evaluation: SelfEvaluation | None = None
 
+    @staticmethod
+    def _recover_missing_submission(
+        *,
+        run_mode: str,
+        submission_path: Path | None,
+        working_dir: Path,
+        component_name: str,
+        sample_submission_path: Path,
+        target_cols: list[str],
+        id_col: str | None,
+        test_ids_are_positional: bool,
+    ) -> Path | None:
+        """Rebuild a missing MLE-bench CSV from validated model evidence."""
+        if submission_path is not None or run_mode != "mlebench":
+            return submission_path
+        from ...utils.submission_artifacts import (
+            rebuild_submission_from_component_predictions,
+        )
+
+        return rebuild_submission_from_component_predictions(
+            working_dir=working_dir,
+            component_name=component_name,
+            sample_submission_path=sample_submission_path,
+            target_cols=target_cols,
+            id_col=id_col,
+            test_ids_are_positional=test_ids_are_positional,
+        )
+
     def _write_execution_logs_and_manifest(
         self,
         component: AblationComponent,
@@ -341,8 +523,12 @@ class DeveloperAgent(
             # independently recomputed metric from canonical labels and OOF.
             "declared_cv_score": self._extract_cv_score(exec_result.stdout),
             "submission_exists": (working_dir / "submission.csv").exists(),
-            "oof_exists": (working_dir / "models" / f"oof_{component.name}.npy").exists(),
-            "test_preds_exists": (working_dir / "models" / f"test_{component.name}.npy").exists(),
+            "oof_exists": _component_prediction_artifact(
+                working_dir, component.name, "oof"
+            ).exists(),
+            "test_preds_exists": _component_prediction_artifact(
+                working_dir, component.name, "test"
+            ).exists(),
             "model_files": sorted(model_files),
             "log_path": str(log_path),
         }
@@ -621,27 +807,33 @@ class DeveloperAgent(
                 for char in component_name
             )
             for prefix in prefixes:
-                path = models_dir / f"{prefix}{component_name}.npy"
-                exists = path.is_file()
-                snapshot_path = (
-                    snapshot_root
-                    / safe_component
-                    / f"{prefix}{safe_component}.npy"
+                suffixes = (
+                    (".npy", ".npz")
+                    if prefix in {"oof_", "test_"}
+                    else (".npy",)
                 )
-                sha256 = None
-                if exists:
-                    snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(path, snapshot_path)
-                    sha256 = cls._artifact_sha256(snapshot_path)
-                records.append(
-                    {
-                        "component_name": component_name,
-                        "path": path,
-                        "existed": exists,
-                        "snapshot_path": snapshot_path,
-                        "sha256": sha256,
-                    }
-                )
+                for suffix in suffixes:
+                    path = models_dir / f"{prefix}{component_name}{suffix}"
+                    exists = path.is_file()
+                    snapshot_path = (
+                        snapshot_root
+                        / safe_component
+                        / f"{prefix}{safe_component}{suffix}"
+                    )
+                    sha256 = None
+                    if exists:
+                        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(path, snapshot_path)
+                        sha256 = cls._artifact_sha256(snapshot_path)
+                    records.append(
+                        {
+                            "component_name": component_name,
+                            "path": path,
+                            "existed": exists,
+                            "snapshot_path": snapshot_path,
+                            "sha256": sha256,
+                        }
+                    )
         if not records:
             shutil.rmtree(snapshot_root, ignore_errors=True)
             return None
@@ -769,6 +961,8 @@ class DeveloperAgent(
             Path("submission.csv"),
             Path("models") / f"oof_{component_name}.npy",
             Path("models") / f"test_{component_name}.npy",
+            Path("models") / f"oof_{component_name}.npz",
+            Path("models") / f"test_{component_name}.npz",
             Path("models") / f"train_ids_{component_name}.npy",
             Path("models") / f"test_ids_{component_name}.npy",
             Path("models") / f"class_order_{component_name}.npy",
@@ -1166,21 +1360,17 @@ class DeveloperAgent(
             # Get expected values from state
             expected_n_train = state.get("expected_train_rows")
             expected_n_test = state.get("expected_test_rows")
-            # Get problem_type from competition_info first, then fallback to state
             competition_info = state.get("competition_info")
-            if competition_info and hasattr(competition_info, "problem_type") and competition_info.problem_type:
-                problem_type = competition_info.problem_type
-            else:
-                problem_type = state.get("problem_type", "classification")
-            submission_contract = state.get("submission_contract") or {}
-            expected_class_order = submission_contract.get("class_order")
+            problem_type = _model_validation_problem_type(state)
+            expected_class_order = _validation_class_order_for_state(
+                state,
+                problem_type,
+            )
             if (
-                expected_class_order is None
-                and "multiclass" in str(problem_type).lower()
+                run_mode == "mlebench"
+                and expected_class_order is not None
+                and _requires_class_order_artifact(state, problem_type)
             ):
-                target_columns = submission_contract.get("target_cols") or []
-                expected_class_order = target_columns if len(target_columns) > 1 else None
-            if run_mode == "mlebench" and expected_class_order is not None:
                 validation_config.require_class_order = True
                 validation_config.require_component_class_order = True
             canonical_contract = state.get("canonical_contract") or {}
@@ -1191,6 +1381,15 @@ class DeveloperAgent(
                     canonical_train_ids_path, allow_pickle=True
                 ).reshape(-1)
             expected_test_ids = state.get("test_rec_ids") or None
+            canonical_test_ids_path = canonical_contract.get("test_ids_path")
+            if (
+                expected_test_ids is None
+                and canonical_test_ids_path
+                and Path(canonical_test_ids_path).is_file()
+            ):
+                expected_test_ids = np.load(
+                    canonical_test_ids_path, allow_pickle=False
+                ).reshape(-1)
 
             # Run comprehensive validation
             validation_result = validate_model_artifacts(
@@ -1230,8 +1429,10 @@ class DeveloperAgent(
                     print("   Lenient mode: Continuing despite validation errors (enable KAGGLE_AGENTS_STRICT_MODE=1 for hard failures)")
 
             # Additionally, check for random/broken predictions if OOF exists
-            oof_file = working_dir / "models" / f"oof_{component.name}.npy"
-            if oof_file.exists():
+            oof_file = _component_prediction_artifact(
+                working_dir, component.name, "oof"
+            )
+            if oof_file.exists() and problem_type != "image_to_image":
                 try:
                     oof_preds = np.load(oof_file, allow_pickle=False)
                     oof_eligible_mask_path = Path(
@@ -1325,22 +1526,85 @@ class DeveloperAgent(
                 (p for p in submission_candidates if p is not None and p.exists() and p.is_file()),
                 None,
             )
+            sample_sub_path = (
+                Path(state.get("sample_submission_path"))
+                if state.get("sample_submission_path")
+                else working_dir / "sample_submission.csv"
+            )
+            if sample_sub_path.exists() and sample_sub_path.is_dir():
+                inner_csvs = sorted(sample_sub_path.glob("*.csv"))
+                if inner_csvs:
+                    sample_sub_path = inner_csvs[0]
+                    print(f"   📂 Resolved directory to file: {sample_sub_path.name}")
+            target_cols = [
+                str(column)
+                for column in (
+                    (state.get("submission_contract") or {}).get("target_cols")
+                    or []
+                )
+                if isinstance(column, str) and column
+            ]
+            if _uses_packed_image_artifacts(working_dir):
+                # The final packed artifact is authoritative. Regenerate even
+                # when generated code already wrote a CSV, because it could
+                # write from artifact A and then replace test_<component>.npz
+                # with artifact B before exiting.
+                from ...utils.submission_artifacts import (
+                    rebuild_submission_from_component_predictions,
+                )
+
+                submission_path = (
+                    rebuild_submission_from_component_predictions(
+                        working_dir=working_dir,
+                        component_name=component.name,
+                        sample_submission_path=sample_sub_path,
+                        target_cols=target_cols,
+                        id_col=(state.get("submission_contract") or {}).get(
+                            "id_col"
+                        ),
+                    )
+                    if sample_sub_path.is_file()
+                    else None
+                )
+            else:
+                submission_path = self._recover_missing_submission(
+                    run_mode=run_mode,
+                    submission_path=submission_path,
+                    working_dir=working_dir,
+                    component_name=component.name,
+                    sample_submission_path=sample_sub_path,
+                    target_cols=target_cols,
+                    id_col=(state.get("submission_contract") or {}).get(
+                        "id_col"
+                    ),
+                    test_ids_are_positional=bool(
+                        (state.get("canonical_metadata") or {}).get(
+                            "test_ids_are_positional", False
+                        )
+                    ),
+                )
+            if run_mode == "mlebench" and submission_path is None:
+                if not hasattr(result, "errors") or result.errors is None:
+                    result.errors = []
+                result.errors.append(
+                    "Submission file is absent and could not be rebuilt from "
+                    "validated test predictions"
+                )
+                result.success = False
+                return self._reject_model_candidate(
+                    state=state,
+                    component=component,
+                    working_dir=working_dir,
+                    current_index=current_index,
+                    attempt_records=attempt_records,
+                    reason="Submission missing after artifact recovery",
+                    retry_invalid=True,
+                )
             if submission_path:
                 backup_name = f"submission_{component.name}.csv"
                 backup_path = working_dir / backup_name
 
                 # Validate submission structure without exposing test-set feedback.
-                sample_sub_path = (
-                    Path(state.get("sample_submission_path"))
-                    if state.get("sample_submission_path")
-                    else working_dir / "sample_submission.csv"
-                )
-                # Handle case where sample_submission.csv is a directory
-                if sample_sub_path and sample_sub_path.exists() and sample_sub_path.is_dir():
-                    inner_csvs = sorted(sample_sub_path.glob("*.csv"))
-                    if inner_csvs:
-                        sample_sub_path = inner_csvs[0]
-                        print(f"   📂 Resolved directory to file: {sample_sub_path.name}")
                 submission_is_valid = False
                 submission_validation_message = "Sample submission contract is unavailable"
                 if sample_sub_path and sample_sub_path.exists() and sample_sub_path.is_file():
@@ -1348,17 +1612,8 @@ class DeveloperAgent(
                         submission_path=submission_path,
                         sample_submission_path=sample_sub_path,
                         component_type=component.component_type,
-                        target_cols=[
-                            str(column)
-                            for column in (
-                                (state.get("submission_contract") or {}).get(
-                                    "target_cols"
-                                )
-                                or []
-                            )
-                            if isinstance(column, str) and column
-                        ]
-                        or None,
+                        problem_type=problem_type,
+                        target_cols=target_cols or None,
                     )
                     submission_is_valid = is_valid
                     submission_validation_message = validation_msg
@@ -1366,6 +1621,40 @@ class DeveloperAgent(
                         print(f"   ❌ Submission validation FAILED: {validation_msg}")
                     else:
                         print(f"   {validation_msg}")
+
+                if run_mode == "mlebench" and not submission_is_valid:
+                    from ...utils.submission_artifacts import (
+                        rebuild_submission_from_component_predictions,
+                    )
+
+                    rebuilt_submission = rebuild_submission_from_component_predictions(
+                        working_dir=working_dir,
+                        component_name=component.name,
+                        sample_submission_path=sample_sub_path,
+                        target_cols=target_cols,
+                        id_col=(state.get("submission_contract") or {}).get("id_col"),
+                        test_ids_are_positional=bool(
+                            (state.get("canonical_metadata") or {}).get(
+                                "test_ids_are_positional", False
+                            )
+                        ),
+                    ) if sample_sub_path else None
+                    if rebuilt_submission is not None:
+                        is_valid, validation_msg = self.executor.validate_submission_format(
+                            submission_path=rebuilt_submission,
+                            sample_submission_path=sample_sub_path,
+                            component_type=component.component_type,
+                            problem_type=problem_type,
+                            target_cols=target_cols or None,
+                        )
+                        submission_is_valid = is_valid
+                        submission_validation_message = validation_msg
+                        submission_path = rebuilt_submission
+                        if is_valid:
+                            print(
+                                "   Rebuilt invalid submission.csv from validated "
+                                f"{_component_prediction_artifact(working_dir, component.name, 'test').name}"
+                            )
 
                 if run_mode == "mlebench" and not submission_is_valid:
                     if not hasattr(result, "errors") or result.errors is None:
@@ -1715,7 +2004,9 @@ class DeveloperAgent(
         # Persist explicit mappings declared in KaggleState. LangGraph drops
         # undeclared dynamic keys such as ``oof_available_<component>``.
         if result.success and component.component_type == "model":
-            oof_file = working_dir / "models" / f"oof_{component.name}.npy"
+            oof_file = _component_prediction_artifact(
+                working_dir, component.name, "oof"
+            )
             # In mlebench, an OOF file without a trusted recomputed score is
             # not ensemble evidence: marking it eligible would send the
             # component into the robustness evidence check, which rejects and
@@ -1836,9 +2127,71 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     transaction_committed = False
                     try:
                         refined_response = self.llm.invoke(refine_messages)
-                        refined_code = self._extract_code_from_response(
-                            get_text_content(refined_response.content)
+                        refined_code = preserve_injected_header(
+                            best_code,
+                            self._extract_code_from_response(
+                                get_text_content(refined_response.content)
+                            ),
                         )
+                        refinement_errors: list[str] = []
+                        helper_shadow = untrusted_contract_helper_import(
+                            refined_code
+                        )
+                        if helper_shadow:
+                            refinement_errors.append(
+                                HELPER_IMPORT_CONTRACT_ERROR
+                            )
+                        if requires_submission_helper(
+                            component.component_type
+                        ) and missing_submission_helper_call(refined_code):
+                            refinement_errors.append(
+                                MISSING_SUBMISSION_HELPER_ERROR
+                            )
+                        handwritten = (
+                            handwritten_submission_write(refined_code)
+                            if requires_submission_helper(
+                                component.component_type
+                            )
+                            else None
+                        )
+                        if handwritten:
+                            refinement_errors.append(
+                                SUBMISSION_CONTRACT_ERROR
+                            )
+                        missing_artifacts = unsaved_expected_artifacts(
+                            refined_code,
+                            _expected_model_artifacts(
+                                component,
+                                working_dir,
+                                run_mode,
+                            ),
+                            component.name,
+                        )
+                        if missing_artifacts:
+                            refinement_errors.append(
+                                "Missing expected artifacts: "
+                                + ", ".join(missing_artifacts)
+                            )
+                        if (
+                            component.component_type == "model"
+                            and expected_class_order is not None
+                            and _requires_class_order_artifact(
+                                state,
+                                problem_type,
+                            )
+                            and missing_class_order_helper_argument(
+                                refined_code
+                            )
+                        ):
+                            refinement_errors.append(
+                                MISSING_CLASS_ORDER_ERROR
+                            )
+                        if refinement_errors:
+                            print(
+                                "Refined candidate rejected before execution: "
+                                + "; ".join(refinement_errors)
+                            )
+                            continue
 
                         transaction = self._begin_candidate_transaction(
                             working_dir, component.name
@@ -1866,10 +2219,37 @@ Based on the training results above, improve the model to achieve a {desired_dir
                         # accept a real gain nor notice a regression. Remember
                         # the evidence it must replace.
                         oof_before = _oof_artifact_digest(working_dir, component.name)
+                        refinement_expected_artifacts = list(
+                            _expected_model_artifacts(
+                                component,
+                                working_dir,
+                                run_mode,
+                            )
+                            or []
+                        )
+                        if requires_submission_helper(component.component_type):
+                            refinement_expected_artifacts.append(
+                                "submission.csv"
+                            )
+                        if (
+                            component.component_type == "model"
+                            and expected_class_order is not None
+                            and _requires_class_order_artifact(
+                                state,
+                                problem_type,
+                            )
+                        ):
+                            refinement_expected_artifacts.append(
+                                "models/"
+                                f"class_order_{component.name}.npy"
+                            )
                         try:
                             refined_exec = self.executor.execute(
                                 refined_code,
                                 working_dir,
+                                expected_artifacts=(
+                                    refinement_expected_artifacts or None
+                                ),
                                 component_type=component.component_type,
                             )
                         except Exception:
@@ -1924,6 +2304,25 @@ Based on the training results above, improve the model to achieve a {desired_dir
                                     problem_type=problem_type,
                                     config=validation_config,
                                 )
+                                if _uses_packed_image_artifacts(working_dir):
+                                    # Bind the CSV to the final packed test
+                                    # artifact again after the child exits. A
+                                    # refinement may otherwise write from
+                                    # artifact A and replace the NPZ with B
+                                    # before promotion.
+                                    from ...utils.submission_artifacts import (
+                                        rebuild_submission_from_component_predictions,
+                                    )
+
+                                    rebuild_submission_from_component_predictions(
+                                        working_dir=working_dir,
+                                        component_name=component.name,
+                                        sample_submission_path=sample_sub_path,
+                                        target_cols=target_cols,
+                                        id_col=(
+                                            state.get("submission_contract") or {}
+                                        ).get("id_col"),
+                                    )
                                 refined_submission = working_dir / "submission.csv"
                                 format_valid = False
                                 if (
@@ -1936,6 +2335,8 @@ Based on the training results above, improve the model to achieve a {desired_dir
                                             submission_path=refined_submission,
                                             sample_submission_path=sample_sub_path,
                                             component_type=component.component_type,
+                                            problem_type=problem_type,
+                                            target_cols=target_cols or None,
                                         )
                                     )
                                     if not format_valid:
@@ -2536,6 +2937,25 @@ Based on the training results above, improve the model to achieve a {desired_dir
 
         prev_env: dict[str, str | None] = {k: os.getenv(k) for k in env_overrides}
         expected_artifacts = _expected_model_artifacts(component, working_dir, run_mode)
+        execution_expected_artifacts = list(expected_artifacts or [])
+        if requires_submission_helper(component.component_type):
+            execution_expected_artifacts.append("submission.csv")
+        execution_problem_type = _model_validation_problem_type(state)
+        execution_class_order = _validation_class_order_for_state(
+            state,
+            execution_problem_type,
+        )
+        if (
+            component.component_type == "model"
+            and execution_class_order is not None
+            and _requires_class_order_artifact(
+                state,
+                execution_problem_type,
+            )
+        ):
+            execution_expected_artifacts.append(
+                f"models/class_order_{component.name}.npy"
+            )
 
         for attempt in range(max_retries):
             print(f"\nAttempt {attempt + 1}/{max_retries}")
@@ -2550,12 +2970,67 @@ Based on the training results above, improve the model to achieve a {desired_dir
             unsaved = unsaved_expected_artifacts(
                 code, expected_artifacts, component.name
             )
+            untrusted_helper_import = untrusted_contract_helper_import(code)
+            missing_submission_helper = (
+                missing_submission_helper_call(code)
+                if requires_submission_helper(component.component_type)
+                else False
+            )
+            missing_class_order = (
+                any(
+                    Path(path).name.startswith("class_order_")
+                    for path in execution_expected_artifacts
+                )
+                and missing_class_order_helper_argument(code)
+            )
             hand_written = (
                 handwritten_submission_write(code)
-                if component.component_type == "model"
+                if requires_submission_helper(component.component_type)
                 else None
             )
-            if unsaved:
+            if untrusted_helper_import:
+                print(
+                    "   Skipping execution: import shadows an injected contract "
+                    f"helper ({untrusted_helper_import})"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[HELPER_IMPORT_CONTRACT_ERROR],
+                )
+            elif missing_submission_helper:
+                print(
+                    "   Skipping execution: model never calls the injected "
+                    f"{_SUBMISSION_HELPER}() helper"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[MISSING_SUBMISSION_HELPER_ERROR],
+                )
+            elif missing_class_order:
+                print(
+                    "   Skipping execution: multiclass evidence helper call "
+                    "omits class_order="
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[MISSING_CLASS_ORDER_ERROR],
+                )
+            elif unsaved:
                 print(
                     "   Skipping execution: code never saves "
                     + ", ".join(unsaved)
@@ -2589,7 +3064,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
                 exec_result = self.executor.execute(
                     code=code,
                     working_dir=working_dir,
-                    expected_artifacts=expected_artifacts,
+                    expected_artifacts=execution_expected_artifacts or None,
                     component_type=component.component_type,
                 )
             self._write_execution_logs_and_manifest(
@@ -2597,7 +3072,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
                 exec_result=exec_result,
                 working_dir=working_dir,
                 attempt=attempt,
-                expected_artifacts=expected_artifacts,
+                expected_artifacts=execution_expected_artifacts or None,
             )
             for k, old in prev_env.items():
                 if old is None:
@@ -2707,7 +3182,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
             component_type=component.component_type,
             state=state,  # Pass state for Meta-Evaluator guidance injection
             paths=getattr(self, "_resolved_paths", None),  # Pass paths for path-related error fixes
-            expected_artifacts=expected_artifacts,
+            expected_artifacts=execution_expected_artifacts or None,
         )
 
         attempt_records.append(

@@ -245,6 +245,92 @@ class TestRobustnessGate:
         assert updates["termination_reason"] == "robustness_failed_preserved_best_submission"
         assert previous.read_bytes() == expected
 
+    def test_rejected_accepted_owner_is_not_restored_or_kept_in_state(
+        self, tmp_path
+    ):
+        run_id = "test-run"
+        submission = tmp_path / "submission.csv"
+        submission.write_text("id,target\n1,0.8\n", encoding="utf-8")
+        snapshot, digest = snapshot_accepted_submission(
+            tmp_path,
+            submission,
+            run_id=run_id,
+            iteration=0,
+        )
+        state = _failure_state(
+            tmp_path,
+            robustness_recovery_count=1,
+            run_id=run_id,
+            accepted_submission_path=str(snapshot),
+            accepted_submission_snapshot_path=str(snapshot),
+            accepted_submission_sha256=digest,
+            accepted_submission_cv_score=0.9,
+            accepted_submission_score_owner="model_a",
+            accepted_submission_score_source="trusted_component_scores",
+            robustness_failure_details={
+                "failed_modules": ["leakage"],
+                "failed_components": ["model_a"],
+                "issues": ["target leakage"],
+                "suggestions": ["regenerate model_a"],
+            },
+            oof_availability={"model_a": True},
+            robustness_approved_components={"model_a": False},
+        )
+
+        updates = robustness_gate_node(state)
+
+        assert updates["workflow_valid"] is False
+        assert updates["termination_reason"] == (
+            "robustness_failed_no_valid_submission"
+        )
+        assert not submission.exists()
+        for key in (
+            "accepted_submission_path",
+            "accepted_submission_snapshot_path",
+            "accepted_submission_sha256",
+            "accepted_submission_cv_score",
+            "accepted_submission_score_owner",
+            "accepted_submission_score_source",
+        ):
+            assert key in updates
+            assert updates[key] is None
+
+    def test_second_failure_restores_verified_best_candidate_owned_by_another_component(
+        self, tmp_path
+    ):
+        submission = tmp_path / "submission.csv"
+        expected = b"id,target\r\n1,0.9\r\n"
+        submission.write_bytes(expected)
+        snapshot, digest = snapshot_best_candidate_submission(
+            tmp_path,
+            submission,
+            run_id="gate-run",
+            iteration=0,
+        )
+        submission.write_text("id,target\n1,0.1\n", encoding="utf-8")
+        state = _failure_state(
+            tmp_path,
+            run_id="gate-run",
+            robustness_recovery_count=1,
+            best_candidate_submission_component_name="model_b",
+            best_candidate_submission_snapshot_path=str(snapshot),
+            best_candidate_submission_sha256=digest,
+            robustness_failure_details={
+                "failed_modules": ["leakage"],
+                "failed_components": ["model_a"],
+                "issues": ["target leakage"],
+                "suggestions": ["regenerate model_a"],
+            },
+            oof_availability={"model_a": True},
+            robustness_approved_components={"model_a": False},
+        )
+
+        updates = robustness_gate_node(state)
+
+        assert updates["workflow_valid"] is True
+        assert updates["termination_reason"] == "robustness_failed_preserved_best_submission"
+        assert submission.read_bytes() == expected
+
     def test_second_failure_rejects_mutable_hill_climb_best_from_disk(self, tmp_path):
         best = tmp_path / "submission_best.csv"
         best.write_text("id,target\n1,0.9\n", encoding="utf-8")

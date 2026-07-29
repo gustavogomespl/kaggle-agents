@@ -60,10 +60,11 @@ def get_constraints_for_domain(domain: str) -> str:
     category = _detect_domain_category(domain)
 
     if category == "image_to_image":
-        from .image import IMAGE_CONSTRAINTS
         from .image_to_image import IMAGE_TO_IMAGE_CONSTRAINTS
 
-        parts.append(IMAGE_CONSTRAINTS)
+        # Classification guidance mandates destructive fixed-size resizing and
+        # large batches. Image-to-image tasks must preserve native geometry and
+        # therefore use their dedicated, non-conflicting contract only.
         parts.append(IMAGE_TO_IMAGE_CONSTRAINTS)
 
     elif category == "image":

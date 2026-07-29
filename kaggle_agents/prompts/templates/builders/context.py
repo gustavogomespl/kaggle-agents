@@ -557,16 +557,31 @@ def _build_audio_context(state: dict[str, Any]) -> str:
             lines.append("**LONG FORMAT: Submission code pattern:**")
             lines.append("```python")
             lines.append("# For LONG format: Id encodes (record_id, class_id)")
-            lines.append("submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)")
+            lines.append(
+                "from kaggle_agents.utils.csv_utils import read_csv_auto"
+            )
+            lines.append(
+                "submission_ids = read_csv_auto(SAMPLE_SUBMISSION_PATH)"
+                f"['{id_column}'].astype(str)"
+            )
             lines.append("pred_map = {}")
             lines.append("for i, record_id in enumerate(TEST_REC_IDS):")
+            lines.append(
+                "    record_id_int = int(record_id)  # observed numeric encoding"
+            )
             lines.append(f"    for class_id in range({num_classes or 'num_classes'}):")
             lines.append(
-                f"        submission_id = record_id * {id_multiplier} + class_id"
+                f"        submission_id = record_id_int * {id_multiplier} + class_id"
             )
-            lines.append("        pred_map[submission_id] = predictions[i, class_id]")
-            lines.append(f"submission['{target_columns[0] if target_columns else 'Probability'}'] = submission['{id_column}'].map(pred_map)")
-            lines.append("submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)")
+            lines.append(
+                "        pred_map[str(submission_id)] = "
+                "predictions[i, class_id]"
+            )
+            lines.append(
+                "submission_predictions = np.asarray("
+                "[pred_map[value] for value in submission_ids])"
+            )
+            lines.append("write_submission(submission_predictions)")
             lines.append("```")
 
         elif format_type == "wide":
@@ -574,10 +589,7 @@ def _build_audio_context(state: dict[str, Any]) -> str:
             lines.append("**WIDE FORMAT: Submission code pattern:**")
             lines.append("```python")
             lines.append("# For WIDE format: One column per class")
-            lines.append("submission = pd.read_csv(SAMPLE_SUBMISSION_PATH)")
-            lines.append(f"for i, col in enumerate({target_columns}):")
-            lines.append("    submission[col] = predictions[:, i]")
-            lines.append("submission.to_csv(OUTPUT_DIR / 'submission.csv', index=False)")
+            lines.append("write_submission(predictions)")
             lines.append("```")
 
         lines.append("")

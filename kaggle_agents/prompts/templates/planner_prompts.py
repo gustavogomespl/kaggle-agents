@@ -423,16 +423,17 @@ CRITICAL: These are PIXEL-LEVEL prediction tasks, NOT image classification!
 
 ## Template-alignment pattern:
 ```python
-sample = pd.read_csv(SAMPLE_SUBMISSION_PATH)
-id_col, target_col = sample.columns[:2]
-template_ids = sample[id_col].astype(str)
-predictions_by_id = build_predictions_for_observed_ids(
-    template_ids.tolist(), test_images, model
+save_component_artifacts(
+    oof_images,
+    test_images,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=CANONICAL_TEST_IDS,
 )
-assert set(predictions_by_id) == set(template_ids)
-sample[target_col] = template_ids.map(predictions_by_id)
-assert sample[target_col].notna().all()
+write_submission(None)
 ```
+The injected writer uses the saved packed test artifact, infers the coordinate
+base only from observed template IDs, verifies exact pixel coverage, and
+streams the CSV. Never load the full template or write it manually.
 
 ## DO NOT USE:
 - Image classifiers (EfficientNet, ResNet with FC classification head)

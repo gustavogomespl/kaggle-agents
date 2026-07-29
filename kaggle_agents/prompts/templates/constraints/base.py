@@ -14,13 +14,21 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
   The canonical assignments already encode the task-appropriate split policy
 - Iterate the canonical fold labels and write every validation prediction back
   to its original canonical row; use `RUN_SEED` only for model randomness
-- Save OOF predictions: `np.save('models/oof_{component_name}.npy', oof_predictions)`
+- Save OOF, test predictions, and row IDs with the injected
+  `save_component_artifacts(oof_predictions, test_predictions, ...)` helper;
+  do not hand-write the individual files.
+- For single-target multiclass classification, reorder every probability
+  matrix to `CANONICAL_METADATA["class_order"]` and pass that exact list as
+  `class_order=` to `save_component_artifacts`. Never rely on an estimator's
+  implicit class-column order.
 
 ### 2. Output Requirements
 - Print "Final Validation Performance: {score:.6f}" at end (CRITICAL for evaluation)
 - For probability metrics only, clamp probabilities to `[0, 1]` before saving
 - For regression, preserve the prediction scale (RMSLE alone requires non-negative values)
 - Match sample_submission.csv exactly: columns, IDs, shape
+- Write the final CSV only with the injected `write_submission(test_preds)`
+  helper. Never infer ID/target columns by position or call `to_csv` for it.
 
 ### 2a. PROBABILITY OUTPUT VALIDATION (CRITICAL - FAIL CLOSED)
 For classification, ALWAYS validate predictions BEFORE saving OOF and test files:

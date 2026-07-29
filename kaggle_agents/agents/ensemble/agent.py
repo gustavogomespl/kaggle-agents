@@ -246,6 +246,7 @@ class EnsembleAgent:
         sample_submission_path,
         *,
         target_cols=None,
+        problem_type=None,
         expected_sha256=None,
         require_hash=False,
     ):
@@ -254,6 +255,7 @@ class EnsembleAgent:
             dest_path,
             sample_submission_path,
             target_cols=target_cols,
+            problem_type=problem_type,
             expected_sha256=expected_sha256,
             require_hash=require_hash,
         )
@@ -274,12 +276,19 @@ class EnsembleAgent:
     ) -> bool:
         """Restore the best artifact under the trust policy for the run mode."""
         submission_target_cols = self._submission_target_cols(state)
+        competition_info = state.get("competition_info")
+        submission_problem_type = (
+            getattr(competition_info, "problem_type", None)
+            if competition_info is not None
+            else None
+        ) or state.get("problem_type")
         if not self._is_mlebench(state):
             return self._safe_restore_submission(
                 working_dir / "submission_best.csv",
                 output_path,
                 sample_submission_path,
                 target_cols=submission_target_cols,
+                problem_type=submission_problem_type,
             )
 
         snapshot_owner = str(
@@ -333,6 +342,7 @@ class EnsembleAgent:
                 output_path,
                 sample_submission_path,
                 target_cols=submission_target_cols,
+                problem_type=submission_problem_type,
                 expected_sha256=digest,
                 require_hash=True,
             ):

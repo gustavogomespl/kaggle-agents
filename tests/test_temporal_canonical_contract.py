@@ -13,6 +13,7 @@ from kaggle_agents.prompts.templates.builders.cv import build_cv_instructions
 from kaggle_agents.agents.ensemble.scoring import compute_oof_score
 from kaggle_agents.utils.calibration import calibrate_oof_predictions
 from kaggle_agents.utils.data_contract import (
+    get_canonical_data_instructions,
     load_canonical_data,
     prepare_canonical_data,
     validate_oof_alignment,
@@ -360,6 +361,30 @@ def test_cv_prompt_forbids_fold_complement_for_temporal_contract() -> None:
     assert "iter_canonical_cv_splits()" in prompt
     assert "folds != fold` leaks future rows" in prompt
     assert "CANONICAL_OOF_ELIGIBLE_MASK" in prompt
+
+
+def test_legacy_canonical_prompt_uses_audited_splitter_and_artifact_helper(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    (canonical / "metadata.json").write_text(
+        json.dumps(
+            {
+                "canonical_rows": 12,
+                "n_folds": 3,
+                "id_col": "id",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    prompt = get_canonical_data_instructions(tmp_path)
+
+    assert "iter_canonical_cv_splits()" in prompt
+    assert "folds != fold_idx" not in prompt
+    assert "save_component_artifacts(" in prompt
+    assert 'np.save("models/oof_' not in prompt
 
 
 def test_oof_scoring_masks_temporal_warmup(tmp_path: Path) -> None:

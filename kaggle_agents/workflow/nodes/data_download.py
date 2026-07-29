@@ -4,11 +4,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import pandas as pd
-
 from ...core.config import get_run_seed
 from ...core.state import KaggleState
 from ...tools.kaggle_api import KaggleAPIClient
+from ...utils.csv_utils import read_csv_auto
+from ...utils.target_inference import (
+    _read_schema_columns,
+    infer_pixel_submission_schema,
+    split_submission_schema,
+)
 
 
 def data_download_node(state: KaggleState) -> dict[str, Any]:
@@ -47,10 +51,32 @@ def data_download_node(state: KaggleState) -> dict[str, Any]:
         if data_files.get("sample_submission"):
             print(f"   Sample Submission: {data_files['sample_submission']}")
             try:
-                # Infer target column from sample submission (usually 2nd column)
-                sample_sub = pd.read_csv(data_files["sample_submission"])
-                if len(sample_sub.columns) >= 2:
-                    target_col = sample_sub.columns[1]
+                # Infer roles from public schemas, not column position. Some
+                # competitions put the prediction first and echo test inputs
+                # (for example Date/Comment) after it.
+                sample_sub = read_csv_auto(
+                    data_files["sample_submission"],
+                    nrows=200,
+                )
+                test_source = data_files.get("test_csv") or data_files.get(
+                    "test"
+                )
+                test_columns = _read_schema_columns(test_source)
+                _, target_cols = split_submission_schema(
+                    [str(column) for column in sample_sub.columns],
+                    test_columns,
+                )
+                test_path = Path(test_source) if test_source else None
+                if (
+                    not test_columns
+                    and test_path is not None
+                    and test_path.is_dir()
+                ):
+                    pixel_roles = infer_pixel_submission_schema(sample_sub)
+                    if pixel_roles is not None:
+                        _, target_cols = pixel_roles
+                if target_cols:
+                    target_col = target_cols[0]
                     print(f"   🎯 Target Column Detected: {target_col}")
             except Exception as e:
                 print(f"   ⚠️ Could not read sample submission to infer target: {e}")

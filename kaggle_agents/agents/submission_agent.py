@@ -411,6 +411,13 @@ class SubmissionAgent:
             sample_submission_path,
             problem_type=problem_type,
             metric_name=metric_name,
+            target_cols=[
+                str(column)
+                for column in (
+                    (state.get("submission_contract") or {}).get("target_cols")
+                    or []
+                )
+            ],
         )
         if is_valid and mlebench_mode and Path(sample_submission_path).is_file():
             try:
@@ -589,6 +596,7 @@ class SubmissionAgent:
         sample_submission_path: Path | None,
         problem_type: str | None = None,
         metric_name: str | None = None,
+        target_cols: list[str] | None = None,
     ) -> tuple[bool, str]:
         """
         Validate submission file format.
@@ -601,6 +609,25 @@ class SubmissionAgent:
         Returns:
             Tuple of (is_valid, message)
         """
+        if sample_submission_path and Path(sample_submission_path).is_file():
+            # Keep the terminal workflow gate on the same role-aware,
+            # chunked contract used immediately after code execution. Loading
+            # both CSVs here used to reintroduce OOM risk for pixel-level
+            # submissions and counted blank echoed inputs as missing
+            # predictions.
+            from ..tools.code_executor.submission import SubmissionValidationMixin
+
+            normalized_problem = str(problem_type or "").lower()
+            if "multiclass" in normalized_problem:
+                normalized_problem = "multiclass"
+            return SubmissionValidationMixin().validate_submission_format(
+                Path(submission_path),
+                Path(sample_submission_path),
+                component_type="model",
+                problem_type=normalized_problem or None,
+                target_cols=target_cols,
+            )
+
         try:
             df = pd.read_csv(submission_path)
 

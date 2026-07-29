@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from kaggle_agents.utils.image_to_image_contract import save_packed_images
 from kaggle_agents.utils.strict_validation import (
     StrictValidationConfig,
     validate_model_artifacts,
@@ -133,6 +134,38 @@ def test_accepts_valid_concrete_multiclass_artifacts(tmp_path):
         np.array([[0.8, 0.2], [0.4, 0.6], [0.1, 0.9]]),
         np.array([[0.7, 0.3], [0.2, 0.8]]),
     )
+    np.save(
+        tmp_path / "models" / "class_order_model.npy",
+        np.array(["negative", "positive"], dtype=str),
+    )
+
+    result = validate_model_artifacts(
+        tmp_path,
+        "model",
+        expected_n_train=3,
+        expected_n_test=2,
+        expected_class_order=["negative", "positive"],
+        problem_type="multiclass_classification",
+        config=StrictValidationConfig(
+            strict_mode=True,
+            require_class_order=True,
+            require_component_class_order=True,
+        ),
+    )
+
+    assert result.is_valid is True
+    assert result.errors == []
+
+
+def test_rejects_multiclass_probabilities_without_expected_class_order(tmp_path):
+    _save_artifacts(
+        tmp_path,
+        "model",
+        np.array(
+            [[0.8, 0.1, 0.1], [0.1, 0.8, 0.1], [0.1, 0.1, 0.8]]
+        ),
+        np.array([[0.7, 0.2, 0.1], [0.2, 0.3, 0.5]]),
+    )
 
     result = validate_model_artifacts(
         tmp_path,
@@ -143,8 +176,8 @@ def test_accepts_valid_concrete_multiclass_artifacts(tmp_path):
         config=StrictValidationConfig(strict_mode=True),
     )
 
-    assert result.is_valid is True
-    assert result.errors == []
+    assert result.is_valid is False
+    assert any("expected class order contract" in error for error in result.errors)
 
 
 def test_mle_contract_rejects_global_class_order_fallback(tmp_path):
@@ -325,3 +358,75 @@ def test_candidate_pickle_in_seq2seq_predictions_is_rejected_without_execution(
     assert result.is_valid is False
     assert any("Failed to load OOF file" in error for error in result.errors)
     assert not sentinel.exists()
+
+
+def test_image_to_image_accepts_variable_sized_packed_component_artifacts(
+    tmp_path: Path,
+) -> None:
+    models = tmp_path / "models"
+    models.mkdir()
+    save_packed_images(
+        models / "oof_model.npz",
+        [
+            np.zeros((2, 3, 3), dtype=np.float32),
+            np.ones((4, 2, 3), dtype=np.float32),
+        ],
+        image_ids=["a.png", "nested/b.png"],
+    )
+    save_packed_images(
+        models / "test_model.npz",
+        [np.full((3, 5, 3), 0.5, dtype=np.float32)],
+        image_ids=["test.png"],
+    )
+
+    result = validate_model_artifacts(
+        tmp_path,
+        "model",
+        expected_n_train=2,
+        # Pixel-level CSV rows are not the number of packed test images.
+        expected_n_test=100_001,
+        expected_train_ids=["a.png", "nested/b.png"],
+        expected_test_ids=["test.png"],
+        problem_type="image_to_image",
+        config=StrictValidationConfig(
+            strict_mode=True,
+            require_train_ids=True,
+            require_test_ids=True,
+        ),
+    )
+
+    assert result.is_valid is True
+    assert result.errors == []
+    assert result.files_verified == ["oof_model.npz", "test_model.npz"]
+
+
+def test_image_to_image_rejects_packed_oof_with_wrong_id_order(
+    tmp_path: Path,
+) -> None:
+    models = tmp_path / "models"
+    models.mkdir()
+    save_packed_images(
+        models / "oof_model.npz",
+        [
+            np.zeros((2, 2, 3), dtype=np.float32),
+            np.ones((2, 2, 3), dtype=np.float32),
+        ],
+        image_ids=["b.png", "a.png"],
+    )
+    save_packed_images(
+        models / "test_model.npz",
+        [np.zeros((2, 2, 3), dtype=np.float32)],
+        image_ids=["test.png"],
+    )
+
+    result = validate_model_artifacts(
+        tmp_path,
+        "model",
+        expected_train_ids=["a.png", "b.png"],
+        expected_test_ids=["test.png"],
+        problem_type="image_to_image",
+        config=StrictValidationConfig(strict_mode=True),
+    )
+
+    assert result.is_valid is False
+    assert any("OOF image IDs do not match" in error for error in result.errors)

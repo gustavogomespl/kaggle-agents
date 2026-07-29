@@ -1,5 +1,6 @@
 """Canonical data preparation node for the Kaggle Agents workflow."""
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -10,6 +11,9 @@ import numpy as np
 from ...core.state import KaggleState
 from ...core.state.contracts import CanonicalDataContract
 from ...utils.data_contract import prepare_canonical_data
+from ...utils.image_to_image_contract import (
+    prepare_image_to_image_canonical_data,
+)
 from ...utils.target_inference import TargetInferenceError
 
 
@@ -78,6 +82,109 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
 
     # Handle non-tabular data (images, audio)
     data_type = str(data_files.get("data_type", "")).lower()
+    domain = str(state.get("domain_detected", "tabular") or "tabular").lower()
+    if domain == "image_to_image":
+        try:
+            image_test_dir = Path(
+                data_files.get("test") or working_dir / "test"
+            )
+            canonical_result = prepare_image_to_image_canonical_data(
+                noisy_dir=data_files.get("train") or working_dir / "train",
+                clean_dir=(
+                    data_files.get("clean_train")
+                    or working_dir / "train_cleaned"
+                ),
+                test_dir=image_test_dir if image_test_dir.is_dir() else None,
+                output_dir=working_dir,
+                n_folds=5,
+            )
+            metadata = canonical_result["metadata"]
+            train_ids = np.load(
+                canonical_result["train_ids_path"], allow_pickle=False
+            )
+            folds = np.load(
+                canonical_result["folds_path"], allow_pickle=False
+            )
+            test_ids = np.load(
+                canonical_result["test_ids_path"], allow_pickle=False
+            )
+            feature_cols_path = (
+                Path(canonical_result["canonical_dir"]) / "feature_cols.json"
+            )
+            feature_cols_path.write_text(
+                json.dumps(["image_pixels"]),
+                encoding="utf-8",
+            )
+            y_bytes = Path(canonical_result["y_path"]).read_bytes()
+            canonical_contract = {
+                "canonical_dir": canonical_result["canonical_dir"],
+                "train_ids_path": canonical_result["train_ids_path"],
+                "y_path": canonical_result["y_path"],
+                "folds_path": canonical_result["folds_path"],
+                "feature_cols_path": str(feature_cols_path),
+                "metadata_path": canonical_result["metadata_path"],
+                "n_train": int(metadata["canonical_rows"]),
+                "n_test": int(metadata.get("n_test") or 0),
+                "n_folds": int(metadata["n_folds"]),
+                "id_col": metadata["id_col"],
+                "id_is_synthetic": False,
+                "target_col": metadata["target_col"],
+                "target_cols": list(metadata["target_cols"]),
+                "target_type": "multi_target",
+                "is_classification": False,
+                "folds_hash": CanonicalDataContract.compute_array_hash(folds),
+                "y_hash": hashlib.sha256(y_bytes).hexdigest(),
+                "train_ids_hash": CanonicalDataContract.compute_array_hash(
+                    train_ids
+                ),
+                "train_schema_hash": (
+                    CanonicalDataContract.compute_schema_hash(
+                        ["image_pixels"], ["packed_float32"]
+                    )
+                ),
+                "cv_strategy": metadata["cv_strategy"],
+                "temporal_splits_path": None,
+                "oof_eligible_mask_path": None,
+                "temporal_order_path": None,
+                "image_input_paths_path": canonical_result[
+                    "image_input_paths_path"
+                ],
+                "test_ids_path": canonical_result["test_ids_path"],
+                "image_test_input_paths_path": canonical_result[
+                    "image_test_input_paths_path"
+                ],
+                "packed_image_contract": True,
+            }
+            return {
+                "canonical_data_prepared": True,
+                "canonical_dir": canonical_result["canonical_dir"],
+                "canonical_train_ids_path": canonical_result[
+                    "train_ids_path"
+                ],
+                "canonical_y_path": canonical_result["y_path"],
+                "canonical_folds_path": canonical_result["folds_path"],
+                "canonical_feature_cols_path": str(feature_cols_path),
+                "canonical_metadata": metadata,
+                "canonical_contract": canonical_contract,
+                "target_col": metadata["target_col"],
+                "target_cols": list(metadata["target_cols"]),
+                "target_type": "multi_target",
+                "expected_train_rows": int(metadata["canonical_rows"]),
+                "expected_test_rows": int(metadata["n_test"]),
+                "test_rec_ids": [str(value) for value in test_ids.tolist()],
+                "last_updated": datetime.now(),
+            }
+        except Exception as exc:
+            if str(state.get("run_mode", "")).lower() == "mlebench":
+                raise RuntimeError(
+                    "MLE-bench image-to-image canonical pair contract failed"
+                ) from exc
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_error": str(exc),
+                "last_updated": datetime.now(),
+            }
+
     if data_type == "image":
         # For IMAGE competitions: Try to create canonical data from train.csv
         # Image competitions typically have train.csv with columns [image_id, label1, label2, ...]

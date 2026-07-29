@@ -149,7 +149,7 @@ _FAST_COMPONENT_DEFS: dict[str, dict[str, Any]] = {
         "description": "Stack OOF predictions from available models with LogisticRegression/Ridge meta-learner. Fallback to weighted average if needed.",
         "estimated_impact": 0.10,
         "rationale": "Cheap ensemble step that often improves generalization without additional heavy training.",
-        "code_outline": "Load models/oof_*.npy + models/test_*.npy. Check IS_CLASSIFICATION from canonical_metadata. If classification: use LogisticRegression as meta-model, evaluate with AUC, clip predictions to [0,1]. If regression: use Ridge as meta-model, evaluate with RMSE. Write submission.csv.",
+        "code_outline": "Load aligned models/oof_*.npy + models/test_*.npy and their ID artifacts. Check IS_CLASSIFICATION from canonical_metadata. If classification: use LogisticRegression as meta-model, evaluate with AUC, and retain probability outputs. If regression: use Ridge as meta-model and evaluate with RMSE. Call save_component_artifacts(oof_preds, test_preds, class_order=class_order when multiclass), then write_submission(test_preds).",
     },
 }
 

@@ -14,14 +14,13 @@ Environment Variables:
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+from .image_to_image_contract import load_packed_images
 
 
 @dataclass
@@ -108,6 +107,12 @@ _SEQ2SEQ_PROBLEM_TYPES = {
     "translation",
     "summarization",
 }
+_IMAGE_TO_IMAGE_PROBLEM_TYPES = {
+    "image_to_image",
+    "image2image",
+    "image_restoration",
+    "image_denoising",
+}
 
 
 def _normalize_problem_type(problem_type: str) -> str:
@@ -123,7 +128,70 @@ def _normalize_problem_type(problem_type: str) -> str:
         return "regression"
     if normalized in _SEQ2SEQ_PROBLEM_TYPES:
         return "seq2seq"
+    if normalized in _IMAGE_TO_IMAGE_PROBLEM_TYPES:
+        return "image_to_image"
     return normalized
+
+
+def _validate_packed_image_artifacts(
+    *,
+    models_dir: Path,
+    component_name: str,
+    expected_n_train: int | None,
+    expected_n_test: int | None,
+    expected_train_ids: Sequence[object] | None,
+    expected_test_ids: Sequence[object] | None,
+    result: ValidationResult,
+) -> ValidationResult:
+    """Validate variable-sized image artifacts using their embedded IDs."""
+    artifacts = [
+        (
+            "OOF",
+            models_dir / f"oof_{component_name}.npz",
+            expected_n_train,
+            expected_train_ids,
+        ),
+        (
+            "Test",
+            models_dir / f"test_{component_name}.npz",
+            expected_n_test,
+            expected_test_ids,
+        ),
+    ]
+    for label, path, expected_rows, expected_ids in artifacts:
+        if not path.is_file():
+            result.add_error(f"Missing {label} packed image file: {path.name}")
+            continue
+        try:
+            packed = load_packed_images(path)
+        except Exception as exc:
+            result.add_error(f"Failed to load {label} packed image file: {exc}")
+            continue
+        result.files_verified.append(path.name)
+        # For dense submissions expected_n_test is the CSV pixel-row count,
+        # not the number of packed test images. Semantic IDs are authoritative
+        # whenever supplied.
+        expected_image_rows = (
+            len(expected_ids)
+            if expected_ids is not None
+            else (expected_rows if label == "OOF" else None)
+        )
+        if (
+            expected_image_rows is not None
+            and len(packed) != expected_image_rows
+        ):
+            result.add_error(
+                f"{label} image count mismatch: {len(packed)} vs expected "
+                f"{expected_image_rows}"
+            )
+        if expected_ids is not None:
+            actual = packed.image_ids.tolist()
+            expected = [str(value) for value in expected_ids]
+            if actual != expected:
+                result.add_error(
+                    f"{label} image IDs do not match canonical IDs in exact order"
+                )
+    return result
 
 
 def _prediction_width(preds: np.ndarray) -> int | None:
@@ -245,6 +313,16 @@ def validate_model_artifacts(
     result = ValidationResult()
     models_dir = working_dir / "models"
     validation_family = _normalize_problem_type(problem_type)
+    if validation_family == "image_to_image":
+        return _validate_packed_image_artifacts(
+            models_dir=models_dir,
+            component_name=component_name,
+            expected_n_train=expected_n_train,
+            expected_n_test=expected_n_test,
+            expected_train_ids=expected_train_ids,
+            expected_test_ids=expected_test_ids,
+            result=result,
+        )
     # 1. Check OOF file exists
     oof_path = models_dir / f"oof_{component_name}.npy"
     if not oof_path.exists():
@@ -342,6 +420,7 @@ def validate_model_artifacts(
 
     oof_width = _prediction_width(oof_preds)
     test_width = _prediction_width(test_preds)
+    declared_multiclass = "multiclass" in str(problem_type).lower()
     if oof_width != test_width:
         result.add_error(
             f"OOF/test prediction width mismatch: {oof_width} vs {test_width}"
@@ -354,6 +433,17 @@ def validate_model_artifacts(
     )
 
     if validation_family in {"classification", "multilabel"}:
+        if (
+            declared_multiclass
+            and oof_width is not None
+            and oof_width > 1
+            and expected_class_order is None
+        ):
+            result.add_error(
+                "Missing expected class order contract for multiclass "
+                "probability columns"
+            )
+
         # Non-finite arrays were already rejected. Avoid deriving misleading
         # extrema or row sums from them.
         arrays_are_finite = bool(
@@ -512,7 +602,13 @@ def validate_model_artifacts(
             )
 
     # 8. Check class order file (for multiclass)
-    if expected_class_order is not None and len(expected_class_order) > 2:
+    if (
+        expected_class_order is not None
+        and len(expected_class_order) > 1
+        and validation_family == "classification"
+        and oof_width is not None
+        and oof_width > 1
+    ):
         class_order_path = models_dir / f"class_order_{component_name}.npy"
         global_class_order_path = models_dir / "class_order.npy"
 

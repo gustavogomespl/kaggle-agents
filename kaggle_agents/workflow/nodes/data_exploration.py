@@ -101,12 +101,27 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     )
     exclude_cols = set(id_cols + target_cols)
 
+    canonical_metadata = state.get("canonical_metadata") or {}
+    declared_text_features = (
+        canonical_metadata.get("text_feature_cols")
+        or canonical_contract.get("text_feature_cols")
+        or []
+    )
+    text_features = [
+        str(column)
+        for column in declared_text_features
+        if isinstance(column, str) and column in df.columns and column not in exclude_cols
+    ]
+
     numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
     categorical_cols = [c for c in categorical_cols if c not in exclude_cols]
     n_features = len([column for column in df.columns if column not in exclude_cols])
 
-    # Try to detect datetime columns from object columns
+    # Declared prose roles take precedence over values that happen to parse as
+    # dates, so a canonical text feature cannot be reclassified here.
     for col in categorical_cols[:]:
+        if col in text_features:
+            continue
         try:
             sample = df[col].dropna().iloc[:100]
             if len(sample) > 0:
@@ -115,6 +130,10 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
                 categorical_cols.remove(col)
         except (ValueError, TypeError, IndexError):
             pass
+
+    categorical_cols = [
+        column for column in categorical_cols if column not in text_features
+    ]
 
     # Missing values analysis
     missing_value_cols = {}
@@ -234,7 +253,7 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
         numeric_features=numeric_cols,
         categorical_features=categorical_cols,
         datetime_features=datetime_cols,
-        text_features=[],  # TODO: detect text features
+        text_features=text_features,
         missing_value_cols=missing_value_cols,
         high_cardinality_cols=high_cardinality_cols,
         constant_cols=constant_cols,

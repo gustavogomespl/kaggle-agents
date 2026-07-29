@@ -31,10 +31,17 @@ from ...tools.code_executor.dataclasses import ExecutionResult
 from ...utils.llm_utils import get_text_content, invoke_with_retry
 from ..planner.sota_analysis import sanitize_external_fact_for_prompt
 from .code_contracts import (
+    HELPER_IMPORT_CONTRACT_ERROR,
+    MISSING_CLASS_ORDER_ERROR,
+    MISSING_SUBMISSION_HELPER_ERROR,
     SUBMISSION_CONTRACT_ERROR,
     handwritten_submission_write,
+    missing_class_order_helper_argument,
+    missing_submission_helper_call,
+    requires_submission_helper,
+    untrusted_contract_helper_import,
 )
-from .code_generator import get_dynamic_temperature
+from .code_generator import CodeGeneratorMixin, get_dynamic_temperature
 
 
 if TYPE_CHECKING:
@@ -45,11 +52,15 @@ if TYPE_CHECKING:
 
 _CATEGORICAL_ENCODING_HINT = (
     "\n\n## Encoding Hint (auto-detected from error):\n"
-    "The error indicates string/categorical columns that the model cannot consume directly. "
-    "Before fitting ANY model, convert every object/category column:\n"
-    "  for col in df.select_dtypes(include=['object', 'category']).columns:\n"
-    "      df[col] = df[col].astype('category').cat.codes\n"
-    "Apply this to BOTH train and test DataFrames BEFORE any model.fit() call."
+    "The model received a string feature, but text and categorical columns "
+    "must not be encoded the same way. Read CANONICAL_METADATA feature_roles "
+    "and text_feature_cols first. For text columns, build word/character "
+    "TF-IDF features inside each canonical CV fold: fit only on the fold "
+    "training partition, then transform validation and test. For genuine "
+    "categorical columns, use an encoder fit only on that fold's training "
+    "partition and transform validation/test with explicit unknown-category "
+    "handling. Never derive category codes independently on train and test, "
+    "and never treat free-form text as ordinal numbers."
 )
 
 _CATEGORICAL_ERROR_PATTERNS = ("could not convert string", "invalid literal")
@@ -62,12 +73,12 @@ _MISSING_ARTIFACT_HINT = (
     "artifact file. Do NOT retrain from scratch when reusable outputs exist: "
     "first check models/ for fold checkpoints or partial prediction arrays "
     "saved by the previous run and load them to produce the missing files. "
-    "Either way, the script MUST create every artifact listed in the error "
-    "above. train_ids_<component>.npy holds the train IDs in canonical row "
-    "order and test_ids_<component>.npy one test ID per prediction row; save "
-    "ID arrays as plain strings — "
-    "np.save(path, np.asarray([str(v) for v in ids]), allow_pickle=False) — "
-    "because object-dtype arrays cannot be saved with allow_pickle=False."
+    "Then call the injected save_component_artifacts(oof_preds, test_preds, "
+    "train_ids=train_ids, test_ids=test_ids, class_order=class_order) exactly "
+    "once; omit class_order only when the task is not multiclass. Do not call "
+    "np.save for contract artifacts. The helper creates every required file, "
+    "keeps train IDs in canonical order, requires one unique test ID per "
+    "prediction row, and writes ID arrays with allow_pickle=False."
 )
 
 _SUBMISSION_CONTRACT_PATTERN = "must be written with write_submission"
@@ -83,6 +94,23 @@ _SUBMISSION_CONTRACT_HINT = (
     "an input column. Writing there produces a file that looks valid and "
     "scores nothing, because the graded column keeps its placeholder."
 )
+
+_INJECTED_HEADER_END = "# === END PATH CONSTANTS ==="
+
+
+def preserve_injected_header(original_code: str, replacement_code: str) -> str:
+    """Keep generator-owned constants/helpers when a fixer returns only a body."""
+    original_end = original_code.find(_INJECTED_HEADER_END)
+    if original_end < 0:
+        return replacement_code
+    header = original_code[: original_end + len(_INJECTED_HEADER_END)]
+    replacement_end = replacement_code.find(_INJECTED_HEADER_END)
+    if replacement_end >= 0:
+        replacement_code = replacement_code[
+            replacement_end + len(_INJECTED_HEADER_END) :
+        ].lstrip("\n")
+    combined = f"{header}\n{replacement_code}"
+    return CodeGeneratorMixin._strip_path_redefinitions(None, combined)
 
 
 def require_oof_artifacts() -> bool:
@@ -276,8 +304,116 @@ class RetryMixin:
             # never produced oof_*) and when a rejected candidate's artifacts
             # were quarantined after rollback.
             if require_oof_artifacts():
-                oof_path = working_dir / "models" / f"oof_{component.name}.npy"
-                if not oof_path.is_file():
+                import numpy as np
+
+                models_dir = working_dir / "models"
+                packed_oof_path = (
+                    models_dir / f"oof_{component.name}.npz"
+                )
+                packed_test_path = (
+                    models_dir / f"test_{component.name}.npz"
+                )
+                dense_oof_path = (
+                    models_dir / f"oof_{component.name}.npy"
+                )
+                dense_test_path = (
+                    models_dir / f"test_{component.name}.npy"
+                )
+                metadata_path = (
+                    working_dir / "canonical" / "metadata.json"
+                )
+                packed_contract = packed_oof_path.is_file() or packed_test_path.is_file()
+                if metadata_path.is_file():
+                    try:
+                        import json
+
+                        metadata = json.loads(
+                            metadata_path.read_text(encoding="utf-8")
+                        )
+                        packed_contract = packed_contract or bool(
+                            metadata.get("packed_image_contract")
+                            and metadata.get("task_type") == "image_to_image"
+                        )
+                    except (OSError, TypeError, ValueError):
+                        pass
+
+                if packed_contract:
+                    if not (
+                        packed_oof_path.is_file()
+                        and packed_test_path.is_file()
+                    ):
+                        print(
+                            "   ⚠️  Packed model cache is incomplete for "
+                            f"{component.name}; both OOF and test artifacts "
+                            "are required"
+                        )
+                        return False
+                    try:
+                        from ...utils.image_to_image_contract import (
+                            load_packed_images,
+                        )
+
+                        packed_oof = load_packed_images(packed_oof_path)
+                        packed_test = load_packed_images(packed_test_path)
+                        for packed, canonical_name, label in (
+                            (packed_oof, "train_ids.npy", "train"),
+                            (packed_test, "test_ids.npy", "test"),
+                        ):
+                            canonical_path = (
+                                working_dir / "canonical" / canonical_name
+                            )
+                            if canonical_path.is_file():
+                                expected_ids = np.asarray(
+                                    np.load(
+                                        canonical_path,
+                                        allow_pickle=False,
+                                    ),
+                                    dtype=str,
+                                )
+                                if not np.array_equal(
+                                    packed.image_ids.astype(str),
+                                    expected_ids,
+                                ):
+                                    print(
+                                        "   ⚠️  Packed cache has misaligned "
+                                        f"{label} IDs for {component.name}"
+                                    )
+                                    return False
+                    except Exception as exc:
+                        print(
+                            "   ⚠️  Invalid packed cache for "
+                            f"{component.name}: {exc}"
+                        )
+                        return False
+                else:
+                    required_dense = [dense_oof_path, dense_test_path]
+                    mlebench = (
+                        str(state.get("run_mode", "")).strip().lower()
+                        == "mlebench"
+                    )
+                    train_ids_path = (
+                        models_dir / f"train_ids_{component.name}.npy"
+                    )
+                    test_ids_path = (
+                        models_dir / f"test_ids_{component.name}.npy"
+                    )
+                    if mlebench or metadata_path.is_file():
+                        required_dense.append(train_ids_path)
+                    if mlebench:
+                        required_dense.append(test_ids_path)
+                    missing = [
+                        path.name
+                        for path in required_dense
+                        if not path.is_file()
+                    ]
+                    if missing:
+                        print(
+                            "   ⚠️  Dense model cache is incomplete for "
+                            f"{component.name}; missing: {missing}"
+                        )
+                        return False
+
+                if not (packed_contract or dense_oof_path.is_file()):
                     print(
                         f"   ⚠️  No OOF artifact on disk for {component.name} - "
                         "cached result cannot be reused as a model"
@@ -350,6 +486,27 @@ class RetryMixin:
             True if predictions are valid, False to invalidate cache
         """
         import numpy as np
+
+        packed_oof_path = (
+            working_dir / "models" / f"oof_{component_name}.npz"
+        )
+        packed_test_path = (
+            working_dir / "models" / f"test_{component_name}.npz"
+        )
+        if packed_oof_path.is_file():
+            try:
+                from ...utils.image_to_image_contract import load_packed_images
+
+                load_packed_images(packed_oof_path)
+                if packed_test_path.is_file():
+                    load_packed_images(packed_test_path)
+                return True
+            except Exception as exc:
+                print(
+                    "   ⚠️  Invalid packed image predictions for "
+                    f"{component_name}: {exc}"
+                )
+                return False
 
         oof_path = working_dir / "models" / f"oof_{component_name}.npy"
         test_path = working_dir / "models" / f"test_{component_name}.npy"
@@ -715,7 +872,7 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 print(f"   ⚠️ Fallback fixer failed: {e}. Returning original code.")
                 return code
 
-        return fixed_code
+        return preserve_injected_header(code, fixed_code)
 
     def _debug_code(
         self,
@@ -860,7 +1017,10 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 if original_timeout is not None:
                     self.executor.timeout = original_timeout
                 return code, exec_result, False
-            debugged_code = self._extract_code_from_response(get_text_content(response.content))
+            debugged_code = preserve_injected_header(
+                code,
+                self._extract_code_from_response(get_text_content(response.content)),
+            )
 
             # Same contracts as the main attempts. Enforcing the artifact one
             # through expected_artifacts was not enough: the submission
@@ -870,9 +1030,70 @@ Output Dir: {paths.get('output_dir', '.')}"""
             # while keeping a weaker one that happened to get it right.
             hand_written = (
                 handwritten_submission_write(debugged_code)
-                if component_type == "model"
+                if requires_submission_helper(component_type)
                 else None
             )
+            untrusted_helper_import = untrusted_contract_helper_import(debugged_code)
+            missing_submission_helper = (
+                missing_submission_helper_call(debugged_code)
+                if requires_submission_helper(component_type)
+                else False
+            )
+            missing_class_order = (
+                any(
+                    Path(path).name.startswith("class_order_")
+                    for path in (expected_artifacts or [])
+                )
+                and missing_class_order_helper_argument(debugged_code)
+            )
+            if untrusted_helper_import:
+                print(
+                    "   Debug iteration imports an injected contract helper "
+                    f"({untrusted_helper_import}); rejecting before training"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[HELPER_IMPORT_CONTRACT_ERROR],
+                )
+                code = debugged_code
+                continue
+            if missing_submission_helper:
+                print(
+                    "   Debug iteration never calls the injected "
+                    "write_submission() helper; rejecting before training"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[MISSING_SUBMISSION_HELPER_ERROR],
+                )
+                code = debugged_code
+                continue
+            if missing_class_order:
+                print(
+                    "   Debug iteration omits class_order= from the injected "
+                    "save_component_artifacts() call; rejecting before training"
+                )
+                exec_result = ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr="",
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[MISSING_CLASS_ORDER_ERROR],
+                )
+                code = debugged_code
+                continue
             if hand_written:
                 print(
                     f"   Debug iteration writes the submission by hand "

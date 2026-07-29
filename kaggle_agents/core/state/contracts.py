@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+
 if TYPE_CHECKING:
     import numpy as np
     import pandas as pd
@@ -192,6 +193,10 @@ class CanonicalDataContract:
     temporal_splits_path: str | None = None
     oof_eligible_mask_path: str | None = None
     temporal_order_path: str | None = None
+    test_ids_path: str | None = None
+    image_input_paths_path: str | None = None
+    image_test_input_paths_path: str | None = None
+    packed_image_contract: bool = False
 
     def validate(self) -> tuple[bool, list[str]]:
         """Validate all canonical files exist and match checksums.
@@ -211,7 +216,18 @@ class CanonicalDataContract:
             path = Path(getattr(self, attr))
             if not path.exists():
                 violations.append(f"Missing: {path}")
-
+        if self.packed_image_contract:
+            for attr in (
+                "test_ids_path",
+                "image_input_paths_path",
+                "image_test_input_paths_path",
+            ):
+                raw_path = getattr(self, attr)
+                if not raw_path or not Path(raw_path).is_file():
+                    violations.append(
+                        f"Missing packed image alignment artifact "
+                        f"{attr}: {raw_path!r}"
+                    )
         # Verify hashes if files exist
         # Use compute_array_hash() for consistency with contract creation
         # Use allow_pickle=True for object arrays (common for ID columns)
@@ -226,11 +242,15 @@ class CanonicalDataContract:
 
         y_path = Path(self.y_path)
         if y_path.exists():
-            arr = np.load(y_path, allow_pickle=True)
-            actual_hash = self.compute_array_hash(arr)
+            if self.packed_image_contract or y_path.suffix.lower() == ".npz":
+                actual_hash = hashlib.sha256(y_path.read_bytes()).hexdigest()
+            else:
+                arr = np.load(y_path, allow_pickle=True)
+                actual_hash = self.compute_array_hash(arr)
             if actual_hash != self.y_hash:
                 violations.append(
-                    f"y.npy hash mismatch: {actual_hash[:8]}... != {self.y_hash[:8]}..."
+                    f"canonical target hash mismatch: {actual_hash[:8]}... "
+                    f"!= {self.y_hash[:8]}..."
                 )
 
         train_ids_path = Path(self.train_ids_path)
@@ -239,7 +259,8 @@ class CanonicalDataContract:
             actual_hash = self.compute_array_hash(arr)
             if actual_hash != self.train_ids_hash:
                 violations.append(
-                    f"train_ids.npy hash mismatch: {actual_hash[:8]}... != {self.train_ids_hash[:8]}..."
+                    f"train_ids.npy hash mismatch: {actual_hash[:8]}... != "
+                    f"{self.train_ids_hash[:8]}..."
                 )
 
         if self.cv_strategy == "temporal_forward_chaining":
@@ -282,6 +303,10 @@ class CanonicalDataContract:
             "temporal_splits_path": self.temporal_splits_path,
             "oof_eligible_mask_path": self.oof_eligible_mask_path,
             "temporal_order_path": self.temporal_order_path,
+            "test_ids_path": self.test_ids_path,
+            "image_input_paths_path": self.image_input_paths_path,
+            "image_test_input_paths_path": self.image_test_input_paths_path,
+            "packed_image_contract": self.packed_image_contract,
         }
 
     def __repr__(self) -> str:
@@ -592,14 +617,17 @@ def create_submission_contract_from_sample(
     Returns:
         SubmissionContract instance
     """
-    import pandas as pd
-
+    from kaggle_agents.utils.csv_utils import read_csv_preview_and_count
     from kaggle_agents.utils.target_inference import (
         _read_schema_columns,
+        infer_pixel_submission_schema,
         split_submission_schema,
     )
 
-    sample_sub = pd.read_csv(sample_submission_path)
+    sample_sub, expected_rows = read_csv_preview_and_count(
+        sample_submission_path,
+        preview_rows=200,
+    )
     cols = [str(column) for column in sample_sub.columns]
 
     if len(cols) < 2:
@@ -607,13 +635,14 @@ def create_submission_contract_from_sample(
             f"sample_submission must have at least 2 columns (id + target), got: {cols}"
         )
 
-    echoed_cols, target_cols = split_submission_schema(
-        cols,
-        _read_schema_columns(test_data_path),
-    )
+    test_columns = _read_schema_columns(test_data_path)
+    echoed_cols, target_cols = split_submission_schema(cols, test_columns)
+    test_path = Path(test_data_path) if test_data_path else None
+    if not test_columns and test_path is not None and test_path.is_dir():
+        pixel_roles = infer_pixel_submission_schema(sample_sub)
+        if pixel_roles is not None:
+            echoed_cols, target_cols = pixel_roles
     id_col = echoed_cols[0] if echoed_cols else cols[0]
-    expected_rows = len(sample_sub)
-
     # Determine only the public layout. Template values are placeholders and
     # cannot identify multilabel classification versus multi-target regression.
     if len(target_cols) == 1:

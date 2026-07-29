@@ -14,6 +14,7 @@ def compose_generate_prompt(
     paths: dict[str, str],
     context: DynamicContext,
     use_modular_constraints: bool = True,
+    requirements: str = "",
 ) -> str:
     """
     Compose a dynamic, context-aware code generation prompt.
@@ -57,6 +58,8 @@ def compose_generate_prompt(
         "",
         _format_task(component, competition_info, paths),
     ]
+    if requirements:
+        parts.extend(("", "## Dynamic Component Contract", requirements))
 
     # Inject dynamic canonical data instructions for model components
     comp_type = getattr(component, "component_type", "model")
@@ -139,21 +142,13 @@ y_train = targets_df.pivot_table(
         )
         parts.append("")
         parts.append("Fix requirements:")
-        parts.append("1. Read sample_submission.csv to match ID values and column order exactly")
+        parts.append("1. Keep the injected header and use write_submission(test_preds)")
         parts.append("2. Match row count exactly (no truncation/padding)")
-        parts.append("3. Preserve ID order from sample_submission.csv")
+        parts.append("3. Preserve the template's echoed columns and row order")
         parts.append(
             "4. For image-to-image: flatten per-pixel predictions to the sample submission ID format"
         )
-        parts.append("5. Use assertions before saving")
-        parts.append("```python")
-        parts.append("sample = pd.read_csv(sample_submission_path)")
-        parts.append("assert list(submission.columns) == list(sample.columns)")
-        parts.append("assert len(submission) == len(sample)")
-        parts.append(
-            "assert (submission[sample.columns[0]].values == sample[sample.columns[0]].values).all()"
-        )
-        parts.append("```")
+        parts.append("5. Do not assign template columns by position or call to_csv directly")
 
     # Adaptive training guidance (GPU-accelerated, bounded by measured runtime)
     if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():

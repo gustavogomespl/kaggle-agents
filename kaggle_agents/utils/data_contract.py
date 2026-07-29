@@ -65,6 +65,52 @@ TEMPORAL_CONTRACT_KEYS = (
     "order_col",
 )
 
+_TEXT_COLUMN_TOKENS = {
+    "text", "sentence", "content", "body", "comment", "review", "message",
+    "description", "title", "question", "answer", "abstract", "article",
+    "excerpt", "passage", "document",
+}
+
+
+def _feature_roles(
+    train_df: pd.DataFrame,
+    feature_cols: list[str],
+) -> dict[str, list[str]]:
+    """Classify canonical features without changing the raw feature schema."""
+    roles = {"numeric": [], "categorical": [], "datetime": [], "text": []}
+    for column in feature_cols:
+        if column not in train_df.columns:
+            roles["categorical"].append(column)
+            continue
+
+        series = train_df[column]
+        normalized = str(column).strip().lower().replace("-", "_")
+        name_tokens = {part for part in normalized.split("_") if part}
+        non_null = series.dropna()
+        average_length = (
+            float(non_null.astype(str).str.len().mean()) if not non_null.empty else 0.0
+        )
+        is_text = (
+            pd.api.types.is_string_dtype(series)
+            and (bool(name_tokens & _TEXT_COLUMN_TOKENS) or average_length > 100.0)
+        )
+        is_named_datetime = (
+            normalized in TEMPORAL_COLUMN_NAMES
+            or normalized.endswith("_date")
+            or normalized.endswith("_time")
+            or normalized.endswith("_at")
+        )
+
+        if is_text:
+            roles["text"].append(column)
+        elif pd.api.types.is_datetime64_any_dtype(series) or is_named_datetime:
+            roles["datetime"].append(column)
+        elif pd.api.types.is_numeric_dtype(series):
+            roles["numeric"].append(column)
+        else:
+            roles["categorical"].append(column)
+    return roles
+
 # Backward-compatible public constants. They describe generic task/identifier
 # conventions only; no task maps to a benchmark-specific schema.
 SEQ2SEQ_GROUP_CANDIDATES = ("_id", "Id", "ID")
@@ -1239,6 +1285,9 @@ def prepare_canonical_data(
     if is_synthetic_id and "_row_id" in feature_cols:
         feature_cols.remove("_row_id")
 
+    feature_roles = _feature_roles(train_df, feature_cols)
+    text_feature_cols = feature_roles["text"]
+
     if missing_in_test:
         print(f"   Warning: {len(missing_in_test)} columns missing in test: {missing_in_test[:5]}...")
 
@@ -1489,6 +1538,22 @@ def prepare_canonical_data(
     with open(canonical_dir / "feature_cols.json", "w") as f:
         json.dump(feature_cols, f, indent=2)
 
+    class_order: list[str] | None = None
+    if is_classification and resolved_target_type == "single":
+        try:
+            ordered_classes = np.unique(np.asarray(y).reshape(-1)).tolist()
+        except TypeError:
+            ordered_classes = sorted(
+                pd.unique(np.asarray(y).reshape(-1)).tolist(),
+                key=lambda value: (type(value).__name__, repr(value)),
+            )
+        class_order = [str(value) for value in ordered_classes]
+        if len(class_order) != len(set(class_order)):
+            raise ValueError(
+                "Classification labels are ambiguous after string "
+                "normalization; cannot define a submission class order"
+            )
+
     # Save metadata
     metadata = {
         "original_rows": original_rows,
@@ -1506,9 +1571,12 @@ def prepare_canonical_data(
         "target_type_source": target_type_source,
         "n_targets": len(resolved_target_cols),
         "n_features": len(feature_cols),
+        "feature_roles": feature_roles,
+        "text_feature_cols": text_feature_cols,
         "group_col": group_col,
         "is_classification": is_classification,
         "n_classes": n_unique if is_classification else None,
+        "class_order": class_order,
         "canonical_version": "1.5",
         # Seq2seq specific metadata
         "task_type": task_type,
@@ -1988,20 +2056,18 @@ folds = np.load(canonical_dir / "folds.npy")
 with open(canonical_dir / "feature_cols.json") as f:
     feature_cols = json.load(f)
 
-# Use folds for CV (DO NOT create your own folds!)
-n_folds = {n_folds}
-for fold_idx in range(n_folds):
-    train_mask = folds != fold_idx
-    val_mask = folds == fold_idx
-
-    X_train, X_val = X[train_mask], X[val_mask]
-    y_train, y_val = y[train_mask], y[val_mask]
+# Use the injected audited splitter for CV. It preserves temporal
+# forward-chaining and warm-up eligibility when the canonical strategy is
+# temporal; a simple fold-complement split does not.
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = y[train_idx], y[val_idx]
 
     # Train model...
     model.fit(X_train, y_train)
 
     # Store OOF predictions in order
-    oof[val_mask] = model.predict_proba(X_val)
+    oof[val_idx] = model.predict_proba(X_val)
 ```
 
 ### CRITICAL RULES:
@@ -2013,11 +2079,14 @@ for fold_idx in range(n_folds):
 
 ### Saving Predictions:
 ```python
-# Save OOF aligned with canonical train_ids
-np.save("models/oof_{{model_name}}.npy", oof)
-
-# Verify alignment before saving
+# Verify alignment, then use the injected artifact helper exactly once.
 assert len(oof) == len(train_ids), "OOF must match canonical row count"
+save_component_artifacts(
+    oof,
+    test_predictions,
+    train_ids=train_ids,
+    test_ids=CANONICAL_TEST_IDS,
+)
 ```
 '''
     return '''

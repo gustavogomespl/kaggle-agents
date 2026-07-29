@@ -525,6 +525,44 @@ class TestWriteSubmissionHelper:
         assert written["Date"].tolist() == sample["Date"].tolist()
         assert written["Comment"].tolist() == sample["Comment"].tolist()
 
+    def test_echoed_ids_with_leading_zeros_are_preserved(self, tmp_path):
+        from kaggle_agents.agents.developer.code_generator import _SUBMISSION_HELPER
+
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text("target,id\n0,001\n0,002\n", encoding="utf-8")
+        namespace = {
+            "SAMPLE_SUBMISSION_PATH": sample,
+            "SUBMISSION_PATH": tmp_path / "submission.csv",
+            "SUBMISSION_TARGET_COLS": ["target"],
+        }
+        exec(compile(_SUBMISSION_HELPER, "<helper>", "exec"), namespace)  # noqa: S102
+
+        namespace["write_submission"](np.array([0.3, 0.7]))
+
+        written = pd.read_csv(tmp_path / "submission.csv", dtype=str)
+        assert written["id"].tolist() == ["001", "002"]
+
+    def test_echoed_na_like_ids_are_preserved_literally(self, tmp_path):
+        from kaggle_agents.agents.developer.code_generator import _SUBMISSION_HELPER
+
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text("target,id\n0,NA\n0,NULL\n0,N/A\n", encoding="utf-8")
+        namespace = {
+            "SAMPLE_SUBMISSION_PATH": sample,
+            "SUBMISSION_PATH": tmp_path / "submission.csv",
+            "SUBMISSION_TARGET_COLS": ["target"],
+        }
+        exec(compile(_SUBMISSION_HELPER, "<helper>", "exec"), namespace)  # noqa: S102
+
+        namespace["write_submission"](np.array([0.1, 0.2, 0.3]))
+
+        written = pd.read_csv(
+            tmp_path / "submission.csv",
+            dtype=str,
+            keep_default_na=False,
+        )
+        assert written["id"].tolist() == ["NA", "NULL", "N/A"]
+
     def test_test_ids_reorder_predictions_to_template_order(self, tmp_path):
         namespace = self._namespace(tmp_path, ["Insult"])
 
@@ -548,8 +586,9 @@ class TestWriteSubmissionHelper:
         with pytest.raises(ValueError, match="expects 1 prediction column"):
             namespace["write_submission"](np.zeros((3, 2)))
 
-    def test_without_a_contract_it_keeps_the_positional_convention(self, tmp_path):
-        # Conventional templates must behave exactly as before.
+    def test_without_a_contract_it_refuses_to_guess_prediction_columns(
+        self, tmp_path
+    ):
         from kaggle_agents.agents.developer.code_generator import _SUBMISSION_HELPER
 
         sample = tmp_path / "sample_submission.csv"
@@ -561,11 +600,9 @@ class TestWriteSubmissionHelper:
         }
         exec(compile(_SUBMISSION_HELPER, "<helper>", "exec"), namespace)  # noqa: S102
 
-        namespace["write_submission"](np.array([0.3, 0.7]))
-
-        written = pd.read_csv(tmp_path / "submission.csv")
-        assert written["id"].tolist() == [1, 2]
-        assert written["target"].tolist() == [0.3, 0.7]
+        with pytest.raises(ValueError, match="could not be resolved"):
+            namespace["write_submission"](np.array([0.3, 0.7]))
+        assert not (tmp_path / "submission.csv").exists()
 
 
 class TestHandwrittenSubmissionCheck:
@@ -597,6 +634,24 @@ class TestHandwrittenSubmissionCheck:
 
         assert self._check(code) is None
 
+    def test_model_without_an_external_helper_call_is_reported(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            missing_submission_helper_call,
+        )
+
+        assert missing_submission_helper_call(
+            "def write_submission(test_preds):\n    pass\n"
+            "train_model()\n"
+        ) is True
+
+    def test_helper_call_does_not_excuse_a_second_manual_submission_write(self):
+        code = (
+            "write_submission(test_preds)\n"
+            "submission.to_csv(SUBMISSION_PATH, index=False)\n"
+        )
+
+        assert self._check(code) == "SUBMISSION_PATH"
+
     def test_helper_definition_alone_does_not_satisfy_it(self):
         # The helper body is injected into every model script, so its own
         # to_csv proves nothing about the generated program.
@@ -621,6 +676,78 @@ class TestHandwrittenSubmissionCheck:
 
     def test_unparseable_code_is_not_a_finding(self):
         assert self._check("def broken(:\n") is None
+
+    def test_import_that_shadows_an_injected_helper_is_rejected(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            untrusted_contract_helper_import,
+        )
+
+        assert untrusted_contract_helper_import(
+            "from submission_utils import write_submission, save_component_artifacts\n"
+            "write_submission(test_preds)\n"
+            "save_component_artifacts(oof, test_preds)\n"
+        ) == "from submission_utils import write_submission, save_component_artifacts"
+
+    def test_assignment_that_shadows_an_injected_helper_is_rejected(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            untrusted_contract_helper_import,
+        )
+
+        code = (
+            "def write_submission(test_preds):\n    pass\n"
+            "def save_component_artifacts(oof, test_preds):\n    pass\n"
+            "write_submission = arbitrary_writer\n"
+            "write_submission(test_preds)\n"
+        )
+
+        assert untrusted_contract_helper_import(code) == (
+            "write_submission = arbitrary_writer"
+        )
+
+    def test_second_helper_definition_is_rejected(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            untrusted_contract_helper_import,
+        )
+
+        code = (
+            "def write_submission(test_preds):\n    pass\n"
+            "def save_component_artifacts(oof, test_preds):\n    pass\n"
+            "def write_submission(test_preds):\n    arbitrary_writer(test_preds)\n"
+            "write_submission(test_preds)\n"
+        )
+
+        assert untrusted_contract_helper_import(code) == (
+            "def write_submission(test_preds):\n"
+            "    arbitrary_writer(test_preds)"
+        )
+
+    def test_globals_assignment_cannot_shadow_submission_helper(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            untrusted_contract_helper_import,
+        )
+
+        code = (
+            "globals()['write_submission'] = arbitrary_writer\n"
+            "write_submission(test_preds)\n"
+        )
+
+        assert untrusted_contract_helper_import(code) == (
+            "globals()['write_submission'] = arbitrary_writer"
+        )
+
+    def test_keyword_submission_destination_is_a_handwritten_write(self):
+        code = "submission.to_csv(path_or_buf=SUBMISSION_PATH, index=False)\n"
+
+        assert self._check(code) == "SUBMISSION_PATH"
+
+    def test_submission_helper_contract_applies_to_models_and_ensembles(self):
+        from kaggle_agents.agents.developer.code_contracts import (
+            requires_submission_helper,
+        )
+
+        assert requires_submission_helper("model") is True
+        assert requires_submission_helper("ensemble") is True
+        assert requires_submission_helper("preprocessing") is False
 
 
 class TestFormatGateCountsOnlyPredictions:
@@ -752,3 +879,64 @@ class TestDebugLoopEnforcesTheSubmissionContract:
         )
 
         assert _SUBMISSION_CONTRACT_PATTERN in SUBMISSION_CONTRACT_ERROR.lower()
+
+    def test_debugged_body_keeps_the_original_injected_header(self):
+        from kaggle_agents.agents.developer.retry import preserve_injected_header
+
+        original = (
+            "# === PATH CONSTANTS ===\n"
+            "SUBMISSION_PATH = OUTPUT_DIR / 'submission.csv'\n"
+            "def write_submission(preds):\n    pass\n"
+            "# === END PATH CONSTANTS ===\n"
+            "old_model_body()\n"
+        )
+
+        fixed = preserve_injected_header(original, "new_model_body()\n")
+
+        assert "SUBMISSION_PATH" in fixed
+        assert "def write_submission" in fixed
+        assert fixed.endswith("new_model_body()\n")
+
+    def test_debugged_body_cannot_redefine_injected_paths(self):
+        from kaggle_agents.agents.developer.retry import preserve_injected_header
+
+        original = (
+            "# === PATH CONSTANTS ===\n"
+            "MODELS_DIR = Path('/trusted/models')\n"
+            "OUTPUT_DIR = Path('/trusted/output')\n"
+            "TRAIN_PATH = Path('/trusted/train.csv')\n"
+            "TEST_PATH = Path('/trusted/test.csv')\n"
+            "# === END PATH CONSTANTS ===\n"
+            "old_model_body()\n"
+        )
+
+        fixed = preserve_injected_header(
+            original,
+            "MODELS_DIR = Path('/tmp/untrusted') / 'models'\n"
+            "OUTPUT_DIR = pathlib.Path('/tmp/untrusted')\n"
+            "TRAIN_PATH = Path(os.getenv('TRAIN_PATH', '/tmp/train.csv'))\n"
+            "globals()['TEST_PATH'] = Path('/tmp/test.csv')\n"
+            "new_model_body()\n",
+        )
+
+        active_body = fixed.split("# === END PATH CONSTANTS ===", 1)[1]
+        assert "\nMODELS_DIR =" not in active_body
+        assert "\nOUTPUT_DIR =" not in active_body
+        assert "\nTRAIN_PATH =" not in active_body
+        assert "globals()['TEST_PATH'] =" not in active_body
+        assert "new_model_body()" in active_body
+
+
+def test_string_conversion_retry_hint_preserves_text_semantics():
+    from kaggle_agents.agents.developer.retry import _maybe_add_encoding_hint
+
+    hint = _maybe_add_encoding_hint(
+        "ValueError: could not convert string to float: 'hello world'"
+    )
+
+    assert "CANONICAL_METADATA" in hint
+    assert "text_feature_cols" in hint
+    assert "TF-IDF" in hint
+    assert "fit only on the fold training partition" in hint
+    assert "unknown" in hint
+    assert ".cat.codes" not in hint

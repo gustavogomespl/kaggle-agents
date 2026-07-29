@@ -77,9 +77,13 @@ audio_files = sorted(
 if not audio_files:
     raise FileNotFoundError(f"No audio files found under {audio_root}")
 
-sample_sub = pd.read_csv(SAMPLE_SUBMISSION_PATH)
-id_col = sample_sub.columns[0]
-target_cols = sample_sub.columns[1:].tolist()
+from kaggle_agents.utils.csv_utils import read_csv_auto
+
+sample_sub = read_csv_auto(SAMPLE_SUBMISSION_PATH, nrows=5)
+id_col = SUBMISSION_ID_COL
+target_cols = list(SUBMISSION_TARGET_COLS)
+if id_col not in sample_sub.columns:
+    raise ValueError("Resolved submission ID column is absent from the template")
 if not target_cols:
     raise ValueError("sample_submission has no prediction columns")
 print({
@@ -203,13 +207,24 @@ Infer wide, long, or structured output exclusively from
 the complete sample IDs—never by row position and never by a remembered numeric
 multiplier.
 
-Save:
+Save evidence with exactly one call to the injected helper:
 
-- `models/oof_{COMPONENT_NAME}.npy`
-- `models/oof_ids_{COMPONENT_NAME}.npy`
-- `models/test_{COMPONENT_NAME}.npy`
-- `models/test_ids_{COMPONENT_NAME}.npy`
-- `submission.csv` with exactly the sample columns, complete ID set, and order
+```python
+save_component_artifacts(
+    oof_predictions,
+    test_predictions,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=TEST_REC_IDS,
+    class_order=class_order,  # required for mutually exclusive multiclass
+)
+```
+
+The packed/dense helper owns all component artifact filenames and ID-array
+semantics; never call `np.save` for OOF/test/train-ID/test-ID evidence. Build
+the final public rows in exact template order, then call
+`write_submission(submission_predictions)` (or pass `test_ids=` only when the
+helper can align one unique ID per prediction row). Never assign template
+columns by position and never write `submission.csv` directly.
 
 Before success, verify shapes, finite/non-constant predictions, exact ID
 coverage, and class-column order. Print the honest OOF metric using exactly:

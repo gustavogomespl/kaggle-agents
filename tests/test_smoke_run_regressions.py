@@ -314,11 +314,10 @@ class TestEvidenceArtifactHelper:
         assert f"models/test_{COMPONENT}.npy" in missing
         assert f"models/oof_{COMPONENT}.npy" not in missing
 
-    def test_helper_is_only_injected_for_model_components(self):
-        # Guard against the helpers leaking into preprocessing/ensemble headers,
-        # where MODELS_DIR/COMPONENT_NAME semantics differ. Read the guard from
-        # the syntax tree rather than a text window, so unrelated edits between
-        # the branch and the injection cannot silently disable this check.
+    def test_helpers_are_injected_for_their_supported_component_types(self):
+        # Evidence artifacts belong to trainable model components. Both models
+        # and ensembles can own the final submission, so both must use the
+        # injected schema-aware submission helper.
         import ast
         from pathlib import Path
 
@@ -327,18 +326,19 @@ class TestEvidenceArtifactHelper:
         ).read_text(encoding="utf-8")
         tree = ast.parse(source)
 
-        guarded: set[str] = set()
+        model_guarded: set[str] = set()
+        submission_guarded: set[str] = set()
         for node in ast.walk(tree):
             if not isinstance(node, ast.If):
                 continue
-            if 'component_type == "model"' not in ast.unparse(node.test).replace(
-                "'", '"'
-            ):
-                continue
+            condition = ast.unparse(node.test).replace("'", '"')
             for statement in node.body:
                 for sub in ast.walk(statement):
                     if isinstance(sub, ast.Name):
-                        guarded.add(sub.id)
+                        if 'component_type == "model"' in condition:
+                            model_guarded.add(sub.id)
+                        if '"model", "ensemble"' in condition:
+                            submission_guarded.add(sub.id)
 
-        assert "_EVIDENCE_ARTIFACT_HELPER" in guarded
-        assert "_SUBMISSION_HELPER" in guarded
+        assert "_EVIDENCE_ARTIFACT_HELPER" in model_guarded
+        assert "_submission_helper_for_contract" in submission_guarded

@@ -473,6 +473,66 @@ print("Final Validation Performance: 1.0")
         assert "secret" not in result.stdout
 
 
+class TestExpectedArtifactFreshness:
+    def test_stale_expected_artifact_cannot_satisfy_current_execution(
+        self, tmp_path
+    ):
+        artifact = tmp_path / "models" / "oof_candidate.npy"
+        artifact.parent.mkdir()
+        artifact.write_bytes(b"accepted-before")
+
+        result = CodeExecutor(timeout=10).execute(
+            'import numpy as np\nprint("Final Validation Performance: 1.0")',
+            str(tmp_path),
+            expected_artifacts=["models/oof_candidate.npy"],
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert "Missing expected artifacts" in result.errors[-1]
+        assert artifact.read_bytes() == b"accepted-before"
+
+    def test_successful_execution_replaces_expected_artifact(self, tmp_path):
+        artifact = tmp_path / "models" / "oof_candidate.npy"
+        artifact.parent.mkdir()
+        artifact.write_bytes(b"accepted-before")
+
+        result = CodeExecutor(timeout=10).execute(
+            """
+import numpy as np
+from pathlib import Path
+Path("models/oof_candidate.npy").write_bytes(b"fresh")
+print("Final Validation Performance: 1.0")
+""",
+            str(tmp_path),
+            expected_artifacts=["models/oof_candidate.npy"],
+            component_type="model",
+        )
+
+        assert result.success is True
+        assert artifact.read_bytes() == b"fresh"
+
+    def test_failed_execution_restores_previous_expected_artifact(self, tmp_path):
+        artifact = tmp_path / "models" / "oof_candidate.npy"
+        artifact.parent.mkdir()
+        artifact.write_bytes(b"accepted-before")
+
+        result = CodeExecutor(timeout=10).execute(
+            """
+import numpy as np
+from pathlib import Path
+Path("models/oof_candidate.npy").write_bytes(b"partial")
+raise RuntimeError("training failed")
+""",
+            str(tmp_path),
+            expected_artifacts=["models/oof_candidate.npy"],
+            component_type="model",
+        )
+
+        assert result.success is False
+        assert artifact.read_bytes() == b"accepted-before"
+
+
 class TestOptunaPruningContractValidation:
     """Tests for Optuna pruning contract validation."""
 

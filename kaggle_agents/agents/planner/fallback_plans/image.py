@@ -217,31 +217,26 @@ Training:
 
 SUBMISSION FORMAT (CRITICAL - MUST FOLLOW):
 ```python
-sample_sub = pd.read_csv(sample_submission_path)
-id_col, target_col = sample_sub.columns[:2]
-template_ids = sample_sub[id_col].astype(str)
-predictions_by_id = build_predictions_for_observed_ids(
-    template_ids.tolist(), test_images, model
+save_component_artifacts(
+    oof_images,
+    test_images,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=CANONICAL_TEST_IDS,
 )
-if set(predictions_by_id) != set(template_ids):
-    raise ValueError("Prediction IDs do not exactly cover the sample template")
-submission = sample_sub.copy()
-submission[target_col] = template_ids.map(predictions_by_id)
-if submission[target_col].isna().any():
-    raise ValueError("Missing predictions after template alignment")
-submission.to_csv("submission.csv", index=False)
-```""",
+write_submission(None)
+```
+The injected writer maps the saved packed test artifact to observed template
+IDs in bounded chunks and rejects ambiguous coordinate conventions.
+
+Train on paired crops/padding produced from one shared spatial transform per
+noisy/clean pair. Use inference batch_size=1, retain a valid-pixel mask for any
+stride padding, and remove padding before metrics/artifacts. Save variable-size
+OOF/test images with the injected save_component_artifacts helper; it writes
+component-specific .npz files with embedded IDs. Never import/redefine that
+helper, use object arrays, or write the CSV manually.""",
                 "estimated_impact": 0.35,
                 "rationale": "Simple autoencoder is fast to train and provides baseline for denoising. Pixel-level output is critical for correct submission format.",
-                "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, flatten to pixel-level CSV",
-            },
-            {
-                "name": "submission_format_validator",
-                "component_type": "ensemble",
-                "description": "Validate pixel-level submission format matches sample_submission.csv exactly.",
-                "estimated_impact": 0.05,
-                "rationale": "Critical validation to catch format errors before submission.",
-                "code_outline": "Load sample_sub, verify row count matches, verify ID format matches exactly",
+                "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, paired crop/pad, packed OOF/test artifacts, write_submission helper",
             },
         ]
 
@@ -265,10 +260,13 @@ U-Net candidate:
 
 SUBMISSION FORMAT (CRITICAL):
 Read sample_submission.csv and align dense predictions to its exact IDs and
-order. Do not assume separators, image dimensions, or coordinate indexing.""",
+order. Do not assume separators, image dimensions, or coordinate indexing.
+Use paired crop/pad transforms in training, batch_size=1 plus a valid-pixel mask
+for validation/test, save OOF/test with the injected save_component_artifacts
+helper, and finish with the injected write_submission helper.""",
             "estimated_impact": 0.40,
             "rationale": "U-Net is a candidate because skip connections can preserve spatial detail; retain it only when held-out image metrics improve.",
-            "code_outline": "Profile paired image tensors, derive a valid U-Net depth/output contract, select loss and maximum steps on held-out data under the deadline, align dense outputs to the sample template",
+            "code_outline": "Profile exact relative-path pairs, apply paired crop/pad, derive a valid U-Net depth/output contract, save packed aligned OOF/test, call write_submission",
         },
         {
             "name": "residual_autoencoder",
@@ -283,19 +281,6 @@ Architecture:
 This provides model diversity for ensemble.""",
             "estimated_impact": 0.35,
             "rationale": "Residual learning (predicting noise) often works better than direct denoising. Provides ensemble diversity.",
-            "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, same pixel-level submission format",
-        },
-        {
-            "name": "pixel_ensemble_average",
-            "component_type": "ensemble",
-            "description": """Average predictions from U-Net and Residual autoencoder at pixel level.
-
-1. Load aligned held-out predictions from both models
-2. Fit or select blend weights using the declared held-out image metric
-3. Keep the blend only if it improves over each constituent
-4. Apply frozen weights to test outputs and align to the sample template""",
-            "estimated_impact": 0.10,
-            "rationale": "Ensembling reduces prediction variance. Simple average works well for image tasks.",
-            "code_outline": "Align OOF tensors, validate coverage, select blend weights on the declared metric, apply frozen weights to aligned test tensors, validate exact submission format",
+            "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, paired transforms, packed image artifacts, write_submission helper",
         },
     ]

@@ -12,7 +12,11 @@ import numpy as np
 
 from ...agents.developer.validation import quarantine_component_artifacts
 from ...core.state import KaggleState
-from ...utils.submission_artifacts import restore_accepted_submission
+from ...utils.image_to_image_contract import load_packed_images
+from ...utils.submission_artifacts import (
+    restore_accepted_submission,
+    restore_best_candidate_submission,
+)
 from ...utils.telemetry import make_event
 
 
@@ -22,9 +26,23 @@ def _field(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
-def _restore_best_valid_submission(state: KaggleState) -> Path | None:
-    """Restore only a hash-verified immutable snapshot accepted in this run."""
-    return restore_accepted_submission(state, Path(state["working_directory"]))
+def _restore_best_valid_submission(
+    state: KaggleState,
+    rejected_components: list[str],
+) -> Path | None:
+    """Restore an accepted snapshot, or an unaffected verified best candidate."""
+    working_dir = Path(state["working_directory"])
+    accepted_owner = str(
+        state.get("accepted_submission_score_owner") or ""
+    )
+    if not accepted_owner or accepted_owner not in rejected_components:
+        restored = restore_accepted_submission(state, working_dir)
+        if restored is not None:
+            return restored
+    owner = str(state.get("best_candidate_submission_component_name") or "")
+    if owner and owner not in rejected_components:
+        return restore_best_candidate_submission(state, working_dir)
+    return None
 
 
 def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
@@ -47,19 +65,44 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
     contract = state.get("canonical_contract") or {}
     if hasattr(contract, "to_dict"):
         contract = contract.to_dict()
+    domain = str(state.get("domain_detected", "") or "").lower().replace("-", "_")
+    packed_image_contract = bool(
+        isinstance(contract, dict)
+        and contract.get("packed_image_contract")
+    ) or domain == "image_to_image"
     canonical_ids_path = (
         Path(str(contract.get("train_ids_path")))
         if isinstance(contract, dict) and contract.get("train_ids_path")
         else None
     )
+    canonical_test_ids_path = (
+        Path(str(contract.get("test_ids_path")))
+        if isinstance(contract, dict) and contract.get("test_ids_path")
+        else None
+    )
     canonical_ids: np.ndarray | None = None
+    canonical_test_ids: np.ndarray | None = None
     if canonical_ids_path is not None and canonical_ids_path.is_file():
         try:
             canonical_ids = np.asarray(
-                np.load(canonical_ids_path, allow_pickle=True)
+                np.load(
+                    canonical_ids_path,
+                    allow_pickle=not packed_image_contract,
+                )
             ).reshape(-1)
         except Exception:
             canonical_ids = None
+    if (
+        packed_image_contract
+        and canonical_test_ids_path is not None
+        and canonical_test_ids_path.is_file()
+    ):
+        try:
+            canonical_test_ids = np.asarray(
+                np.load(canonical_test_ids_path, allow_pickle=False)
+            ).reshape(-1)
+        except Exception:
+            canonical_test_ids = None
 
     trusted_scores = state.get("trusted_component_scores") or {}
     submission_contract = state.get("submission_contract") or {}
@@ -88,14 +131,60 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
         if not math.isfinite(score):
             issues.append("missing independently recomputed finite OOF score")
 
-        for artifact_kind in ("oof", "test"):
-            artifact_path = (
-                working_dir / "models" / f"{artifact_kind}_{name}.npy"
-            )
-            if not artifact_path.is_file():
-                issues.append(f"missing {artifact_kind} prediction artifact")
+        if packed_image_contract:
+            packed_artifacts = {}
+            for artifact_kind in ("oof", "test"):
+                artifact_path = (
+                    working_dir / "models" / f"{artifact_kind}_{name}.npz"
+                )
+                if not artifact_path.is_file():
+                    issues.append(
+                        f"missing {artifact_kind} packed image artifact"
+                    )
+                    continue
+                try:
+                    packed_artifacts[artifact_kind] = load_packed_images(
+                        artifact_path
+                    )
+                except Exception as exc:
+                    issues.append(
+                        f"{artifact_kind} packed image artifact cannot be "
+                        f"verified: {exc}"
+                    )
 
-        if expected_class_order and len(expected_class_order) > 2:
+            if canonical_ids is None:
+                issues.append("canonical train image IDs are unavailable")
+            elif "oof" in packed_artifacts and (
+                packed_artifacts["oof"].image_ids.tolist()
+                != [str(value) for value in canonical_ids]
+            ):
+                issues.append(
+                    "packed OOF image IDs do not match canonical OOF image order"
+                )
+            if canonical_test_ids is None:
+                issues.append("canonical test image IDs are unavailable")
+            elif "test" in packed_artifacts and (
+                packed_artifacts["test"].image_ids.tolist()
+                != [str(value) for value in canonical_test_ids]
+            ):
+                issues.append(
+                    "packed test image IDs do not match canonical test image order"
+                )
+        else:
+            for artifact_kind in ("oof", "test"):
+                artifact_path = (
+                    working_dir / "models" / f"{artifact_kind}_{name}.npy"
+                )
+                if not artifact_path.is_file():
+                    issues.append(
+                        f"missing {artifact_kind} prediction artifact"
+                    )
+
+        if (
+            not packed_image_contract
+            and expected_class_order
+            and len(expected_class_order) > 2
+        ):
             class_order_path = (
                 working_dir / "models" / f"class_order_{name}.npy"
             )
@@ -119,24 +208,27 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
                         f"component class order cannot be verified: {exc}"
                     )
 
-        model_ids_path = working_dir / "models" / f"train_ids_{name}.npy"
-        if canonical_ids is None:
-            issues.append("canonical train IDs are unavailable")
-        elif not model_ids_path.is_file():
-            issues.append("model train IDs are unavailable")
-        else:
-            try:
-                model_ids = np.asarray(
-                    np.load(model_ids_path, allow_pickle=False)
-                ).reshape(-1)
-                if [str(value) for value in model_ids] != [
-                    str(value) for value in canonical_ids
-                ]:
+        if not packed_image_contract:
+            model_ids_path = working_dir / "models" / f"train_ids_{name}.npy"
+            if canonical_ids is None:
+                issues.append("canonical train IDs are unavailable")
+            elif not model_ids_path.is_file():
+                issues.append("model train IDs are unavailable")
+            else:
+                try:
+                    model_ids = np.asarray(
+                        np.load(model_ids_path, allow_pickle=False)
+                    ).reshape(-1)
+                    if [str(value) for value in model_ids] != [
+                        str(value) for value in canonical_ids
+                    ]:
+                        issues.append(
+                            "model train IDs do not match canonical OOF row order"
+                        )
+                except Exception as exc:
                     issues.append(
-                        "model train IDs do not match canonical OOF row order"
+                        f"model train IDs cannot be verified: {exc}"
                     )
-            except Exception as exc:
-                issues.append(f"model train IDs cannot be verified: {exc}")
 
         if issues:
             failures[name] = issues
@@ -229,7 +321,7 @@ def _quarantine_rejected_candidate(
         if moved:
             moved_by_component[component_name] = moved
 
-    restored = _restore_best_valid_submission(state)
+    restored = _restore_best_valid_submission(state, component_names)
     oof_availability = dict(state.get("oof_availability", {}) or {})
     component_results = dict(state.get("component_results", {}) or {})
     trusted_scores = dict(state.get("trusted_component_scores", {}) or {})
@@ -253,6 +345,20 @@ def _quarantine_rejected_candidate(
     snapshot_owner = str(
         state.get("best_candidate_submission_component_name") or ""
     )
+    accepted_owner = str(
+        state.get("accepted_submission_score_owner") or ""
+    )
+    if accepted_owner in component_names:
+        updates.update(
+            {
+                "accepted_submission_path": None,
+                "accepted_submission_snapshot_path": None,
+                "accepted_submission_sha256": None,
+                "accepted_submission_cv_score": None,
+                "accepted_submission_score_owner": None,
+                "accepted_submission_score_source": None,
+            }
+        )
     best_model_name = str(state.get("best_single_model_name") or "")
     rejected_best_snapshot = snapshot_owner in component_names or (
         not snapshot_owner and best_model_name in component_names

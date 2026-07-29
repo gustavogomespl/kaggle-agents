@@ -4,32 +4,29 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
-PROMPT_SOURCES = (
-    "kaggle_agents/prompts/templates/audio_template.py",
-    "kaggle_agents/prompts/templates/constraints/audio.py",
-    "kaggle_agents/prompts/templates/constraints/image.py",
-    "kaggle_agents/prompts/templates/constraints/image_to_image.py",
-    "kaggle_agents/prompts/templates/data_format_prompt.py",
-    "kaggle_agents/prompts/templates/planner_prompts.py",
-    "kaggle_agents/prompts/templates/developer/component_guidance.py",
-    "kaggle_agents/prompts/templates/developer/prompt_composition.py",
-    "kaggle_agents/prompts/templates/builders/context.py",
-    "kaggle_agents/prompts/templates/builders/budget.py",
-    "kaggle_agents/prompts/templates/builders/cv.py",
-    "kaggle_agents/prompts/templates/builders/feature_eng.py",
-    "kaggle_agents/prompts/templates/builders/image_model.py",
-    "kaggle_agents/prompts/templates/builders/model.py",
-    "kaggle_agents/agents/planner/fallback_plans/audio.py",
-    "kaggle_agents/agents/planner/fallback_plans/base.py",
-    "kaggle_agents/agents/planner/fallback_plans/diversified.py",
-    "kaggle_agents/agents/planner/fallback_plans/image.py",
-    "kaggle_agents/agents/planner/fallback_plans/seq2seq.py",
-    "kaggle_agents/agents/planner/fallback_plans/tabular.py",
-    "kaggle_agents/agents/planner/fallback_plans/text.py",
+# Every module under these trees is model-facing text. Discovering them by
+# glob means a new constraints/ or fallback_plans/ file is audited the day it
+# is added, instead of silently escaping the policy until someone remembers to
+# extend a hand-written list.
+PROMPT_SOURCE_TREES = (
+    "kaggle_agents/prompts/templates",
+    "kaggle_agents/agents/planner/fallback_plans",
+)
+EXTRA_PROMPT_SOURCES = (
     "kaggle_agents/agents/planner/domain_patterns.py",
     "kaggle_agents/domain/detection/llm_detection.py",
     "kaggle_agents/utils/text_normalization.py",
 )
+
+
+def prompt_source_paths() -> list[Path]:
+    """Resolve every audited prompt module, newest files included."""
+    repo_root = Path(__file__).resolve().parents[1]
+    paths: list[Path] = []
+    for tree in PROMPT_SOURCE_TREES:
+        paths.extend(sorted((repo_root / tree).rglob("*.py")))
+    paths.extend(repo_root / relative for relative in EXTRA_PROMPT_SOURCES)
+    return [path for path in paths if path.name != "__init__.py"]
 
 BANNED_BENCHMARK_HINTS = (
     "mlsp-2013-birds",
@@ -65,14 +62,37 @@ BANNED_BENCHMARK_HINTS = (
 
 def test_active_prompt_sources_do_not_name_development_benchmark_tasks() -> None:
     """Prompts may use domain heuristics, but not memorized task identities/results."""
-    repo_root = Path(__file__).resolve().parents[1]
     combined = "\n".join(
-        (repo_root / relative_path).read_text(encoding="utf-8").lower()
-        for relative_path in PROMPT_SOURCES
+        path.read_text(encoding="utf-8").lower() for path in prompt_source_paths()
     )
 
     for forbidden_hint in BANNED_BENCHMARK_HINTS:
         assert forbidden_hint not in combined
+
+
+def test_prompt_sources_do_not_hardcode_task_specific_column_schemas() -> None:
+    """A remembered column trio identifies a task as surely as its slug does.
+
+    Generic role guidance ("resolve the declared text column") is allowed;
+    naming the literal columns of a development task is memorized schema and
+    lets a run succeed without actually resolving roles from public evidence.
+    """
+    banned_column_schemas = (
+        ("insult", "comment", "date"),
+        ("comment_text", "toxic"),
+        ("passengerid", "survived"),
+    )
+
+    for path in prompt_source_paths():
+        text = path.read_text(encoding="utf-8").lower()
+        for schema in banned_column_schemas:
+            present = [column for column in schema if f"`{column}`" in text]
+            # Two co-occurring literal names already pin down the task.
+            assert len(present) < 2, (
+                f"{path.name} names the literal columns {present} of the "
+                f"{schema} schema; describe the role instead of the "
+                "remembered column names"
+            )
 
 
 def test_cv_prompt_preserves_honest_scores_and_semantic_test_ids() -> None:

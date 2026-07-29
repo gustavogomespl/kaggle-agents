@@ -10,6 +10,8 @@ Handles:
 
 from __future__ import annotations
 
+import ast
+import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -53,6 +55,8 @@ IMMUTABLE_PATH_VARS = [
     "CANONICAL_TEMPORAL_SPLITS_PATH",
     "CANONICAL_OOF_ELIGIBLE_MASK_PATH",
     "CANONICAL_TEMPORAL_ORDER_PATH",
+    "CANONICAL_IMAGE_INPUT_PATHS_PATH",
+    "CANONICAL_IMAGE_TEST_INPUT_PATHS_PATH",
     # Common base directory patterns
     "BASE_DIR",
     "DATA_DIR",
@@ -102,13 +106,28 @@ def write_submission(test_preds, test_ids=None):
     """
     import numpy as _np
     import pandas as _pd
+    from kaggle_agents.utils.csv_utils import detect_delimiter as _detect_delimiter
 
-    _sample = _pd.read_csv(SAMPLE_SUBMISSION_PATH)
-    _columns = [str(_c) for _c in _sample.columns]
-    _declared = [str(_c) for _c in SUBMISSION_TARGET_COLS if str(_c) in _columns]
-    _pred_cols = _declared or _columns[1:]
+    # The template may use a non-comma delimiter; the graded file is always a
+    # comma CSV, which is what the grader parses.
+    _read_kwargs = {
+        "sep": _detect_delimiter(SAMPLE_SUBMISSION_PATH),
+        "dtype": str,
+        "keep_default_na": False,
+        "na_filter": False,
+    }
+    _columns = [
+        str(_c)
+        for _c in _pd.read_csv(
+            SAMPLE_SUBMISSION_PATH, nrows=0, **_read_kwargs
+        ).columns
+    ]
+    _pred_cols = [str(_c) for _c in SUBMISSION_TARGET_COLS if str(_c) in _columns]
     if not _pred_cols:
-        raise ValueError("Submission template has no prediction column")
+        raise ValueError(
+            "Submission target columns could not be resolved from the public "
+            "template; refusing to guess by column position"
+        )
 
     _preds = _np.asarray(test_preds)
     if _preds.ndim == 1:
@@ -118,36 +137,123 @@ def write_submission(test_preds, test_ids=None):
             f"Predictions have shape {_preds.shape} but the template expects "
             f"{len(_pred_cols)} prediction column(s): {_pred_cols}"
         )
-    if len(_preds) != len(_sample):
+
+    # The template is streamed, never held as one DataFrame: pixel-level
+    # templates have millions of rows and materializing them here undoes the
+    # bounded-memory contract the rest of the pipeline enforces.
+    _chunk_rows = 100000
+    _echo = [_c for _c in _columns if _c not in set(_pred_cols)]
+    _echo_values = {_c: [] for _c in _echo} if test_ids is not None else {}
+    _n_rows = 0
+    for _piece in _pd.read_csv(
+        SAMPLE_SUBMISSION_PATH, chunksize=_chunk_rows, **_read_kwargs
+    ):
+        _n_rows += len(_piece)
+        for _column in _echo_values:
+            _echo_values[_column].extend(_piece[_column].tolist())
+    if len(_preds) != _n_rows:
         raise ValueError(
-            f"Predictions have {len(_preds)} rows but the template has "
-            f"{len(_sample)}"
+            f"Predictions have {len(_preds)} rows but the template has {_n_rows}"
         )
 
     if test_ids is not None:
         _ids = [str(_v) for _v in _np.asarray(test_ids).reshape(-1)]
         if len(_ids) != len(_preds):
             raise ValueError("Need exactly one test ID per prediction row")
-        _echo = [_c for _c in _columns if _c not in set(_pred_cols)]
-        _key = None
         for _candidate in _echo:
-            _values = _sample[_candidate].astype(str)
-            if not _values.duplicated().any() and set(_values) == set(_ids):
-                _key = _candidate
+            _values = [str(_v) for _v in _echo_values[_candidate]]
+            if len(set(_values)) == len(_values) and set(_values) == set(_ids):
+                _order = {_v: _i for _i, _v in enumerate(_ids)}
+                _preds = _preds[[_order[_v] for _v in _values]]
                 break
-        if _key is not None:
-            _order = {_v: _i for _i, _v in enumerate(_ids)}
-            _preds = _preds[[_order[_v] for _v in _sample[_key].astype(str)]]
 
-    for _offset, _column in enumerate(_pred_cols):
-        _sample[_column] = _preds[:, _offset]
     SUBMISSION_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _sample.to_csv(SUBMISSION_PATH, index=False)
+    _partial = SUBMISSION_PATH.with_name(SUBMISSION_PATH.name + ".partial")
+    _written = 0
+    try:
+        with _partial.open("w", encoding="utf-8", newline="") as _handle:
+            for _index, _piece in enumerate(
+                _pd.read_csv(
+                    SAMPLE_SUBMISSION_PATH, chunksize=_chunk_rows, **_read_kwargs
+                )
+            ):
+                _slice = _preds[_written : _written + len(_piece)]
+                for _position, _column in enumerate(_pred_cols):
+                    _piece[_column] = _slice[:, _position]
+                _piece.to_csv(_handle, index=False, header=_index == 0)
+                _written += len(_piece)
+        _partial.replace(SUBMISSION_PATH)
+    finally:
+        _partial.unlink(missing_ok=True)
     print(
-        f"[LOG:INFO] Wrote submission.csv: {len(_sample)} rows, "
+        f"[LOG:INFO] Wrote submission.csv: {_written} rows, "
         f"predictions in {_pred_cols}"
     )
 '''
+
+
+_IMAGE_SUBMISSION_HELPER = '''
+# === PACKED IMAGE SUBMISSION (MANDATORY - streaming and atomic) ===
+def write_submission(test_preds, test_ids=None):
+    """Build submission from the saved packed test artifact.
+
+    The argument is accepted for the common helper API, but the authoritative
+    values come from ``test_<component>.npz`` written immediately beforehand
+    by ``save_component_artifacts``. This binds the graded CSV to the exact
+    evidence the host validates.
+    """
+    import os as _os
+
+    if test_ids is not None:
+        raise ValueError(
+            "test_ids is not supported for packed image submissions: provide "
+            "pixel predictions in the exact sample_submission row order"
+        )
+
+    _packed_test_path = MODELS_DIR / f"test_{COMPONENT_NAME}.npz"
+    if not _packed_test_path.is_file():
+        raise ValueError(
+            "Packed test evidence is missing. Call save_component_artifacts(...) "
+            "before write_submission(...)."
+        )
+    try:
+        _chunk_rows = int(
+            _os.getenv("KAGGLE_AGENTS_SUBMISSION_CHUNK_ROWS", "100000")
+        )
+    except ValueError as _error:
+        raise ValueError(
+            "KAGGLE_AGENTS_SUBMISSION_CHUNK_ROWS must be a positive integer"
+        ) from _error
+    if _chunk_rows <= 0:
+        raise ValueError(
+            "KAGGLE_AGENTS_SUBMISSION_CHUNK_ROWS must be a positive integer"
+        )
+    from kaggle_agents.utils.image_to_image_contract import (
+        write_packed_image_submission as _write_packed_image_submission,
+    )
+
+    _write_packed_image_submission(
+        packed_predictions_path=_packed_test_path,
+        sample_submission_path=SAMPLE_SUBMISSION_PATH,
+        output_path=SUBMISSION_PATH,
+        target_cols=SUBMISSION_TARGET_COLS,
+        id_col=globals().get("SUBMISSION_ID_COL"),
+        chunk_rows=_chunk_rows,
+    )
+    print(
+        "[LOG:INFO] Wrote submission.csv atomically from validated packed "
+        f"evidence: {_packed_test_path.name}"
+    )
+'''
+
+
+def _submission_helper_for_contract(packed_image_contract: bool) -> str:
+    """Select the bounded pixel writer only for audited packed image runs."""
+    return (
+        _IMAGE_SUBMISSION_HELPER
+        if packed_image_contract
+        else _SUBMISSION_HELPER
+    )
 
 
 _EVIDENCE_ARTIFACT_HELPER = '''
@@ -226,6 +332,212 @@ def save_component_artifacts(
 '''
 
 
+_IMAGE_EVIDENCE_ARTIFACT_HELPER = '''
+# === PACKED IMAGE EVIDENCE (MANDATORY - call exactly once, at the end) ===
+def _save_packed_image_artifact(path, images, image_ids):
+    """Save variable-sized images without object arrays or pickle."""
+    import numpy as _np
+
+    _arrays = [_np.asarray(_image, dtype=_np.float32) for _image in images]
+    _ids = [str(_value) for _value in _np.asarray(image_ids).reshape(-1)]
+    if not _arrays:
+        raise ValueError("Packed image evidence cannot be empty")
+    if len(_arrays) != len(_ids):
+        raise ValueError(
+            f"Image count ({len(_arrays)}) must match ID count ({len(_ids)})"
+        )
+    if len(set(_ids)) != len(_ids) or any(not _value for _value in _ids):
+        raise ValueError("Packed image IDs must be unique and non-empty")
+    _rank = _arrays[0].ndim
+    if _rank not in (2, 3) or any(_array.ndim != _rank for _array in _arrays):
+        raise ValueError("All packed images must have the same rank (2 or 3)")
+    if any(not _np.all(_np.isfinite(_array)) for _array in _arrays):
+        raise ValueError("Packed image evidence contains NaN or Inf")
+    if any(
+        _np.any(_array < 0.0) or _np.any(_array > 1.0)
+        for _array in _arrays
+    ):
+        raise ValueError("Packed image evidence must use the [0, 1] scale")
+    _sizes = _np.asarray([_array.size for _array in _arrays], dtype=_np.int64)
+    _offsets = _np.concatenate(
+        [_np.asarray([0], dtype=_np.int64), _np.cumsum(_sizes, dtype=_np.int64)]
+    )
+    _shapes = _np.asarray([_array.shape for _array in _arrays], dtype=_np.int32)
+    _values = _np.concatenate([_array.reshape(-1) for _array in _arrays]).astype(
+        _np.float32, copy=False
+    )
+    _image_ids = _np.asarray(_ids, dtype=str)
+    _np.savez(
+        path,
+        values=_values,
+        offsets=_offsets,
+        shapes=_shapes,
+        image_ids=_image_ids,
+    )
+
+
+def save_component_artifacts(
+    oof_preds,
+    test_preds,
+    train_ids=None,
+    test_ids=None,
+    class_order=None,
+):
+    """Persist variable-sized OOF/test images with IDs embedded in safe NPZs."""
+    if class_order is not None:
+        raise ValueError("class_order is not valid for image-to-image regression")
+    if train_ids is None:
+        train_ids = globals().get("CANONICAL_TRAIN_IDS")
+    if test_ids is None:
+        test_ids = globals().get("CANONICAL_TEST_IDS")
+    if train_ids is None or test_ids is None:
+        raise ValueError("Canonical train and test image IDs are required")
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    _save_packed_image_artifact(
+        MODELS_DIR / f"oof_{COMPONENT_NAME}.npz",
+        oof_preds,
+        train_ids,
+    )
+    _save_packed_image_artifact(
+        MODELS_DIR / f"test_{COMPONENT_NAME}.npz",
+        test_preds,
+        test_ids,
+    )
+    print(
+        f"[LOG:INFO] Saved packed image evidence for {COMPONENT_NAME}: "
+        f"oof={len(train_ids)}, test={len(test_ids)}"
+    )
+'''
+
+
+def _build_image_canonical_header(
+    canonical_dir: Path,
+    canonical_y_path: Path,
+) -> str:
+    """Build the pickle-free canonical header for image-to-image components."""
+    return f'''
+# === PACKED IMAGE CANONICAL CONTRACT (MANDATORY) ===
+from pathlib import Path
+import json
+import numpy as np
+
+CANONICAL_DIR = Path("{canonical_dir}")
+CANONICAL_TRAIN_IDS_PATH = CANONICAL_DIR / "train_ids.npy"
+CANONICAL_TEST_IDS_PATH = CANONICAL_DIR / "test_ids.npy"
+CANONICAL_Y_PATH = Path("{canonical_y_path}")
+CANONICAL_FOLDS_PATH = CANONICAL_DIR / "folds.npy"
+CANONICAL_FEATURE_COLS_PATH = CANONICAL_DIR / "feature_cols.json"
+CANONICAL_METADATA_PATH = CANONICAL_DIR / "metadata.json"
+CANONICAL_IMAGE_INPUT_PATHS_PATH = CANONICAL_DIR / "image_input_paths.npy"
+CANONICAL_IMAGE_TEST_INPUT_PATHS_PATH = CANONICAL_DIR / "image_test_input_paths.npy"
+
+with open(CANONICAL_METADATA_PATH, encoding="utf-8") as _f:
+    CANONICAL_METADATA = json.load(_f)
+if not bool(CANONICAL_METADATA.get("packed_image_contract")):
+    raise ValueError("Canonical metadata does not declare packed image evidence")
+if str(CANONICAL_METADATA.get("task_type")) != "image_to_image":
+    raise ValueError("Canonical task_type must be image_to_image")
+
+CANONICAL_TRAIN_IDS = np.asarray(
+    np.load(CANONICAL_TRAIN_IDS_PATH, allow_pickle=False), dtype=str
+)
+CANONICAL_TEST_IDS = np.asarray(
+    np.load(CANONICAL_TEST_IDS_PATH, allow_pickle=False), dtype=str
+)
+CANONICAL_FOLDS = np.asarray(
+    np.load(CANONICAL_FOLDS_PATH, allow_pickle=False), dtype=np.int64
+)
+CANONICAL_IMAGE_INPUT_PATHS = np.asarray(
+    np.load(CANONICAL_IMAGE_INPUT_PATHS_PATH, allow_pickle=False), dtype=str
+)
+CANONICAL_IMAGE_TEST_INPUT_PATHS = np.asarray(
+    np.load(CANONICAL_IMAGE_TEST_INPUT_PATHS_PATH, allow_pickle=False), dtype=str
+)
+N_FOLDS = int(CANONICAL_METADATA["n_folds"])
+ID_COL = str(CANONICAL_METADATA["id_col"])
+TARGET_COL = str(CANONICAL_METADATA["target_col"])
+TARGET_COLS = tuple(CANONICAL_METADATA["target_cols"])
+TARGET_TYPE = str(CANONICAL_METADATA["target_type"])
+N_TARGETS = int(CANONICAL_METADATA["n_targets"])
+IS_CLASSIFICATION = False
+CANONICAL_CV_STRATEGY = str(CANONICAL_METADATA["cv_strategy"])
+CANONICAL_FOLDS_AVAILABLE = True
+TEST_IDS_ARE_POSITIONAL = False
+
+def _load_packed_canonical_images(path):
+    _required = {{"values", "offsets", "shapes", "image_ids"}}
+    with np.load(path, allow_pickle=False) as _archive:
+        if set(_archive.files) != _required:
+            raise ValueError(
+                f"Packed canonical keys mismatch: {{sorted(_archive.files)}}"
+            )
+        _values = np.asarray(_archive["values"])
+        _offsets = np.asarray(_archive["offsets"])
+        _shapes = np.asarray(_archive["shapes"])
+        _image_ids = np.asarray(_archive["image_ids"])
+    if _values.dtype != np.float32 or _values.ndim != 1:
+        raise ValueError("Canonical packed values must be 1-D float32")
+    if not np.all(np.isfinite(_values)):
+        raise ValueError("Canonical packed values contain NaN or Inf")
+    if _offsets.dtype != np.int64 or _offsets.ndim != 1:
+        raise ValueError("Canonical packed offsets must be 1-D int64")
+    if _shapes.dtype != np.int32 or _shapes.ndim != 2:
+        raise ValueError("Canonical packed shapes must be 2-D int32")
+    if _image_ids.dtype.kind != "U" or _image_ids.ndim != 1:
+        raise ValueError("Canonical packed image_ids must be 1-D unicode")
+    if len(_offsets) != len(_image_ids) + 1 or int(_offsets[0]) != 0:
+        raise ValueError("Canonical packed offsets/image count mismatch")
+    if int(_offsets[-1]) != len(_values) or np.any(np.diff(_offsets) < 0):
+        raise ValueError("Canonical packed offsets are invalid")
+    if not np.array_equal(
+        np.prod(_shapes, axis=1, dtype=np.int64),
+        np.diff(_offsets),
+    ):
+        raise ValueError("Canonical packed shapes do not match offsets")
+    return _values, _offsets, _shapes, _image_ids
+
+(
+    CANONICAL_TARGET_VALUES,
+    CANONICAL_TARGET_OFFSETS,
+    CANONICAL_TARGET_SHAPES,
+    CANONICAL_TARGET_IMAGE_IDS,
+) = _load_packed_canonical_images(CANONICAL_Y_PATH)
+
+if not (
+    len(CANONICAL_TRAIN_IDS)
+    == len(CANONICAL_FOLDS)
+    == len(CANONICAL_IMAGE_INPUT_PATHS)
+    == len(CANONICAL_TARGET_IMAGE_IDS)
+):
+    raise ValueError("Canonical image training artifacts are not aligned")
+if not np.array_equal(CANONICAL_TARGET_IMAGE_IDS, CANONICAL_TRAIN_IDS):
+    raise ValueError("Canonical target image IDs are not in training order")
+if len(CANONICAL_TEST_IDS) != len(CANONICAL_IMAGE_TEST_INPUT_PATHS):
+    raise ValueError("Canonical test image IDs and paths are not aligned")
+
+def canonical_target_image(index):
+    _start = int(CANONICAL_TARGET_OFFSETS[index])
+    _stop = int(CANONICAL_TARGET_OFFSETS[index + 1])
+    return CANONICAL_TARGET_VALUES[_start:_stop].reshape(
+        tuple(CANONICAL_TARGET_SHAPES[index])
+    )
+
+def iter_canonical_cv_splits():
+    for _fold in range(N_FOLDS):
+        _val_idx = np.flatnonzero(CANONICAL_FOLDS == _fold)
+        _train_idx = np.flatnonzero(CANONICAL_FOLDS != _fold)
+        if len(_train_idx) == 0 or len(_val_idx) == 0:
+            raise ValueError(f"Invalid canonical image partition for fold {{_fold}}")
+        yield _fold, _train_idx, _val_idx
+
+print(
+    f"[CANONICAL] Packed image contract: {{len(CANONICAL_TRAIN_IDS)}} train, "
+    f"{{len(CANONICAL_TEST_IDS)}} test, {{N_FOLDS}} folds"
+)
+# === END PACKED IMAGE CANONICAL CONTRACT ===
+'''
+
+
 def _protected_vars_in_header(header: str) -> list[str]:
     """Immutable path constants actually defined in the injected header.
 
@@ -240,6 +552,103 @@ def _protected_vars_in_header(header: str) -> list[str]:
         for var in IMMUTABLE_PATH_VARS
         if var == "BASE_DIR" or re.search(rf"^[ \t]*{var}\s*=", header, re.MULTILINE)
     ]
+
+
+def _assigned_protected_names(
+    node: ast.AST,
+    protected_names: set[str],
+) -> set[str]:
+    """Return protected globals rebound by one assignment statement.
+
+    Only a real rebinding counts: a bare name, a name inside tuple/list
+    unpacking, or ``globals()["NAME"]``. A protected constant appearing as a
+    subscript index (``cache[DATA_DIR] = value``) or as the object being
+    indexed/attributed leaves the binding intact, and treating those as
+    redefinitions deletes correct lines from the candidate program.
+    """
+    targets: list[ast.AST] = []
+    if isinstance(node, ast.Assign):
+        targets.extend(node.targets)
+    elif isinstance(node, (ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+        targets.append(node.target)
+    else:
+        return set()
+
+    rebound: set[str] = set()
+    pending: list[ast.AST] = list(targets)
+    while pending:
+        target = pending.pop()
+        if isinstance(target, ast.Name):
+            if target.id in protected_names:
+                rebound.add(target.id)
+        elif isinstance(target, (ast.Tuple, ast.List)):
+            pending.extend(target.elts)
+        elif isinstance(target, ast.Starred):
+            pending.append(target.value)
+        elif isinstance(target, ast.Subscript):
+            value = target.value
+            is_globals = (
+                isinstance(value, ast.Call)
+                and isinstance(value.func, ast.Name)
+                and value.func.id == "globals"
+                and not value.args
+                and not value.keywords
+            )
+            key = target.slice
+            if (
+                is_globals
+                and isinstance(key, ast.Constant)
+                and isinstance(key.value, str)
+                and key.value in protected_names
+            ):
+                rebound.add(key.value)
+    return rebound
+
+
+def _protected_assignment_nodes(
+    code: str,
+    protected_names: set[str],
+) -> list[tuple[ast.AST, set[str]]]:
+    """Find assignments that can override generator-owned constants."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return []
+    return [
+        (node, names)
+        for node in ast.walk(tree)
+        if (names := _assigned_protected_names(node, protected_names))
+    ]
+
+
+def _strip_protected_assignments(
+    code: str,
+    protected_names: set[str],
+) -> str:
+    """Replace protected assignments with an indentation-safe no-op."""
+    assignments = _protected_assignment_nodes(code, protected_names)
+    if not assignments:
+        return code
+
+    lines = code.splitlines(keepends=True)
+    spans: dict[tuple[int, int], set[str]] = {}
+    for node, names in assignments:
+        start = max(int(getattr(node, "lineno", 1)) - 1, 0)
+        end = max(int(getattr(node, "end_lineno", start + 1)), start + 1)
+        spans.setdefault((start, end), set()).update(names)
+
+    for (start, end), names in sorted(spans.items(), reverse=True):
+        original = lines[start]
+        indent = original[: len(original) - len(original.lstrip(" \t"))]
+        newline = "\n" if original.endswith(("\n", "\r")) else ""
+        joined_names = ", ".join(sorted(names))
+        lines[start] = (
+            f"{indent}pass  # STRIPPED (path constant): "
+            f"{joined_names}{newline}"
+        )
+        for index in range(start + 1, min(end, len(lines))):
+            lines[index] = ""
+    return "".join(lines)
 
 
 def _build_submission_format_header(submission_format: dict | None) -> str:
@@ -568,7 +977,17 @@ class CodeGeneratorMixin:
         # Check for redefinitions of each immutable path variable the header
         # defines. Leading whitespace is [ \t]* (not \s*): with re.MULTILINE,
         # \s* crosses newlines and anchors the match to the previous blank line.
-        for var in _protected_vars_in_header(code[:marker_idx]):
+        protected_vars = _protected_vars_in_header(code[:marker_idx])
+        protected_names = set(protected_vars)
+        for _node, names in _protected_assignment_nodes(
+            code_after_header,
+            protected_names,
+        ):
+            violations.extend(
+                f"Path redefinition detected: {name}" for name in sorted(names)
+            )
+
+        for var in protected_vars:
             # Multiple patterns to catch various redefinition attempts
             patterns = [
                 # VAR = Path(...)
@@ -589,6 +1008,7 @@ class CodeGeneratorMixin:
                     violations.append(f"Path redefinition detected: {var}")
                     break  # Only report once per variable
 
+        violations = list(dict.fromkeys(violations))
         return len(violations) == 0, violations
 
     def _strip_path_redefinitions(
@@ -613,7 +1033,12 @@ class CodeGeneratorMixin:
         header = code[:marker_idx + len(path_header_end_marker)]
         code_after_header = code[marker_idx + len(path_header_end_marker):]
 
-        for var in _protected_vars_in_header(header):
+        protected_vars = _protected_vars_in_header(header)
+        code_after_header = _strip_protected_assignments(
+            code_after_header,
+            set(protected_vars),
+        )
+        for var in protected_vars:
             # Full-line patterns; leading whitespace is [ \t]* (not \s*): with
             # re.MULTILINE, \s* crosses newlines, and a redefinition after a
             # blank line got the comment prefix on the blank line while the
@@ -991,13 +1416,37 @@ class CodeGeneratorMixin:
         # partial canonical/ dir mid-run, and injecting the contract block for
         # an incomplete dir crashes every subsequent script at import time.
         canonical_dir = working_dir / "canonical"
+        canonical_metadata_path = canonical_dir / "metadata.json"
+        canonical_metadata: dict = {}
+        if canonical_metadata_path.is_file():
+            try:
+                canonical_metadata = json.loads(
+                    canonical_metadata_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError, TypeError):
+                canonical_metadata = {}
+        packed_image_contract = bool(
+            canonical_metadata.get("packed_image_contract")
+            and str(canonical_metadata.get("task_type")) == "image_to_image"
+        )
+        canonical_y_path = Path(
+            ((state or {}).get("canonical_contract") or {}).get("y_path")
+            or canonical_dir
+            / ("image_targets.npz" if packed_image_contract else "y.npy")
+        )
         canonical_files = (
             canonical_dir / "train_ids.npy",
-            canonical_dir / "y.npy",
+            canonical_y_path,
             canonical_dir / "folds.npy",
             canonical_dir / "feature_cols.json",
-            canonical_dir / "metadata.json",
+            canonical_metadata_path,
         )
+        if packed_image_contract:
+            canonical_files += (
+                canonical_dir / "test_ids.npy",
+                canonical_dir / "image_input_paths.npy",
+                canonical_dir / "image_test_input_paths.npy",
+            )
         has_canonical = canonical_dir.is_dir() and all(
             path.is_file() for path in canonical_files
         )
@@ -1041,7 +1490,7 @@ RUN_SEED = int(os.getenv("RUN_SEED", "42"))
             # For image competitions: inject BOTH directory paths AND CSV paths
             # TRAIN_IMG_DIR = directory containing images
             # TRAIN_CSV_PATH = CSV file with image IDs and labels
-            # TRAIN_PATH = points to CSV for pd.read_csv() compatibility
+            # TRAIN_PATH = CSV when present, otherwise the real image directory
 
             # Resolve CSV paths at Python runtime (not in generated code)
             # This fixes the bug where empty strings created Path("") or Path("None")
@@ -1062,9 +1511,9 @@ TRAIN_CSV_PATH = Path("{resolved_train_csv}")
 TEST_IMG_DIR = Path("{resolved_test_path}")
 {test_csv_line}
 
-# COMPATIBILITY: TRAIN_PATH points to CSV for pd.read_csv() calls
-# Use TRAIN_IMG_DIR when you need the image directory
-TRAIN_PATH = TRAIN_CSV_PATH if TRAIN_CSV_PATH.exists() else Path("{working_dir}/train.csv")
+# COMPATIBILITY: tabular-image tasks retain their CSV, while directory-only
+# image tasks receive a path that actually exists.
+TRAIN_PATH = TRAIN_CSV_PATH if TRAIN_CSV_PATH.exists() else TRAIN_IMG_DIR
 TEST_PATH = TEST_CSV_PATH if TEST_CSV_PATH and TEST_CSV_PATH.exists() else TEST_IMG_DIR
 '''
         else:
@@ -1083,7 +1532,12 @@ COMPONENT_NAME = "{component.name.replace(" ", "_").lower()}"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 '''
         # Add canonical data paths if available
-        if has_canonical:
+        if has_canonical and packed_image_contract:
+            path_header += _build_image_canonical_header(
+                canonical_dir,
+                canonical_y_path,
+            )
+        elif has_canonical:
             path_header += f'''
 # === CANONICAL DATA CONTRACT (MANDATORY - DO NOT REDEFINE) ===
 # All model components MUST use these artifacts for consistent data handling
@@ -1803,7 +2257,12 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
         )
         path_header += _build_submission_format_header(submission_format)
 
-        if component.component_type == "model":
+        if component.component_type in {"model", "ensemble"}:
+            submission_id_col = (
+                (state.get("submission_contract") or {}).get("id_col")
+                if state
+                else None
+            )
             submission_target_cols = [
                 str(column)
                 for column in (
@@ -1814,14 +2273,34 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
                 or []
                 if isinstance(column, str) and column
             ]
+            if not submission_target_cols:
+                # The helper fails closed on an empty list, so every candidate
+                # for this component will be rejected at write time. Say so
+                # once here: otherwise the run only shows generic component
+                # failures and the actual cause (unresolved submission roles)
+                # never surfaces in the logs.
+                print(
+                    "   ⚠️  Submission target columns are unresolved for "
+                    f"'{component.name}'. write_submission() will fail closed "
+                    "rather than guess by column position; fix the submission "
+                    "contract (sample_submission/test schema) first."
+                )
             path_header += (
-                "\n# Prediction columns resolved from the public template. Empty "
-                "means\n# the roles could not be resolved; the helper then falls "
-                "back to position.\n"
+                "\n# Prediction columns resolved from the public template. An "
+                "empty list is a fail-closed\n# contract error: the helper never "
+                "guesses prediction columns by position.\n"
+                f"SUBMISSION_ID_COL = {submission_id_col!r}\n"
                 f"SUBMISSION_TARGET_COLS = {submission_target_cols!r}\n"
             )
-            path_header += _SUBMISSION_HELPER
-            path_header += _EVIDENCE_ARTIFACT_HELPER
+            path_header += _submission_helper_for_contract(
+                packed_image_contract
+            )
+            if component.component_type == "model":
+                path_header += (
+                    _IMAGE_EVIDENCE_ARTIFACT_HELPER
+                    if packed_image_contract
+                    else _EVIDENCE_ARTIFACT_HELPER
+                )
 
         path_header += "\n# === END PATH CONSTANTS ===\n"
 
@@ -1831,6 +2310,7 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
                 competition_info=competition_info,
                 paths=paths,
                 context=context,
+                requirements=requirements,
             )
 
             messages = [

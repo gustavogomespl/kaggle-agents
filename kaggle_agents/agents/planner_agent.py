@@ -2733,13 +2733,13 @@ for fold, (train_idx, val_idx) in enumerate(kf.split(X)):
                 {
                     "name": "tta_inference_only",
                     "component_type": "ensemble",
-                    "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained model and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions. Write submission.csv.",
+                    "description": "Test-Time Augmentation ONLY (no additional training). Load the single trained model and apply 5 simple transforms (original, hflip, vflip, rotate90, rotate180), average predictions, save aligned evidence, and call write_submission(test_preds).",
                     "estimated_impact": 0.05,
                     "rationale": (
                         "TTA adds inference cost but no training. Retain it only when an OOF "
                         "simulation improves the declared metric."
                     ),
-                    "code_outline": "Load models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], write submission.csv",
+                    "code_outline": "Load models/best_model.* (auto-detect extension), for each test image: apply transforms, average predictions, clip to [0,1], call save_component_artifacts(oof_preds, test_preds), then write_submission(test_preds)",
                 },
             ]
 
@@ -2823,52 +2823,20 @@ Training:
 
 SUBMISSION FORMAT (CRITICAL - MUST FOLLOW):
 ```python
-from kaggle_agents.utils.target_inference import infer_target_columns
-
-sample_sub = pd.read_csv(sample_submission_path)
-submission_contract = infer_target_columns(sample_submission_path)
-identifier_columns = [submission_contract.id_col]
-prediction_columns = submission_contract.target_cols
-
-# Build one record per sample key by joining model outputs to supplied test
-# metadata. Never parse or synthesize identifiers from filenames/coordinates.
-prediction_table = build_prediction_table(model_outputs, test_metadata)
-expected_keys = list(
-    sample_sub[identifier_columns].itertuples(index=False, name=None)
+save_component_artifacts(
+    oof_images,
+    test_images,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=CANONICAL_TEST_IDS,
 )
-candidate_keys = list(
-    prediction_table[identifier_columns].itertuples(index=False, name=None)
-)
-assert len(expected_keys) == len(set(expected_keys))
-assert len(candidate_keys) == len(set(candidate_keys))
-assert set(candidate_keys) == set(expected_keys)
-
-predictions_by_key = dict(
-    zip(
-        candidate_keys,
-        prediction_table[prediction_columns].to_numpy(),
-        strict=True,
-    )
-)
-submission = sample_sub.copy()
-submission[prediction_columns] = [
-    predictions_by_key[key] for key in expected_keys
-]
-assert list(submission.columns) == list(sample_sub.columns)
-assert submission[identifier_columns].equals(sample_sub[identifier_columns])
-submission.to_csv("submission.csv", index=False)
-```""",
+write_submission(None)
+```
+The injected writer maps the saved packed artifact to observed template IDs,
+proves exact pixel coverage and coordinate base, and streams the CSV.
+Never load the full template or write it manually.""",
                     "estimated_impact": 0.35,
                     "rationale": "Simple autoencoder is fast to train and provides baseline for denoising. Pixel-level output is critical for correct submission format.",
                     "code_outline": "Conv2d encoder, ConvTranspose2d decoder, MSE loss, output same size as input, align keyed predictions to sample_submission",
-                },
-                {
-                    "name": "submission_format_validator",
-                    "component_type": "ensemble",
-                    "description": "Validate submission columns, identifier set, and identifier order against sample_submission.csv.",
-                    "estimated_impact": 0.05,
-                    "rationale": "Critical validation to catch format errors before submission.",
-                    "code_outline": "Load sample_sub, verify exact columns and key set, reorder predictions to sample order, then verify identifiers are unchanged",
                 },
             ]
 
@@ -2918,22 +2886,6 @@ This provides model diversity for ensemble.""",
                     "it with direct prediction before using it in an ensemble."
                 ),
                 "code_outline": "Conv encoder-decoder, predict residual, output = input - residual, align keyed predictions to sample_submission",
-            },
-            {
-                "name": "pixel_ensemble_average",
-                "component_type": "ensemble",
-                "description": """Average predictions from U-Net and Residual autoencoder at pixel level.
-
-1. Load predictions from both models
-2. Average pixel values: final[i,j] = (unet[i,j] + residual[i,j]) / 2
-3. Associate outputs with identifiers from supplied test metadata
-4. Validate exact key-set equality and reorder to sample_submission order""",
-                "estimated_impact": 0.10,
-                "rationale": (
-                    "Pixel-level averaging is an inexpensive ensemble candidate; retain it "
-                    "only when held-out image metrics improve."
-                ),
-                "code_outline": "Load both model outputs, average dense predictions, build keyed records, align to sample_submission, validate columns and identifier order",
             },
         ]
 

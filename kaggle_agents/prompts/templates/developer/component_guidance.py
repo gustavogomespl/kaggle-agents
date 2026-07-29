@@ -225,19 +225,21 @@ This is a PIXEL-LEVEL prediction task. Your model must output FULL IMAGES, not s
 ### DATA PIPELINE FIXES (MANDATORY - PREVENTS COMMON CRASHES):
 
 1. **VARIABLE IMAGE DIMENSIONS** (torch.stack error):
-   Images often have different sizes. Use these solutions:
+   Images often have different sizes. Keep each noisy/clean pair spatially
+   aligned and never stack native sizes:
    ```python
-   # TRAINING: Use RandomCrop for consistent tensor sizes
-   train_transform = transforms.Compose([
-       transforms.RandomCrop(256, 256),  # Fixed size for batching
-       transforms.ToTensor(),
-   ])
-   train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)  # batch_size > 1 OK
+   # TRAINING: paired_crop_or_pad samples geometry once and applies it to both
+   noisy_patch, clean_patch, valid_mask = paired_crop_or_pad(
+       noisy_image, clean_image, crop_size=(256, 256)
+   )
+   train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
 
-   # VALIDATION/TEST: Use batch_size=1 to handle any size
+   # VALIDATION/TEST: one native image at a time; mask/remove stride padding
    val_loader = DataLoader(val_ds, batch_size=1, shuffle=False)
    test_loader = DataLoader(test_ds, batch_size=1, shuffle=False)
+   prediction = unpad_to_valid_pixels(model(padded_image), valid_mask)
    ```
+   Never compose independent random crops/flips for the noisy and clean sides.
 
 2. **NEGATIVE STRIDES** (numpy/torch conversion error):
    ```python
@@ -259,8 +261,11 @@ This is a PIXEL-LEVEL prediction task. Your model must output FULL IMAGES, not s
    # DO THIS:
    train_dir = Path('/path/to/train')
    clean_dir = Path('/path/to/train_cleaned')
-   noisy_files = sorted(train_dir.glob('*.png'))
-   pairs = [(nf, clean_dir / nf.name) for nf in noisy_files if (clean_dir / nf.name).exists()]
+   noisy = {p.relative_to(train_dir).as_posix(): p for p in train_dir.rglob('*') if p.is_file()}
+   clean = {p.relative_to(clean_dir).as_posix(): p for p in clean_dir.rglob('*') if p.is_file()}
+   if set(noisy) != set(clean):
+       raise ValueError("Noisy/clean relative-path coverage is not exactly 1:1")
+   pairs = [(image_id, noisy[image_id], clean[image_id]) for image_id in sorted(noisy)]
    print(f"Found {len(pairs)} paired training samples.")
    ```
 
@@ -280,45 +285,26 @@ This is a PIXEL-LEVEL prediction task. Your model must output FULL IMAGES, not s
 - Output: Image of shape (H, W, C) or (H, W) - SAME spatial dimensions
 - Loss: MSE, L1, SSIM, or perceptual loss
 
+### OOF/Test Artifacts (CRITICAL):
+Use the dedicated safe packed helper; object arrays and pickle are forbidden.
+```python
+save_component_artifacts(
+    oof_images,
+    test_images,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=CANONICAL_TEST_IDS,
+)
+```
+The helper is injected; never import, redefine, or replace it with manual
+`np.save`/`np.savez` calls.
+
 ### Submission Format (CRITICAL):
 Derive the row granularity and ID encoding from the supplied sample submission.
 Do not assume a delimiter, coordinate base, image size, or ID layout.
 
-```python
-def write_pixel_submission(
-    sample_submission_path,
-    id_col,
-    target_col,
-    test_images,
-    model,
-):
-    # Pass id_col/target_col as exact literal names copied from the injected
-    # submission_format_info. Never derive either role from column position.
-    sample_sub = pd.read_csv(sample_submission_path)
-    if id_col not in sample_sub.columns or target_col not in sample_sub.columns:
-        raise ValueError("Injected pixel submission roles do not match template")
-
-    # Build this mapping only after inspecting and round-trip validating the
-    # observed template IDs against the model's image/pixel coordinates.
-    predictions_by_template_id = build_predictions_for_observed_ids(
-        sample_sub[id_col].astype(str).tolist(),
-        test_images,
-        model,
-    )
-    template_ids = sample_sub[id_col].astype(str)
-    missing = set(template_ids) - set(predictions_by_template_id)
-    extra = set(predictions_by_template_id) - set(template_ids)
-    if missing or extra:
-        raise ValueError(
-            f"Pixel-ID coverage mismatch: missing={len(missing)}, extra={len(extra)}"
-        )
-
-    submission = sample_sub.copy()
-    submission[target_col] = template_ids.map(predictions_by_template_id)
-    if submission[target_col].isna().any():
-        raise ValueError("Missing pixel predictions after template alignment")
-    submission.to_csv("submission.csv", index=False)
-```
+After mapping model outputs to the exact observed template row order, call
+`write_submission(pixel_predictions)`. The injected helper preserves all
+echo/ID columns. Never construct or save the submission DataFrame manually.
 
 ### Common Mistake to Avoid:
 One prediction per test image is invalid when the local template requires

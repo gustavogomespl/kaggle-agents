@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from ...utils.csv_utils import read_csv_auto
 from ...utils.submission_artifacts import sha256_file
 from .postprocessing import labels_from_oof_tuning
 
@@ -137,7 +138,7 @@ def validate_and_align_submission(
 
     try:
         sub_df = pd.read_csv(submission_path)
-        sample_df = pd.read_csv(sample_submission_path)
+        sample_df = read_csv_auto(sample_submission_path)
     except Exception as e:
         return False, f"Failed to read CSV: {e}", None
 
@@ -213,6 +214,7 @@ def safe_restore_submission(
     sample_submission_path: Path | None,
     *,
     target_cols: list[str] | None = None,
+    problem_type: str | None = None,
     expected_sha256: str | None = None,
     require_hash: bool = False,
 ) -> bool:
@@ -225,6 +227,8 @@ def safe_restore_submission(
         target_cols: Resolved prediction column names, so row order is checked
             against a column the template supplies rather than one the model
             fills in.
+        problem_type: Explicit prediction semantics, including label-format
+            multiclass submissions whose template placeholder is numeric.
         expected_sha256: Optional immutable-snapshot digest.
         require_hash: Fail closed unless ``expected_sha256`` is supplied and
             matches both the source and restored destination.
@@ -271,37 +275,28 @@ def safe_restore_submission(
     )
 
     try:
-        is_valid, error_msg, _ = validate_and_align_submission(
-            source_path,
-            sample_path,
-            validation_path,
-            target_cols,
-        )
-        if not is_valid:
-            print(f"      Warning: Submission validation failed: {error_msg}")
-            return False
-
         if expected_digest:
             # Immutable snapshots must already have canonical row order. An
             # alignment rewrite would sever the state digest from the bytes
-            # subsequently graded. Compare a column the template supplies:
-            # a prediction column differs from its placeholder by design.
-            sample_df = pd.read_csv(sample_path)
-            source_df = pd.read_csv(source_path)
-            predicted = {
-                sample_df.columns[position]
-                for position in prediction_positions(sample_df, target_cols)
-            }
-            order_cols = [
-                column for column in sample_df.columns if column not in predicted
-            ]
-            order_col = order_cols[0] if order_cols else sample_df.columns[0]
-            source_ids = source_df[order_col]
-            sample_ids = sample_df[order_col]
-            if not source_ids.equals(sample_ids):
+            # subsequently graded. Validate exact schema, echo columns, order,
+            # row count, and finite predictions in bounded chunks.
+            from kaggle_agents.tools.code_executor.submission import (
+                SubmissionValidationMixin,
+            )
+
+            is_valid, error_msg = (
+                SubmissionValidationMixin().validate_submission_format(
+                    source_path,
+                    sample_path,
+                    component_type="model",
+                    problem_type=problem_type,
+                    target_cols=target_cols,
+                )
+            )
+            if not is_valid:
                 print(
-                    "      Warning: Immutable submission row order differs from "
-                    "sample_submission"
+                    "      Warning: Submission validation failed: "
+                    f"{error_msg}"
                 )
                 return False
             shutil.copyfile(source_path, restore_path)
@@ -311,6 +306,18 @@ def safe_restore_submission(
         else:
             # For regular Kaggle runs retain the safe historical behavior:
             # reorder a structurally valid artifact to the template ID order.
+            is_valid, error_msg, _ = validate_and_align_submission(
+                source_path,
+                sample_path,
+                validation_path,
+                target_cols,
+            )
+            if not is_valid:
+                print(
+                    "      Warning: Submission validation failed: "
+                    f"{error_msg}"
+                )
+                return False
             validation_path.replace(restore_path)
 
         restore_path.replace(dest_path)

@@ -15,6 +15,7 @@ import numpy as np
 
 from ...core.config import calculate_score_improvement, is_metric_minimization
 from ...core.state import AblationComponent, KaggleState
+from ...utils.image_to_image_contract import packed_image_rmse
 from ..ensemble.scoring import score_predictions
 
 
@@ -54,11 +55,12 @@ def quarantine_component_artifacts(
     )
     moved: list[str] = []
     for prefix in ("oof_", "test_", "test_ids_", "train_ids_", "class_order_"):
-        src = models_dir / f"{prefix}{artifact_component}.npy"
-        if src.exists():
-            destination_root.mkdir(parents=True, exist_ok=True)
-            src.replace(destination_root / src.name)
-            moved.append(src.name)
+        for suffix in (".npy", ".npz"):
+            src = models_dir / f"{prefix}{artifact_component}{suffix}"
+            if src.exists():
+                destination_root.mkdir(parents=True, exist_ok=True)
+                src.replace(destination_root / src.name)
+                moved.append(src.name)
     return moved
 
 
@@ -107,10 +109,24 @@ class ValidationMixin:
         diagnostics, but it must never decide promotion or rollback.
         """
         working_dir = Path(state["working_directory"])
-        oof_path = working_dir / "models" / f"oof_{component.name}.npy"
         canonical_contract = state.get("canonical_contract") or {}
         y_path = Path(
             canonical_contract.get("y_path") or working_dir / "canonical" / "y.npy"
+        )
+        competition_info = state.get("competition_info")
+        problem_type = str(
+            getattr(competition_info, "problem_type", "")
+            or state.get("problem_type", "")
+        ).lower()
+        domain = str(state.get("domain_detected", "") or "").lower()
+        is_image_to_image = (
+            domain == "image_to_image"
+            or "image_to_image" in problem_type.replace("-", "_")
+        )
+        oof_path = (
+            working_dir / "models" / f"oof_{component.name}.npz"
+            if is_image_to_image
+            else working_dir / "models" / f"oof_{component.name}.npy"
         )
         if not oof_path.is_file() or not y_path.is_file():
             print(
@@ -119,14 +135,19 @@ class ValidationMixin:
             )
             return None
 
-        competition_info = state.get("competition_info")
         metric_name = (
             competition_info.evaluation_metric if competition_info is not None else ""
         )
-        problem_type = str(
-            getattr(competition_info, "problem_type", "")
-            or state.get("problem_type", "")
-        ).lower()
+        if is_image_to_image:
+            try:
+                if "rmse" not in str(metric_name).lower():
+                    raise ValueError(
+                        "packed image trusted scoring currently requires RMSE"
+                    )
+                return packed_image_rmse(oof_path, y_path)
+            except Exception as exc:
+                print(f"      Trusted OOF scoring failed: {exc}")
+                return None
         if any(
             token in problem_type
             for token in ("seq2seq", "seq_to_seq", "sequence_to_sequence", "normalization")

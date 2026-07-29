@@ -46,17 +46,41 @@ class TextClassifier(nn.Module):
 ```
 
 ### 4. TF-IDF + Traditional ML Baseline
-For quick baselines or when transformers are too slow:
+For quick baselines or when transformers are too slow, fit a fresh vocabulary
+inside every canonical fold. Never fit IDF/vocabulary on validation or test
+text:
 ```python
+from scipy.sparse import hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.multiclass import OneVsRestClassifier
 
-vectorizer = TfidfVectorizer(max_features=10000, ngram_range=(1, 2))
-X_train = vectorizer.fit_transform(train_texts)
-X_test = vectorizer.transform(test_texts)
-
-model = LogisticRegression(max_iter=1000, random_state=42)
-model.fit(X_train, y_train)
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    word_vectorizer = TfidfVectorizer(
+        max_features=5000, min_df=2, ngram_range=(1, 2)
+    )
+    char_vectorizer = TfidfVectorizer(
+        analyzer="char_wb", max_features=5000, min_df=2, ngram_range=(3, 5)
+    )
+    X_train = hstack([
+        word_vectorizer.fit_transform(train_texts.iloc[train_idx]),
+        char_vectorizer.fit_transform(train_texts.iloc[train_idx]),
+    ])
+    X_val = hstack([
+        word_vectorizer.transform(train_texts.iloc[val_idx]),
+        char_vectorizer.transform(train_texts.iloc[val_idx]),
+    ])
+    X_test = hstack([
+        word_vectorizer.transform(test_texts),
+        char_vectorizer.transform(test_texts),
+    ])
+    base_model = LogisticRegression(max_iter=1000, random_state=RUN_SEED)
+    model = (
+        OneVsRestClassifier(base_model)
+        if N_TARGETS > 1
+        else base_model
+    )
+    model.fit(X_train, CANONICAL_Y[train_idx])
 ```
 
 ### 5. Memory Efficiency
@@ -80,46 +104,48 @@ MultinomialNB requires **NON-NEGATIVE features**. Violating this causes worse-th
 # WRONG - MultinomialNB with LSA (negative features):
 from sklearn.decomposition import TruncatedSVD
 svd = TruncatedSVD(n_components=100)
-X_lsa = svd.fit_transform(X_tfidf)  # Contains negative values!
+X_train_lsa = svd.fit_transform(X_train_tfidf)  # Contains negative values!
 model = MultinomialNB()
-model.fit(X_lsa, y)  # Will perform WORSE than random!
+model.fit(X_train_lsa, CANONICAL_Y[train_idx])  # Incompatible feature domain!
 
-# CORRECT OPTIONS:
+# CORRECT FOLD-LOCAL OPTIONS:
+from sklearn.naive_bayes import GaussianNB, MultinomialNB
 
-# Option 1: Use MultinomialNB with raw TF-IDF
-from sklearn.naive_bayes import MultinomialNB
-X_tfidf = TfidfVectorizer(max_features=10000).fit_transform(texts)
-model = MultinomialNB()
-model.fit(X_tfidf, y)  # Works correctly
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    # Fit vocabulary and IDF only on this fold's training text.
+    vectorizer = TfidfVectorizer(max_features=10000)
+    X_train_tfidf = vectorizer.fit_transform(train_texts.iloc[train_idx])
+    X_val_tfidf = vectorizer.transform(train_texts.iloc[val_idx])
+    X_test_tfidf = vectorizer.transform(test_texts)
 
-# Option 2: Use GaussianNB for LSA/SVD features
-from sklearn.naive_bayes import GaussianNB
-X_lsa = TruncatedSVD(100).fit_transform(X_tfidf)
-model = GaussianNB()  # Handles negative values
-model.fit(X_lsa, y)
+    # Option 1: MultinomialNB with raw non-negative TF-IDF.
+    # Validation/test use transform(), never fit_transform().
+    model = MultinomialNB()
+    model.fit(X_train_tfidf, CANONICAL_Y[train_idx])
+    fold_val_predictions = model.predict_proba(X_val_tfidf)
+    fold_test_predictions = model.predict_proba(X_test_tfidf)
 
-# Option 3: Shift LSA features to non-negative (NOT recommended)
-X_shifted = X_lsa - X_lsa.min() + 1e-6
-model = MultinomialNB()
-model.fit(X_shifted, y)
+# Option 2: GaussianNB for LSA/SVD features, also fit inside each fold.
+# Fit SVD on X_train_tfidf only, then transform X_val_tfidf/X_test_tfidf
+# with that same fitted transformer before fitting on CANONICAL_Y[train_idx].
+# Do not shift validation/test features using their own minima: that changes
+# feature semantics across partitions.
 ```
 
-### 7. Text Column Detection
-For competitions with text in CSV files (not .txt directories), identify the text column:
+### 7. Text Column Resolution
+For competitions with text in CSV files, resolve the text column from canonical
+metadata. `feature_cols.json` is a raw train/test schema intersection and can
+mix prose fields with timestamps or numeric metadata, so never pass every raw
+feature to a numeric model and never choose a text column by position.
+`TARGET_COLS` are labels and must never be candidate text inputs.
 ```python
-# Find text column by name or length
-text_column = None
-for col in df.columns:
-    if col.lower() in ('text', 'sentence', 'content', 'body', 'review'):
-        text_column = col
-        break
-    elif df[col].dtype == object:
-        avg_len = df[col].astype(str).str.len().mean()
-        if avg_len > 100:  # Long text content
-            text_column = col
-            break
-
-if text_column is None:
-    raise ValueError("No text column found in dataframe")
+text_feature_cols = list(CANONICAL_METADATA.get("text_feature_cols", []))
+if not text_feature_cols:
+    raise ValueError("Canonical metadata declares no text feature columns")
+text_column = text_feature_cols[0]  # declared prose column, never positional
+if text_column in TARGET_COLS:
+    raise ValueError("A target column cannot be used as text input")
+train_texts = train_df[text_column].fillna("").astype(str)
+test_texts = test_df[text_column].fillna("").astype(str)
 ```
 """

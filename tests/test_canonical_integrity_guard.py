@@ -77,6 +77,50 @@ def test_snapshot_detects_mutation_and_restores_exact_contract(
     )
 
 
+def test_snapshot_accepts_complete_packed_image_contract_without_y_npy(
+    tmp_path: Path,
+) -> None:
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    np.save(canonical / "train_ids.npy", np.asarray(["a"], dtype=str))
+    np.save(canonical / "test_ids.npy", np.asarray(["b"], dtype=str))
+    np.save(canonical / "folds.npy", np.asarray([0], dtype=np.int64))
+    np.save(
+        canonical / "image_input_paths.npy",
+        np.asarray(["train/a.png"], dtype=str),
+    )
+    np.save(
+        canonical / "image_test_input_paths.npy",
+        np.asarray(["test/b.png"], dtype=str),
+    )
+    np.savez(
+        canonical / "image_targets.npz",
+        values=np.asarray([0.5], dtype=np.float32),
+        offsets=np.asarray([0, 1], dtype=np.int64),
+        shapes=np.asarray([[1, 1]], dtype=np.int32),
+        image_ids=np.asarray(["a"], dtype=str),
+    )
+    (canonical / "feature_cols.json").write_text(
+        json.dumps(["image_pixels"]),
+        encoding="utf-8",
+    )
+    (canonical / "metadata.json").write_text(
+        json.dumps(
+            {
+                "task_type": "image_to_image",
+                "packed_image_contract": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = snapshot_canonical_contract(tmp_path)
+
+    assert snapshot is not None
+    assert "image_targets.npz" in snapshot.manifest
+    assert "y.npy" not in snapshot.manifest
+
+
 def test_mlebench_executor_hash_guard_rejects_and_restores_np_save(
     tmp_path: Path,
     monkeypatch,
