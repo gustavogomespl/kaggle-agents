@@ -1048,8 +1048,9 @@ Output Dir: {paths.get('output_dir', '.')}"""
             )
             if untrusted_helper_import:
                 print(
-                    "   Debug iteration imports an injected contract helper "
-                    f"({untrusted_helper_import}); rejecting before training"
+                    "   Debug iteration shadows an injected contract helper "
+                    f"({untrusted_helper_import.splitlines()[0]}); rejecting "
+                    "before training"
                 )
                 exec_result = ExecutionResult(
                     success=False,

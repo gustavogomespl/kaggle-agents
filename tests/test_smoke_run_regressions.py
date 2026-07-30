@@ -314,19 +314,31 @@ class TestEvidenceArtifactHelper:
         assert f"models/test_{COMPONENT}.npy" in missing
         assert f"models/oof_{COMPONENT}.npy" not in missing
 
-    def test_helpers_are_injected_for_their_supported_component_types(self):
-        # Evidence artifacts belong to trainable model components. Both models
-        # and ensembles can own the final submission, so both must use the
-        # injected schema-aware submission helper.
+    def test_every_component_told_to_save_evidence_receives_the_helper(self):
+        """Injection scope must match what the constraints demand.
+
+        Ensembles are told by BASE_CONSTRAINTS and by the ensemble plan
+        outlines to call save_component_artifacts. Injecting that helper only
+        for models left ensemble code calling a name that did not exist, so it
+        imported one instead - and the helper-shadowing guard then rejected
+        every attempt before execution, burning the entire repair budget.
+        """
         import ast
         from pathlib import Path
+
+        from kaggle_agents.prompts.templates.constraints.base import (
+            BASE_CONSTRAINTS,
+        )
+
+        # The instruction side: constraints loaded for every component type.
+        assert "save_component_artifacts" in BASE_CONSTRAINTS
 
         source = Path(
             "kaggle_agents/agents/developer/code_generator.py"
         ).read_text(encoding="utf-8")
         tree = ast.parse(source)
 
-        model_guarded: set[str] = set()
+        model_only_guarded: set[str] = set()
         submission_guarded: set[str] = set()
         for node in ast.walk(tree):
             if not isinstance(node, ast.If):
@@ -336,9 +348,14 @@ class TestEvidenceArtifactHelper:
                 for sub in ast.walk(statement):
                     if isinstance(sub, ast.Name):
                         if 'component_type == "model"' in condition:
-                            model_guarded.add(sub.id)
+                            model_only_guarded.add(sub.id)
                         if '"model", "ensemble"' in condition:
                             submission_guarded.add(sub.id)
 
-        assert "_EVIDENCE_ARTIFACT_HELPER" in model_guarded
+        # The injection side: both helpers share the model/ensemble scope, and
+        # neither is narrowed to models only.
         assert "_submission_helper_for_contract" in submission_guarded
+        assert "_EVIDENCE_ARTIFACT_HELPER" in submission_guarded
+        assert "_IMAGE_EVIDENCE_ARTIFACT_HELPER" in submission_guarded
+        assert "_EVIDENCE_ARTIFACT_HELPER" not in model_only_guarded
+        assert "_IMAGE_EVIDENCE_ARTIFACT_HELPER" not in model_only_guarded

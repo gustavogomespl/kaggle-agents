@@ -197,9 +197,16 @@ SUBMISSION_CONTRACT_ERROR = (
     "and leaves the graded column unfilled"
 )
 
+# The guard also catches redefinition and reassignment, not just imports, so
+# the message must not send the fixer looking for an import statement it never
+# wrote: that mismatch is what makes the repair loop alternate between
+# importing and redefining the helper until the budget runs out.
 HELPER_IMPORT_CONTRACT_ERROR = (
-    f"Do not import {SUBMISSION_HELPER} or {ARTIFACT_HELPER}: both helpers are "
-    "injected into the script and imports can shadow the validated implementation"
+    f"{SUBMISSION_HELPER}() and {ARTIFACT_HELPER}() are already defined in this "
+    "script by the injected header. Call them directly. Do not import them, do "
+    "not define your own version, and do not assign over the names (including "
+    "inside try/except ImportError fallbacks) — any of those replaces the "
+    "validated implementation with an unvalidated one."
 )
 
 MISSING_SUBMISSION_HELPER_ERROR = (

@@ -2295,12 +2295,17 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
             path_header += _submission_helper_for_contract(
                 packed_image_contract
             )
-            if component.component_type == "model":
-                path_header += (
-                    _IMAGE_EVIDENCE_ARTIFACT_HELPER
-                    if packed_image_contract
-                    else _EVIDENCE_ARTIFACT_HELPER
-                )
+            # Injected for every component the constraints instruct to persist
+            # evidence, which includes ensembles: BASE_CONSTRAINTS and the
+            # ensemble plan outlines both say to call save_component_artifacts.
+            # Injecting it only for models left ensemble code told to call a
+            # helper that did not exist, so it imported one instead and the
+            # helper-shadowing guard rejected every attempt before execution.
+            path_header += (
+                _IMAGE_EVIDENCE_ARTIFACT_HELPER
+                if packed_image_contract
+                else _EVIDENCE_ARTIFACT_HELPER
+            )
 
         path_header += "\n# === END PATH CONSTANTS ===\n"
 

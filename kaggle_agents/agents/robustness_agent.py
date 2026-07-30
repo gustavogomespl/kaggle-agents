@@ -359,7 +359,29 @@ class RobustnessAgent:
         if passed:
             print(f" Validation PASSED (threshold: {min_score:.1%})")
         else:
-            print(f"L Validation FAILED (threshold: {min_score:.1%})")
+            # Name the binding constraint. An aggregate above the threshold with
+            # one hard-failing module reads as a threshold problem and sends the
+            # next debugging session after the wrong thing entirely.
+            reasons: list[str] = []
+            if not decision_names:
+                reasons.append("no component was eligible for a decision")
+            withheld = [
+                name
+                for name in decision_names
+                if approvals.get(name) is not True
+            ]
+            if withheld:
+                reasons.append(f"approval withheld for {sorted(withheld)}")
+            if failed_results:
+                reasons.append(
+                    "failed modules: "
+                    + ", ".join(sorted(result.module for result in failed_results))
+                )
+            if overall_score < min_score:
+                reasons.append(
+                    f"overall {overall_score:.1%} below threshold {min_score:.1%}"
+                )
+            print(f"L Validation FAILED ({'; '.join(reasons)})")
 
         # Telemetry: per-module outcome for this iteration (guardrail interventions)
         telemetry_events = [

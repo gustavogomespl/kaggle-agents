@@ -614,22 +614,17 @@ class DeveloperAgent(
         snapshot_owner = str(
             state.get("best_candidate_submission_component_name") or ""
         )
-        owner_score: Any = (
-            (state.get("trusted_component_scores") or {}).get(snapshot_owner)
-            if snapshot_owner
-            and isinstance(state.get("trusted_component_scores"), dict)
-            else None
-        )
-        if isinstance(owner_score, dict):
-            owner_score = owner_score.get("score", owner_score.get("cv_score"))
-        try:
-            owner_score_is_finite = math.isfinite(float(owner_score))
-        except (TypeError, ValueError):
-            owner_score_is_finite = False
+        # A trusted score is deliberately NOT required here. Domains where no
+        # canonical contract could be prepared preserve their first structurally
+        # valid candidate as an explicitly unscored fallback, so demanding a
+        # finite score made that fallback impossible to restore: rejecting any
+        # later candidate deleted the live submission.csv and left the run with
+        # nothing to grade while the verified snapshot sat unused on disk.
+        # What makes the snapshot safe to restore is not a score but its
+        # provenance: restore_best_candidate_submission re-verifies the SHA-256
+        # digest and confines the path to this run's snapshot store.
         best_snapshot_still_eligible = (
-            bool(snapshot_owner)
-            and snapshot_owner != component.name
-            and owner_score_is_finite
+            bool(snapshot_owner) and snapshot_owner != component.name
         )
 
         restored = (
@@ -2990,8 +2985,8 @@ Based on the training results above, improve the model to achieve a {desired_dir
             )
             if untrusted_helper_import:
                 print(
-                    "   Skipping execution: import shadows an injected contract "
-                    f"helper ({untrusted_helper_import})"
+                    "   Skipping execution: code shadows an injected contract "
+                    f"helper ({untrusted_helper_import.splitlines()[0]})"
                 )
                 exec_result = ExecutionResult(
                     success=False,

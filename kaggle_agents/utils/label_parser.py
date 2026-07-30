@@ -451,8 +451,13 @@ def infer_filename_label_table(
         if len(set(parent_targets)) > 1:
             candidates["immediate_parent_directory"] = parent_targets
 
+        # Both ends of the stem are considered, and symmetrically: a class can
+        # prefix a record counter (``<class>.<n>``) exactly as often as it can
+        # follow one. Neither end is trusted on its own - the viability and
+        # uniqueness rules below still have to accept the partition.
+        leading_targets: list[str] = []
         terminal_targets: list[str] = []
-        has_terminal_token = True
+        has_stem_tokens = True
         for path in paths:
             tokens = [
                 token
@@ -460,10 +465,12 @@ def infer_filename_label_table(
                 if token
             ]
             if len(tokens) < 2:
-                has_terminal_token = False
+                has_stem_tokens = False
                 break
+            leading_targets.append(tokens[0])
             terminal_targets.append(tokens[-1])
-        if has_terminal_token:
+        if has_stem_tokens:
+            candidates["leading_delimited_stem_token"] = leading_targets
             candidates["terminal_delimited_stem_token"] = terminal_targets
 
         viable: dict[str, list[str]] = {}

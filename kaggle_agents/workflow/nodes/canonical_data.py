@@ -207,11 +207,66 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             test_path = str(test_csv_path) if test_csv_path else str(train_csv_path)
             # Continue with normal canonical data preparation below
         else:
-            print(f"   Skipping canonical data prep for {data_type} data type")
-            print("   (No train.csv found - image competitions without labels CSV)")
+            # No labels CSV: the labels may still live in the filenames or in
+            # class subdirectories. Skipping outright cost the whole canonical
+            # contract - no injected CANONICAL_* constants (so every candidate
+            # program raised NameError on the constants the prompts mandate),
+            # no y.npy, and therefore no trusted OOF score for any component.
+            print("   Image competition without train.csv detected")
+            print("   Attempting to create canonical data from image filenames...")
+
+            from ...mlebench.data_adapter.detection import DetectionMixin
+
+            image_train_dir = Path(
+                data_files.get("train") or working_dir / "train"
+            )
+            result = (
+                DetectionMixin().create_canonical_from_image_filenames(
+                    image_dir=image_train_dir,
+                    canonical_dir=working_dir / "canonical",
+                    n_folds=5,
+                    explicit_pattern=_filename_label_pattern_from_state(state),
+                    test_ids=[
+                        str(value) for value in (state.get("test_rec_ids") or [])
+                    ],
+                )
+                if image_train_dir.is_dir()
+                else {"success": False, "error": f"Missing {image_train_dir}"}
+            )
+
+            if result.get("success"):
+                metadata = result["metadata"]
+                print(
+                    f"   Created canonical data from "
+                    f"{metadata['canonical_rows']} image files"
+                )
+                return {
+                    "canonical_data_prepared": True,
+                    "canonical_dir": result["canonical_dir"],
+                    "canonical_train_ids_path": result["train_ids_path"],
+                    "canonical_y_path": result["y_path"],
+                    "canonical_folds_path": result["folds_path"],
+                    "canonical_feature_cols_path": result["feature_cols_path"],
+                    "canonical_metadata": metadata,
+                    "canonical_data_skipped_reason": None,
+                    "target_col": metadata["target_col"],
+                    "target_cols": list(metadata["target_cols"]),
+                    "target_type": metadata["target_type"],
+                    "expected_train_rows": int(metadata["canonical_rows"]),
+                    "expected_test_rows": expected_test_rows,
+                    "last_updated": datetime.now(),
+                }
+
+            print(
+                "   Could not derive labels from image filenames: "
+                f"{result.get('error')}"
+            )
             return {
                 "canonical_data_prepared": False,
-                "canonical_data_skipped_reason": f"{data_type} data type - no train.csv",
+                "canonical_data_skipped_reason": (
+                    f"{data_type} data type - no train.csv and no "
+                    f"evidence-backed filename labels ({result.get('error')})"
+                ),
                 "last_updated": datetime.now(),
             }
 
