@@ -256,6 +256,94 @@ def _submission_helper_for_contract(packed_image_contract: bool) -> str:
     )
 
 
+_PROBABILITY_VALIDATION_HELPER = '''
+# === PROBABILITY VALIDATION (HOST-OWNED - DO NOT REDEFINE) ===
+def validate_probabilities(
+    preds,
+    *,
+    expected_rows,
+    expected_cols=None,
+    is_multiclass=True,
+    independent_outputs=False,
+    name="predictions",
+):
+    """Validate probability predictions. Call for BOTH OOF and test."""
+    import numpy as _np
+
+    preds = _np.asarray(preds, dtype=_np.float64)
+    if preds.ndim == 0 or preds.shape[0] != expected_rows:
+        raise ValueError(
+            f"{name} row mismatch: shape={preds.shape}, "
+            f"expected_rows={expected_rows}"
+        )
+    if expected_cols is not None:
+        observed_cols = 1 if preds.ndim == 1 else preds.shape[1]
+        if observed_cols != int(expected_cols):
+            raise ValueError(
+                f"{name} output mismatch: cols={observed_cols}, "
+                f"expected={expected_cols}"
+            )
+
+    # Non-finite values invalidate the candidate. Never replace them with
+    # constants because that fabricates predictions and conceals model failure.
+    nonfinite_count = int(_np.sum(~_np.isfinite(preds)))
+    if nonfinite_count:
+        raise ValueError(
+            f"{name} contains {nonfinite_count} NaN/Inf values; "
+            "candidate is invalid"
+        )
+
+    # Probability metrics require probabilities. Clipping is allowed only after
+    # the finite/shape checks above have passed.
+    if _np.any(preds < 0) or _np.any(preds > 1):
+        print(
+            f"WARNING: {name} outside [0,1]: min={preds.min():.4f}, "
+            f"max={preds.max():.4f}, clipping"
+        )
+        preds = _np.clip(preds, 1e-15, 1 - 1e-15)
+
+    # Multiclass: normalize finite positive rows to sum=1 for log loss.
+    if (
+        is_multiclass
+        and not independent_outputs
+        and preds.ndim > 1
+        and preds.shape[1] > 1
+    ):
+        row_sums = preds.sum(axis=1, keepdims=True)
+        if _np.any(row_sums <= 0):
+            bad_rows = int(_np.sum(row_sums <= 0))
+            raise ValueError(
+                f"{name} has {bad_rows} non-positive rows; "
+                "OOF/test is incomplete"
+            )
+        bad_rows = _np.sum(_np.abs(row_sums.flatten() - 1.0) > 0.01)
+        if bad_rows > 0:
+            print(
+                f"WARNING: {name} has {bad_rows} rows not summing to 1.0, "
+                "renormalizing"
+            )
+            preds = preds / row_sums
+
+    if not _np.all(_np.isfinite(preds)):
+        raise ValueError(f"{name} became non-finite during validation")
+
+    return preds
+'''
+
+
+def _probability_validation_helper_for_component(
+    component_type: str,
+    packed_image_contract: bool,
+) -> str:
+    """Inject dense probability validation only where the prompt requires it."""
+    if (
+        str(component_type).lower() in {"model", "ensemble"}
+        and not packed_image_contract
+    ):
+        return _PROBABILITY_VALIDATION_HELPER
+    return ""
+
+
 _EVIDENCE_ARTIFACT_HELPER = '''
 # === EVIDENCE ARTIFACTS (MANDATORY - call this exactly once, at the end) ===
 def save_component_artifacts(
@@ -1614,6 +1702,46 @@ if CANONICAL_Y.shape != _expected_y_shape:
         f"target contract {{_expected_y_shape}}"
     )
 
+if IS_CLASSIFICATION and TARGET_TYPE == "single":
+    _canonical_class_order = CANONICAL_METADATA.get("class_order")
+    if (
+        not isinstance(_canonical_class_order, list)
+        or not _canonical_class_order
+    ):
+        raise ValueError(
+            "Canonical class order must be a non-empty list for "
+            "single-target classification"
+        )
+    CANONICAL_CLASS_ORDER = tuple(_canonical_class_order)
+    try:
+        _canonical_class_set = set(CANONICAL_CLASS_ORDER)
+        _canonical_label_keys = [
+            str(_label)
+            for _label in CANONICAL_Y.tolist()
+        ]
+        _canonical_label_set = set(_canonical_label_keys)
+    except TypeError as _class_error:
+        raise ValueError(
+            "Canonical class order and target labels must contain scalar values"
+        ) from _class_error
+    if len(_canonical_class_set) != len(CANONICAL_CLASS_ORDER):
+        raise ValueError("Canonical class order must be unique")
+    if _canonical_label_set != _canonical_class_set:
+        raise ValueError(
+            "Canonical class order must exactly cover canonical target labels"
+        )
+    _canonical_class_to_index = {{
+        _label: _index
+        for _index, _label in enumerate(CANONICAL_CLASS_ORDER)
+    }}
+    CANONICAL_CLASS_INDICES = np.asarray(
+        [
+            _canonical_class_to_index[_label]
+            for _label in _canonical_label_keys
+        ],
+        dtype=np.int64,
+    )
+
 if CANONICAL_CV_STRATEGY == "temporal_forward_chaining":
     for _required_path in (
         CANONICAL_TEMPORAL_SPLITS_PATH,
@@ -2307,6 +2435,10 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
                 else _EVIDENCE_ARTIFACT_HELPER
             )
 
+        path_header += _probability_validation_helper_for_component(
+            component.component_type,
+            packed_image_contract,
+        )
         path_header += "\n# === END PATH CONSTANTS ===\n"
 
         def _generate_with_llm() -> str:

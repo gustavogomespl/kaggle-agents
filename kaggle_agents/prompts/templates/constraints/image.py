@@ -31,6 +31,31 @@ Every model component must load `CANONICAL_FOLDS`, `CANONICAL_TRAIN_IDS`, and
 `CANONICAL_Y`, assert their lengths match the image records, and iterate those
 assignments. Never build an image-specific holdout or a new fold splitter.
 
+### 0b. Single-Target Classification Labels (CRITICAL)
+For single-target classification, `CANONICAL_Y` is the raw semantic evidence
+(for example, `"cat"` and `"dog"`). Never cast `CANONICAL_Y` directly with
+NumPy or PyTorch and never derive a second label encoder. Use the injected
+`CANONICAL_CLASS_INDICES`, whose integer values follow
+`CANONICAL_CLASS_ORDER`, for all model targets.
+
+Convert those already-encoded indices only to the dtype required by the loss:
+
+```python
+# Binary classification with one output logit:
+bce_targets = torch.as_tensor(
+    CANONICAL_CLASS_INDICES[indices],
+    dtype=torch.float32,
+)
+criterion = nn.BCEWithLogitsLoss()
+
+# Multiclass classification with one logit per canonical class:
+ce_targets = torch.as_tensor(
+    CANONICAL_CLASS_INDICES[indices],
+    dtype=torch.long,
+)
+criterion = nn.CrossEntropyLoss()
+```
+
 ### 1. Variable Image Dimensions (CRITICAL)
 Images often have different sizes. DataLoader's `torch.stack()` fails on different sizes.
 

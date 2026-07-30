@@ -221,7 +221,21 @@ def assert_oof_sanity(
                     train_ids_path,
                     allow_pickle=False,
                 )
-                if not np.array_equal(saved_ids, expected_train_ids):
+                # Compare identity, not dtype. The injected
+                # save_component_artifacts helper always writes IDs as text,
+                # while the canonical train_ids.npy keeps the public column's
+                # own dtype. np.array_equal across '<U' and int64 is False for
+                # identical IDs, which rejected every component's OOF on any
+                # competition with numeric IDs and silently disabled stacking.
+                # This is the same normalization the robustness gate applies.
+                saved_order = [
+                    str(value) for value in np.asarray(saved_ids).reshape(-1)
+                ]
+                expected_order = [
+                    str(value)
+                    for value in np.asarray(expected_train_ids).reshape(-1)
+                ]
+                if saved_order != expected_order:
                     train_ids_match = False
                     errors.append("Train IDs mismatch - row order inconsistent")
             except Exception as e:

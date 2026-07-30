@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from ...core.state import KaggleState
 from ...core.state.contracts import CanonicalDataContract
@@ -35,6 +36,84 @@ def _filename_label_pattern_from_state(state: KaggleState) -> str | None:
         ):
             return value.strip()
     return None
+
+
+def _resolve_filename_image_test_ids(
+    *,
+    data_files: dict[str, Any],
+    working_dir: Path,
+    submission_contract: dict[str, Any],
+    sample_submission_path: str | None,
+    image_extensions: frozenset[str],
+) -> list[str]:
+    """Load and prove the submission template's one-to-one image coverage."""
+    sample_submission = Path(
+        data_files.get("sample_submission")
+        or sample_submission_path
+        or working_dir / "sample_submission.csv"
+    )
+    id_col = submission_contract.get("id_col")
+    if not sample_submission.is_file() or not id_col:
+        raise ValueError(
+            f"Missing sample submission or submission ID column: {sample_submission}"
+        )
+
+    template = pd.read_csv(sample_submission, dtype=str, keep_default_na=False)
+    if id_col not in template.columns:
+        raise ValueError(
+            f"Submission template is missing ID column {id_col!r}: "
+            f"{template.columns.tolist()}"
+        )
+
+    raw_ids = template[id_col]
+    if raw_ids.isna().any() or (raw_ids == "").any():
+        raise ValueError("Submission template contains null IDs")
+    test_ids = [str(value) for value in raw_ids.tolist()]
+    if not test_ids:
+        raise ValueError("Submission template contains no IDs")
+    if len(set(test_ids)) != len(test_ids):
+        raise ValueError("Submission template IDs must be unique")
+
+    test_dir = Path(data_files.get("test") or working_dir / "test")
+    if not test_dir.is_dir():
+        raise ValueError(f"Missing test image directory: {test_dir}")
+    test_images = sorted(
+        path
+        for path in test_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in image_extensions
+    )
+    if not test_images:
+        raise ValueError(f"No supported test images found in {test_dir}")
+
+    aliases_to_paths: dict[str, set[Path]] = {}
+    for image_path in test_images:
+        relative_path = image_path.relative_to(test_dir).as_posix()
+        aliases = {
+            image_path.name,
+            image_path.stem,
+            relative_path,
+            str(Path(relative_path).with_suffix("")),
+        }
+        for alias in aliases:
+            aliases_to_paths.setdefault(alias, set()).add(image_path)
+
+    matching_paths: list[Path] = []
+    for test_id in test_ids:
+        matches = aliases_to_paths.get(test_id, set())
+        if len(matches) != 1:
+            raise ValueError(
+                f"Submission ID {test_id!r} resolves to {len(matches)} test images"
+            )
+        matching_paths.append(next(iter(matches)))
+
+    if (
+        len(test_ids) != len(test_images)
+        or len(set(matching_paths)) != len(test_images)
+    ):
+        raise ValueError(
+            "Submission template IDs do not provide one-to-one test image coverage"
+        )
+    return test_ids
 
 
 def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
@@ -217,45 +296,95 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
 
             from ...mlebench.data_adapter.detection import DetectionMixin
 
+            detector = DetectionMixin()
             image_train_dir = Path(
                 data_files.get("train") or working_dir / "train"
             )
-            result = (
-                DetectionMixin().create_canonical_from_image_filenames(
-                    image_dir=image_train_dir,
-                    canonical_dir=working_dir / "canonical",
-                    n_folds=5,
-                    explicit_pattern=_filename_label_pattern_from_state(state),
-                    test_ids=[
-                        str(value) for value in (state.get("test_rec_ids") or [])
-                    ],
+            try:
+                test_ids = _resolve_filename_image_test_ids(
+                    data_files=data_files,
+                    working_dir=working_dir,
+                    submission_contract=submission_contract,
+                    sample_submission_path=state.get("sample_submission_path"),
+                    image_extensions=detector.IMAGE_LABEL_EXTENSIONS,
                 )
-                if image_train_dir.is_dir()
-                else {"success": False, "error": f"Missing {image_train_dir}"}
-            )
+            except ValueError as exc:
+                result = {"success": False, "error": str(exc)}
+            else:
+                result = (
+                    detector.create_canonical_from_image_filenames(
+                        image_dir=image_train_dir,
+                        canonical_dir=working_dir / "canonical",
+                        n_folds=5,
+                        explicit_pattern=_filename_label_pattern_from_state(state),
+                        test_ids=test_ids,
+                    )
+                    if image_train_dir.is_dir()
+                    else {"success": False, "error": f"Missing {image_train_dir}"}
+                )
 
             if result.get("success"):
                 metadata = result["metadata"]
-                print(
-                    f"   Created canonical data from "
-                    f"{metadata['canonical_rows']} image files"
+                train_ids = np.load(result["train_ids_path"], allow_pickle=True)
+                y = np.load(result["y_path"], allow_pickle=True)
+                folds = np.load(result["folds_path"], allow_pickle=True)
+                with Path(result["feature_cols_path"]).open(encoding="utf-8") as file:
+                    feature_cols = json.load(file)
+                canonical_contract = CanonicalDataContract(
+                    canonical_dir=result["canonical_dir"],
+                    train_ids_path=result["train_ids_path"],
+                    y_path=result["y_path"],
+                    folds_path=result["folds_path"],
+                    feature_cols_path=result["feature_cols_path"],
+                    metadata_path=result["metadata_path"],
+                    n_train=int(metadata["canonical_rows"]),
+                    n_test=int(metadata["n_test"]),
+                    n_folds=int(metadata["n_folds"]),
+                    id_col=metadata["id_col"],
+                    id_is_synthetic=bool(metadata.get("id_is_synthetic", False)),
+                    target_col=metadata["target_col"],
+                    target_cols=list(metadata["target_cols"]),
+                    target_type=metadata["target_type"],
+                    is_classification=bool(metadata["is_classification"]),
+                    folds_hash=CanonicalDataContract.compute_array_hash(folds),
+                    y_hash=CanonicalDataContract.compute_array_hash(y),
+                    train_ids_hash=CanonicalDataContract.compute_array_hash(train_ids),
+                    train_schema_hash=CanonicalDataContract.compute_schema_hash(
+                        feature_cols, ["unknown"] * len(feature_cols)
+                    ),
+                    cv_strategy=metadata["cv_strategy"],
+                    test_ids_path=result["test_ids_path"],
                 )
-                return {
-                    "canonical_data_prepared": True,
-                    "canonical_dir": result["canonical_dir"],
-                    "canonical_train_ids_path": result["train_ids_path"],
-                    "canonical_y_path": result["y_path"],
-                    "canonical_folds_path": result["folds_path"],
-                    "canonical_feature_cols_path": result["feature_cols_path"],
-                    "canonical_metadata": metadata,
-                    "canonical_data_skipped_reason": None,
-                    "target_col": metadata["target_col"],
-                    "target_cols": list(metadata["target_cols"]),
-                    "target_type": metadata["target_type"],
-                    "expected_train_rows": int(metadata["canonical_rows"]),
-                    "expected_test_rows": expected_test_rows,
-                    "last_updated": datetime.now(),
-                }
+                contract_is_valid, contract_violations = canonical_contract.validate()
+                if not contract_is_valid:
+                    result = {
+                        "success": False,
+                        "error": "; ".join(contract_violations),
+                    }
+                else:
+                    print(
+                        f"   Created canonical data from "
+                        f"{metadata['canonical_rows']} image files"
+                    )
+                    return {
+                        "canonical_data_prepared": True,
+                        "canonical_dir": result["canonical_dir"],
+                        "canonical_train_ids_path": result["train_ids_path"],
+                        "canonical_y_path": result["y_path"],
+                        "canonical_folds_path": result["folds_path"],
+                        "canonical_feature_cols_path": result["feature_cols_path"],
+                        "canonical_test_ids_path": result["test_ids_path"],
+                        "canonical_metadata": metadata,
+                        "canonical_contract": canonical_contract.to_dict(),
+                        "canonical_data_skipped_reason": None,
+                        "target_col": metadata["target_col"],
+                        "target_cols": list(metadata["target_cols"]),
+                        "target_type": metadata["target_type"],
+                        "expected_train_rows": int(metadata["canonical_rows"]),
+                        "expected_test_rows": int(metadata["n_test"]),
+                        "test_rec_ids": test_ids,
+                        "last_updated": datetime.now(),
+                    }
 
             print(
                 "   Could not derive labels from image filenames: "

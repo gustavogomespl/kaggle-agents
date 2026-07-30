@@ -185,6 +185,7 @@ class KaggleState(TypedDict):
     canonical_y_path: str | None
     canonical_folds_path: str | None
     canonical_feature_cols_path: str | None
+    canonical_test_ids_path: str | None
     canonical_metadata: dict[str, Any] | None
     submission_contract: dict[str, Any] | None  # SubmissionContract.to_dict()
     eval_fidelity: dict[str, Any] | None  # EvalFidelityContract.to_dict()
@@ -474,6 +475,7 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         canonical_y_path=None,
         canonical_folds_path=None,
         canonical_feature_cols_path=None,
+        canonical_test_ids_path=None,
         canonical_metadata=None,
         submission_contract=None,
         eval_fidelity=None,

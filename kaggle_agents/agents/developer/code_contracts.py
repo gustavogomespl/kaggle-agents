@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import ast
 
+
 # Injected into every model script by the code generator; one call writes all
 # four evidence artifacts under the correct component name.
 ARTIFACT_HELPER = "save_component_artifacts"
@@ -21,10 +22,47 @@ ARTIFACT_HELPER = "save_component_artifacts"
 # columns without the caller having to identify them.
 SUBMISSION_HELPER = "write_submission"
 
+# Injected only into dense model/ensemble headers. Packed image-to-image
+# components have their own evidence validator and must not be rejected for
+# defining or importing a name the host never supplied.
+PROBABILITY_HELPER = "validate_probabilities"
+
+PATH_HEADER_END_MARKER = "# === END PATH CONSTANTS ==="
+
 
 def requires_submission_helper(component_type: str) -> bool:
     """Whether a generated component owns a final submission CSV."""
     return str(component_type).lower() in {"model", "ensemble"}
+
+
+def _helper_defined_in_header(code: str, helper_name: str) -> bool:
+    """Whether the injected header actually defines a given helper.
+
+    With the marker present, candidate code is excluded from the search. When
+    the marker is absent, treating the whole parseable script as the header is
+    intentionally conservative.
+    """
+    marker_index = code.find(PATH_HEADER_END_MARKER)
+    header = code if marker_index < 0 else code[:marker_index]
+    try:
+        tree = ast.parse(header)
+    except SyntaxError:
+        return False
+    return any(
+        isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == helper_name
+        for node in ast.walk(tree)
+    )
+
+
+def _protected_helper_names(code: str) -> set[str]:
+    """Return universal helpers plus optional helpers present in the header."""
+    optional_helpers = (
+        {PROBABILITY_HELPER}
+        if _helper_defined_in_header(code, PROBABILITY_HELPER)
+        else set()
+    )
+    return {ARTIFACT_HELPER, SUBMISSION_HELPER} | optional_helpers
 
 
 def _helper_body_nodes(tree: ast.AST, helper_name: str) -> set[int]:
@@ -141,7 +179,7 @@ def untrusted_contract_helper_import(code: str) -> str | None:
     except SyntaxError:
         return None
 
-    helper_names = {ARTIFACT_HELPER, SUBMISSION_HELPER}
+    helper_names = _protected_helper_names(code)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Import, ast.ImportFrom)) and any(
             alias.asname in helper_names or alias.name in helper_names
@@ -202,11 +240,11 @@ SUBMISSION_CONTRACT_ERROR = (
 # wrote: that mismatch is what makes the repair loop alternate between
 # importing and redefining the helper until the budget runs out.
 HELPER_IMPORT_CONTRACT_ERROR = (
-    f"{SUBMISSION_HELPER}() and {ARTIFACT_HELPER}() are already defined in this "
-    "script by the injected header. Call them directly. Do not import them, do "
-    "not define your own version, and do not assign over the names (including "
-    "inside try/except ImportError fallbacks) — any of those replaces the "
-    "validated implementation with an unvalidated one."
+    "The contract helpers present in this script's injected header are already "
+    "defined there. Call them directly. Do not import them, do not define your "
+    "own version, and do not assign over the names (including inside try/except "
+    "ImportError fallbacks) — any of those replaces a validated implementation "
+    "with an unvalidated one."
 )
 
 MISSING_SUBMISSION_HELPER_ERROR = (

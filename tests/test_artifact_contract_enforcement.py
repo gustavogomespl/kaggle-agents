@@ -18,18 +18,24 @@ from kaggle_agents.agents.developer.agent import (
     _requires_class_order_artifact,
     _validation_class_order_for_state,
 )
+from kaggle_agents.agents.developer.code_contracts import (
+    missing_class_order_helper_argument,
+    untrusted_contract_helper_import,
+)
+from kaggle_agents.agents.developer.code_generator import (
+    _PROBABILITY_VALIDATION_HELPER,
+    _probability_validation_helper_for_component,
+)
 from kaggle_agents.agents.developer.retry import (
     RetryMixin,
     _maybe_add_artifact_hint,
-)
-from kaggle_agents.agents.developer.code_contracts import (
-    missing_class_order_helper_argument,
 )
 from kaggle_agents.core.state import (
     AblationComponent,
     CompetitionInfo,
     DevelopmentResult,
 )
+from kaggle_agents.prompts.templates.constraints.base import BASE_CONSTRAINTS
 
 
 class _Retry(RetryMixin):
@@ -39,6 +45,117 @@ class _Retry(RetryMixin):
 @pytest.fixture(autouse=True)
 def _default_oof_requirement(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KAGGLE_AGENTS_REQUIRE_OOF", raising=False)
+
+
+@pytest.fixture
+def dense_header() -> str:
+    return (
+        _probability_validation_helper_for_component("model", False)
+        + "\n# === END PATH CONSTANTS ==="
+    )
+
+
+def test_injected_probability_helper_accepts_finite_binary_predictions(
+    dense_header: str,
+) -> None:
+    namespace: dict = {}
+    exec(compile(dense_header, "<dense-header>", "exec"), namespace)
+
+    validated = namespace["validate_probabilities"](
+        np.asarray([0.0, 0.25, 1.0]),
+        expected_rows=3,
+        is_multiclass=False,
+        name="Binary",
+    )
+
+    np.testing.assert_allclose(validated, [0.0, 0.25, 1.0])
+    assert validated.dtype == np.float64
+
+
+@pytest.mark.parametrize(
+    ("predictions", "expected_rows", "error"),
+    [
+        ([0.2, 0.8], 3, "row mismatch"),
+        ([0.2, np.nan], 2, "NaN/Inf values; candidate is invalid"),
+        ([0.2, np.inf], 2, "NaN/Inf values; candidate is invalid"),
+    ],
+)
+def test_injected_probability_helper_rejects_invalid_predictions(
+    dense_header: str,
+    predictions: list[float],
+    expected_rows: int,
+    error: str,
+) -> None:
+    namespace: dict = {}
+    exec(compile(dense_header, "<dense-header>", "exec"), namespace)
+
+    with pytest.raises(ValueError, match=error):
+        namespace["validate_probabilities"](
+            predictions,
+            expected_rows=expected_rows,
+            is_multiclass=False,
+            name="Candidate",
+        )
+
+
+@pytest.mark.parametrize("component_type", ["model", "ensemble"])
+def test_dense_model_and_ensemble_headers_receive_probability_helper(
+    component_type: str,
+) -> None:
+    assert (
+        _probability_validation_helper_for_component(component_type, False)
+        == _PROBABILITY_VALIDATION_HELPER
+    )
+
+
+_PROBABILITY_SHADOWING_FORMS = [
+    "from candidate_validators import validate_probabilities\n",
+    (
+        "def validate_probabilities(*args, **kwargs):\n"
+        "    return args[0]\n"
+    ),
+    "validate_probabilities = arbitrary_validator\n",
+    "globals()['validate_probabilities'] = arbitrary_validator\n",
+]
+
+
+@pytest.mark.parametrize("shadow", _PROBABILITY_SHADOWING_FORMS)
+def test_probability_helper_shadowing_is_rejected_only_when_injected(
+    dense_header: str,
+    shadow: str,
+) -> None:
+    finding = untrusted_contract_helper_import(dense_header + "\n" + shadow)
+
+    assert finding is not None
+    assert "validate_probabilities" in finding
+
+
+@pytest.mark.parametrize("candidate_code", _PROBABILITY_SHADOWING_FORMS)
+def test_packed_image_header_does_not_protect_absent_probability_helper(
+    candidate_code: str,
+) -> None:
+    header = (
+        _probability_validation_helper_for_component("model", True)
+        + "\n# === END PATH CONSTANTS ==="
+    )
+
+    assert "def validate_probabilities(" not in header
+    assert untrusted_contract_helper_import(header + "\n" + candidate_code) is None
+
+
+def test_non_model_header_does_not_receive_probability_helper() -> None:
+    assert (
+        _probability_validation_helper_for_component("preprocessing", False)
+        == ""
+    )
+
+
+def test_probability_prompt_calls_injected_helper_without_defining_it() -> None:
+    assert "def validate_probabilities" not in BASE_CONSTRAINTS
+    assert "oof_preds = validate_probabilities(" in BASE_CONSTRAINTS
+    assert "test_preds = validate_probabilities(" in BASE_CONSTRAINTS
+    assert "NaN/Inf values; candidate is invalid" in BASE_CONSTRAINTS
+    assert "packed image-to-image" in BASE_CONSTRAINTS.lower()
 
 
 def test_model_artifacts_require_train_ids_when_canonical_exists(

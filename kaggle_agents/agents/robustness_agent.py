@@ -732,6 +732,39 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 if isinstance(child, ast.Name)
             }
 
+        def split_assignment(
+            target: ast.AST,
+            value: ast.AST,
+        ) -> list[tuple[set[str], ast.AST]]:
+            """Pair unpacked targets with their own value, not their siblings'.
+
+            ``X_train, X_val = X[train_idx], X[val_idx]`` says nothing about
+            X_train. Treating the statement as one unit taints the training
+            side because a sibling mentions validation, and that false positive
+            fails the gate on exactly the fold-local preprocessing the
+            constraints require.
+            """
+            if (
+                isinstance(target, (ast.Tuple, ast.List))
+                and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+            ):
+                pairs: list[tuple[set[str], ast.AST]] = []
+                for element_target, element_value in zip(
+                    target.elts, value.elts
+                ):
+                    pairs.extend(split_assignment(element_target, element_value))
+                return pairs
+            return [(assignment_targets(target), value)]
+
+        def held_out_named(names: set[str]) -> set[str]:
+            """Targets whose own name marks them as the held-out partition."""
+            return {
+                name
+                for name in names
+                if tokens({name}) & {"test", "val", "valid", "validation"}
+            }
+
         concat_calls: list[ast.Call] = []
         tainted_names: set[str] = set()
         assignments: list[tuple[set[str], ast.AST]] = []
@@ -743,17 +776,16 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 if "train" in name_tokens and "test" in name_tokens:
                     concat_calls.append(node)
             elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                targets: set[str] = set()
-                value: ast.AST | None = None
-                if isinstance(node, ast.Assign):
-                    for target in node.targets:
-                        targets.update(assignment_targets(target))
-                    value = node.value
-                else:
-                    targets.update(assignment_targets(node.target))
-                    value = node.value
-                if value is not None:
-                    assignments.append((targets, value))
+                target_nodes = (
+                    list(node.targets)
+                    if isinstance(node, ast.Assign)
+                    else [node.target]
+                )
+                if node.value is not None:
+                    for target in target_nodes:
+                        assignments.extend(
+                            split_assignment(target, node.value)
+                        )
 
         changed = True
         while changed:
@@ -769,12 +801,22 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 is_held_out_alias = bool(
                     value_tokens & {"test", "val", "valid", "validation"}
                 )
-                if (
-                    is_mixed_concat
-                    or is_tainted_alias
-                    or is_held_out_alias
-                ) and not targets.issubset(tainted_names):
-                    tainted_names.update(targets)
+                if is_mixed_concat or is_tainted_alias:
+                    # Direct evidence about this value: every target it feeds
+                    # is tainted regardless of what the names say.
+                    newly_tainted = targets
+                elif is_held_out_alias:
+                    # A splitter returns both partitions from one expression
+                    # (``X_train, X_val = train_test_split(...)``). Only the
+                    # names that say so are held out; with no such name the
+                    # whole statement stays tainted, which keeps the
+                    # single-target case (``X_train = X[val_idx]``) caught.
+                    newly_tainted = held_out_named(targets) or targets
+                else:
+                    continue
+
+                if not newly_tainted.issubset(tainted_names):
+                    tainted_names.update(newly_tainted)
                     changed = True
 
         findings: list[dict[str, Any]] = []

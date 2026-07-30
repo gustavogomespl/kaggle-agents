@@ -20,7 +20,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from langgraph.graph import END, StateGraph
 
+from kaggle_agents.core.state import KaggleState
+from kaggle_agents.core.state.contracts import CanonicalDataContract
 from kaggle_agents.mlebench.data_adapter.detection import DetectionMixin
 from kaggle_agents.utils.label_parser import infer_filename_label_table
 from kaggle_agents.workflow.nodes.canonical_data import (
@@ -176,6 +179,95 @@ class TestImageFilenameCanonicalContract:
             tmp_path / "canonical" / "test_ids.npy", allow_pickle=False
         )
         assert [str(value) for value in test_ids] == state["test_rec_ids"]
+
+    def test_template_ids_complete_the_filename_canonical_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """The public template, not optional state, defines graded test order."""
+        state = self._image_workspace(tmp_path)
+        template_ids = ["t3", "t1", "t0", "t2"]
+        pd.DataFrame({"id": template_ids, "label": [0] * len(template_ids)}).to_csv(
+            tmp_path / "sample_submission.csv", index=False
+        )
+        state.pop("test_rec_ids")
+
+        result = canonical_data_preparation_node(state)
+
+        canonical = tmp_path / "canonical"
+        assert result["test_rec_ids"] == template_ids
+        assert np.load(canonical / "test_ids.npy", allow_pickle=False).tolist() == template_ids
+        assert result["canonical_metadata"]["n_test"] == len(template_ids)
+        assert CanonicalDataContract.from_dict(result["canonical_contract"]).validate()[0]
+
+    def test_missing_test_image_fails_closed_without_a_canonical_contract(
+        self, tmp_path: Path
+    ) -> None:
+        """Every submitted template ID must resolve to exactly one test image."""
+        state = self._image_workspace(tmp_path)
+        template_ids = ["t0", "t1", "missing", "t3"]
+        pd.DataFrame({"id": template_ids, "label": [0] * len(template_ids)}).to_csv(
+            tmp_path / "sample_submission.csv", index=False
+        )
+        state.pop("test_rec_ids")
+
+        result = canonical_data_preparation_node(state)
+
+        assert result["canonical_data_prepared"] is False
+        assert "canonical_contract" not in result
+
+    def test_template_ids_preserve_leading_zeroes_as_text(
+        self, tmp_path: Path
+    ) -> None:
+        """Numeric-looking submission IDs are identifiers, never integers."""
+        state = self._image_workspace(tmp_path)
+        template_ids = ["0003", "0001", "0000", "0002"]
+        test_dir = Path(state["data_files"]["test"])
+        for index, path in enumerate(sorted(test_dir.glob("*.jpg"))):
+            path.rename(test_dir / f"{template_ids[index]}.jpg")
+        pd.DataFrame({"id": template_ids, "label": [0] * len(template_ids)}).to_csv(
+            tmp_path / "sample_submission.csv", index=False
+        )
+        state.pop("test_rec_ids")
+
+        result = canonical_data_preparation_node(state)
+
+        assert result["test_rec_ids"] == template_ids
+
+    def test_ambiguous_test_image_alias_fails_closed(
+        self, tmp_path: Path
+    ) -> None:
+        """A basename shared by two test images cannot select either image."""
+        state = self._image_workspace(tmp_path)
+        test_dir = Path(state["data_files"]["test"])
+        (test_dir / "t0.jpg").unlink()
+        for folder in ("left", "right"):
+            duplicate = test_dir / folder
+            duplicate.mkdir()
+            (duplicate / "duplicate.jpg").write_bytes(b"\x00")
+        template_ids = ["duplicate", "t1", "t2", "t3", "unused"]
+        pd.DataFrame({"id": template_ids, "label": [0] * len(template_ids)}).to_csv(
+            tmp_path / "sample_submission.csv", index=False
+        )
+        state.pop("test_rec_ids")
+
+        result = canonical_data_preparation_node(state)
+
+        assert result["canonical_data_prepared"] is False
+        assert "resolves to 2 test images" in result["canonical_data_skipped_reason"]
+
+    def test_stategraph_keeps_the_canonical_test_ids_path(self) -> None:
+        """The graph schema must retain the canonical test-ID artifact path."""
+        workflow = StateGraph(KaggleState)
+        workflow.add_node(
+            "record_test_ids",
+            lambda _: {"canonical_test_ids_path": "/tmp/canonical/test_ids.npy"},
+        )
+        workflow.set_entry_point("record_test_ids")
+        workflow.add_edge("record_test_ids", END)
+
+        result = workflow.compile().invoke({})
+
+        assert result["canonical_test_ids_path"] == "/tmp/canonical/test_ids.npy"
 
     def test_trusted_scoring_inputs_exist(self, tmp_path: Path) -> None:
         """y.npy plus train_ids.npy is what an independent OOF score needs."""

@@ -31,70 +31,22 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
   helper. Never infer ID/target columns by position or call `to_csv` for it.
 
 ### 2a. PROBABILITY OUTPUT VALIDATION (CRITICAL - FAIL CLOSED)
-For classification, ALWAYS validate predictions BEFORE saving OOF and test files:
+For dense model/ensemble classification components, ALWAYS call the injected
+`validate_probabilities(...)` helper BEFORE saving OOF and test files. It is
+host-owned and already defined in the generated header: call it directly; do
+not import, redefine, or assign over it.
+
+The helper rejects row/column mismatches before saving, and its host-owned
+implementation will `raise ValueError` for any non-finite prediction with an
+error containing `NaN/Inf values; candidate is invalid`.
+Never replace NaN/Inf with constants. Only after finite/shape checks does the
+helper clip probability outputs to `[0, 1]`; multiclass outputs are normalized
+only when their finite row sums are positive.
+
+Packed image-to-image components are explicitly excluded from this helper.
+They must use the injected packed evidence contract instead.
 
 ```python
-def validate_probabilities(
-    preds,
-    *,
-    expected_rows,
-    expected_cols=None,
-    is_multiclass=True,
-    independent_outputs=False,
-    name="predictions",
-):
-    '''Validate probability predictions. Call for BOTH OOF and test.'''
-    import numpy as np
-
-    preds = np.asarray(preds, dtype=np.float64)
-    if preds.ndim == 0 or preds.shape[0] != expected_rows:
-        raise ValueError(
-            f'{name} row mismatch: shape={preds.shape}, expected_rows={expected_rows}'
-        )
-    if expected_cols is not None:
-        observed_cols = 1 if preds.ndim == 1 else preds.shape[1]
-        if observed_cols != int(expected_cols):
-            raise ValueError(
-                f'{name} output mismatch: cols={observed_cols}, expected={expected_cols}'
-            )
-
-    # Non-finite values invalidate the candidate. Never replace them with
-    # constants because that fabricates predictions and conceals model failure.
-    nonfinite_count = int(np.sum(~np.isfinite(preds)))
-    if nonfinite_count:
-        raise ValueError(
-            f'{name} contains {nonfinite_count} NaN/Inf values; candidate is invalid'
-        )
-
-    # Probability metrics require probabilities. Clipping is allowed only after
-    # the finite/shape checks above have passed.
-    if np.any(preds < 0) or np.any(preds > 1):
-        print(f'WARNING: {name} outside [0,1]: min={preds.min():.4f}, max={preds.max():.4f}, clipping')
-        preds = np.clip(preds, 1e-15, 1 - 1e-15)
-
-    # Multiclass: normalize finite positive rows to sum=1 for log loss.
-    if (
-        is_multiclass
-        and not independent_outputs
-        and preds.ndim > 1
-        and preds.shape[1] > 1
-    ):
-        row_sums = preds.sum(axis=1, keepdims=True)
-        if np.any(row_sums <= 0):
-            bad_rows = int(np.sum(row_sums <= 0))
-            raise ValueError(
-                f'{name} has {bad_rows} non-positive rows; OOF/test is incomplete'
-            )
-        bad_rows = np.sum(np.abs(row_sums.flatten() - 1.0) > 0.01)
-        if bad_rows > 0:
-            print(f'WARNING: {name} has {bad_rows} rows not summing to 1.0, renormalizing')
-            preds = preds / row_sums
-
-    if not np.all(np.isfinite(preds)):
-        raise ValueError(f'{name} became non-finite during validation')
-
-    return preds
-
 # MANDATORY: Call BEFORE saving OOF and test predictions
 oof_preds = validate_probabilities(
     oof_preds,

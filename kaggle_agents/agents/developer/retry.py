@@ -63,6 +63,23 @@ _CATEGORICAL_ENCODING_HINT = (
     "and never treat free-form text as ordinal numbers."
 )
 
+_TARGET_ENCODING_HINT = (
+    "\n\n## Target Encoding Hint (auto-detected from error):\n"
+    "The failure comes from converting raw semantic model targets. "
+    "CANONICAL_Y must remain unchanged for trusted scoring; do not cast it "
+    "to a numeric NumPy or PyTorch dtype. For single-target classification, "
+    "train on the injected CANONICAL_CLASS_INDICES in canonical row order. "
+    "Convert those already-encoded indices to float only for binary "
+    "BCEWithLogitsLoss targets, or to torch.long for multiclass "
+    "CrossEntropyLoss targets."
+)
+
+_TARGET_ENCODING_ERROR_PATTERNS = (
+    "invalid data type 'numpy.str_'",
+    'invalid data type "numpy.str_"',
+    "could not convert string to float: np.str_(",
+)
+
 _CATEGORICAL_ERROR_PATTERNS = ("could not convert string", "invalid literal")
 
 _MISSING_ARTIFACT_PATTERN = "missing expected artifacts"
@@ -140,11 +157,27 @@ SECURITY BOUNDARY:
 
 
 def _maybe_add_encoding_hint(error_text: str) -> str:
-    """Append a categorical-encoding hint if the error matches known patterns."""
-    error_lower = error_text.lower()
-    if any(pattern in error_lower for pattern in _CATEGORICAL_ERROR_PATTERNS):
-        return error_text + _CATEGORICAL_ENCODING_HINT
+    """Append the matching target- or feature-encoding hint."""
+    encoding_hint = _encoding_hint_for_error(error_text)
+    if encoding_hint:
+        return error_text + encoding_hint
     return error_text
+
+
+def _encoding_hint_for_error(error_text: str) -> str:
+    """Select target guidance before the broader string-feature guidance."""
+    error_lower = error_text.lower()
+    if any(
+        pattern in error_lower
+        for pattern in _TARGET_ENCODING_ERROR_PATTERNS
+    ):
+        return _TARGET_ENCODING_HINT
+    if any(
+        pattern in error_lower
+        for pattern in _CATEGORICAL_ERROR_PATTERNS
+    ):
+        return _CATEGORICAL_ENCODING_HINT
+    return ""
 
 
 def _is_mlebench_state(state: dict | None) -> bool:
@@ -930,11 +963,16 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 meta_feedback = (meta_feedback or "") + meta_eval_context
                 print("   🧠 Injected Meta-Evaluator guidance into debug context")
 
-        # Inject categorical encoding hint based on the initial error
+        # Target-specific NumPy string failures take precedence over the
+        # broader string-feature patterns.
         initial_errors = " ".join(exec_result.errors) if exec_result.errors else exec_result.stderr
-        if any(p in initial_errors.lower() for p in _CATEGORICAL_ERROR_PATTERNS):
-            meta_feedback = (meta_feedback or "") + _CATEGORICAL_ENCODING_HINT
-            print("   🔤 Injected categorical encoding hint into debug context")
+        encoding_hint = _encoding_hint_for_error(initial_errors)
+        if encoding_hint:
+            meta_feedback = (meta_feedback or "") + encoding_hint
+            if encoding_hint == _TARGET_ENCODING_HINT:
+                print("   🎯 Injected canonical target hint into debug context")
+            else:
+                print("   🔤 Injected categorical encoding hint into debug context")
 
         if _MISSING_ARTIFACT_PATTERN in initial_errors.lower():
             meta_feedback = (meta_feedback or "") + _MISSING_ARTIFACT_HINT
