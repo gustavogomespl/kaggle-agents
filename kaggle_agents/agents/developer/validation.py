@@ -5,6 +5,7 @@ Provides capabilities for extracting CV scores from stdout and
 validating component improvements using hill climbing strategy.
 """
 
+import json
 import math
 import re
 from datetime import datetime
@@ -21,6 +22,118 @@ from ..ensemble.scoring import score_predictions
 
 if TYPE_CHECKING:
     from ...tools.code_executor import ExecutionResult
+
+
+# These four live here rather than beside their first caller because the
+# developer decides which artifacts a component must write and the robustness
+# gate decides whether the artifacts it finds are sufficient. When those two
+# answers came from separate rules they disagreed, and the disagreement was
+# unobservable: a multilabel run wrote exactly the artifacts it was asked for,
+# the gate demanded one more, and grading was refused without printing why.
+
+
+def _model_validation_problem_type(state: KaggleState) -> str:
+    """Resolve validation semantics, preserving explicit image-to-image domain."""
+    domain = str(state.get("domain_detected", "") or "").lower().replace("-", "_")
+    if domain == "image_to_image":
+        return "image_to_image"
+    competition_info = state.get("competition_info")
+    declared = (
+        getattr(competition_info, "problem_type", "")
+        if competition_info is not None
+        else ""
+    )
+    return str(declared or state.get("problem_type", "classification"))
+
+
+def _expected_class_order_for_state(
+    state: KaggleState,
+) -> list[str] | None:
+    """Resolve probability-column order from public or canonical evidence."""
+    submission_order = (
+        state.get("submission_contract") or {}
+    ).get("class_order")
+    canonical_metadata = state.get("canonical_metadata") or {}
+    canonical_order = canonical_metadata.get("class_order")
+    raw_order = submission_order or canonical_order
+    if raw_order is None:
+        metadata_path = (
+            state.get("canonical_contract") or {}
+        ).get("metadata_path")
+        if metadata_path and Path(metadata_path).is_file():
+            try:
+                raw_order = json.loads(
+                    Path(metadata_path).read_text(encoding="utf-8")
+                ).get("class_order")
+            except (OSError, TypeError, ValueError):
+                raw_order = None
+    if not isinstance(raw_order, (list, tuple)) or len(raw_order) < 2:
+        return None
+    normalized = [str(value) for value in raw_order]
+    if len(normalized) != len(set(normalized)):
+        return None
+    return normalized
+
+
+def _validation_class_order_for_state(
+    state: KaggleState,
+    problem_type: str,
+) -> list[str] | None:
+    """Resolve order for wide outputs or label-format multiclass outputs."""
+    normalized_problem = str(problem_type).lower()
+    compact_problem = normalized_problem.replace("_", "").replace("-", "")
+    is_classification = any(
+        marker in compact_problem
+        for marker in ("class", "binary", "multilabel")
+    )
+    if not is_classification:
+        return None
+    submission_order = (
+        state.get("submission_contract") or {}
+    ).get("class_order")
+    if isinstance(submission_order, (list, tuple)) and len(submission_order) > 1:
+        normalized = [str(value) for value in submission_order]
+        return (
+            normalized
+            if len(normalized) == len(set(normalized))
+            else None
+        )
+
+    canonical_metadata = state.get("canonical_metadata") or {}
+    try:
+        canonical_n_classes = int(
+            canonical_metadata.get("n_classes") or 0
+        )
+    except (TypeError, ValueError):
+        canonical_n_classes = 0
+    if (
+        "multiclass" not in compact_problem
+        and canonical_n_classes <= 2
+    ):
+        return None
+    return _expected_class_order_for_state(state)
+
+
+def _requires_class_order_artifact(
+    state: KaggleState,
+    problem_type: str,
+) -> bool:
+    """Whether probability columns encode mutually exclusive classes.
+
+    A wide multilabel submission also has more than two prediction columns, but
+    those columns are independent labels with no ordering to record, so no
+    component is ever asked to save one.
+    """
+    normalized_problem = str(problem_type).lower()
+    compact_problem = normalized_problem.replace("_", "").replace("-", "")
+    if not any(
+        marker in compact_problem
+        for marker in ("class", "binary")
+    ):
+        return False
+    if _validation_class_order_for_state(state, problem_type) is None:
+        return False
+    return "multilabel" not in compact_problem
 
 
 def quarantine_component_artifacts(

@@ -32,6 +32,11 @@ class StrictValidationConfig:
     require_component_class_order: bool = False
     require_train_ids: bool = False
     require_test_ids: bool = False
+    # Whether unnormalized multiclass rows are a hard failure. Only true when
+    # the graded metric reads a row as a probability vector; under a ranking
+    # metric the same predictions grade fine, so failing on them destroys a
+    # valid candidate to enforce a property nobody scores.
+    require_normalized_rows: bool = True
     probability_tolerance: float = 0.01
     empty_row_threshold: float = 0.0  # Fraction of empty rows allowed (0 = none)
 
@@ -522,13 +527,14 @@ def validate_model_artifacts(
             and oof_for_validation.shape[1] > 1
             and arrays_are_finite
         ):
+            enforce_row_sums = config.strict_mode and config.require_normalized_rows
             oof_row_sums = oof_for_validation.sum(axis=1)
             bad_oof_rows = np.sum(np.abs(oof_row_sums - 1.0) > config.probability_tolerance)
             if bad_oof_rows > 0:
                 result.add_warning(
                     f"{bad_oof_rows} OOF rows do not sum to 1.0 (not normalized)"
                 )
-                if config.strict_mode:
+                if enforce_row_sums:
                     result.add_error(
                         f"{bad_oof_rows} OOF rows violate the probability-sum contract"
                     )
@@ -539,7 +545,7 @@ def validate_model_artifacts(
                 result.add_warning(
                     f"{bad_test_rows} test rows do not sum to 1.0 (not normalized)"
                 )
-                if config.strict_mode:
+                if enforce_row_sums:
                     result.add_error(
                         f"{bad_test_rows} test rows violate the probability-sum contract"
                     )

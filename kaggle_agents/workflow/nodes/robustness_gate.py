@@ -10,7 +10,11 @@ from typing import Any
 
 import numpy as np
 
-from ...agents.developer.validation import quarantine_component_artifacts
+from ...agents.developer.validation import (
+    _model_validation_problem_type,
+    _requires_class_order_artifact,
+    quarantine_component_artifacts,
+)
 from ...core.state import KaggleState
 from ...utils.image_to_image_contract import load_packed_images
 from ...utils.submission_artifacts import (
@@ -113,6 +117,19 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
     )
     if not isinstance(expected_class_order, (list, tuple)):
         expected_class_order = None
+    # Ask the same question the developer asked when it decided which artifacts
+    # to demand. A wide multilabel template also has more than two prediction
+    # columns, but its columns are independent labels: no component is ever
+    # told to save an order for them, so requiring the file here made every
+    # multilabel competition permanently ungradeable.
+    requires_class_order = (
+        not packed_image_contract
+        and bool(expected_class_order)
+        and _requires_class_order_artifact(
+            state,
+            _model_validation_problem_type(state),
+        )
+    )
     working_dir = Path(state["working_directory"])
     failures: dict[str, list[str]] = {}
     for name in eligible:
@@ -180,11 +197,7 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
                         f"missing {artifact_kind} prediction artifact"
                     )
 
-        if (
-            not packed_image_contract
-            and expected_class_order
-            and len(expected_class_order) > 2
-        ):
+        if requires_class_order:
             class_order_path = (
                 working_dir / "models" / f"class_order_{name}.npy"
             )
@@ -400,6 +413,31 @@ def _quarantine_rejected_candidate(
     return updates, restored, audit
 
 
+def _print_withheld_reason(
+    state: KaggleState,
+    evidence_failures: dict[str, list[str]],
+    unapproved_components: list[str],
+) -> None:
+    """Say which constraint withheld the candidate.
+
+    The gate applies its own evidence checks on top of the robustness agent's
+    verdict, so it can withhold a candidate the agent just approved. Printing
+    nothing made that combination read as "validation passed, then grading was
+    refused for no stated reason" — the most expensive way to report a block,
+    because the run gives no clue which check to look at.
+    """
+    print("\n" + "=" * 60)
+    print("=  ROBUSTNESS GATE: Candidate withheld")
+    print("=" * 60)
+    if state.get("robustness_passed") is not True:
+        print("   Robustness validation did not pass")
+    for component_name, component_issues in sorted(evidence_failures.items()):
+        print(f"   {component_name}: {'; '.join(component_issues)}")
+    approval_only = sorted(set(unapproved_components) - set(evidence_failures))
+    if approval_only:
+        print(f"   Approval missing for: {', '.join(approval_only)}")
+
+
 def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
     """Turn robustness results into pass, one bounded recovery, or safe stop."""
     evidence_failures = _mle_evidence_failures(state)
@@ -468,6 +506,8 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
             "the public metric before robustness approval"
         )
 
+    _print_withheld_reason(state, evidence_failures, unapproved_components)
+
     rejected_components = _rejected_component_names(
         state,
         explicit_rejections=(
@@ -480,6 +520,9 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
     )
 
     if recovery_count < max_recoveries:
+        print(
+            f"   Requesting recovery attempt {recovery_count + 1}/{max_recoveries}"
+        )
         issue_text = "; ".join(str(issue) for issue in issues[:8]) or "robustness validation failed"
         suggestion_text = "; ".join(str(item) for item in suggestions[:8])
         # Naming every rejected component does double duty: the planner is told
@@ -540,6 +583,14 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
         else "robustness_failed_no_valid_submission"
     )
     error = None if preserved else "Robustness validation failed; candidate blocked"
+    print(
+        f"   Recovery budget exhausted ({recovery_count}/{max_recoveries}); "
+        + (
+            "grading an earlier verified snapshot"
+            if preserved
+            else "no verified snapshot survives, grading is blocked"
+        )
+    )
 
     return {
         **rejection_updates,

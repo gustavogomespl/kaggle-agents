@@ -1047,8 +1047,14 @@ def _ensure_id_column(
     """
     Ensure a valid ID column exists for deterministic sampling.
 
-    If no ID column is found, creates a synthetic '_row_id' based on
+    If no usable ID column is found, creates a synthetic '_row_id' based on
     the original row index. This MUST be done BEFORE any transformations.
+
+    A column that repeats a value is not usable either. The canonical contract
+    names each training row exactly once, so every component that aligns by a
+    duplicated key raises before it trains, and no repair can succeed because
+    the defect is in the contract rather than in the code. Detecting it here
+    costs one pass over one column; detecting it downstream costs the run.
 
     Args:
         df: DataFrame to check
@@ -1058,15 +1064,24 @@ def _ensure_id_column(
         Tuple of (df_with_id, id_col_name, is_synthetic)
     """
     is_synthetic = False
+    reason = ""
 
     if id_col is None or id_col not in df.columns:
+        reason = "No ID column found"
+    elif bool(df[id_col].astype(str).duplicated().any()):
+        duplicates = int(df[id_col].astype(str).duplicated().sum())
+        reason = (
+            f"ID column {id_col!r} repeats {duplicates:,} of {len(df):,} values"
+        )
+
+    if reason:
         # Create synthetic ID based on original index (preserves order)
         # IMPORTANT: Must be done BEFORE any transformation/shuffle
         df = df.copy()
         df["_row_id"] = df.index.astype(str)
         id_col = "_row_id"
         is_synthetic = True
-        print("[LOG:WARN] No ID column found, using synthetic '_row_id' for sampling")
+        print(f"[LOG:WARN] {reason}; using synthetic '_row_id' as the row key")
 
     return df, id_col, is_synthetic
 

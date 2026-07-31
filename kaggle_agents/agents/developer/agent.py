@@ -26,6 +26,7 @@ from ...core.config import (
     get_config,
     get_llm_for_role,
     is_metric_minimization,
+    metric_reads_rows_as_distribution,
 )
 from ...core.state import (
     AblationComponent,
@@ -65,7 +66,13 @@ from .retry import (
     require_oof_artifacts,
 )
 from .utils import DeveloperUtilsMixin
-from .validation import ValidationMixin, quarantine_component_artifacts
+from .validation import (
+    ValidationMixin,
+    _model_validation_problem_type,
+    _requires_class_order_artifact,
+    _validation_class_order_for_state,
+    quarantine_component_artifacts,
+)
 
 
 from .code_contracts import (
@@ -110,105 +117,6 @@ def _component_prediction_artifact(
     ):
         return packed
     return dense
-
-
-def _model_validation_problem_type(state: KaggleState) -> str:
-    """Resolve validation semantics, preserving explicit image-to-image domain."""
-    domain = str(state.get("domain_detected", "") or "").lower().replace("-", "_")
-    if domain == "image_to_image":
-        return "image_to_image"
-    competition_info = state.get("competition_info")
-    declared = (
-        getattr(competition_info, "problem_type", "")
-        if competition_info is not None
-        else ""
-    )
-    return str(declared or state.get("problem_type", "classification"))
-
-
-def _expected_class_order_for_state(
-    state: KaggleState,
-) -> list[str] | None:
-    """Resolve probability-column order from public or canonical evidence."""
-    submission_order = (
-        state.get("submission_contract") or {}
-    ).get("class_order")
-    canonical_metadata = state.get("canonical_metadata") or {}
-    canonical_order = canonical_metadata.get("class_order")
-    raw_order = submission_order or canonical_order
-    if raw_order is None:
-        metadata_path = (
-            state.get("canonical_contract") or {}
-        ).get("metadata_path")
-        if metadata_path and Path(metadata_path).is_file():
-            try:
-                raw_order = json.loads(
-                    Path(metadata_path).read_text(encoding="utf-8")
-                ).get("class_order")
-            except (OSError, TypeError, ValueError):
-                raw_order = None
-    if not isinstance(raw_order, (list, tuple)) or len(raw_order) < 2:
-        return None
-    normalized = [str(value) for value in raw_order]
-    if len(normalized) != len(set(normalized)):
-        return None
-    return normalized
-
-
-def _validation_class_order_for_state(
-    state: KaggleState,
-    problem_type: str,
-) -> list[str] | None:
-    """Resolve order for wide outputs or label-format multiclass outputs."""
-    normalized_problem = str(problem_type).lower()
-    compact_problem = normalized_problem.replace("_", "").replace("-", "")
-    is_classification = any(
-        marker in compact_problem
-        for marker in ("class", "binary", "multilabel")
-    )
-    if not is_classification:
-        return None
-    submission_order = (
-        state.get("submission_contract") or {}
-    ).get("class_order")
-    if isinstance(submission_order, (list, tuple)) and len(submission_order) > 1:
-        normalized = [str(value) for value in submission_order]
-        return (
-            normalized
-            if len(normalized) == len(set(normalized))
-            else None
-        )
-
-    canonical_metadata = state.get("canonical_metadata") or {}
-    try:
-        canonical_n_classes = int(
-            canonical_metadata.get("n_classes") or 0
-        )
-    except (TypeError, ValueError):
-        canonical_n_classes = 0
-    if (
-        "multiclass" not in compact_problem
-        and canonical_n_classes <= 2
-    ):
-        return None
-    return _expected_class_order_for_state(state)
-
-
-def _requires_class_order_artifact(
-    state: KaggleState,
-    problem_type: str,
-) -> bool:
-    """Whether probability columns encode mutually exclusive classes."""
-    normalized_problem = str(problem_type).lower()
-    compact_problem = normalized_problem.replace("_", "").replace("-", "")
-    if not any(
-        marker in compact_problem
-        for marker in ("class", "binary")
-    ):
-        return False
-    if _validation_class_order_for_state(state, problem_type) is None:
-        return False
-    return "multilabel" not in compact_problem
 
 
 def _oof_artifact_digest(working_dir: Path, component_name: str) -> str | None:
@@ -1356,6 +1264,9 @@ class DeveloperAgent(
             expected_n_train = state.get("expected_train_rows")
             expected_n_test = state.get("expected_test_rows")
             competition_info = state.get("competition_info")
+            validation_config.require_normalized_rows = (
+                metric_reads_rows_as_distribution(metric_name)
+            )
             problem_type = _model_validation_problem_type(state)
             expected_class_order = _validation_class_order_for_state(
                 state,
@@ -2983,10 +2894,77 @@ Based on the training results above, improve the model to achieve a {desired_dir
                 if requires_submission_helper(component.component_type)
                 else None
             )
+            # Report every violated contract at once. Reporting them one at a
+            # time costs an attempt per round-trip, and a repair that satisfies
+            # one contract by breaking another looks like progress until the
+            # budget is gone: the observed loop was "omits class_order=" ->
+            # "shadows an injected helper" -> success, three attempts for one
+            # program.
+            contract_violations: list[tuple[str, str]] = []
             if untrusted_helper_import:
+                contract_violations.append(
+                    (
+                        "code shadows an injected contract helper "
+                        f"({untrusted_helper_import.splitlines()[0]})",
+                        HELPER_IMPORT_CONTRACT_ERROR,
+                    )
+                )
+            if missing_submission_helper:
+                contract_violations.append(
+                    (
+                        "model never calls the injected "
+                        f"{_SUBMISSION_HELPER}() helper",
+                        MISSING_SUBMISSION_HELPER_ERROR,
+                    )
+                )
+            if missing_class_order:
+                contract_violations.append(
+                    (
+                        "multiclass evidence helper call omits class_order=",
+                        MISSING_CLASS_ORDER_ERROR,
+                    )
+                )
+            if unsaved:
+                contract_violations.append(
+                    (
+                        "code never saves " + ", ".join(unsaved),
+                        f"Missing expected artifacts: {', '.join(unsaved)}",
+                    )
+                )
+            if hand_written:
+                contract_violations.append(
+                    (
+                        f"writes the submission by hand ({hand_written}) "
+                        f"instead of calling {_SUBMISSION_HELPER}()",
+                        SUBMISSION_CONTRACT_ERROR,
+                    )
+                )
+
+            if contract_violations:
                 print(
-                    "   Skipping execution: code shadows an injected contract "
-                    f"helper ({untrusted_helper_import.splitlines()[0]})"
+                    "   Skipping execution (contract check before training): "
+                    f"{len(contract_violations)} violation(s)"
+                )
+                for summary, _ in contract_violations:
+                    print(f"      - {summary}")
+                # One joined string, because every consumer of a failed
+                # execution reads errors[0]. A list would silently drop
+                # everything after the first entry and restore the ping-pong.
+                combined_error = (
+                    "\n".join(error for _, error in contract_violations)
+                    if len(contract_violations) == 1
+                    else (
+                        "This code violates "
+                        f"{len(contract_violations)} contracts. Fix all of them "
+                        "in one revision; fixing one by breaking another wastes "
+                        "an attempt.\n"
+                        + "\n".join(
+                            f"{index}. {error}"
+                            for index, (_, error) in enumerate(
+                                contract_violations, start=1
+                            )
+                        )
+                    )
                 )
                 exec_result = ExecutionResult(
                     success=False,
@@ -2995,65 +2973,7 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     execution_time=0.0,
                     exit_code=-1,
                     artifacts_created=[],
-                    errors=[HELPER_IMPORT_CONTRACT_ERROR],
-                )
-            elif missing_submission_helper:
-                print(
-                    "   Skipping execution: model never calls the injected "
-                    f"{_SUBMISSION_HELPER}() helper"
-                )
-                exec_result = ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr="",
-                    execution_time=0.0,
-                    exit_code=-1,
-                    artifacts_created=[],
-                    errors=[MISSING_SUBMISSION_HELPER_ERROR],
-                )
-            elif missing_class_order:
-                print(
-                    "   Skipping execution: multiclass evidence helper call "
-                    "omits class_order="
-                )
-                exec_result = ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr="",
-                    execution_time=0.0,
-                    exit_code=-1,
-                    artifacts_created=[],
-                    errors=[MISSING_CLASS_ORDER_ERROR],
-                )
-            elif unsaved:
-                print(
-                    "   Skipping execution: code never saves "
-                    + ", ".join(unsaved)
-                    + " (contract check before training)"
-                )
-                exec_result = ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr="",
-                    execution_time=0.0,
-                    exit_code=-1,
-                    artifacts_created=[],
-                    errors=[f"Missing expected artifacts: {', '.join(unsaved)}"],
-                )
-            elif hand_written:
-                print(
-                    f"   Skipping execution: writes the submission by hand "
-                    f"({hand_written}) instead of calling {_SUBMISSION_HELPER}() "
-                    "(contract check before training)"
-                )
-                exec_result = ExecutionResult(
-                    success=False,
-                    stdout="",
-                    stderr="",
-                    execution_time=0.0,
-                    exit_code=-1,
-                    artifacts_created=[],
-                    errors=[SUBMISSION_CONTRACT_ERROR],
+                    errors=[combined_error],
                 )
             else:
                 exec_result = self.executor.execute(

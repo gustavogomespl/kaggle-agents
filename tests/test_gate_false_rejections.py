@@ -12,15 +12,38 @@ A run that produced a valid 0.039 log_loss submission finished with
    np.array_equal. The injected helper always writes IDs as text while the
    canonical file keeps the public column's dtype, so identical IDs compared
    unequal and every component was dropped from the ensemble.
+
+Three later runs were blocked the same way, each by a gate holding a component
+to a contract nothing had asked it to satisfy:
+
+3. The robustness gate demanded a class-order artifact from every submission
+   with more than two prediction columns. A wide multilabel template has six,
+   its columns are independent labels with no order to record, and the
+   developer therefore never asks for the file. No multilabel competition could
+   be graded, and the gate printed nothing.
+4. Canonical prep accepted a repeating column as the row key, so every
+   component raised on `align_train_to_canonical` before it trained and no
+   repair could succeed: the defect was in the contract, not in the code.
+5. Multiclass rows that did not sum to 1 failed a candidate outright even when
+   the graded metric scores each column independently and would have accepted
+   the very same predictions.
 """
 
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from kaggle_agents.agents.robustness_agent import RobustnessAgent
+from kaggle_agents.core.config import metric_reads_rows_as_distribution
+from kaggle_agents.utils.data_contract import _ensure_id_column
 from kaggle_agents.utils.oof_validation import assert_oof_sanity
+from kaggle_agents.utils.strict_validation import (
+    StrictValidationConfig,
+    validate_model_artifacts,
+)
+from kaggle_agents.workflow.nodes.robustness_gate import _mle_evidence_failures
 
 
 class TestFoldLocalPreprocessingIsNotLeakage:
@@ -284,3 +307,255 @@ class TestLeakageSeveritySeparatesFactFromInference:
         code = "X_val = X[vi]\nX_tr = X_val.copy()\nmodel.fit(X_tr)\n"
 
         assert self._severity(code) == "derived"
+
+
+def _evidence_state(
+    tmp_path: Path,
+    *,
+    name: str,
+    problem_type: str,
+    class_order: list[str],
+    width: int,
+    write_class_order: list[str] | None = None,
+) -> dict:
+    """Stage exactly the artifacts the injected helper writes for a component."""
+    models_dir = tmp_path / "models"
+    models_dir.mkdir(exist_ok=True)
+    canonical_dir = tmp_path / "canonical"
+    canonical_dir.mkdir(exist_ok=True)
+
+    train_ids = np.asarray(["a", "b", "c"])
+    test_ids = np.asarray(["x", "y"])
+    np.save(canonical_dir / "train_ids.npy", train_ids, allow_pickle=False)
+    np.save(models_dir / f"oof_{name}.npy", np.zeros((3, width)))
+    np.save(models_dir / f"test_{name}.npy", np.zeros((2, width)))
+    np.save(models_dir / f"train_ids_{name}.npy", train_ids, allow_pickle=False)
+    np.save(models_dir / f"test_ids_{name}.npy", test_ids, allow_pickle=False)
+    if write_class_order is not None:
+        np.save(
+            models_dir / f"class_order_{name}.npy",
+            np.asarray(write_class_order, dtype=str),
+            allow_pickle=False,
+        )
+
+    return {
+        "run_mode": "mlebench",
+        "working_directory": str(tmp_path),
+        "oof_availability": {name: True},
+        "trusted_component_scores": {name: 0.9847},
+        "canonical_contract": {
+            "train_ids_path": str(canonical_dir / "train_ids.npy")
+        },
+        "submission_contract": {"class_order": class_order},
+        "problem_type": problem_type,
+    }
+
+
+# Six independent labels vs four mutually exclusive classes: both are wide
+# templates, only the second one has an order worth recording.
+TOXICITY_LABELS = [
+    "toxic",
+    "severe_toxic",
+    "obscene",
+    "threat",
+    "insult",
+    "identity_hate",
+]
+DISEASE_CLASSES = ["healthy", "multiple_diseases", "rust", "scab"]
+
+
+class TestMultilabelEvidenceNeedsNoClassOrder:
+    """Independent labels have no order, so none can be demanded of them."""
+
+    def test_wide_multilabel_component_is_complete_evidence(self, tmp_path) -> None:
+        state = _evidence_state(
+            tmp_path,
+            name="tfidf_linear_baseline",
+            problem_type="multilabel_classification",
+            class_order=TOXICITY_LABELS,
+            width=6,
+        )
+
+        assert _mle_evidence_failures(state) == {}
+
+    def test_multiclass_still_must_declare_its_column_order(self, tmp_path) -> None:
+        state = _evidence_state(
+            tmp_path,
+            name="efficientnet_b0",
+            problem_type="multiclass_classification",
+            class_order=DISEASE_CLASSES,
+            width=4,
+        )
+
+        assert _mle_evidence_failures(state) == {
+            "efficientnet_b0": ["missing component-specific multiclass class order"]
+        }
+
+    def test_multiclass_with_matching_order_is_complete(self, tmp_path) -> None:
+        state = _evidence_state(
+            tmp_path,
+            name="efficientnet_b0",
+            problem_type="multiclass_classification",
+            class_order=DISEASE_CLASSES,
+            width=4,
+            write_class_order=DISEASE_CLASSES,
+        )
+
+        assert _mle_evidence_failures(state) == {}
+
+    def test_multiclass_with_permuted_order_is_still_caught(self, tmp_path) -> None:
+        state = _evidence_state(
+            tmp_path,
+            name="efficientnet_b0",
+            problem_type="multiclass_classification",
+            class_order=DISEASE_CLASSES,
+            width=4,
+            write_class_order=["scab", "rust", "healthy", "multiple_diseases"],
+        )
+
+        assert _mle_evidence_failures(state) == {
+            "efficientnet_b0": [
+                "component class order does not match submission contract"
+            ]
+        }
+
+
+class TestContractViolationsAreReportedTogether:
+    """A repair that trades one contract for another must not cost an attempt.
+
+    Observed on every multiclass component of one run: attempt 1 failed on
+    ``omits class_order=``, attempt 2 on ``shadows an injected helper``, and
+    only attempt 3 ran. Three generations for one program, because the
+    pre-execution checks reported one violation at a time.
+    """
+
+    @staticmethod
+    def _pre_execution_source() -> str:
+        import inspect
+
+        from kaggle_agents.agents.developer.agent import DeveloperAgent
+
+        return inspect.getsource(DeveloperAgent)
+
+    def test_every_violation_is_collected_before_reporting(self) -> None:
+        source = self._pre_execution_source()
+
+        assert "contract_violations: list[tuple[str, str]] = []" in source
+        # An elif chain here means only the first violation is ever reported.
+        assert "elif missing_class_order:" not in source
+        assert "elif untrusted_helper_import:" not in source
+
+    def test_violations_reach_the_fixer_as_one_message(self) -> None:
+        """Consumers read errors[0]; a list would drop all but the first."""
+        source = self._pre_execution_source()
+
+        assert "errors=[combined_error]" in source
+        assert "Fix all of them" in source
+
+
+class TestRepeatingKeyCannotNameRows:
+    """The canonical contract names each training row exactly once."""
+
+    def test_duplicate_key_falls_back_to_row_position(self) -> None:
+        # This competition's key is a pickup timestamp, and timestamps collide.
+        frame = pd.DataFrame(
+            {
+                "key": [
+                    "2014-03-30 12:14:00.000000128",
+                    "2014-03-30 12:14:00.000000128",
+                    "2011-08-18 00:35:00.00000049",
+                ],
+                "fare_amount": [7.5, 9.0, 5.7],
+            }
+        )
+
+        aligned, id_col, synthetic = _ensure_id_column(frame, "key")
+
+        assert (id_col, synthetic) == ("_row_id", True)
+        assert aligned[id_col].is_unique
+
+    def test_unique_key_is_kept(self) -> None:
+        frame = pd.DataFrame({"key": ["a", "b", "c"], "y": [1, 2, 3]})
+
+        _, id_col, synthetic = _ensure_id_column(frame, "key")
+
+        assert (id_col, synthetic) == ("key", False)
+
+    def test_absent_column_still_falls_back(self) -> None:
+        frame = pd.DataFrame({"y": [1, 2, 3]})
+
+        _, id_col, synthetic = _ensure_id_column(frame, "id")
+
+        assert (id_col, synthetic) == ("_row_id", True)
+
+
+class TestRowSumContractFollowsTheGradedMetric:
+    """Rows are a distribution only when the metric reads them as one."""
+
+    @staticmethod
+    def _artifacts(tmp_path: Path) -> None:
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        # Per-class sigmoid outputs: valid predictions, rows do not sum to 1.
+        np.save(
+            models_dir / "oof_model.npy",
+            np.array([[0.8, 0.3], [0.4, 0.6], [0.1, 0.9]]),
+        )
+        np.save(
+            models_dir / "test_model.npy",
+            np.array([[0.7, 0.3], [0.9, 0.8]]),
+        )
+
+    @pytest.mark.parametrize(
+        ("metric", "reads_rows"),
+        [
+            ("multi class log loss", True),
+            ("log_loss", True),
+            ("cross_entropy", True),
+            ("auc", False),
+            ("roc_auc", False),
+            ("accuracy", False),
+            ("rmse", False),
+            ("", False),
+        ],
+    )
+    def test_metric_classification(self, metric: str, reads_rows: bool) -> None:
+        assert metric_reads_rows_as_distribution(metric) is reads_rows
+
+    def test_ranking_metric_reports_but_does_not_reject(self, tmp_path) -> None:
+        self._artifacts(tmp_path)
+
+        result = validate_model_artifacts(
+            tmp_path,
+            "model",
+            expected_n_train=3,
+            expected_n_test=2,
+            expected_class_order=["negative", "positive"],
+            problem_type="multiclass_classification",
+            config=StrictValidationConfig(
+                strict_mode=True, require_normalized_rows=False
+            ),
+        )
+
+        assert result.is_valid is True
+        assert any("do not sum to 1.0" in warning for warning in result.warnings)
+
+    def test_likelihood_metric_still_rejects(self, tmp_path) -> None:
+        self._artifacts(tmp_path)
+
+        result = validate_model_artifacts(
+            tmp_path,
+            "model",
+            expected_n_train=3,
+            expected_n_test=2,
+            expected_class_order=["negative", "positive"],
+            problem_type="multiclass_classification",
+            config=StrictValidationConfig(
+                strict_mode=True, require_normalized_rows=True
+            ),
+        )
+
+        assert result.is_valid is False
+        assert any(
+            "probability-sum contract" in error for error in result.errors
+        )

@@ -787,6 +787,41 @@ def is_metric_minimization(metric_name: str) -> bool:
     return any(metric in metric_lower for metric in minimize_metrics)
 
 
+def metric_reads_rows_as_distribution(metric_name: str) -> bool:
+    """Whether the graded metric interprets each row as one probability vector.
+
+    Only likelihood-style losses do. A ranking metric such as AUC scores each
+    prediction column independently, so rows that do not sum to 1 are not a
+    defect there: rejecting them discards a submission the grader would have
+    accepted and scored.
+
+    Args:
+        metric_name: Name of the evaluation metric (e.g. 'auc', 'log_loss')
+
+    Returns:
+        True when unnormalized rows would actually degrade the graded score.
+
+    Examples:
+        >>> metric_reads_rows_as_distribution('multi class log loss')
+        True
+        >>> metric_reads_rows_as_distribution('auc')
+        False
+    """
+    if not metric_name:
+        return False
+
+    metric_lower = str(metric_name).lower()
+    distribution_metrics = (
+        "logloss",
+        "log_loss",
+        "log loss",
+        "cross_entropy",
+        "cross entropy",
+        "crossentropy",
+    )
+    return any(metric in metric_lower for metric in distribution_metrics)
+
+
 def calculate_score_improvement(new_score: float, baseline_score: float, metric_name: str) -> float:
     """
     Calculate score improvement considering metric direction.
