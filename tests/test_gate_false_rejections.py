@@ -202,3 +202,85 @@ def test_dtype_blind_comparison_matches_intent(saved, canonical, identical):
     ]
 
     assert normalized is identical
+
+
+class TestExclusionIsNotLeakage:
+    """The training partition is routinely defined by removing validation."""
+
+    @staticmethod
+    def _findings(code: str) -> list[dict]:
+        return RobustnessAgent._find_direct_leakage(code)
+
+    def test_numpy_delete_of_validation_rows(self) -> None:
+        code = (
+            "y_tr = np.delete(y, val_idx, axis=0)\n"
+            "model.fit(X[t_idx], y_tr[t_idx])\n"
+        )
+
+        assert self._findings(code) == []
+
+    def test_negated_validation_mask(self) -> None:
+        code = (
+            "val_mask = folds == fold\n"
+            "y_tr = y[~val_mask]\n"
+            "model.fit(X[t_idx], y_tr[t_idx])\n"
+        )
+
+        assert self._findings(code) == []
+
+    def test_setdiff_against_validation_indices(self) -> None:
+        code = "t_idx = np.setdiff1d(all_idx, val_idx)\nmodel.fit(X[t_idx])\n"
+
+        assert self._findings(code) == []
+
+    def test_inequality_against_the_validation_fold(self) -> None:
+        code = "t_idx = np.flatnonzero(folds != val_fold)\nmodel.fit(X[t_idx])\n"
+
+        assert self._findings(code) == []
+
+    def test_dropping_validation_rows(self) -> None:
+        code = "train_df = df.drop(val_idx)\nmodel.fit(train_df)\n"
+
+        assert self._findings(code) == []
+
+    def test_selecting_the_validation_mask_is_still_leakage(self) -> None:
+        """One character apart from the excluded form, and the opposite thing."""
+        code = "model.fit(X[val_mask], y[val_mask])\n"
+
+        assert self._findings(code)
+
+
+class TestLeakageSeveritySeparatesFactFromInference:
+    """Only evidence in the code's shape may fail a candidate by itself."""
+
+    @staticmethod
+    def _severity(code: str) -> str | None:
+        findings = RobustnessAgent._find_direct_leakage(code)
+        return findings[0]["severity"] if findings else None
+
+    def test_concatenated_train_and_test_is_direct(self) -> None:
+        code = "full = pd.concat([train_df, test_df])\nscaler.fit_transform(full)\n"
+
+        assert self._severity(code) == "direct"
+
+    def test_structural_taint_survives_intermediate_aliases(self) -> None:
+        code = (
+            "X_all = np.vstack([train_features, test_features])\n"
+            "X_tr = X_all[:n_train]\n"
+            "scaler.fit(X_tr)\n"
+        )
+
+        assert self._severity(code) == "direct"
+
+    def test_fitting_the_held_out_name_is_direct(self) -> None:
+        assert self._severity("scaler.fit(X_val)\n") == "direct"
+
+    def test_name_chain_only_is_derived(self) -> None:
+        code = "X_train = X[val_idx]\nscaler.fit_transform(X_train)\n"
+
+        assert self._severity(code) == "derived"
+
+    def test_alias_chain_is_derived(self) -> None:
+        code = "X_val = X[vi]\nX_tr = X_val.copy()\nmodel.fit(X_tr)\n"
+
+        assert self._severity(code) == "derived"

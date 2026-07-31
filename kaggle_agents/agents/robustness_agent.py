@@ -493,8 +493,20 @@ class RobustnessAgent:
 
         code = str(dev_result.code or "")
         deterministic_findings = self._find_direct_leakage(code)
-        if deterministic_findings:
-            issues = [finding["description"] for finding in deterministic_findings]
+        direct_findings = [
+            finding
+            for finding in deterministic_findings
+            if finding.get("severity", "direct") == "direct"
+        ]
+        # Only evidence visible in the code's structure fails a candidate on its
+        # own. Name-derived findings are handed to the reviewer below instead:
+        # identifiers cannot distinguish using the held-out partition from
+        # excluding it, and a false positive here discards an entire graded run.
+        derived_findings = [
+            finding for finding in deterministic_findings if finding not in direct_findings
+        ]
+        if direct_findings:
+            issues = [finding["description"] for finding in direct_findings]
             return ValidationResult(
                 module="leakage",
                 passed=False,
@@ -507,7 +519,7 @@ class RobustnessAgent:
                 details={
                     "review_status": "YES",
                     "source": "deterministic_ast",
-                    "findings": deterministic_findings,
+                    "findings": direct_findings,
                 },
             )
 
@@ -604,16 +616,26 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
             )
 
         print(f"   ✅ No Data Leakage: {explanation}")
+        if derived_findings:
+            print(
+                f"   ℹ️  {len(derived_findings)} name-derived leakage hint(s) not "
+                "corroborated by the reviewer; reported as advisory"
+            )
         return ValidationResult(
             module="leakage",
             passed=True,
             score=1.0,
-            issues=[],
+            issues=[
+                f"Advisory (name-derived, reviewer found no leak): "
+                f"{finding['description']}"
+                for finding in derived_findings
+            ],
             suggestions=[],
             details={
                 "review_status": "NO",
                 "source": "deterministic_ast+llm",
                 "explanation": explanation,
+                "advisory_findings": derived_findings,
             },
         )
 
@@ -765,6 +787,48 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 if tokens({name}) & {"test", "val", "valid", "validation"}
             }
 
+        exclusion_calls = {"delete", "setdiff1d", "drop", "difference"}
+
+        def excludes_held_out(value: ast.AST) -> bool:
+            """Whether every held-out reference in ``value`` is being removed.
+
+            The training partition is routinely defined by exclusion:
+            ``y[~val_mask]``, ``np.delete(y, val_idx)``, ``folds != fold``.
+            Those mention validation in order to drop it, and a name-only rule
+            reads them as fitting on held-out data. Deciding this on syntax -
+            negation, inequality, or an explicit removal call - is what the
+            names cannot express: ``y[val_mask]`` and ``y[~val_mask]`` are one
+            character apart and mean the opposite.
+            """
+            held_out_nodes = [
+                node
+                for node in ast.walk(value)
+                if isinstance(node, (ast.Name, ast.Attribute))
+                and tokens(identifier_names(node))
+                & {"test", "val", "valid", "validation"}
+            ]
+            if not held_out_nodes:
+                return False
+
+            excluded: set[int] = set()
+            for node in ast.walk(value):
+                is_exclusion = (
+                    isinstance(node, ast.UnaryOp)
+                    and isinstance(node.op, (ast.Invert, ast.Not))
+                ) or (
+                    isinstance(node, ast.Compare)
+                    and any(
+                        isinstance(operator, (ast.NotEq, ast.IsNot, ast.NotIn))
+                        for operator in node.ops
+                    )
+                ) or (
+                    isinstance(node, ast.Call)
+                    and call_name(node.func).lower() in exclusion_calls
+                )
+                if is_exclusion:
+                    excluded.update(id(child) for child in ast.walk(node))
+            return all(id(node) in excluded for node in held_out_nodes)
+
         concat_calls: list[ast.Call] = []
         tainted_names: set[str] = set()
         assignments: list[tuple[set[str], ast.AST]] = []
@@ -787,6 +851,12 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                             split_assignment(target, node.value)
                         )
 
+        # Structural taint is evidence in the code's shape (a call that
+        # concatenates train and test). Name taint is an inference from
+        # identifiers. They are tracked apart so the caller can weigh them
+        # differently: one is a fact, the other is a guess.
+        structural_tainted: set[str] = set()
+
         changed = True
         while changed:
             changed = False
@@ -800,7 +870,13 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 is_tainted_alias = bool(value_names & tainted_names)
                 is_held_out_alias = bool(
                     value_tokens & {"test", "val", "valid", "validation"}
-                )
+                ) and not excludes_held_out(value)
+
+                if is_mixed_concat or bool(value_names & structural_tainted):
+                    if not targets.issubset(structural_tainted):
+                        structural_tainted.update(targets)
+                        changed = True
+
                 if is_mixed_concat or is_tainted_alias:
                     # Direct evidence about this value: every target it feeds
                     # is tainted regardless of what the names say.
@@ -847,14 +923,24 @@ Use UNKNOWN whenever the evidence is insufficient. Do not guess NO."""
                 uses_tainted = bool(names & tainted_names)
                 uses_held_out = bool(
                     name_tokens & {"test", "val", "valid", "validation"}
-                )
-                if not (uses_tainted or uses_held_out):
+                ) and not excludes_held_out(expression)
+                uses_structural = bool(names & structural_tainted)
+                if not (uses_tainted or uses_held_out or uses_structural):
                     continue
                 input_names = ", ".join(sorted(names)) or "<expression>"
+                # "direct" means the code itself shows the leak: the fitted
+                # expression names the held-out partition, or it descends from
+                # a call that merged train with test. "derived" means only a
+                # chain of identifier names suggests it, which is an inference
+                # the caller should corroborate before failing a candidate.
+                severity = (
+                    "direct" if (uses_held_out or uses_structural) else "derived"
+                )
                 findings.append(
                     {
                         "kind": "fit_on_held_out_data",
                         "line": int(getattr(node, "lineno", 0) or 0),
+                        "severity": severity,
                         "description": (
                             f"{method}() consumes held-out or combined data "
                             f"({input_names}) on line {getattr(node, 'lineno', '?')}."
