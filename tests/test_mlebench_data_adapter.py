@@ -84,6 +84,43 @@ def test_prepare_workspace_discovers_audio_in_arbitrarily_named_directories(
     )
 
 
+def test_tabular_state_paths_prefer_csvs_over_supplementary_directories(
+    tmp_path: Path,
+) -> None:
+    comp_id = "synthetic-tabular-with-row-assets"
+    cache_root = tmp_path / "mle-cache"
+    public_dir = cache_root / comp_id / "prepared" / "public"
+    (public_dir / "train").mkdir(parents=True)
+    (public_dir / "test").mkdir()
+    _write_text(public_dir / "train" / "row-1.json", "{}")
+    _write_text(public_dir / "test" / "row-2.json", "{}")
+    _write_text(
+        public_dir / "train.csv",
+        "id,feature,target\n1,0.1,0.2\n2,0.3,0.4\n",
+    )
+    _write_text(
+        public_dir / "test.csv",
+        "id,feature\n3,0.5\n4,0.6\n",
+    )
+    _write_text(
+        public_dir / "sample_submission.csv",
+        "id,target\n3,0\n4,0\n",
+    )
+
+    workspace = tmp_path / "workspace" / comp_id
+    adapter = MLEBenchDataAdapter(mle_cache_path=cache_root)
+    info = adapter.prepare_workspace(comp_id, workspace)
+    paths = adapter.get_state_paths(info)
+
+    assert paths["data_files"]["data_type"] == "tabular"
+    assert Path(paths["train_data_path"]) == workspace / "train.csv"
+    assert Path(paths["test_data_path"]) == workspace / "test.csv"
+    assert Path(paths["data_files"]["train"]) == workspace / "train.csv"
+    assert Path(paths["data_files"]["test"]) == workspace / "test.csv"
+    assert (workspace / "train").is_dir()
+    assert (workspace / "test").is_dir()
+
+
 def test_sample_submission_directory_resolves_to_inner_csv(tmp_path: Path) -> None:
     # Kaggle packaging quirk: sample_submission.csv is a DIRECTORY containing
     # the real CSV. The staged alias name collides with the copied directory

@@ -35,19 +35,25 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     working_dir = Path(state.get("working_directory", "."))
     data_files = state.get("data_files", {})
 
-    # Try to find train data
+    # EDA below uses pd.read_csv, so choose a declared table and never a
+    # same-named supplementary directory.
     train_path = None
     candidates = [
-        Path(data_files.get("train", "")) if data_files.get("train") else None,
+        Path(data_files["train_csv"]) if data_files.get("train_csv") else None,
+        Path(state["current_train_path"])
+        if state.get("current_train_path")
+        else None,
+        Path(state["train_data_path"]) if state.get("train_data_path") else None,
+        Path(data_files["train"]) if data_files.get("train") else None,
         working_dir / "train.csv",
         working_dir / "data" / "train.csv",
     ]
     for cand in candidates:
-        if cand and cand.exists():
+        if cand and cand.is_file():
             train_path = cand
             break
 
-    if not train_path or not train_path.exists():
+    if not train_path or not train_path.is_file():
         print("   ⚠️ No train.csv found. Skipping EDA.")
         return {"last_updated": datetime.now()}
 

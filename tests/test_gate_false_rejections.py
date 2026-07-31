@@ -51,6 +51,23 @@ class TestFoldLocalPreprocessingIsNotLeakage:
 
         assert self._findings(code) == []
 
+    def test_log_regression_indexing_train_outputs_is_clean(self) -> None:
+        code = (
+            "X_train_f, X_val_f, y_train_f, y_val_f = "
+            "train_test_split(X, y)\n"
+            "model.fit(X[t_idx], y_train_f[t_idx])\n"
+        )
+
+        assert self._findings(code) == []
+
+    def test_log_regression_training_indices_are_clean(self) -> None:
+        code = (
+            "train_idx, val_idx = train_test_split(indices)\n"
+            "model.fit(X[train_idx])\n"
+        )
+
+        assert self._findings(code) == []
+
     def test_fold_local_vectorizer_is_clean(self) -> None:
         code = (
             "for fold, train_idx, val_idx in iter_canonical_cv_splits():\n"

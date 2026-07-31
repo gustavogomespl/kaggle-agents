@@ -586,6 +586,7 @@ def create_metric_contract(
             "mse",
             "mae",
             "mape",
+            "rmsle",
             "logloss",
             "log_loss",
             "cross_entropy",

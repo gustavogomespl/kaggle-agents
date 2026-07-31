@@ -1836,14 +1836,17 @@ def align_train_to_canonical(df):
     if ID_COL in df.columns:
         _keyed = df.copy()
         _keyed[ID_COL] = _keyed[ID_COL].astype(str)
+        _canonical_id_keys = np.asarray(
+            [str(_v) for _v in CANONICAL_TRAIN_IDS]
+        )
         if _keyed[ID_COL].duplicated().any():
             raise ValueError(f"Training ID column {{ID_COL!r}} is not unique")
-        _missing = set(CANONICAL_TRAIN_IDS.tolist()) - set(_keyed[ID_COL])
+        _missing = set(_canonical_id_keys.tolist()) - set(_keyed[ID_COL])
         if _missing:
             raise ValueError(
                 f"Training data is missing {{len(_missing)}} canonical rows"
             )
-        return _keyed.set_index(ID_COL).loc[CANONICAL_TRAIN_IDS].reset_index()
+        return _keyed.set_index(ID_COL).loc[_canonical_id_keys].reset_index()
 
     if not ID_IS_SYNTHETIC:
         raise ValueError(

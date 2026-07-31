@@ -128,7 +128,9 @@ class WorkspaceMixin:
             info.train_csv_path = workspace / "train.csv"
             if info.data_type == "tabular":
                 info.train_path = workspace / "train.csv"
-        if (workspace / "train").is_dir():
+        if (workspace / "train").is_dir() and (
+            info.data_type != "tabular" or info.train_csv_path is None
+        ):
             info.train_path = workspace / "train"
         if info.train_path and info.train_path.is_file():
             linked_train_file = workspace / info.train_path.name
@@ -139,7 +141,9 @@ class WorkspaceMixin:
             info.test_csv_path = workspace / "test.csv"
             if info.data_type == "tabular":
                 info.test_path = workspace / "test.csv"
-        if (workspace / "test").is_dir():
+        if (workspace / "test").is_dir() and (
+            info.data_type != "tabular" or info.test_csv_path is None
+        ):
             info.test_path = workspace / "test"
         if info.test_path and info.test_path.is_file():
             linked_test_file = workspace / info.test_path.name
@@ -161,9 +165,15 @@ class WorkspaceMixin:
         Returns:
             Dictionary with paths for state initialization
         """
-        # Prefer the main data asset (dir/zip) for non-tabular domains; keep CSVs in `data_files`.
-        train_data_path = info.train_path or info.train_csv_path
-        test_data_path = info.test_path or info.test_csv_path
+        # Tabular runs consume the public tables even when supplementary
+        # per-row assets also happen to live under train/ and test/. Media
+        # domains keep their directories as the primary model inputs.
+        if info.data_type == "tabular":
+            train_data_path = info.train_csv_path or info.train_path
+            test_data_path = info.test_csv_path or info.test_path
+        else:
+            train_data_path = info.train_path or info.train_csv_path
+            test_data_path = info.test_path or info.test_csv_path
 
         # Validate paths exist - if not, search workspace for actual data
         workspace = info.workspace

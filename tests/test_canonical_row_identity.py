@@ -51,7 +51,7 @@ def _align_namespace(train_ids, *, id_col: str, synthetic: bool) -> dict:
         "pd": pd,
         "ID_COL": id_col,
         "ID_IS_SYNTHETIC": synthetic,
-        "CANONICAL_TRAIN_IDS": np.asarray([str(v) for v in train_ids]),
+        "CANONICAL_TRAIN_IDS": np.asarray(train_ids),
     }
     exec(  # noqa: S102 - executing our own shipped header text is the point
         compile(_extract_header_function("align_train_to_canonical"), "<hdr>", "exec"),
@@ -80,6 +80,25 @@ class TestAlignTrainToCanonical:
 
         assert aligned["id"].tolist() == ["3", "9", "7"]
         assert aligned["label"].tolist() == [2, 3, 1]
+
+    def test_numeric_canonical_ids_align_after_csv_roundtrip(
+        self, tmp_path: Path
+    ):
+        csv_path = tmp_path / "train_engineered.csv"
+        pd.DataFrame({"id": [10, 1, 2], "label": [1, 2, 3]}).to_csv(
+            csv_path, index=False
+        )
+        frame = pd.read_csv(csv_path)
+        namespace = _align_namespace([2, 10, 1], id_col="id", synthetic=False)
+        canonical_ids = namespace["CANONICAL_TRAIN_IDS"]
+        canonical_ids_before = canonical_ids.copy()
+
+        aligned = namespace["align_train_to_canonical"](frame)
+
+        assert aligned["id"].tolist() == ["2", "10", "1"]
+        assert aligned["label"].tolist() == [3, 1, 2]
+        assert np.issubdtype(canonical_ids.dtype, np.integer)
+        np.testing.assert_array_equal(canonical_ids, canonical_ids_before)
 
     def test_missing_canonical_rows_are_reported(self):
         frame = pd.DataFrame({"id": [1, 2], "label": [0, 1]})

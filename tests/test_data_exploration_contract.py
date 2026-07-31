@@ -87,3 +87,41 @@ def test_eda_does_not_guess_last_column_as_target_without_contract(tmp_path) -> 
     insights = updates["data_insights"]
     assert insights.n_classes is None
     assert insights.numeric_features == ["feature_a", "feature_b"]
+
+
+def test_eda_prefers_declared_train_csv_over_supplementary_train_directory(
+    tmp_path,
+) -> None:
+    train_dir = tmp_path / "train"
+    train_dir.mkdir()
+    (train_dir / "row-1.json").write_text("{}", encoding="utf-8")
+    train_csv = tmp_path / "train.csv"
+    pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "feature": [0.1, 0.2, 0.3],
+            "target": [0.4, 0.5, 0.6],
+        }
+    ).to_csv(train_csv, index=False)
+
+    updates = data_exploration_node(
+        {
+            "working_directory": str(tmp_path),
+            "data_files": {
+                "data_type": "tabular",
+                "train": str(train_dir),
+                "train_csv": str(train_csv),
+            },
+            "canonical_contract": {
+                "target_col": "target",
+                "target_cols": ["target"],
+                "target_type": "single",
+                "id_col": "id",
+                "is_classification": False,
+            },
+        }
+    )
+
+    insights = updates["data_insights"]
+    assert insights.n_train_samples == 3
+    assert insights.numeric_features == ["feature"]
