@@ -327,11 +327,16 @@ class ValidationMixin:
                 raise ValueError(
                     "OOF predictions contain NaN or Inf on eligible rows"
                 )
-            canonical_ids_path = canonical_contract.get("train_ids_path")
+            # Same directory fallback as y_path above: a contract missing the
+            # key must not disqualify IDs that verifiably exist on disk.
+            canonical_ids_path = Path(
+                canonical_contract.get("train_ids_path")
+                or working_dir / "canonical" / "train_ids.npy"
+            )
             model_ids_path = (
                 working_dir / "models" / f"train_ids_{component.name}.npy"
             )
-            if not canonical_ids_path or not model_ids_path.is_file():
+            if not canonical_ids_path.is_file() or not model_ids_path.is_file():
                 raise ValueError("Canonical/model train IDs are unavailable")
             canonical_ids = np.asarray(
                 np.load(canonical_ids_path, allow_pickle=True)

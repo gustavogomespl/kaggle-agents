@@ -116,6 +116,80 @@ def _resolve_filename_image_test_ids(
     return test_ids
 
 
+def _media_fallback_state_updates(
+    result: dict[str, Any],
+    test_ids: list[str],
+) -> dict[str, Any] | None:
+    """Build the complete canonical state a filename-derived contract carries.
+
+    The audio fallback used to return a success dict WITHOUT
+    ``canonical_contract``: the trusted scorer reads
+    ``canonical_contract["train_ids_path"]`` with no directory fallback, so
+    every model was rejected with "Canonical/model train IDs are unavailable"
+    and both audio benchmark competitions zeroed by construction. One
+    builder, shared by every media-filename path, keeps the fallback and
+    tabular contracts structurally identical.
+
+    Returns ``None`` (writing the reason into ``result["error"]``) when the
+    produced contract does not validate; the caller reports failure and the
+    run continues canonical-less.
+    """
+    metadata = result["metadata"]
+    train_ids = np.load(result["train_ids_path"], allow_pickle=True)
+    y = np.load(result["y_path"], allow_pickle=True)
+    folds = np.load(result["folds_path"], allow_pickle=True)
+    with Path(result["feature_cols_path"]).open(encoding="utf-8") as file:
+        feature_cols = json.load(file)
+    canonical_contract = CanonicalDataContract(
+        canonical_dir=result["canonical_dir"],
+        train_ids_path=result["train_ids_path"],
+        y_path=result["y_path"],
+        folds_path=result["folds_path"],
+        feature_cols_path=result["feature_cols_path"],
+        metadata_path=result["metadata_path"],
+        n_train=int(metadata["canonical_rows"]),
+        n_test=int(metadata["n_test"]),
+        n_folds=int(metadata["n_folds"]),
+        id_col=metadata["id_col"],
+        id_is_synthetic=bool(metadata.get("id_is_synthetic", False)),
+        target_col=metadata["target_col"],
+        target_cols=list(metadata["target_cols"]),
+        target_type=metadata["target_type"],
+        is_classification=bool(metadata["is_classification"]),
+        folds_hash=CanonicalDataContract.compute_array_hash(folds),
+        y_hash=CanonicalDataContract.compute_array_hash(y),
+        train_ids_hash=CanonicalDataContract.compute_array_hash(train_ids),
+        train_schema_hash=CanonicalDataContract.compute_schema_hash(
+            feature_cols, ["unknown"] * len(feature_cols)
+        ),
+        cv_strategy=metadata["cv_strategy"],
+        test_ids_path=result["test_ids_path"],
+    )
+    contract_is_valid, contract_violations = canonical_contract.validate()
+    if not contract_is_valid:
+        result["error"] = "; ".join(contract_violations)
+        return None
+    return {
+        "canonical_data_prepared": True,
+        "canonical_dir": result["canonical_dir"],
+        "canonical_train_ids_path": result["train_ids_path"],
+        "canonical_y_path": result["y_path"],
+        "canonical_folds_path": result["folds_path"],
+        "canonical_feature_cols_path": result["feature_cols_path"],
+        "canonical_test_ids_path": result["test_ids_path"],
+        "canonical_metadata": metadata,
+        "canonical_contract": canonical_contract.to_dict(),
+        "canonical_data_skipped_reason": None,
+        "target_col": metadata["target_col"],
+        "target_cols": list(metadata["target_cols"]),
+        "target_type": metadata["target_type"],
+        "expected_train_rows": int(metadata["canonical_rows"]),
+        "expected_test_rows": int(metadata["n_test"]),
+        "test_rec_ids": test_ids,
+        "last_updated": datetime.now(),
+    }
+
+
 def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
     """
     Prepare canonical data contract for consistent data handling.
@@ -167,13 +241,18 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             image_test_dir = Path(
                 data_files.get("test") or working_dir / "test"
             )
+            # Pass the path unconditionally: the preparer refuses a missing or
+            # empty test directory with a precise error. Collapsing it to None
+            # here used to produce a "complete" contract with zero test rows —
+            # it passed the executor integrity gate and every component then
+            # died on "Packed image evidence cannot be empty".
             canonical_result = prepare_image_to_image_canonical_data(
                 noisy_dir=data_files.get("train") or working_dir / "train",
                 clean_dir=(
                     data_files.get("clean_train")
                     or working_dir / "train_cleaned"
                 ),
-                test_dir=image_test_dir if image_test_dir.is_dir() else None,
+                test_dir=image_test_dir,
                 output_dir=working_dir,
                 n_folds=5,
             )
@@ -324,67 +403,14 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                 )
 
             if result.get("success"):
-                metadata = result["metadata"]
-                train_ids = np.load(result["train_ids_path"], allow_pickle=True)
-                y = np.load(result["y_path"], allow_pickle=True)
-                folds = np.load(result["folds_path"], allow_pickle=True)
-                with Path(result["feature_cols_path"]).open(encoding="utf-8") as file:
-                    feature_cols = json.load(file)
-                canonical_contract = CanonicalDataContract(
-                    canonical_dir=result["canonical_dir"],
-                    train_ids_path=result["train_ids_path"],
-                    y_path=result["y_path"],
-                    folds_path=result["folds_path"],
-                    feature_cols_path=result["feature_cols_path"],
-                    metadata_path=result["metadata_path"],
-                    n_train=int(metadata["canonical_rows"]),
-                    n_test=int(metadata["n_test"]),
-                    n_folds=int(metadata["n_folds"]),
-                    id_col=metadata["id_col"],
-                    id_is_synthetic=bool(metadata.get("id_is_synthetic", False)),
-                    target_col=metadata["target_col"],
-                    target_cols=list(metadata["target_cols"]),
-                    target_type=metadata["target_type"],
-                    is_classification=bool(metadata["is_classification"]),
-                    folds_hash=CanonicalDataContract.compute_array_hash(folds),
-                    y_hash=CanonicalDataContract.compute_array_hash(y),
-                    train_ids_hash=CanonicalDataContract.compute_array_hash(train_ids),
-                    train_schema_hash=CanonicalDataContract.compute_schema_hash(
-                        feature_cols, ["unknown"] * len(feature_cols)
-                    ),
-                    cv_strategy=metadata["cv_strategy"],
-                    test_ids_path=result["test_ids_path"],
-                )
-                contract_is_valid, contract_violations = canonical_contract.validate()
-                if not contract_is_valid:
-                    result = {
-                        "success": False,
-                        "error": "; ".join(contract_violations),
-                    }
-                else:
+                updates = _media_fallback_state_updates(result, test_ids)
+                if updates is not None:
                     print(
                         f"   Created canonical data from "
-                        f"{metadata['canonical_rows']} image files"
+                        f"{result['metadata']['canonical_rows']} image files"
                     )
-                    return {
-                        "canonical_data_prepared": True,
-                        "canonical_dir": result["canonical_dir"],
-                        "canonical_train_ids_path": result["train_ids_path"],
-                        "canonical_y_path": result["y_path"],
-                        "canonical_folds_path": result["folds_path"],
-                        "canonical_feature_cols_path": result["feature_cols_path"],
-                        "canonical_test_ids_path": result["test_ids_path"],
-                        "canonical_metadata": metadata,
-                        "canonical_contract": canonical_contract.to_dict(),
-                        "canonical_data_skipped_reason": None,
-                        "target_col": metadata["target_col"],
-                        "target_cols": list(metadata["target_cols"]),
-                        "target_type": metadata["target_type"],
-                        "expected_train_rows": int(metadata["canonical_rows"]),
-                        "expected_test_rows": int(metadata["n_test"]),
-                        "test_rec_ids": test_ids,
-                        "last_updated": datetime.now(),
-                    }
+                    return updates
+                result = {"success": False, "error": result.get("error")}
 
             print(
                 "   Could not derive labels from image filenames: "
@@ -422,31 +448,44 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                 train_dir = working_dir / "train"
 
             if train_dir.exists():
-                result = detector.create_canonical_from_audio_filenames(
-                    audio_dir=train_dir,
-                    canonical_dir=working_dir / "canonical",
-                    n_folds=5,
-                    explicit_pattern=filename_label_pattern,
-                )
+                # Same identity requirements as the image fallback: graded
+                # test IDs come from the submission template with proven
+                # one-to-one media coverage, and the state must carry the
+                # SAME canonical_contract the tabular path produces — the
+                # trusted scorer reads train_ids_path only from the contract.
+                try:
+                    test_ids = _resolve_filename_image_test_ids(
+                        data_files=data_files,
+                        working_dir=working_dir,
+                        submission_contract=submission_contract,
+                        sample_submission_path=state.get(
+                            "sample_submission_path"
+                        ),
+                        image_extensions=detector.AUDIO_LABEL_EXTENSIONS,
+                    )
+                except ValueError as exc:
+                    result = {"success": False, "error": str(exc)}
+                else:
+                    result = detector.create_canonical_from_audio_filenames(
+                        audio_dir=train_dir,
+                        canonical_dir=working_dir / "canonical",
+                        n_folds=5,
+                        explicit_pattern=filename_label_pattern,
+                        test_ids=test_ids,
+                    )
 
                 if result.get("success"):
-                    print(f"   Created canonical data from {result['metadata']['canonical_rows']} audio files")
-                    return {
-                        "canonical_data_prepared": True,
-                        "canonical_dir": result["canonical_dir"],
-                        "canonical_train_ids_path": result["train_ids_path"],
-                        "canonical_y_path": result["y_path"],
-                        "canonical_folds_path": result["folds_path"],
-                        "canonical_metadata": result["metadata"],
-                        "canonical_data_skipped_reason": None,
-                        "expected_train_rows": int(
-                            result["metadata"]["canonical_rows"]
-                        ),
-                        "expected_test_rows": expected_test_rows,
-                        "last_updated": datetime.now(),
-                    }
-                else:
-                    print(f"   Failed to extract labels from filenames: {result.get('error')}")
+                    updates = _media_fallback_state_updates(result, test_ids)
+                    if updates is not None:
+                        print(
+                            f"   Created canonical data from "
+                            f"{result['metadata']['canonical_rows']} audio files"
+                        )
+                        return updates
+                print(
+                    "   Failed to extract labels from filenames: "
+                    f"{result.get('error')}"
+                )
 
             # Fallback: skip canonical data for audio without labels
             print("   Skipping canonical data prep for audio (no train.csv or filename labels)")
@@ -546,28 +585,39 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             train_dir = working_dir / "train"
 
             if train_dir.exists():
-                fallback_result = detector.create_canonical_from_audio_filenames(
-                    audio_dir=train_dir,
-                    canonical_dir=working_dir / "canonical",
-                    n_folds=5,
-                    explicit_pattern=filename_label_pattern,
-                )
+                try:
+                    fallback_test_ids = _resolve_filename_image_test_ids(
+                        data_files=data_files,
+                        working_dir=working_dir,
+                        submission_contract=submission_contract,
+                        sample_submission_path=state.get(
+                            "sample_submission_path"
+                        ),
+                        image_extensions=detector.AUDIO_LABEL_EXTENSIONS,
+                    )
+                except ValueError as exc:
+                    fallback_result = {"success": False, "error": str(exc)}
+                else:
+                    fallback_result = (
+                        detector.create_canonical_from_audio_filenames(
+                            audio_dir=train_dir,
+                            canonical_dir=working_dir / "canonical",
+                            n_folds=5,
+                            explicit_pattern=filename_label_pattern,
+                            test_ids=fallback_test_ids,
+                        )
+                    )
 
                 if fallback_result.get("success"):
-                    print(f"   ✅ Fallback succeeded: {fallback_result['metadata']['canonical_rows']} files")
-                    return {
-                        "canonical_data_prepared": True,
-                        "canonical_dir": fallback_result["canonical_dir"],
-                        "canonical_train_ids_path": fallback_result["train_ids_path"],
-                        "canonical_y_path": fallback_result["y_path"],
-                        "canonical_folds_path": fallback_result["folds_path"],
-                        "canonical_metadata": fallback_result["metadata"],
-                        "expected_train_rows": int(
-                            fallback_result["metadata"]["canonical_rows"]
-                        ),
-                        "expected_test_rows": expected_test_rows,
-                        "last_updated": datetime.now(),
-                    }
+                    updates = _media_fallback_state_updates(
+                        fallback_result, fallback_test_ids
+                    )
+                    if updates is not None:
+                        print(
+                            "   ✅ Fallback succeeded: "
+                            f"{fallback_result['metadata']['canonical_rows']} files"
+                        )
+                        return updates
 
             print("   ❌ Fallback failed: No audio files with labels found")
             return {

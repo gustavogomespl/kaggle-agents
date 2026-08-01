@@ -42,6 +42,10 @@ error containing `NaN/Inf values; candidate is invalid`.
 Never replace NaN/Inf with constants. Only after finite/shape checks does the
 helper clip probability outputs to `[0, 1]`; multiclass outputs are normalized
 only when their finite row sums are positive.
+Temporal CV is the one sanctioned exception: pass the FULL-length OOF with its
+warm-up rows still NaN — the helper validates only rows where
+`CANONICAL_OOF_ELIGIBLE_MASK` is True and requires the warm-up rows to stay
+entirely NaN. Do not fill them and do not validate a masked slice instead.
 
 Packed image-to-image components are explicitly excluded from this helper.
 They must use the injected packed evidence contract instead.

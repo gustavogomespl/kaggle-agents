@@ -2,29 +2,31 @@
 
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
-from kaggle_agents.mlebench.data_adapter.detection import DetectionMixin
 from kaggle_agents.agents.planner.fallback_plans.audio import (
     create_audio_fallback_plan,
 )
+from kaggle_agents.mlebench.data_adapter.detection import DetectionMixin
 from kaggle_agents.prompts.templates.audio_template import get_audio_config
-from kaggle_agents.prompts.templates.builders.model import (
-    _build_audio_domain_instructions,
-)
 from kaggle_agents.prompts.templates.builders.context import (
     _build_audio_context,
 )
-from kaggle_agents.utils.label_parser import (
-    infer_filename_label_table,
-    read_id_mapping,
+from kaggle_agents.prompts.templates.builders.model import (
+    _build_audio_domain_instructions,
 )
 from kaggle_agents.utils.data_audit import (
     AuditFailedError,
     audit_audio_competition,
 )
+from kaggle_agents.utils.label_parser import (
+    infer_filename_label_table,
+    read_id_mapping,
+)
 from kaggle_agents.workflow.nodes.canonical_data import (
     _filename_label_pattern_from_state,
+    canonical_data_preparation_node,
 )
 
 
@@ -121,6 +123,60 @@ def test_audio_canonical_folds_adapt_to_observed_class_support(tmp_path) -> None
     assert result["metadata"]["n_folds"] == 3
     assert result["metadata"]["target_source"] == "unique_filename_structure"
     assert result["metadata"]["id_col"] == "record_id"
+
+
+def test_audio_fallback_state_carries_a_gradeable_contract(tmp_path) -> None:
+    """The audio fallback must return the same contract the tabular path does.
+
+    Its success dict used to omit ``canonical_contract`` (and never passed
+    test IDs through), so the trusted scorer — which reads
+    ``canonical_contract["train_ids_path"]`` with no directory fallback —
+    rejected every model with "Canonical/model train IDs are unavailable".
+    Both audio competitions in the benchmark suite zeroed by construction.
+    """
+    train_dir = tmp_path / "train"
+    test_dir = tmp_path / "test"
+    _files(
+        train_dir,
+        ["clip_a_red.wav", "clip_b_red.wav", "clip_c_blue.wav", "clip_d_blue.wav"],
+    )
+    _files(test_dir, ["t_1.wav", "t_2.wav"])
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("clip,probability\nt_1,0\nt_2,0\n", encoding="utf-8")
+
+    updates = canonical_data_preparation_node(
+        {
+            "working_directory": str(tmp_path),
+            "data_files": {
+                "data_type": "audio",
+                "train": str(train_dir),
+                "test": str(test_dir),
+                "sample_submission": str(sample),
+            },
+            "submission_contract": {"id_col": "clip"},
+            "sample_submission_path": str(sample),
+        }
+    )
+
+    assert updates["canonical_data_prepared"] is True
+    contract = updates["canonical_contract"]
+    # The exact key the trusted scorer refuses to work without:
+    train_ids_path = contract["train_ids_path"]
+    assert train_ids_path
+    assert (tmp_path / "canonical" / "train_ids.npy").is_file()
+    assert set(np.load(train_ids_path, allow_pickle=True).tolist()) == {
+        "clip_a_red",
+        "clip_b_red",
+        "clip_c_blue",
+        "clip_d_blue",
+    }
+    # Test IDs, in submission-template order, so components and the ensemble
+    # agree on prediction alignment.
+    test_ids = np.load(
+        tmp_path / "canonical" / "test_ids.npy", allow_pickle=False
+    )
+    assert [str(v) for v in test_ids] == ["t_1", "t_2"]
+    assert updates["expected_test_rows"] == 2
 
 
 def test_id_mapping_defaults_to_generic_contract_columns(tmp_path) -> None:

@@ -363,13 +363,23 @@ class MLEBenchRunner:
         """
         console.print("\n[bold]Grading submission with MLE-bench...[/bold]")
 
+        # Grading runs exactly once, at the very end of a multi-hour run, so a
+        # tight limit buys nothing and a pixel-level submission (millions of
+        # rows) can legitimately need minutes just to be read by the grader.
+        try:
+            grading_timeout_s = max(
+                60, int(os.getenv("KAGGLE_AGENTS_GRADING_TIMEOUT_S", "900"))
+            )
+        except ValueError:
+            grading_timeout_s = 900
+
         try:
             result = subprocess.run(
                 ["mlebench", "grade-sample", str(submission_path), competition_id],
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=60,
+                timeout=grading_timeout_s,
             )
 
             output = result.stdout + result.stderr
@@ -401,9 +411,14 @@ class MLEBenchRunner:
             }
 
         except subprocess.TimeoutExpired:
+            # The artifact exists and is hash-verified; the grader simply did
+            # not finish. That is a harness condition, not an agent failure —
+            # without this flag the run is permanently billed to the agent and
+            # becomes ineligible for rerun.
             return {
                 "valid_submission": False,
-                "error": "Grading timeout (60s)",
+                "error": f"Grading timeout ({grading_timeout_s}s)",
+                "grading_unavailable": True,
             }
         except FileNotFoundError:
             return {

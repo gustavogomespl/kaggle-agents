@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 import zipfile
 from collections.abc import Iterable, Sequence
@@ -483,17 +484,56 @@ def prepare_image_to_image_canonical_data(
     output_dir: str | Path,
     n_folds: int = 5,
 ) -> dict[str, object]:
+    """Pair noisy/clean images and write canonical targets, atomically enough.
+
+    A contract with zero test rows is refused up front: it satisfies the
+    executor's file-presence integrity gate and then kills every component
+    with "Packed image evidence cannot be empty" — a poisoned success. And a
+    failure part-way through must not leave a partial ``canonical/`` behind,
+    or that same gate refuses ALL generated-code execution for the rest of
+    the run (the orphan-directory class of bug).
+    """
+    output_dir = Path(output_dir)
+    canonical_dir = output_dir / "canonical"
+    contract_was_complete = (canonical_dir / "metadata.json").is_file()
+    try:
+        return _prepare_image_to_image_canonical_data_impl(
+            noisy_dir=noisy_dir,
+            clean_dir=clean_dir,
+            test_dir=test_dir,
+            output_dir=output_dir,
+            n_folds=n_folds,
+        )
+    except BaseException:
+        if not contract_was_complete:
+            shutil.rmtree(canonical_dir, ignore_errors=True)
+        raise
+
+
+def _prepare_image_to_image_canonical_data_impl(
+    *,
+    noisy_dir: str | Path,
+    clean_dir: str | Path,
+    test_dir: str | Path | None,
+    output_dir: Path,
+    n_folds: int,
+) -> dict[str, object]:
     """Pair noisy/clean images by relative path and write canonical targets."""
     noisy_dir = Path(noisy_dir)
     clean_dir = Path(clean_dir)
-    test_dir = Path(test_dir) if test_dir is not None else None
-    output_dir = Path(output_dir)
     if not noisy_dir.is_dir():
         raise ValueError(f"Noisy image directory does not exist: {noisy_dir}")
     if not clean_dir.is_dir():
         raise ValueError(f"Clean target directory does not exist: {clean_dir}")
-    if test_dir is not None and not test_dir.is_dir():
-        raise ValueError(f"Test image directory does not exist: {test_dir}")
+    if test_dir is None or not Path(test_dir).is_dir():
+        raise ValueError(
+            "image-to-image canonical contract requires an existing test "
+            "image directory (zero test rows cannot produce a submission): "
+            f"{test_dir}"
+        )
+    test_by_id = _relative_image_paths(Path(test_dir))
+    if not test_by_id:
+        raise ValueError(f"No test images were found in: {test_dir}")
 
     noisy_by_id = _relative_image_paths(noisy_dir)
     clean_by_id = _relative_image_paths(clean_dir)
@@ -542,7 +582,6 @@ def prepare_image_to_image_canonical_data(
         input_paths_path,
         np.asarray([str(noisy_by_id[image_id]) for image_id in image_ids], dtype=str),
     )
-    test_by_id = _relative_image_paths(test_dir) if test_dir is not None else {}
     test_ids = sorted(test_by_id)
     test_ids_path = canonical_dir / "test_ids.npy"
     np.save(test_ids_path, np.asarray(test_ids, dtype=str), allow_pickle=False)

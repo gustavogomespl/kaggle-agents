@@ -16,7 +16,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..core.config import calculate_score_improvement, compare_scores, get_config
+from ..core.config import (
+    calculate_score_improvement,
+    compare_scores,
+    get_config,
+    metric_reads_rows_as_distribution,
+)
 from ..core.state import KaggleState, SubmissionResult
 from ..utils.csv_utils import read_csv_auto
 from ..utils.submission_artifacts import (
@@ -620,12 +625,20 @@ class SubmissionAgent:
             normalized_problem = str(problem_type or "").lower()
             if "multiclass" in normalized_problem:
                 normalized_problem = "multiclass"
+            # Same metric-aware row-sum rule as the developer gate. Leaving the
+            # default (True) here rejected, at the very end of the run, bytes
+            # the developer had validated and snapshotted under a ranking
+            # metric — the terminal gate must not hold the artifact to a
+            # stricter contract than the one it was accepted under.
             return SubmissionValidationMixin().validate_submission_format(
                 Path(submission_path),
                 Path(sample_submission_path),
                 component_type="model",
                 problem_type=normalized_problem or None,
                 target_cols=target_cols,
+                require_normalized_rows=metric_reads_rows_as_distribution(
+                    metric_name or ""
+                ),
             )
 
         try:

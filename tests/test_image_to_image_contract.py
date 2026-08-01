@@ -265,10 +265,14 @@ def test_prepare_image_pairs_supports_relative_paths_and_variable_sizes(
     _write_rgb(clean / "café" / "imagem.png", first)
     _write_rgb(noisy / "犬.png", second + 1)
     _write_rgb(clean / "犬.png", second)
+    # A test directory is now mandatory: a contract with zero test rows
+    # cannot produce a submission but used to pass the integrity gate.
+    _write_rgb(tmp_path / "test" / "t.png", first)
 
     result = prepare_image_to_image_canonical_data(
         noisy_dir=noisy,
         clean_dir=clean,
+        test_dir=tmp_path / "test",
         output_dir=tmp_path,
         n_folds=5,
     )
@@ -285,6 +289,73 @@ def test_prepare_image_pairs_supports_relative_paths_and_variable_sizes(
     assert result["metadata"]["target_value_range"] == [0.0, 1.0]
     assert result["metadata"]["integer_pixel_normalization"] == "dtype_max"
     assert result["metadata"]["canonical_rows"] == 2
+
+
+def _paired_train_dirs(tmp_path: Path) -> tuple[Path, Path]:
+    noisy = tmp_path / "train"
+    clean = tmp_path / "train_cleaned"
+    image = np.ones((2, 2, 3), dtype=np.uint8)
+    _write_rgb(noisy / "a.png", image)
+    _write_rgb(clean / "a.png", image)
+    return noisy, clean
+
+
+def test_prepare_refuses_a_contract_with_zero_test_rows(tmp_path: Path) -> None:
+    """A "complete" contract with n_test=0 passes the executor integrity gate
+    and then kills every component with "Packed image evidence cannot be
+    empty" — a poisoned success. Refusal must also leave no canonical/
+    behind, or the gate blocks all execution for the rest of the run."""
+    noisy, clean = _paired_train_dirs(tmp_path)
+
+    with pytest.raises(ValueError, match="test image directory"):
+        prepare_image_to_image_canonical_data(
+            noisy_dir=noisy, clean_dir=clean, test_dir=None, output_dir=tmp_path
+        )
+
+    assert not (tmp_path / "canonical").exists()
+
+
+def test_prepare_refuses_an_empty_test_directory(tmp_path: Path) -> None:
+    noisy, clean = _paired_train_dirs(tmp_path)
+    empty_test = tmp_path / "test"
+    empty_test.mkdir()
+
+    with pytest.raises(ValueError, match="No test images"):
+        prepare_image_to_image_canonical_data(
+            noisy_dir=noisy,
+            clean_dir=clean,
+            test_dir=empty_test,
+            output_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "canonical").exists()
+
+
+def test_failed_preparation_leaves_no_partial_canonical(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A crash after canonical/ is created must remove the partial directory
+    (the orphan-canonical class: the executor integrity gate refuses ALL
+    generated-code execution over an incomplete contract)."""
+    noisy, clean = _paired_train_dirs(tmp_path)
+    _write_rgb(tmp_path / "test" / "t.png", np.ones((2, 2, 3), dtype=np.uint8))
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "kaggle_agents.utils.image_to_image_contract.save_packed_images", boom
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        prepare_image_to_image_canonical_data(
+            noisy_dir=noisy,
+            clean_dir=clean,
+            test_dir=tmp_path / "test",
+            output_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "canonical").exists()
 
 
 def test_prepare_image_contract_discovers_test_images_and_persists_ids(
@@ -318,11 +389,13 @@ def test_prepare_image_pairs_rejects_shape_mismatch(tmp_path: Path) -> None:
     clean = tmp_path / "train_cleaned"
     _write_rgb(noisy / "a.png", np.zeros((2, 2, 3), dtype=np.uint8))
     _write_rgb(clean / "a.png", np.zeros((3, 2, 3), dtype=np.uint8))
+    _write_rgb(tmp_path / "test" / "t.png", np.zeros((2, 2, 3), dtype=np.uint8))
 
     with pytest.raises(ValueError, match=r"Paired image shape mismatch.*a.png"):
         prepare_image_to_image_canonical_data(
             noisy_dir=noisy,
             clean_dir=clean,
+            test_dir=tmp_path / "test",
             output_dir=tmp_path,
         )
 
@@ -334,6 +407,7 @@ def test_prepare_image_pairs_rejects_missing_pair_in_either_directory(
     clean = tmp_path / "train_cleaned"
     _write_rgb(noisy / "only-noisy.png", np.zeros((2, 2, 3), dtype=np.uint8))
     _write_rgb(clean / "only-clean.png", np.zeros((2, 2, 3), dtype=np.uint8))
+    _write_rgb(tmp_path / "test" / "t.png", np.zeros((2, 2, 3), dtype=np.uint8))
 
     with pytest.raises(
         ValueError,
@@ -342,6 +416,7 @@ def test_prepare_image_pairs_rejects_missing_pair_in_either_directory(
         prepare_image_to_image_canonical_data(
             noisy_dir=noisy,
             clean_dir=clean,
+            test_dir=tmp_path / "test",
             output_dir=tmp_path,
         )
 
@@ -421,6 +496,7 @@ def test_image_to_image_node_and_trusted_scorer_end_to_end(
     clean = tmp_path / "train_cleaned"
     _write_rgb(noisy / "a.png", np.full((2, 2, 3), 3, dtype=np.uint8))
     _write_rgb(clean / "a.png", np.full((2, 2, 3), 2, dtype=np.uint8))
+    _write_rgb(tmp_path / "test" / "t.png", np.full((2, 2, 3), 3, dtype=np.uint8))
     updates = canonical_data_preparation_node(
         {
             "working_directory": str(tmp_path),
@@ -429,6 +505,7 @@ def test_image_to_image_node_and_trusted_scorer_end_to_end(
                 "data_type": "image",
                 "train": str(noisy),
                 "clean_train": str(clean),
+                "test": str(tmp_path / "test"),
             },
         }
     )

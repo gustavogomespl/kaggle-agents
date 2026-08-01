@@ -98,6 +98,98 @@ def test_injected_probability_helper_rejects_invalid_predictions(
         )
 
 
+class TestTemporalWarmupNaNContract:
+    """The helper must accept the NaN the temporal contract REQUIRES.
+
+    The injected header mandates that temporal warm-up OOF rows remain NaN
+    and every host validator rejects anything else — while this helper's
+    docstring says to call it on BOTH OOF and test and it raised on any NaN.
+    A compliant temporal component therefore had no passing path. Temporal
+    handling activates only for a full-length array that already carries NaN
+    under a masked contract, so test predictions (all finite) and
+    non-temporal runs (all-True mask) keep the exact old behavior.
+    """
+
+    @staticmethod
+    def _helper(mask: np.ndarray | None):
+        header = (
+            _probability_validation_helper_for_component("model", False)
+            + "\n# === END PATH CONSTANTS ==="
+        )
+        namespace: dict = {}
+        exec(compile(header, "<dense-header>", "exec"), namespace)
+        if mask is not None:
+            namespace["CANONICAL_OOF_ELIGIBLE_MASK"] = mask
+        return namespace["validate_probabilities"]
+
+    def test_compliant_temporal_oof_is_accepted(self) -> None:
+        mask = np.asarray([False, False, True, True, True])
+        oof = np.asarray([np.nan, np.nan, 0.2, 0.7, 0.9])
+
+        validated = self._helper(mask)(
+            oof, expected_rows=5, is_multiclass=False, name="OOF"
+        )
+
+        assert np.isnan(validated[:2]).all()
+        np.testing.assert_allclose(validated[2:], [0.2, 0.7, 0.9])
+
+    def test_partially_filled_warmup_is_rejected_with_the_contract(self) -> None:
+        mask = np.asarray([False, False, True, True, True])
+        oof = np.asarray([0.5, np.nan, 0.2, 0.7, 0.9])
+
+        with pytest.raises(ValueError, match="warm-up rows must remain NaN"):
+            self._helper(mask)(
+                oof, expected_rows=5, is_multiclass=False, name="OOF"
+            )
+
+    def test_nan_on_eligible_rows_is_still_invalid(self) -> None:
+        mask = np.asarray([False, True, True])
+        oof = np.asarray([np.nan, np.nan, 0.9])
+
+        with pytest.raises(ValueError, match="NaN/Inf values"):
+            self._helper(mask)(
+                oof, expected_rows=3, is_multiclass=False, name="OOF"
+            )
+
+    def test_multiclass_normalization_skips_warmup_rows(self) -> None:
+        mask = np.asarray([False, True, True])
+        oof = np.asarray(
+            [[np.nan, np.nan], [0.6, 0.6], [0.2, 0.2]]
+        )
+
+        validated = self._helper(mask)(
+            oof, expected_rows=3, is_multiclass=True, name="OOF"
+        )
+
+        assert np.isnan(validated[0]).all()
+        np.testing.assert_allclose(validated[1:].sum(axis=1), [1.0, 1.0])
+
+    def test_all_true_mask_keeps_the_old_behavior(self) -> None:
+        mask = np.ones(3, dtype=bool)
+
+        with pytest.raises(ValueError, match="NaN/Inf values"):
+            self._helper(mask)(
+                np.asarray([0.1, np.nan, 0.9]),
+                expected_rows=3,
+                is_multiclass=False,
+                name="OOF",
+            )
+
+    def test_finite_test_predictions_pass_under_a_temporal_mask(self) -> None:
+        # n_test can coincide with n_train; all-finite predictions must not
+        # be mistaken for a non-compliant OOF.
+        mask = np.asarray([False, True, True])
+
+        validated = self._helper(mask)(
+            np.asarray([0.1, 0.5, 0.9]),
+            expected_rows=3,
+            is_multiclass=False,
+            name="Test",
+        )
+
+        np.testing.assert_allclose(validated, [0.1, 0.5, 0.9])
+
+
 @pytest.mark.parametrize("component_type", ["model", "ensemble"])
 def test_dense_model_and_ensemble_headers_receive_probability_helper(
     component_type: str,

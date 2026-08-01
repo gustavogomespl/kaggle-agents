@@ -17,6 +17,7 @@ from kaggle_agents.tools.code_executor.canonical_integrity import (
     snapshot_canonical_contract,
     verify_and_restore_canonical_contract,
 )
+from kaggle_agents.utils.data_contract import prepare_canonical_data
 
 
 def _write_canonical_contract(workspace: Path) -> dict[str, bytes]:
@@ -45,6 +46,54 @@ def _write_canonical_contract(workspace: Path) -> dict[str, bytes]:
         for path in canonical.iterdir()
         if path.is_file()
     }
+
+
+def test_failed_preparation_does_not_poison_the_execution_gate(tmp_path):
+    """A canonical prep that dies mid-way must not leave a partial canonical/.
+
+    The executor's integrity gate treats an existing canonical/ as a declared
+    contract and fails closed when it is incomplete. A preparation crash that
+    leaves the directory behind (observed when the public training data is a
+    directory of JSON files, so pd.read_csv raises right after mkdir) therefore
+    poisoned every later generated-code execution: the whole run produced zero
+    components. Failure must leave the workspace exactly as canonical-less.
+    """
+    train_dir = tmp_path / "train"
+    train_dir.mkdir()
+
+    with pytest.raises((OSError, ValueError)):
+        prepare_canonical_data(
+            train_path=train_dir,
+            test_path=train_dir,
+            target_col="target",
+            output_dir=tmp_path,
+        )
+
+    assert not (tmp_path / "canonical").exists()
+    # The exact consequence that matters: the execution gate opens again.
+    assert snapshot_canonical_contract(tmp_path) is None
+
+
+def test_failed_re_preparation_keeps_a_complete_preexisting_contract(tmp_path):
+    """Cleanup covers only the partial directory this preparation created.
+
+    When a complete contract already exists, a failed re-preparation must not
+    delete it: the artifacts on disk are still the ones every earlier
+    component was validated against.
+    """
+    _write_canonical_contract(tmp_path)
+    train_dir = tmp_path / "train"
+    train_dir.mkdir()
+
+    with pytest.raises((OSError, ValueError)):
+        prepare_canonical_data(
+            train_path=train_dir,
+            test_path=train_dir,
+            target_col="target",
+            output_dir=tmp_path,
+        )
+
+    assert (tmp_path / "canonical" / "metadata.json").is_file()
 
 
 def test_snapshot_detects_mutation_and_restores_exact_contract(

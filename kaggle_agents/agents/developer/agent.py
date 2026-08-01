@@ -14,6 +14,7 @@ import math
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -261,6 +262,40 @@ def _expected_model_artifacts(
     if mlebench:
         expected.append(f"models/test_ids_{component.name}.npy")
     return expected
+
+
+def _resolved_primary_score(
+    result: Any,
+    component_name: str,
+    state: Mapping[str, Any],
+    new_cv_score: float | None,
+) -> float | None:
+    """Trusted score used for promotion decisions, surviving cache reuse.
+
+    A reused result deliberately skips re-scoring (its improvement gate ran
+    when it first executed), so ``new_cv_score`` is ``None`` here. Reading
+    that ``None`` as "no independently reproducible OOF score" rejected the
+    reused component and quarantined the prior best model's artifacts on
+    every refinement iteration. The score it earned is still in the trusted
+    map, keyed by the same host-recomputed provenance — only cache reuse may
+    substitute it; a fresh unscored result stays unscored and fail-closed.
+    """
+    try:
+        primary = float(new_cv_score)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        primary = None
+    if primary is not None and not math.isfinite(primary):
+        primary = None
+    if primary is not None or not getattr(result, "reused_from_cache", False):
+        return primary
+    reused = (state.get("trusted_component_scores") or {}).get(component_name)
+    if isinstance(reused, dict):
+        reused = reused.get("score", reused.get("cv_score"))
+    try:
+        reused_score = float(reused)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return reused_score if math.isfinite(reused_score) else None
 
 
 def _has_combinable_model_predictions(
@@ -1586,7 +1621,9 @@ class DeveloperAgent(
                 shutil.copy(submission_path, backup_path)
                 print(f"Backup submission saved: {backup_name}")
 
-                primary_score = _coerce_score(new_cv_score)
+                primary_score = _resolved_primary_score(
+                    result, component.name, state, new_cv_score
+                )
                 if primary_score is not None:
                     primary_score_source = "cv"
 

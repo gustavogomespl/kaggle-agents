@@ -284,6 +284,12 @@ def safe_restore_submission(
                 SubmissionValidationMixin,
             )
 
+            # Structure, echo columns, order, and row count are re-checked;
+            # the metric-dependent row-sum quality rule is NOT. The snapshot
+            # was validated under the graded metric's rule when it was
+            # accepted and the digest pins those exact bytes — re-litigating
+            # quality here rejected, at restore time, submissions a ranking
+            # metric would score unchanged.
             is_valid, error_msg = (
                 SubmissionValidationMixin().validate_submission_format(
                     source_path,
@@ -291,6 +297,7 @@ def safe_restore_submission(
                     component_type="model",
                     problem_type=problem_type,
                     target_cols=target_cols,
+                    require_normalized_rows=False,
                 )
             )
             if not is_valid:

@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from kaggle_agents.agents.developer.agent import unsaved_expected_artifacts
+from kaggle_agents.agents.developer.agent import (
+    _resolved_primary_score,
+    unsaved_expected_artifacts,
+)
 from kaggle_agents.core.state.results import DevelopmentResult
 from kaggle_agents.prompts.templates.builders.model import (
     build_performance_gap_instructions,
@@ -91,6 +94,38 @@ class TestCachedComponentIsNotRejudged:
 
         # The guard sits immediately above the gate, in the same condition.
         assert source.count("reused_from_cache", guard, gate_call) == 1
+
+    def test_a_reused_result_keeps_its_trusted_score_for_promotion(self):
+        """Skipping the gate leaves new_cv_score=None for reused results, and
+        the promotion block read that None as "no independently reproducible
+        OOF score" — rejecting the reused component and quarantining the
+        prior best model's artifacts on every refinement iteration (observed
+        on a live run: the accepted baseline was stripped at the start of
+        iteration 2). The score it earned is still in the trusted map."""
+        reused = DevelopmentResult(code="x", success=True)
+        reused.reused_from_cache = True
+        state = {"trusted_component_scores": {"baseline": 0.9767}}
+
+        assert _resolved_primary_score(reused, "baseline", state, None) == (
+            pytest.approx(0.9767)
+        )
+
+    def test_a_fresh_unscored_result_still_resolves_to_none(self):
+        """Only cache reuse may substitute the stored score: a fresh result
+        without a recomputed score remains unscored and keeps the existing
+        fail-closed handling."""
+        fresh = DevelopmentResult(code="x", success=True)
+        state = {"trusted_component_scores": {"baseline": 0.9767}}
+
+        assert _resolved_primary_score(fresh, "baseline", state, None) is None
+
+    def test_a_reused_result_without_a_stored_score_stays_unscored(self):
+        reused = DevelopmentResult(code="x", success=True)
+        reused.reused_from_cache = True
+
+        assert (
+            _resolved_primary_score(reused, "baseline", {}, None) is None
+        )
 
 
 class TestArtifactContractCheckedBeforeTraining:

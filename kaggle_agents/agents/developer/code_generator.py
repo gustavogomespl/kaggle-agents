@@ -267,7 +267,13 @@ def validate_probabilities(
     independent_outputs=False,
     name="predictions",
 ):
-    """Validate probability predictions. Call for BOTH OOF and test."""
+    """Validate probability predictions. Call for BOTH OOF and test.
+
+    Temporal CV: the canonical contract requires warm-up OOF rows to remain
+    NaN. A full-length array that already carries NaN under a temporal
+    eligibility mask is validated on eligible rows only; its warm-up rows
+    must be entirely NaN and are returned unchanged.
+    """
     import numpy as _np
 
     preds = _np.asarray(preds, dtype=_np.float64)
@@ -284,9 +290,30 @@ def validate_probabilities(
                 f"expected={expected_cols}"
             )
 
+    # Temporal OOF detection is deliberately narrow: a masked contract, a
+    # full-length array, AND NaN already present (test predictions are all
+    # finite even when n_test happens to equal n_train, and a warm-up filled
+    # in by mistake is caught by the host validators with the same message).
+    _eligible = None
+    _mask = globals().get("CANONICAL_OOF_ELIGIBLE_MASK")
+    if _mask is not None:
+        _mask = _np.asarray(_mask, dtype=bool).reshape(-1)
+        if (
+            _mask.shape[0] == preds.shape[0]
+            and not _mask.all()
+            and bool(_np.isnan(preds).any())
+        ):
+            _eligible = _mask
+            if bool(_np.isfinite(preds[~_eligible]).any()):
+                raise ValueError(
+                    f"{name} temporal warm-up rows must remain NaN; never "
+                    "fill rows where CANONICAL_OOF_ELIGIBLE_MASK is False"
+                )
+
     # Non-finite values invalidate the candidate. Never replace them with
     # constants because that fabricates predictions and conceals model failure.
-    nonfinite_count = int(_np.sum(~_np.isfinite(preds)))
+    _checked = preds if _eligible is None else preds[_eligible]
+    nonfinite_count = int(_np.sum(~_np.isfinite(_checked)))
     if nonfinite_count:
         raise ValueError(
             f"{name} contains {nonfinite_count} NaN/Inf values; "
@@ -294,11 +321,12 @@ def validate_probabilities(
         )
 
     # Probability metrics require probabilities. Clipping is allowed only after
-    # the finite/shape checks above have passed.
+    # the finite/shape checks above have passed. NaN comparisons are False, so
+    # preserved warm-up rows pass through both the check and the clip.
     if _np.any(preds < 0) or _np.any(preds > 1):
         print(
-            f"WARNING: {name} outside [0,1]: min={preds.min():.4f}, "
-            f"max={preds.max():.4f}, clipping"
+            f"WARNING: {name} outside [0,1]: min={_np.nanmin(preds):.4f}, "
+            f"max={_np.nanmax(preds):.4f}, clipping"
         )
         preds = _np.clip(preds, 1e-15, 1 - 1e-15)
 
@@ -324,7 +352,8 @@ def validate_probabilities(
             )
             preds = preds / row_sums
 
-    if not _np.all(_np.isfinite(preds)):
+    _checked = preds if _eligible is None else preds[_eligible]
+    if not _np.all(_np.isfinite(_checked)):
         raise ValueError(f"{name} became non-finite during validation")
 
     return preds

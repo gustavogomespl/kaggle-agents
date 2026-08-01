@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -1170,6 +1171,42 @@ def _hash_based_sample(
 
 
 def prepare_canonical_data(
+    train_path: str | Path,
+    test_path: str | Path,
+    target_col: str | None,
+    output_dir: str | Path,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Prepare the canonical contract, leaving nothing behind on failure.
+
+    The executor's integrity gate (``snapshot_canonical_contract``) treats an
+    existing ``canonical/`` directory as a declared contract and refuses ALL
+    generated-code execution when it is incomplete. Preparation writes into
+    that directory incrementally with ``metadata.json`` last, so a crash at
+    any point would otherwise leave a partial directory that blocks the whole
+    run. Failure therefore removes the directory this call created; a
+    complete pre-existing contract is preserved because earlier components
+    were validated against those exact bytes.
+
+    See :func:`_prepare_canonical_data_impl` for parameters and semantics.
+    """
+    canonical_dir = Path(output_dir) / "canonical"
+    contract_was_complete = (canonical_dir / "metadata.json").is_file()
+    try:
+        return _prepare_canonical_data_impl(
+            train_path,
+            test_path,
+            target_col,
+            output_dir,
+            **kwargs,
+        )
+    except BaseException:
+        if not contract_was_complete:
+            shutil.rmtree(canonical_dir, ignore_errors=True)
+        raise
+
+
+def _prepare_canonical_data_impl(
     train_path: str | Path,
     test_path: str | Path,
     target_col: str | None,

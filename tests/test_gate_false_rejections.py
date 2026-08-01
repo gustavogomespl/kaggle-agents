@@ -27,6 +27,10 @@ to a contract nothing had asked it to satisfy:
 5. Multiclass rows that did not sum to 1 failed a candidate outright even when
    the graded metric scores each column independently and would have accepted
    the very same predictions.
+6. Fixing (5) at the developer gate was not enough: the SubmissionAgent's
+   terminal validation and the ensemble's snapshot restore re-applied the
+   unconditional row-sum rule to the very same bytes, so the run was accepted
+   in the middle and rejected at the end.
 """
 
 from pathlib import Path
@@ -35,7 +39,9 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from kaggle_agents.agents.ensemble.submission import safe_restore_submission
 from kaggle_agents.agents.robustness_agent import RobustnessAgent
+from kaggle_agents.agents.submission_agent import SubmissionAgent
 from kaggle_agents.core.config import metric_reads_rows_as_distribution
 from kaggle_agents.utils.data_contract import _ensure_id_column
 from kaggle_agents.utils.oof_validation import assert_oof_sanity
@@ -43,6 +49,7 @@ from kaggle_agents.utils.strict_validation import (
     StrictValidationConfig,
     validate_model_artifacts,
 )
+from kaggle_agents.utils.submission_artifacts import sha256_file
 from kaggle_agents.workflow.nodes.robustness_gate import _mle_evidence_failures
 
 
@@ -487,6 +494,87 @@ class TestRepeatingKeyCannotNameRows:
         _, id_col, synthetic = _ensure_id_column(frame, "id")
 
         assert (id_col, synthetic) == ("_row_id", True)
+
+
+class TestTerminalGatesFollowTheGradedMetric:
+    """The terminal gates must apply the same metric-aware row-sum rule.
+
+    The developer gate learned that rows are a distribution only under a
+    likelihood metric; the SubmissionAgent's final validation and the
+    ensemble's hash-verified snapshot restore kept the unconditional rule, so
+    bytes accepted (and snapshotted) mid-run were rejected at the very end and
+    the run graded as nothing. Shape: four one-hot prediction columns scored
+    by column-wise AUC, sigmoid rows.
+    """
+
+    WIDE_COLS = ("label_a", "label_b", "label_c", "label_d")
+
+    @classmethod
+    def _unnormalized_submission(cls, tmp_path: Path) -> tuple[Path, Path]:
+        header = "row_id," + ",".join(cls.WIDE_COLS)
+        sample = tmp_path / "sample_submission.csv"
+        sample.write_text(
+            f"{header}\nr0,0.25,0.25,0.25,0.25\nr1,0.25,0.25,0.25,0.25\n",
+            encoding="utf-8",
+        )
+        submission = tmp_path / "submission.csv"
+        submission.write_text(
+            f"{header}\nr0,0.9,0.8,0.1,0.2\nr1,0.3,0.9,0.4,0.8\n",
+            encoding="utf-8",
+        )
+        return submission, sample
+
+    def test_submission_agent_accepts_sigmoid_rows_under_ranking_metric(
+        self, tmp_path
+    ) -> None:
+        submission, sample = self._unnormalized_submission(tmp_path)
+
+        is_valid, message = SubmissionAgent()._validate_submission(
+            submission,
+            sample,
+            problem_type="multiclass_classification",
+            metric_name="auc",
+            target_cols=list(self.WIDE_COLS),
+        )
+
+        assert is_valid, message
+
+    def test_submission_agent_still_rejects_under_likelihood_metric(
+        self, tmp_path
+    ) -> None:
+        submission, sample = self._unnormalized_submission(tmp_path)
+
+        is_valid, message = SubmissionAgent()._validate_submission(
+            submission,
+            sample,
+            problem_type="multiclass_classification",
+            metric_name="multi class log loss",
+            target_cols=list(self.WIDE_COLS),
+        )
+
+        assert is_valid is False
+        assert "sum to 1.0" in message
+
+    def test_snapshot_restore_does_not_relitigate_row_sums(
+        self, tmp_path
+    ) -> None:
+        """A hash-verified snapshot was validated when it was accepted; the
+        restore boundary checks structure and bytes, not quality rules."""
+        submission, sample = self._unnormalized_submission(tmp_path)
+        destination = tmp_path / "restored" / "submission.csv"
+
+        restored = safe_restore_submission(
+            submission,
+            destination,
+            sample,
+            target_cols=list(self.WIDE_COLS),
+            problem_type="multiclass",
+            expected_sha256=sha256_file(submission),
+            require_hash=True,
+        )
+
+        assert restored is True
+        assert destination.read_bytes() == submission.read_bytes()
 
 
 class TestRowSumContractFollowsTheGradedMetric:

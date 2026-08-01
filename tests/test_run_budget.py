@@ -11,12 +11,13 @@ import hashlib
 import importlib.util
 import platform
 import signal
+import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from kaggle_agents.mlebench.runner import classify_failure_origin
+from kaggle_agents.mlebench.runner import MLEBenchRunner, classify_failure_origin
 from kaggle_agents.tools.code_executor.process import (
     MIN_CPU_TIME_S,
     cpu_time_budget_for,
@@ -407,6 +408,54 @@ class TestBackbonePreflight:
         monkeypatch.setenv("KAGGLE_AGENTS_ALLOW_DEFAULT_BACKBONE", "true")
 
         assert MLEBenchRunner._preflight_backbone() == {}
+
+
+class TestGradingTimeoutIsAHarnessCondition:
+    """A 60s cap zeroed pixel-scale submissions deterministically, and the
+    timeout message matched no failure signature, so the run was billed to
+    the agent and became ineligible for rerun — with a perfect hash-verified
+    artifact sitting on disk. Grading runs once at the very end of a
+    multi-hour run; the cap must be generous and a timeout must surface as a
+    harness condition."""
+
+    def _runner(self, tmp_path: Path):
+        return MLEBenchRunner(
+            mle_cache_path=tmp_path / "cache", workspace_base=tmp_path / "ws"
+        )
+
+    def _timing_out_run(self, monkeypatch, captured: dict):
+        def fake_run(*args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            raise subprocess.TimeoutExpired(
+                cmd="mlebench", timeout=kwargs.get("timeout")
+            )
+
+        monkeypatch.setattr(
+            "kaggle_agents.mlebench.runner.subprocess.run", fake_run
+        )
+
+    def test_timeout_reports_grading_unavailable(self, tmp_path, monkeypatch):
+        self._timing_out_run(monkeypatch, {})
+        grading = self._runner(tmp_path)._grade_submission(
+            "comp", tmp_path / "s.csv"
+        )
+        assert grading["valid_submission"] is False
+        assert grading.get("grading_unavailable") is True
+
+    def test_timeout_budget_is_generous_and_configurable(
+        self, tmp_path, monkeypatch
+    ):
+        captured: dict = {}
+        self._timing_out_run(monkeypatch, captured)
+        runner = self._runner(tmp_path)
+
+        monkeypatch.delenv("KAGGLE_AGENTS_GRADING_TIMEOUT_S", raising=False)
+        runner._grade_submission("comp", tmp_path / "s.csv")
+        assert captured["timeout"] >= 600
+
+        monkeypatch.setenv("KAGGLE_AGENTS_GRADING_TIMEOUT_S", "1234")
+        runner._grade_submission("comp", tmp_path / "s.csv")
+        assert captured["timeout"] == 1234
 
 
 class TestGradingSurvivesACrash:
