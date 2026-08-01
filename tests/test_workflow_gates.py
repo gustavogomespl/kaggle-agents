@@ -17,8 +17,10 @@ from kaggle_agents.core.state import (
     ValidationResult,
 )
 from kaggle_agents.utils.submission_artifacts import (
+    sha256_file,
     snapshot_accepted_submission,
     snapshot_best_candidate_submission,
+    verified_accepted_submission,
 )
 from kaggle_agents.workflow.nodes.robustness_gate import robustness_gate_node
 from kaggle_agents.workflow.routing import (
@@ -358,6 +360,10 @@ class TestRobustnessGate:
             "accepted_submission_score_owner",
         ):
             assert preserved_key not in updates
+        assert (
+            verified_accepted_submission({**state, **updates}, tmp_path)
+            is not None
+        )
 
     def test_integrity_failure_discards_the_snapshot_its_owner_produced(
         self, tmp_path
@@ -450,6 +456,70 @@ class TestRobustnessGate:
             "robustness_quality_objection_graded_verified_snapshot"
         )
         assert submission.read_bytes() == expected
+        # The runner grades ONLY the accepted registry. When the run never
+        # reached the SubmissionAgent (this scenario: the gate stops the run
+        # before ensemble/submission), workflow_valid=True with an unbound
+        # snapshot makes the runner answer "No hash-verified accepted
+        # submission generated in this run" and the run grades as nothing.
+        graded = verified_accepted_submission({**state, **updates}, tmp_path)
+        assert graded is not None
+        assert sha256_file(graded) == digest
+
+    def test_integrity_failure_still_grades_anothers_verified_snapshot(
+        self, tmp_path
+    ):
+        """Integrity discards the disputed candidate, not the whole run.
+
+        model_a's evidence cannot be verified (its rows do not line up with
+        the canonical order), but the surviving snapshot belongs to model_b,
+        whose integrity is not in question. The run must end gradeable, with
+        the snapshot bound to the registry the runner reads.
+        """
+        run_id = "gate-run"
+        models = tmp_path / "models"
+        canonical = tmp_path / "canonical"
+        models.mkdir()
+        canonical.mkdir()
+        np.save(canonical / "train_ids.npy", np.array(["a", "b"]))
+        np.save(models / "train_ids_model_a.npy", np.array(["b", "a"]))
+        np.save(models / "oof_model_a.npy", np.array([0.2, 0.8]))
+        np.save(models / "test_model_a.npy", np.array([0.4]))
+        submission = tmp_path / "submission.csv"
+        expected = b"id,target\r\n1,0.9\r\n"
+        submission.write_bytes(expected)
+        snapshot, digest = snapshot_best_candidate_submission(
+            tmp_path,
+            submission,
+            run_id=run_id,
+            iteration=0,
+        )
+        state = _failure_state(
+            tmp_path,
+            run_mode="mlebench",
+            robustness_passed=True,
+            robustness_recovery_count=1,
+            run_id=run_id,
+            best_candidate_submission_component_name="model_b",
+            best_candidate_submission_snapshot_path=str(snapshot),
+            best_candidate_submission_sha256=digest,
+            oof_availability={"model_a": True},
+            robustness_approved_components={"model_a": True},
+            trusted_component_scores={"model_a": 0.8},
+            canonical_contract={
+                "train_ids_path": str(canonical / "train_ids.npy")
+            },
+        )
+
+        updates = robustness_gate_node(state)
+
+        assert updates["workflow_valid"] is True
+        assert updates["termination_reason"] == (
+            "robustness_failed_preserved_best_submission"
+        )
+        assert submission.read_bytes() == expected
+        graded = verified_accepted_submission({**state, **updates}, tmp_path)
+        assert graded is not None
+        assert sha256_file(graded) == digest
 
     def test_second_failure_rejects_mutable_hill_climb_best_from_disk(self, tmp_path):
         best = tmp_path / "submission_best.csv"

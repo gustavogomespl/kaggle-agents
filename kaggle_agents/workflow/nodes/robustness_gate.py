@@ -20,6 +20,8 @@ from ...utils.image_to_image_contract import load_packed_images
 from ...utils.submission_artifacts import (
     restore_accepted_submission,
     restore_best_candidate_submission,
+    snapshot_accepted_submission,
+    verified_accepted_submission,
 )
 from ...utils.telemetry import make_event
 
@@ -460,6 +462,70 @@ def _quarantine_rejected_candidate(
     return updates, restored, audit
 
 
+def _bind_restored_snapshot_for_grading(
+    state: KaggleState,
+    updates: dict[str, Any],
+    restored: Path | None,
+) -> tuple[dict[str, Any], bool]:
+    """Bind the restored, hash-verified submission to the graded registry.
+
+    The runner grades ONLY the accepted registry
+    (``verified_accepted_submission``), which until here is written solely by
+    the SubmissionAgent. A run this gate stops before ensemble/submission has
+    at best a best-candidate snapshot: declaring ``workflow_valid=True`` on it
+    without this binding is a promise the runner cannot honor, and the run
+    grades as nothing.
+
+    Returns ``(updates, preserved)``: the updates extended with the binding
+    when one was needed, and ``preserved=False`` when nothing verifiable can
+    reach the grader — the caller must then fail closed.
+    """
+    if restored is None:
+        return updates, False
+    working_dir = Path(state["working_directory"])
+    merged = {**state, **updates}
+    if verified_accepted_submission(merged, working_dir) is not None:
+        return updates, True
+    try:
+        snapshot, digest = snapshot_accepted_submission(
+            working_dir,
+            restored,
+            run_id=str(state.get("run_id") or ""),
+            iteration=int(state.get("current_iteration", 0) or 0),
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        print(f"   Could not bind the restored snapshot for grading: {exc}")
+        return updates, False
+    bound: dict[str, Any] = {
+        "accepted_submission_path": str(snapshot),
+        "accepted_submission_snapshot_path": str(snapshot),
+        "accepted_submission_sha256": digest,
+    }
+    # Carry the trusted CV provenance along only when it demonstrably belongs
+    # to these bytes; a digest mismatch means the score describes another file.
+    owner = str(merged.get("best_candidate_submission_component_name") or "")
+    owner_digest = str(
+        merged.get("best_candidate_submission_sha256") or ""
+    ).lower()
+    raw_score = (merged.get("trusted_component_scores") or {}).get(owner)
+    if isinstance(raw_score, dict):
+        raw_score = raw_score.get("score", raw_score.get("cv_score"))
+    if (
+        owner
+        and owner_digest == digest
+        and isinstance(raw_score, (int, float))
+        and math.isfinite(float(raw_score))
+    ):
+        bound.update(
+            {
+                "accepted_submission_cv_score": float(raw_score),
+                "accepted_submission_score_owner": owner,
+                "accepted_submission_score_source": "trusted_component_scores",
+            }
+        )
+    return {**updates, **bound}, True
+
+
 def _termination_reason(preserved: bool, *, integrity_failed: bool) -> str:
     """Name the outcome so telemetry can tell the two kinds of stop apart."""
     if not preserved:
@@ -656,7 +722,9 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
     # Only the absence of a hash-verified artifact blocks grading. `restored`
     # is that check: it re-verifies the digest and refuses a tampered snapshot,
     # so a quality objection cannot smuggle an unverifiable file to the grader.
-    preserved = restored is not None
+    rejection_updates, preserved = _bind_restored_snapshot_for_grading(
+        state, rejection_updates, restored
+    )
     reason = _termination_reason(preserved, integrity_failed=bool(evidence_failures))
     error = None if preserved else "Robustness validation failed; candidate blocked"
     print(
