@@ -1675,7 +1675,25 @@ if (
 ):
     raise ValueError("Canonical target metadata is internally inconsistent")
 
+# The authoritative feature list, resolved once during canonical preparation.
+# Selecting features as "every column except the target" instead picks up the
+# row key, and when that key is a synthetic row position it is text: tree
+# libraries reject the dtype and the component dies after loading the data.
+if CANONICAL_FEATURE_COLS_PATH.is_file():
+    with open(CANONICAL_FEATURE_COLS_PATH) as _f:
+        CANONICAL_FEATURE_COLS = [str(_c) for _c in json.load(_f)]
+else:
+    CANONICAL_FEATURE_COLS = []
+CANONICAL_NON_FEATURE_COLS = tuple(
+    {{str(ID_COL), *(str(_c) for _c in TARGET_COLS)}}
+)
+
 print(f"[LOG:INFO] Canonical data loaded: {{CANONICAL_METADATA.get('canonical_rows', 'unknown')}} samples, {{N_FOLDS}} folds")
+if CANONICAL_FEATURE_COLS:
+    print(
+        f"[CANONICAL] Feature columns: {{len(CANONICAL_FEATURE_COLS)}} "
+        f"(never include {{CANONICAL_NON_FEATURE_COLS}})"
+    )
 
 # === CANONICAL FOLDS (MANDATORY) ===
 CANONICAL_FOLDS = np.load(CANONICAL_FOLDS_PATH)

@@ -108,6 +108,7 @@ class SubmissionValidationMixin:
         component_type: str | None = None,
         problem_type: str | None = None,
         target_cols: list[str] | None = None,
+        require_normalized_rows: bool = True,
     ) -> tuple[bool, str]:
         """
         Validate submission matches expected format exactly.
@@ -122,6 +123,12 @@ class SubmissionValidationMixin:
             target_cols: Resolved prediction column names. Without them the
                 first column is assumed to identify rows, which misreads
                 templates whose first column is the prediction.
+            require_normalized_rows: Whether multiclass rows must sum to 1.
+                Only true when the graded metric reads a row as a probability
+                vector. Under a column-wise ranking metric the grader accepts
+                and scores these predictions unchanged, so rejecting them
+                discards a valid submission to enforce a property nobody
+                measures.
 
         Returns:
             Tuple of (is_valid, message)
@@ -284,6 +291,7 @@ class SubmissionValidationMixin:
 
                 if (
                     is_multiclass
+                    and require_normalized_rows
                     and len(pred_cols) > 1
                     and numeric_values is not None
                 ):

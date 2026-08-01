@@ -919,6 +919,12 @@ class DeveloperAgent(
         working_dir = Path(state["working_directory"])
         competition_info = state["competition_info"]
         metric_name = getattr(competition_info, "evaluation_metric", "")
+        # Multiclass rows that do not sum to 1 are only a defect when the
+        # graded metric reads a row as a probability vector. Under a
+        # column-wise ranking metric the grader accepts them and scores them
+        # normally, so both submission-format and artifact validation must
+        # stop treating them as fatal or they destroy scoring candidates.
+        needs_normalized_rows = metric_reads_rows_as_distribution(metric_name)
 
         if not ablation_plan:
             print("No ablation plan found. Run Planner Agent first.")
@@ -1264,9 +1270,7 @@ class DeveloperAgent(
             expected_n_train = state.get("expected_train_rows")
             expected_n_test = state.get("expected_test_rows")
             competition_info = state.get("competition_info")
-            validation_config.require_normalized_rows = (
-                metric_reads_rows_as_distribution(metric_name)
-            )
+            validation_config.require_normalized_rows = needs_normalized_rows
             problem_type = _model_validation_problem_type(state)
             expected_class_order = _validation_class_order_for_state(
                 state,
@@ -1520,6 +1524,7 @@ class DeveloperAgent(
                         component_type=component.component_type,
                         problem_type=problem_type,
                         target_cols=target_cols or None,
+                        require_normalized_rows=needs_normalized_rows,
                     )
                     submission_is_valid = is_valid
                     submission_validation_message = validation_msg
@@ -1552,6 +1557,7 @@ class DeveloperAgent(
                             component_type=component.component_type,
                             problem_type=problem_type,
                             target_cols=target_cols or None,
+                            require_normalized_rows=needs_normalized_rows,
                         )
                         submission_is_valid = is_valid
                         submission_validation_message = validation_msg
@@ -2243,6 +2249,9 @@ Based on the training results above, improve the model to achieve a {desired_dir
                                             component_type=component.component_type,
                                             problem_type=problem_type,
                                             target_cols=target_cols or None,
+                                            require_normalized_rows=(
+                                                needs_normalized_rows
+                                            ),
                                         )
                                     )
                                     if not format_valid:

@@ -159,7 +159,15 @@ class TestRobustnessGate:
             "refinement_guidance"
         ]["planner_guidance"]
 
-    def test_rejecting_best_component_revokes_its_snapshot(self, tmp_path):
+    def test_quality_objection_keeps_the_snapshot_it_disputes(self, tmp_path):
+        """Suspecting a model is bad is not evidence that its artifact is fake.
+
+        The snapshot is hash-verified and was chosen without any grading score.
+        Revoking it converts "we doubt this model" into "this run produced
+        nothing", which tells the benchmark strictly less: the grader would
+        have accepted the file, and a weak score reports the same doubt without
+        throwing the evidence away.
+        """
         models = tmp_path / "models"
         models.mkdir()
         np.save(models / "oof_model_a.npy", np.array([0.2, 0.8]))
@@ -198,11 +206,60 @@ class TestRobustnessGate:
         updates = robustness_gate_node(state)
 
         assert updates["robustness_gate_action"] == "recover"
+        # Demoted out of the ensemble, but still gradeable.
+        assert updates["oof_availability"]["model_a"] is False
+        assert updates["robustness_approved_components"]["model_a"] is False
+        for revoked_key in (
+            "best_candidate_submission_snapshot_path",
+            "best_candidate_submission_sha256",
+            "best_candidate_submission_component_name",
+            "best_single_model_name",
+            "best_single_model_score",
+        ):
+            assert revoked_key not in updates
+
+    def test_integrity_failure_revokes_the_snapshot_it_disputes(self, tmp_path):
+        """Unverifiable evidence is the one case where destruction is right."""
+        models = tmp_path / "models"
+        canonical = tmp_path / "canonical"
+        models.mkdir()
+        canonical.mkdir()
+        np.save(canonical / "train_ids.npy", np.array(["a", "b"]))
+        np.save(models / "train_ids_model_a.npy", np.array(["a", "b"]))
+        np.save(models / "oof_model_a.npy", np.array([0.2, 0.8]))
+        # test_model_a.npy is absent: the pair cannot be verified.
+        submission = tmp_path / "submission.csv"
+        submission.write_text("id,target\n1,0.8\n", encoding="utf-8")
+        snapshot, digest = snapshot_best_candidate_submission(
+            tmp_path,
+            submission,
+            run_id="gate-run",
+            iteration=0,
+        )
+        state = _failure_state(
+            tmp_path,
+            run_mode="mlebench",
+            run_id="gate-run",
+            robustness_passed=True,
+            best_single_model_name="model_a",
+            best_single_model_score=0.8,
+            best_candidate_submission_component_name="model_a",
+            best_candidate_submission_snapshot_path=str(snapshot),
+            best_candidate_submission_sha256=digest,
+            oof_availability={"model_a": True},
+            robustness_approved_components={"model_a": True},
+            trusted_component_scores={"model_a": 0.8},
+            canonical_contract={
+                "train_ids_path": str(canonical / "train_ids.npy")
+            },
+        )
+
+        updates = robustness_gate_node(state)
+
         assert updates["best_candidate_submission_snapshot_path"] is None
         assert updates["best_candidate_submission_sha256"] is None
         assert updates["best_candidate_submission_component_name"] is None
         assert updates["best_single_model_name"] is None
-        assert updates["best_single_model_score"] is None
 
     def test_first_failure_requests_one_targeted_recovery(self, tmp_path):
         updates = robustness_gate_node(_failure_state(tmp_path))
@@ -242,12 +299,21 @@ class TestRobustnessGate:
         )
         updates = robustness_gate_node(state)
         assert updates["workflow_valid"] is True
-        assert updates["termination_reason"] == "robustness_failed_preserved_best_submission"
+        assert updates["termination_reason"] == (
+            "robustness_quality_objection_graded_verified_snapshot"
+        )
         assert previous.read_bytes() == expected
 
-    def test_rejected_accepted_owner_is_not_restored_or_kept_in_state(
+    def test_quality_objection_grades_the_snapshot_its_owner_produced(
         self, tmp_path
     ):
+        """Even when the disputed component is the one that owns the snapshot.
+
+        This is the case the split exists for: the accepted artifact is
+        hash-verified, the objection is a suspicion about the code that made
+        it, and blocking here is how a run that produced a scoring submission
+        came to report that it produced nothing.
+        """
         run_id = "test-run"
         submission = tmp_path / "submission.csv"
         submission.write_text("id,target\n1,0.8\n", encoding="utf-8")
@@ -279,21 +345,73 @@ class TestRobustnessGate:
 
         updates = robustness_gate_node(state)
 
+        assert updates["workflow_valid"] is True
+        assert updates["termination_reason"] == (
+            "robustness_quality_objection_graded_verified_snapshot"
+        )
+        assert submission.read_text(encoding="utf-8") == "id,target\n1,0.8\n"
+        assert updates["oof_availability"]["model_a"] is False
+        for preserved_key in (
+            "accepted_submission_path",
+            "accepted_submission_snapshot_path",
+            "accepted_submission_sha256",
+            "accepted_submission_score_owner",
+        ):
+            assert preserved_key not in updates
+
+    def test_integrity_failure_discards_the_snapshot_its_owner_produced(
+        self, tmp_path
+    ):
+        """The same setup, with evidence that cannot be verified, still blocks."""
+        run_id = "test-run"
+        models = tmp_path / "models"
+        canonical = tmp_path / "canonical"
+        models.mkdir()
+        canonical.mkdir()
+        np.save(canonical / "train_ids.npy", np.array(["a", "b"]))
+        np.save(models / "train_ids_model_a.npy", np.array(["b", "a"]))
+        np.save(models / "oof_model_a.npy", np.array([0.2, 0.8]))
+        np.save(models / "test_model_a.npy", np.array([0.4]))
+        submission = tmp_path / "submission.csv"
+        submission.write_text("id,target\n1,0.8\n", encoding="utf-8")
+        snapshot, digest = snapshot_accepted_submission(
+            tmp_path,
+            submission,
+            run_id=run_id,
+            iteration=0,
+        )
+        state = _failure_state(
+            tmp_path,
+            run_mode="mlebench",
+            robustness_passed=True,
+            robustness_recovery_count=1,
+            run_id=run_id,
+            accepted_submission_path=str(snapshot),
+            accepted_submission_snapshot_path=str(snapshot),
+            accepted_submission_sha256=digest,
+            accepted_submission_score_owner="model_a",
+            oof_availability={"model_a": True},
+            robustness_approved_components={"model_a": True},
+            trusted_component_scores={"model_a": 0.8},
+            canonical_contract={
+                "train_ids_path": str(canonical / "train_ids.npy")
+            },
+        )
+
+        updates = robustness_gate_node(state)
+
         assert updates["workflow_valid"] is False
         assert updates["termination_reason"] == (
             "robustness_failed_no_valid_submission"
         )
         assert not submission.exists()
-        for key in (
+        for revoked_key in (
             "accepted_submission_path",
             "accepted_submission_snapshot_path",
             "accepted_submission_sha256",
-            "accepted_submission_cv_score",
             "accepted_submission_score_owner",
-            "accepted_submission_score_source",
         ):
-            assert key in updates
-            assert updates[key] is None
+            assert updates[revoked_key] is None
 
     def test_second_failure_restores_verified_best_candidate_owned_by_another_component(
         self, tmp_path
@@ -328,7 +446,9 @@ class TestRobustnessGate:
         updates = robustness_gate_node(state)
 
         assert updates["workflow_valid"] is True
-        assert updates["termination_reason"] == "robustness_failed_preserved_best_submission"
+        assert updates["termination_reason"] == (
+            "robustness_quality_objection_graded_verified_snapshot"
+        )
         assert submission.read_bytes() == expected
 
     def test_second_failure_rejects_mutable_hill_climb_best_from_disk(self, tmp_path):

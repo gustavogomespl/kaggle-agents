@@ -306,8 +306,26 @@ def _rejected_component_names(
 def _quarantine_rejected_candidate(
     state: KaggleState,
     component_names: list[str],
+    *,
+    preserve_snapshots: bool = False,
 ) -> tuple[dict[str, Any], Path | None, dict[str, Any]]:
-    """Quarantine mutable candidate files and restore a verified prior result."""
+    """Withhold rejected components; keep their verified snapshot if asked.
+
+    The mutable working files always go: a rejected component's arrays must
+    leave the ensemble namespace, or a plain ``oof_*.npy`` glob averages them
+    back in, and the scratch ``submission.csv`` is never the graded artifact
+    anyway.
+
+    Args:
+        state: Current workflow state.
+        component_names: Components robustness refused to approve.
+        preserve_snapshots: True when the evidence is verifiable and only the
+            model is disputed. The components are still demoted out of the
+            ensemble, but the hash-verified snapshot they own is kept, because
+            a grader would have accepted it and a weak score reports the same
+            doubt without discarding the run. False when the evidence itself is
+            untrustworthy: nothing derived from it may be graded.
+    """
     working_dir = Path(state["working_directory"])
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     quarantine_root = (
@@ -334,7 +352,13 @@ def _quarantine_rejected_candidate(
         if moved:
             moved_by_component[component_name] = moved
 
-    restored = _restore_best_valid_submission(state, component_names)
+    # Restoring is also how a snapshot is verified: it re-checks the digest and
+    # refuses a tampered file. A quality objection does not disown the snapshot,
+    # so nothing is excluded from the search in that case.
+    restored = _restore_best_valid_submission(
+        state,
+        [] if preserve_snapshots else component_names,
+    )
     oof_availability = dict(state.get("oof_availability", {}) or {})
     component_results = dict(state.get("component_results", {}) or {})
     trusted_scores = dict(state.get("trusted_component_scores", {}) or {})
@@ -361,6 +385,29 @@ def _quarantine_rejected_candidate(
     accepted_owner = str(
         state.get("accepted_submission_score_owner") or ""
     )
+    if preserve_snapshots:
+        # The demotion above already keeps these components out of the
+        # ensemble. Revoking their snapshot as well would delete the only
+        # gradeable evidence the run produced, which is the outcome this split
+        # exists to prevent.
+        if new_failed:
+            updates["failed_component_names"] = new_failed
+        return (
+            updates,
+            restored,
+            {
+                "components": component_names,
+                "quarantine_directory": (
+                    str(quarantine_root.relative_to(working_dir))
+                    if quarantine_root.exists()
+                    else None
+                ),
+                "submission_quarantined": quarantined_submission,
+                "artifacts": moved_by_component,
+                "restored_accepted_submission": restored is not None,
+                "snapshots_preserved": "quality_objection_only",
+            },
+        )
     if accepted_owner in component_names:
         updates.update(
             {
@@ -413,12 +460,21 @@ def _quarantine_rejected_candidate(
     return updates, restored, audit
 
 
+def _termination_reason(preserved: bool, *, integrity_failed: bool) -> str:
+    """Name the outcome so telemetry can tell the two kinds of stop apart."""
+    if not preserved:
+        return "robustness_failed_no_valid_submission"
+    if integrity_failed:
+        return "robustness_failed_preserved_best_submission"
+    return "robustness_quality_objection_graded_verified_snapshot"
+
+
 def _print_withheld_reason(
     state: KaggleState,
     evidence_failures: dict[str, list[str]],
-    unapproved_components: list[str],
+    quality_rejections: list[str],
 ) -> None:
-    """Say which constraint withheld the candidate.
+    """Say which constraint withheld the candidate, and of which kind.
 
     The gate applies its own evidence checks on top of the robustness agent's
     verdict, so it can withhold a candidate the agent just approved. Printing
@@ -429,13 +485,16 @@ def _print_withheld_reason(
     print("\n" + "=" * 60)
     print("=  ROBUSTNESS GATE: Candidate withheld")
     print("=" * 60)
-    if state.get("robustness_passed") is not True:
-        print("   Robustness validation did not pass")
-    for component_name, component_issues in sorted(evidence_failures.items()):
-        print(f"   {component_name}: {'; '.join(component_issues)}")
-    approval_only = sorted(set(unapproved_components) - set(evidence_failures))
-    if approval_only:
-        print(f"   Approval missing for: {', '.join(approval_only)}")
+    if evidence_failures:
+        print("   Integrity (evidence cannot be verified):")
+        for component_name, component_issues in sorted(evidence_failures.items()):
+            print(f"      {component_name}: {'; '.join(component_issues)}")
+    if state.get("robustness_passed") is not True or quality_rejections:
+        print("   Quality (evidence is verifiable; the model is disputed):")
+        if state.get("robustness_passed") is not True:
+            print("      robustness validation did not pass")
+        if quality_rejections:
+            print(f"      approval withheld for: {', '.join(quality_rejections)}")
 
 
 def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
@@ -506,7 +565,24 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
             "the public metric before robustness approval"
         )
 
-    _print_withheld_reason(state, evidence_failures, unapproved_components)
+    # Integrity and quality are different kinds of objection and must not carry
+    # the same consequence. Integrity says the artifact is not evidence of what
+    # it claims — a missing prediction file, rows that do not line up with the
+    # canonical order, a score nothing recomputed, a class order that does not
+    # match the contract. Nothing downstream can be trusted, so the artifact is
+    # quarantined. Quality says the evidence is verifiable and the model is
+    # disputed anyway: suspected leakage, odd hyperparameters, a metric gap.
+    #
+    # Destroying the artifact on a quality objection converts "we are unsure
+    # this model is good" into "this run produced nothing", which is strictly
+    # worse information: the grader would have accepted the submission and
+    # scored it, and a weak score reports the same doubt without discarding the
+    # evidence. Quality objections therefore withhold approval — the ensemble
+    # already excludes unapproved pairs — but leave the artifacts standing.
+    quality_rejections = sorted(
+        set(unapproved_components) - set(evidence_failures)
+    )
+    _print_withheld_reason(state, evidence_failures, quality_rejections)
 
     rejected_components = _rejected_component_names(
         state,
@@ -517,6 +593,7 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
     rejection_updates, restored, quarantine_audit = _quarantine_rejected_candidate(
         state,
         rejected_components,
+        preserve_snapshots=not evidence_failures,
     )
 
     if recovery_count < max_recoveries:
@@ -576,17 +653,16 @@ def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
             "last_updated": datetime.now(),
         }
 
+    # Only the absence of a hash-verified artifact blocks grading. `restored`
+    # is that check: it re-verifies the digest and refuses a tampered snapshot,
+    # so a quality objection cannot smuggle an unverifiable file to the grader.
     preserved = restored is not None
-    reason = (
-        "robustness_failed_preserved_best_submission"
-        if preserved
-        else "robustness_failed_no_valid_submission"
-    )
+    reason = _termination_reason(preserved, integrity_failed=bool(evidence_failures))
     error = None if preserved else "Robustness validation failed; candidate blocked"
     print(
         f"   Recovery budget exhausted ({recovery_count}/{max_recoveries}); "
         + (
-            "grading an earlier verified snapshot"
+            "grading the verified snapshot this run accepted"
             if preserved
             else "no verified snapshot survives, grading is blocked"
         )
