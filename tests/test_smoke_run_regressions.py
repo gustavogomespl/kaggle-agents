@@ -10,6 +10,7 @@ that had already succeeded but skipped their artifact saves.
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from kaggle_agents.agents.developer.agent import (
@@ -348,6 +349,41 @@ class TestEvidenceArtifactHelper:
 
         assert f"models/test_{COMPONENT}.npy" in missing
         assert f"models/oof_{COMPONENT}.npy" not in missing
+
+    def test_object_dtype_predictions_fail_at_save_with_a_clear_error(
+        self, tmp_path
+    ):
+        """np.save silently pickles object arrays, but every host loader uses
+        allow_pickle=False — the component "succeeded" and then died at
+        promotion with an unactionable load failure. Refuse at save time,
+        inside the component's own run, where the fixer can see the cause."""
+        namespace: dict = {"MODELS_DIR": tmp_path, "COMPONENT_NAME": "seq_model"}
+        exec(compile(self._helper_source(), "<helper>", "exec"), namespace)
+        ragged = np.asarray([["a"], ["b", "c"]], dtype=object)
+
+        with pytest.raises(ValueError, match="object dtype"):
+            namespace["save_component_artifacts"](
+                ragged,
+                np.asarray(["x"]),
+                train_ids=np.asarray(["r0", "r1"]),
+                test_ids=np.asarray(["t0"]),
+            )
+
+    def test_string_predictions_save_and_reload_without_pickle(self, tmp_path):
+        """seq2seq components save string predictions; the artifacts must be
+        loadable exactly the way the host loads them."""
+        namespace: dict = {"MODELS_DIR": tmp_path, "COMPONENT_NAME": "seq_model"}
+        exec(compile(self._helper_source(), "<helper>", "exec"), namespace)
+
+        namespace["save_component_artifacts"](
+            np.asarray(["foo", "bar"]),
+            np.asarray(["baz"]),
+            train_ids=np.asarray(["r0", "r1"]),
+            test_ids=np.asarray(["t0"]),
+        )
+
+        loaded = np.load(tmp_path / "oof_seq_model.npy", allow_pickle=False)
+        assert loaded.tolist() == ["foo", "bar"]
 
     def test_every_component_told_to_save_evidence_receives_the_helper(self):
         """Injection scope must match what the constraints demand.

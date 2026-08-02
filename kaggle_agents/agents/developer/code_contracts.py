@@ -181,6 +181,13 @@ def untrusted_contract_helper_import(code: str) -> str | None:
 
     helper_names = _protected_helper_names(code)
     for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "__main__":
+            # ``from __main__ import <helper>`` rebinds the SAME injected
+            # objects — the script runs as __main__ and the header defined
+            # them already. Flagging this no-op killed an attempt every time
+            # a model reached for it after being told the helpers "are
+            # already defined".
+            continue
         if isinstance(node, (ast.Import, ast.ImportFrom)) and any(
             alias.asname in helper_names or alias.name in helper_names
             for alias in node.names

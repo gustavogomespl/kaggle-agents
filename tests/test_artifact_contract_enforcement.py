@@ -222,6 +222,42 @@ def test_probability_helper_shadowing_is_rejected_only_when_injected(
     assert "validate_probabilities" in finding
 
 
+@pytest.mark.parametrize(
+    "harmless_import",
+    [
+        "from __main__ import validate_probabilities\n",
+        "from __main__ import write_submission, save_component_artifacts\n",
+        "from __main__ import write_submission as ws\n",
+    ],
+)
+def test_importing_injected_helpers_from_main_is_not_shadowing(
+    dense_header: str,
+    harmless_import: str,
+) -> None:
+    """``from __main__ import <helper>`` rebinds the SAME injected objects.
+
+    The detector checked only the imported names, never the module, so this
+    no-op — a natural move for a model told the helpers "are already defined"
+    — killed the attempt before execution. Observed burning an attempt in
+    four separate benchmark runs.
+    """
+    finding = untrusted_contract_helper_import(
+        dense_header + "\n" + harmless_import
+    )
+
+    assert finding is None
+
+
+def test_importing_a_helper_from_any_other_module_is_still_shadowing(
+    dense_header: str,
+) -> None:
+    finding = untrusted_contract_helper_import(
+        dense_header + "\nfrom my_utils import write_submission\n"
+    )
+
+    assert finding is not None
+
+
 @pytest.mark.parametrize("candidate_code", _PROBABILITY_SHADOWING_FORMS)
 def test_packed_image_header_does_not_protect_absent_probability_helper(
     candidate_code: str,

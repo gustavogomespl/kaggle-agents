@@ -6,6 +6,7 @@ Contains methods for detecting data type, target column, and ID column.
 
 from __future__ import annotations
 
+import shutil
 import zipfile
 from pathlib import Path
 
@@ -264,6 +265,48 @@ class DetectionMixin:
         )
 
     def create_canonical_from_media_filenames(  # noqa: PLR0913
+        self,
+        media_dir: Path,
+        canonical_dir: Path,
+        *,
+        extensions: frozenset[str],
+        source: str,
+        n_folds: int = 5,
+        explicit_pattern: str | None = None,
+        test_ids: list[str] | None = None,
+    ) -> dict:
+        """Own the canonical directory it writes, from a clean slate.
+
+        This producer is only invoked when no usable contract exists (no
+        train.csv, or a prep that resolved zero rows), so anything already in
+        ``canonical/`` is unusable by definition. Rebuilding from scratch
+        prevents two poisoned outcomes: stale files from an earlier failed
+        prep (a temporal mask, old test IDs) surviving next to fresh arrays
+        and failing every component's shape checks, and a refusal or crash
+        mid-write leaving a partial tree that makes the executor's integrity
+        gate refuse ALL generated-code execution.
+        """
+        canonical_dir = Path(canonical_dir)
+        if canonical_dir.exists():
+            shutil.rmtree(canonical_dir)
+        try:
+            result = self._create_canonical_from_media_filenames_impl(
+                media_dir,
+                canonical_dir,
+                extensions=extensions,
+                source=source,
+                n_folds=n_folds,
+                explicit_pattern=explicit_pattern,
+                test_ids=test_ids,
+            )
+        except BaseException:
+            shutil.rmtree(canonical_dir, ignore_errors=True)
+            raise
+        if not result.get("success"):
+            shutil.rmtree(canonical_dir, ignore_errors=True)
+        return result
+
+    def _create_canonical_from_media_filenames_impl(
         self,
         media_dir: Path,
         canonical_dir: Path,

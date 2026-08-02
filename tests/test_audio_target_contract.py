@@ -179,6 +179,59 @@ def test_audio_fallback_state_carries_a_gradeable_contract(tmp_path) -> None:
     assert updates["expected_test_rows"] == 2
 
 
+def test_failed_media_canonical_leaves_no_directory_behind(tmp_path) -> None:
+    """A refused fallback must not leave a canonical/ shell on disk.
+
+    The single-samples check runs AFTER mkdir, so a refusal used to leave an
+    empty canonical/ — which the executor's integrity gate reads as a
+    declared-but-incomplete contract and then refuses ALL generated-code
+    execution (the orphan-directory class of bug).
+    """
+    audio_dir = tmp_path / "audio"
+    # One sample per class: stratified CV is impossible, producer refuses.
+    _files(audio_dir, ["clip_a_red.wav", "clip_b_blue.wav"])
+
+    result = DetectionMixin().create_canonical_from_audio_filenames(
+        audio_dir,
+        tmp_path / "canonical",
+        n_folds=5,
+    )
+
+    assert result["success"] is False
+    assert not (tmp_path / "canonical").exists()
+
+
+def test_media_canonical_rebuild_removes_stale_files(tmp_path) -> None:
+    """The fallback owns the whole directory it writes.
+
+    It is invoked precisely because no usable contract exists, yet it used to
+    overwrite only its own five files — stale artifacts from an earlier
+    failed prep (a temporal mask, old test IDs) survived next to the fresh
+    arrays and every component then failed shape checks against them.
+    """
+    canonical = tmp_path / "canonical"
+    canonical.mkdir()
+    (canonical / "oof_eligible_mask.npy").write_bytes(b"stale")
+    (canonical / "temporal_splits.npz").write_bytes(b"stale")
+    audio_dir = tmp_path / "audio"
+    _files(
+        audio_dir,
+        ["clip_a_red.wav", "clip_b_red.wav", "clip_c_blue.wav", "clip_d_blue.wav"],
+    )
+
+    result = DetectionMixin().create_canonical_from_audio_filenames(
+        audio_dir,
+        canonical,
+        n_folds=2,
+        test_ids=["t_1", "t_2"],
+    )
+
+    assert result["success"] is True
+    assert not (canonical / "oof_eligible_mask.npy").exists()
+    assert not (canonical / "temporal_splits.npz").exists()
+    assert (canonical / "metadata.json").is_file()
+
+
 def test_id_mapping_defaults_to_generic_contract_columns(tmp_path) -> None:
     mapping_path = tmp_path / "mapping.csv"
     mapping_path.write_text(

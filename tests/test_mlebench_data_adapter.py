@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pandas as pd
 
 from kaggle_agents.mlebench.data_adapter import MLEBenchDataAdapter
 
@@ -8,6 +11,70 @@ from kaggle_agents.mlebench.data_adapter import MLEBenchDataAdapter
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def test_json_table_competition_is_materialized_as_csv(tmp_path: Path) -> None:
+    """A competition whose tables ship as JSON gets workspace CSV copies.
+
+    Shape: ``train/train.json`` + ``test/test.json`` and no CSV anywhere.
+    Nothing downstream reads JSON — canonical prep and every generated
+    component assume CSV tables — so such runs executed zero components:
+    the prep failed (canonical-less lane), the injected header lost its
+    canonical block while the prompts still mandated CANONICAL_* names, and
+    the raw directory defeated every ``pd.read_csv(TRAIN_PATH)``. The
+    workspace stage materializes the CSVs; the public tree is never touched.
+    """
+    comp_id = "fake-json-competition"
+    cache_root = tmp_path / "mle-cache"
+    public_dir = cache_root / comp_id / "prepared" / "public"
+    train_records = [
+        {
+            "request_id": f"t_{i}",
+            "request_text": f"body {i}",
+            "subreddits": ["a", "b"],
+            "target": i % 2,
+        }
+        for i in range(6)
+    ]
+    test_records = [
+        {"request_id": f"u_{i}", "request_text": f"body {i}", "subreddits": ["a"]}
+        for i in range(3)
+    ]
+    (public_dir / "train").mkdir(parents=True)
+    (public_dir / "test").mkdir(parents=True)
+    (public_dir / "train" / "train.json").write_text(
+        json.dumps(train_records), encoding="utf-8"
+    )
+    (public_dir / "test" / "test.json").write_text(
+        json.dumps(test_records), encoding="utf-8"
+    )
+    _write_text(
+        public_dir / "sample_submission.csv",
+        "request_id,target\nu_0,0\nu_1,0\nu_2,0\n",
+    )
+
+    workspace = tmp_path / "workspace" / comp_id
+    adapter = MLEBenchDataAdapter(mle_cache_path=cache_root)
+    info = adapter.prepare_workspace(
+        competition_id=comp_id, workspace_path=workspace
+    )
+
+    assert (workspace / "train.csv").is_file()
+    assert (workspace / "test.csv").is_file()
+    train_frame = pd.read_csv(workspace / "train.csv")
+    assert len(train_frame) == 6
+    assert "target" in train_frame.columns
+    assert len(pd.read_csv(workspace / "test.csv")) == 3
+
+    # The tabular lane consumes the materialized tables.
+    paths = adapter.get_state_paths(info)
+    assert Path(paths["train_data_path"]).name == "train.csv"
+    assert Path(paths["test_data_path"]).name == "test.csv"
+
+    # The public tree is read-only for this pipeline: no CSV appears there.
+    assert sorted(p.name for p in (public_dir / "train").iterdir()) == [
+        "train.json"
+    ]
 
 
 def test_prepare_workspace_stages_only_public_data_inside_run(tmp_path: Path) -> None:

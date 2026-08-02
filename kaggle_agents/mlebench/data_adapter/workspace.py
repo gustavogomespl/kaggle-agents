@@ -11,6 +11,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
 from .dataclasses import MLEBenchDataInfo
 
 
@@ -121,6 +123,21 @@ class WorkspaceMixin:
             if (path := staged(extra_file)) is not None
         ]
 
+        # Competitions that ship their tables as JSON (e.g. train/train.json,
+        # with no CSV anywhere) are unreadable to the whole tabular lane:
+        # canonical prep and every generated component assume CSV tables, so
+        # such runs executed zero components. Materialize workspace CSV copies
+        # from a single unambiguous staged table; the public tree is never
+        # modified.
+        if info.train_csv_path is None:
+            info.train_csv_path = self._materialize_tabular_table(
+                workspace, "train.csv", info.train_path
+            )
+        if info.test_csv_path is None:
+            info.test_csv_path = self._materialize_tabular_table(
+                workspace, "test.csv", info.test_path
+            )
+
         # Normalize conventional paths after staging. Type checks (is_file/
         # is_dir) matter: a same-named artifact of the wrong kind (e.g. a
         # sample_submission.csv directory) must not clobber a resolved path.
@@ -154,6 +171,57 @@ class WorkspaceMixin:
             info.sample_submission_path = workspace / "sample_submission.csv"
 
         print("   Public data staged inside run workspace!", flush=True)
+
+    @staticmethod
+    def _materialize_tabular_table(
+        workspace: Path,
+        alias: str,
+        source: Path | None,
+    ) -> Path | None:
+        """Write a workspace CSV copy of a JSON/JSONL table, when unambiguous.
+
+        Deliberately narrow: the source must be a single tabular file, either
+        directly or as the only table inside the staged directory. Anything
+        ambiguous (several candidates, unparsable content, fewer than two
+        columns) materializes nothing and the run keeps its current behavior.
+        A CSV found inside a directory is copied byte-for-byte — a parse and
+        re-write round-trip could alter float formatting.
+        """
+        destination = workspace / alias
+        if source is None or destination.exists() or destination.is_symlink():
+            return None
+
+        tabular_suffixes = {".json", ".jsonl", ".csv"}
+        if source.is_file():
+            candidates = [source]
+        elif source.is_dir():
+            candidates = sorted(
+                path
+                for path in source.iterdir()
+                if path.is_file() and path.suffix.lower() in tabular_suffixes
+            )
+        else:
+            return None
+        if len(candidates) != 1:
+            return None
+
+        table_path = candidates[0]
+        suffix = table_path.suffix.lower()
+        temporary = destination.with_name(f".{alias}.materializing")
+        try:
+            if suffix == ".csv":
+                shutil.copyfile(table_path, temporary)
+            else:
+                frame = pd.read_json(table_path, lines=(suffix == ".jsonl"))
+                if frame.empty or frame.shape[1] < 2:
+                    return None
+                frame.to_csv(temporary, index=False)
+            temporary.replace(destination)
+        except (OSError, TypeError, ValueError):
+            temporary.unlink(missing_ok=True)
+            return None
+        print(f"   Materialized {alias} from {table_path.name}")
+        return destination
 
     def get_state_paths(self, info: MLEBenchDataInfo) -> dict[str, Any]:
         """

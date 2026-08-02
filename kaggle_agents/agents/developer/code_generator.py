@@ -431,9 +431,19 @@ def save_component_artifacts(
     if _np.asarray(_test_ids).size != len(set(_test_ids.tolist())):
         raise ValueError("Test IDs must be unique")
 
+    # Host validators load these artifacts with allow_pickle=False, so a
+    # pickled object array "saves fine" here and then fails at promotion
+    # where nothing can act on it. Refuse it now, with the cause.
+    for _label, _array in (("oof_preds", _oof), ("test_preds", _test)):
+        if _array.dtype == object:
+            raise ValueError(
+                f"{_label} have object dtype (None values or ragged rows?); "
+                "save a uniform numeric or string array instead"
+            )
+
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    _np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", _oof)
-    _np.save(MODELS_DIR / f"test_{COMPONENT_NAME}.npy", _test)
+    _np.save(MODELS_DIR / f"oof_{COMPONENT_NAME}.npy", _oof, allow_pickle=False)
+    _np.save(MODELS_DIR / f"test_{COMPONENT_NAME}.npy", _test, allow_pickle=False)
     _np.save(MODELS_DIR / f"train_ids_{COMPONENT_NAME}.npy", _train_ids, allow_pickle=False)
     _np.save(MODELS_DIR / f"test_ids_{COMPONENT_NAME}.npy", _test_ids, allow_pickle=False)
     if class_order is not None:

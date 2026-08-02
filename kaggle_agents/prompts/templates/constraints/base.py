@@ -10,8 +10,16 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 - Define `RUN_SEED = int(os.getenv("RUN_SEED", "42"))` once and use it everywhere
 - Load the injected `CANONICAL_FOLDS_PATH`, `CANONICAL_TRAIN_IDS_PATH`, and
   `CANONICAL_Y_PATH`; fail if any canonical artifact is absent or misaligned
-- NEVER create a new KFold/StratifiedKFold/GroupKFold inside a model component.
-  The canonical assignments already encode the task-appropriate split policy
+- These names are DEFINED IN THE INJECTED HEADER when a canonical contract
+  exists — read the header you were given. If the header has NO
+  `CANONICAL DATA CONTRACT` block, the `CANONICAL_*` names do not exist
+  anywhere: do NOT invent them or a `load_canonical_data()` loader. In that
+  case build a `StratifiedKFold(shuffle=True, random_state=RUN_SEED)` split
+  yourself and pass explicit `train_ids=`/`test_ids=` to
+  `save_component_artifacts`
+- NEVER create a new KFold/StratifiedKFold/GroupKFold inside a model component
+  when the canonical contract exists. The canonical assignments already encode
+  the task-appropriate split policy
 - Iterate the canonical fold labels and write every validation prediction back
   to its original canonical row; use `RUN_SEED` only for model randomness
 - Save OOF, test predictions, and row IDs with the injected
