@@ -9,13 +9,72 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ...agents.developer.target_source import (
+    build_canonical_validation_marker as _validation_marker,
+)
 from ...core.state import KaggleState
 from ...core.state.contracts import CanonicalDataContract
+from ...utils.canonical_validation import (
+    describe_violations,
+    representation_kind_for,
+    validate_dense_rows,
+    validate_metadata_agreement,
+    validate_packed_representation,
+)
 from ...utils.data_contract import prepare_canonical_data
 from ...utils.image_to_image_contract import (
     prepare_image_to_image_canonical_data,
 )
 from ...utils.target_inference import TargetInferenceError
+
+
+def _assert_contract_rows_and_semantics(
+    contract: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    train_ids: np.ndarray | None = None,
+    folds: np.ndarray | None = None,
+    y: np.ndarray | None = None,
+) -> None:
+    """Prove the contract this node just wrote actually holds.
+
+    The rules live in ``utils.canonical_validation`` and are the SAME ones the
+    target-source selector applies later; keeping a second copy here is how the
+    producer and the consumer came to disagree about what a valid contract is.
+
+    Dense and media contracts pass the arrays they already hold, so a
+    freshly written multi-million-row contract is not re-read to check it.
+    Packed image contracts have no dense ``y`` at all: they are validated
+    through the shared packed path, which checks what a packed contract
+    actually guarantees (target/ID/input-path alignment and fold assignment)
+    instead of a fabricated array.
+    """
+    try:
+        typed_contract = CanonicalDataContract.from_dict(dict(contract))
+    except Exception as exc:  # any deserialization failure is corruption
+        raise ValueError(
+            f"Canonical preparation produced an undeserializable contract: {exc}"
+        ) from exc
+
+    kind = representation_kind_for(metadata, contract)
+    violations: list[dict[str, Any]] = []
+    validate_metadata_agreement(typed_contract, metadata, None, kind, violations)
+    if kind == "packed_image":
+        validate_packed_representation(typed_contract, violations)
+    else:
+        arrays = (
+            (train_ids, folds, y)
+            if train_ids is not None and folds is not None and y is not None
+            else None
+        )
+        validate_dense_rows(typed_contract, metadata, violations, arrays=arrays)
+    if violations:
+        raise ValueError(
+            describe_violations(
+                violations,
+                "Canonical preparation produced an inconsistent contract",
+            )
+        )
 
 
 def _filename_label_pattern_from_state(state: KaggleState) -> str | None:
@@ -169,6 +228,18 @@ def _media_fallback_state_updates(
     if not contract_is_valid:
         result["error"] = "; ".join(contract_violations)
         return None
+    contract_dict = canonical_contract.to_dict()
+    try:
+        _assert_contract_rows_and_semantics(
+            contract_dict,
+            metadata,
+            train_ids=train_ids,
+            folds=folds,
+            y=y,
+        )
+    except ValueError as exc:
+        result["error"] = str(exc)
+        return None
     return {
         "canonical_data_prepared": True,
         "canonical_dir": result["canonical_dir"],
@@ -178,7 +249,8 @@ def _media_fallback_state_updates(
         "canonical_feature_cols_path": result["feature_cols_path"],
         "canonical_test_ids_path": result["test_ids_path"],
         "canonical_metadata": metadata,
-        "canonical_contract": canonical_contract.to_dict(),
+        "canonical_contract": contract_dict,
+        "canonical_contract_validation": _validation_marker(contract_dict, metadata),
         "canonical_data_skipped_reason": None,
         "target_col": metadata["target_col"],
         "target_cols": list(metadata["target_cols"]),
@@ -313,6 +385,10 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                 ],
                 "packed_image_contract": True,
             }
+            # Packed contracts carry no dense y: validating a fabricated
+            # array proved nothing. The shared packed path checks what this
+            # representation actually guarantees.
+            _assert_contract_rows_and_semantics(canonical_contract, metadata)
             return {
                 "canonical_data_prepared": True,
                 "canonical_dir": canonical_result["canonical_dir"],
@@ -322,8 +398,12 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                 "canonical_y_path": canonical_result["y_path"],
                 "canonical_folds_path": canonical_result["folds_path"],
                 "canonical_feature_cols_path": str(feature_cols_path),
+                "canonical_test_ids_path": canonical_result["test_ids_path"],
                 "canonical_metadata": metadata,
                 "canonical_contract": canonical_contract,
+                "canonical_contract_validation": _validation_marker(
+                    canonical_contract, metadata
+                ),
                 "target_col": metadata["target_col"],
                 "target_cols": list(metadata["target_cols"]),
                 "target_type": "multi_target",
@@ -691,11 +771,23 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             temporal_order_path=canonical_result.get(
                 "temporal_order_path"
             ),
+            # Declared, not rediscovered: generated loaders must read the
+            # contract's path instead of probing for canonical/test_ids.npy.
+            test_ids_path=canonical_result.get("test_ids_path"),
         )
 
         print(f"      folds_hash: {folds_hash[:8]}...")
         print(f"      y_hash: {y_hash[:8]}...")
         print(f"      train_ids_hash: {train_ids_hash[:8]}...")
+
+        contract_dict = canonical_contract.to_dict()
+        _assert_contract_rows_and_semantics(
+            contract_dict,
+            metadata,
+            train_ids=train_ids_arr,
+            folds=folds_arr,
+            y=y_arr,
+        )
 
         return {
             "canonical_data_prepared": True,
@@ -704,8 +796,12 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             "canonical_y_path": canonical_result["y_path"],
             "canonical_folds_path": canonical_result["folds_path"],
             "canonical_feature_cols_path": canonical_result["feature_cols_path"],
+            "canonical_test_ids_path": canonical_result.get("test_ids_path"),
             "canonical_metadata": canonical_result["metadata"],
-            "canonical_contract": canonical_contract.to_dict(),
+            "canonical_contract": contract_dict,
+            "canonical_contract_validation": _validation_marker(
+                contract_dict, metadata
+            ),
             "target_col": metadata["target_col"],
             "target_cols": list(
                 metadata.get("target_cols") or [metadata["target_col"]]

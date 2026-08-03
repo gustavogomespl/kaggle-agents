@@ -15,13 +15,20 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
+from dataclasses import dataclass, replace
 from pathlib import Path
 from queue import Empty, Queue
 
 from .canonical_integrity import (
     CanonicalIntegrityError,
+    ProtectedInputMutationError,
+    ProtectedInputSnapshot,
+    describe_protected_input_changes,
     snapshot_canonical_contract,
+    snapshot_protected_inputs,
     verify_and_restore_canonical_contract,
+    verify_and_restore_protected_inputs,
 )
 from .dataclasses import ExecutionResult
 from .error_parser import ErrorParserMixin
@@ -40,6 +47,55 @@ from .process import (
 )
 from .sanitizer import CodeSanitizerMixin
 from .submission import SubmissionValidationMixin
+
+
+@dataclass(frozen=True)
+class _GeneratedContractInstrumentation:
+    """Per-execution proof of where the candidate body began.
+
+    ``source`` is the script actually launched: the received program with one
+    flushed sentinel print inserted immediately after the injected marker. The
+    token is unguessable per execution, so candidate code cannot fabricate the
+    "the body ran" evidence that keeps a failure retryable, and the sentinel
+    line is removed from the stdout the caller sees.
+    """
+
+    source: str
+    token: str
+    protected_inputs: tuple[tuple[str, int, str], ...]
+
+    @property
+    def sentinel_line(self) -> str:
+        return f'print("{self.token}", flush=True)'
+
+
+def _apply_protected_input_verdict(
+    execution_result: ExecutionResult,
+    snapshot: ProtectedInputSnapshot,
+) -> None:
+    """Restore mutated preamble inputs and reject the candidate that did it."""
+    try:
+        changes = verify_and_restore_protected_inputs(snapshot)
+    except Exception as exc:
+        changes = [f"verification_or_restore_failed={type(exc).__name__}:{exc}"]
+    if not changes:
+        return
+
+    message = (
+        "Protected preamble input integrity violation: the candidate changed a "
+        "file the injected header had already fingerprinted "
+        f"({'; '.join(changes)}). The original bytes were restored and the "
+        "candidate is rejected."
+    )
+    print(f"   ⚠️  {message}")
+    execution_result.success = False
+    execution_result.errors = list(execution_result.errors or [])
+    execution_result.errors.append(message)
+    execution_result.stderr = f"{execution_result.stderr}\n{message}".strip()
+    # Candidate-caused, so agent-origin; and no rewrite of this candidate can
+    # restore a contract it has already invalidated.
+    execution_result.failure_origin = "agent"
+    execution_result.retryable = False
 
 
 class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMixin):
@@ -98,6 +154,7 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
         Returns:
             ExecutionResult with execution details
         """
+        received_code = code
         # AUTO-SANITIZE CODE (remove sys.exit, etc.)
         code, _fixes_applied = self.sanitize_code(code)
 
@@ -141,7 +198,10 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
         working_path = Path(working_dir) if isinstance(working_dir, str) else working_dir
         working_path.mkdir(parents=True, exist_ok=True)
 
+        instrumentation = self._generated_contract_instrumentation(received_code, code)
+
         canonical_snapshot = None
+        protected_snapshot: ProtectedInputSnapshot | None = None
         expected_artifact_transaction: tuple[
             Path, list[tuple[Path, Path]]
         ] | None = None
@@ -151,7 +211,11 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
             execution_result: ExecutionResult,
         ) -> ExecutionResult:
             """Restore host-owned inputs and commit only fresh candidate outputs."""
-            nonlocal canonical_snapshot, expected_artifact_transaction
+            nonlocal canonical_snapshot, protected_snapshot
+            nonlocal expected_artifact_transaction
+            if protected_snapshot is not None:
+                snapshot, protected_snapshot = protected_snapshot, None
+                _apply_protected_input_verdict(execution_result, snapshot)
             if canonical_snapshot is not None:
                 try:
                     changes = verify_and_restore_canonical_contract(
@@ -201,8 +265,10 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
         runtime_guard_dir = None
 
         # Create temporary script file before the guarded try so final cleanup
-        # is safe even when integrity-boundary setup fails.
-        script_file = working_path / f"_exec_{int(time.time())}.py"
+        # is safe even when integrity-boundary setup fails. A UUID name keeps
+        # concurrent executions in one workspace from sharing a path: the
+        # classifier only trusts frames naming the exact script it launched.
+        script_file = working_path / f"_exec_{uuid.uuid4().hex}.py"
 
         try:
             if mlebench_execution:
@@ -218,6 +284,32 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                 runtime_guard_dir = install_mlebench_runtime_guard(
                     working_path,
                     source=execution_env,
+                )
+
+            if instrumentation is not None and instrumentation.protected_inputs:
+                # Everything the immutable preamble reads must be immutable for
+                # the execution being classified. A mismatch here means the
+                # header was rendered against bytes that no longer exist, which
+                # is an agent-origin integrity failure, not a harness failure.
+                self._verify_protected_inputs_before_launch(
+                    working_path, instrumentation
+                )
+                protected_snapshot = snapshot_protected_inputs(
+                    working_path,
+                    instrumentation.protected_inputs,
+                    # canonical/ already has its own controller-memory snapshot
+                    # in mlebench executions; do not hold those bytes twice.
+                    skip_relatives=(
+                        [
+                            relative
+                            for relative, _size, _digest in (
+                                instrumentation.protected_inputs
+                            )
+                            if relative.startswith("canonical/")
+                        ]
+                        if canonical_snapshot is not None
+                        else ()
+                    ),
                 )
 
             if expected_artifacts:
@@ -258,7 +350,7 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
 
             # Write code to file
             with open(script_file, "w", encoding="utf-8") as f:
-                f.write(code)
+                f.write(code if instrumentation is None else instrumentation.source)
 
             # Keep common credential discovery paths away from the real user
             # home. This reduces accidental exposure but is not an OS sandbox.
@@ -352,6 +444,14 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                         prefix, line = stdout_queue.get_nowait()
                         line_stripped = line.rstrip("\n\r")
                         stdout_lines.append(line)
+                        if (
+                            instrumentation is not None
+                            and line_stripped == instrumentation.token
+                        ):
+                            # Internal phase sentinel: kept for classification,
+                            # never echoed to the operator.
+                            last_output_time = time.time()
+                            continue
                         # Print structured logs with special formatting
                         if line_stripped.startswith("[LOG:"):
                             print(f"      📋 {line_stripped}")
@@ -439,6 +539,9 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
 
                     stdout = "".join(stdout_lines)
                     stderr = "".join(stderr_lines)
+                    stdout, body_reached = self._consume_body_phase_token(
+                        stdout, stderr, instrumentation
+                    )
 
                     # Track artifacts after execution (partial)
                     artifacts_after = self._get_artifacts(working_path)
@@ -461,6 +564,8 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                             errors=[
                                 f"Timeout: execution exceeded {self.timeout}s"
                             ],
+                            executed_script_path=str(script_file),
+                            candidate_body_reached=body_reached,
                         )
                     )
 
@@ -483,6 +588,9 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
             # Combine collected output
             stdout = "".join(stdout_lines)
             stderr = "".join(stderr_lines)
+            stdout, body_reached = self._consume_body_phase_token(
+                stdout, stderr, instrumentation
+            )
             execution_time = time.time() - start_time
 
             # Create result object compatible with subprocess.run
@@ -539,6 +647,27 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                     exit_code=result.returncode,
                     artifacts_created=artifacts_created,
                     errors=errors,
+                    executed_script_path=str(script_file),
+                    candidate_body_reached=body_reached,
+                )
+            )
+
+        except ProtectedInputMutationError as exc:
+            # Typed on purpose: the broad handler below would erase the origin
+            # and the failure would re-enter the fix/debug loop, where no
+            # candidate rewrite can repair an already-stale input contract.
+            print(f"   ⚠️  {exc}")
+            return finalize_execution_result(
+                ExecutionResult(
+                    success=False,
+                    stdout="",
+                    stderr=str(exc),
+                    execution_time=0.0,
+                    exit_code=-1,
+                    artifacts_created=[],
+                    errors=[f"Protected preamble input changed: {exc}"],
+                    failure_origin="agent",
+                    retryable=False,
                 )
             )
 
@@ -592,6 +721,85 @@ class CodeExecutor(CodeSanitizerMixin, SubmissionValidationMixin, ErrorParserMix
                         shutil.move(str(backup), str(destination))
                 shutil.rmtree(backup_root, ignore_errors=True)
                 expected_artifact_transaction = None
+
+    @staticmethod
+    def _generated_contract_instrumentation(
+        received_code: str,
+        sanitized_code: str,
+    ) -> _GeneratedContractInstrumentation | None:
+        """Insert the body-reached sentinel, or decline to instrument.
+
+        Code without a generated header is a supported generic executor input:
+        it runs uninstrumented and reports ``candidate_body_reached=None``. The
+        same conservative answer is returned when sanitization changed the
+        header, because then the launched script's marker line no longer
+        matches the caller's copy and no classification would be trustworthy.
+        """
+        from ...agents.developer.execution_failures import (
+            GeneratedContractStructureError,
+            generated_header,
+            parse_exact_header_manifest,
+        )
+
+        header = generated_header(sanitized_code)
+        if header is None or generated_header(received_code) != header:
+            return None
+        try:
+            manifest = parse_exact_header_manifest(header)
+        except GeneratedContractStructureError:
+            # Structure is validated by the caller before launch; an executor
+            # that cannot read the manifest simply does not classify.
+            return None
+
+        token = f"__KAGGLE_AGENTS_BODY_REACHED_{uuid.uuid4().hex}__"
+        instrumentation = _GeneratedContractInstrumentation(
+            source="",
+            token=token,
+            protected_inputs=tuple(
+                (item.relative_path, int(item.size), item.sha256)
+                for item in manifest.protected_inputs
+            ),
+        )
+        body = sanitized_code[len(header) :]
+        if not header.endswith("\n"):
+            header += "\n"
+        source = f"{header}{instrumentation.sentinel_line}\n{body}"
+        return replace(instrumentation, source=source)
+
+    @staticmethod
+    def _verify_protected_inputs_before_launch(
+        working_path: Path,
+        instrumentation: _GeneratedContractInstrumentation,
+    ) -> None:
+        """Fail closed when the header's declared inputs no longer match disk."""
+        changes = describe_protected_input_changes(
+            working_path, instrumentation.protected_inputs
+        )
+        if changes:
+            raise ProtectedInputMutationError(
+                "The injected header was rendered against inputs that have "
+                "since changed: " + "; ".join(changes)
+            )
+
+    @staticmethod
+    def _consume_body_phase_token(
+        stdout: str,
+        stderr: str,
+        instrumentation: _GeneratedContractInstrumentation | None,
+    ) -> tuple[str, bool | None]:
+        """Detect the sentinel, then remove it from the caller-visible stdout."""
+        if instrumentation is None:
+            return stdout, None
+        token = instrumentation.token
+        observed = token in stdout or token in stderr
+        if not observed:
+            return stdout, False
+        kept = [
+            line
+            for line in stdout.splitlines(keepends=True)
+            if line.rstrip("\r\n") != token
+        ]
+        return "".join(kept), True
 
     def execute_with_retry(
         self,

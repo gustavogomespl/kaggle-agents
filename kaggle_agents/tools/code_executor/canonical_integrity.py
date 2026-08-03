@@ -17,6 +17,8 @@ import json
 import shutil
 import stat
 import uuid
+from collections import OrderedDict
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -313,9 +315,198 @@ def verify_and_restore_canonical_contract(
     return changes
 
 
+# ---------------------------------------------------------------------------
+# Protected preamble inputs
+# ---------------------------------------------------------------------------
+#
+# The injected header reads a handful of files eagerly, above the candidate
+# body: canonical arrays, a verified sparse-label artifact, an ID mapping. The
+# generator fingerprints them when it renders the header, so a failure in that
+# region is only attributable to the harness while those bytes are still the
+# bytes the header was rendered against.
+#
+# Hashing them unconditionally per attempt is not an option: canonical arrays
+# reach multiple gigabytes and every retry would re-read them. Digests are
+# therefore memoized by ``(resolved path, st_size, st_mtime_ns)``; a clean stat
+# match reuses the cached digest and a full byte re-hash runs only when the
+# stat changed.
+
+_PROTECTED_DIGEST_CACHE: OrderedDict[tuple[str, int, int], str] = OrderedDict()
+_PROTECTED_DIGEST_CACHE_SIZE = 512
+# Bytes above this size are verified but not held in controller memory. The
+# canonical directory has its own snapshot; this cap only affects unusually
+# large auxiliary inputs, which are reported rather than restored.
+_PROTECTED_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
+
+ProtectedInputDeclaration = tuple[str, int, str]
+
+
+class ProtectedInputIntegrityError(CanonicalIntegrityError):
+    """A fingerprinted preamble input is missing, mutated or unsafe."""
+
+
+class ProtectedInputMutationError(RuntimeError):
+    """A previously fingerprinted preamble input changed before execution.
+
+    Defined next to the check that raises it so the executor can name the type
+    in an ``except`` clause without importing the developer package;
+    ``kaggle_agents.agents.developer.execution_failures`` re-exports this exact
+    class as part of the Developer failure taxonomy.
+    """
+
+
+@dataclass(frozen=True)
+class ProtectedInputSnapshot:
+    """Controller-memory copy of the restorable protected inputs."""
+
+    workspace: Path
+    declared: tuple[ProtectedInputDeclaration, ...]
+    files: dict[str, bytes]
+    modes: dict[str, int]
+
+
+def reset_protected_input_digest_cache() -> None:
+    """Drop the stat-keyed digest memo (tests and long-lived workers)."""
+    _PROTECTED_DIGEST_CACHE.clear()
+
+
+def _cached_file_digest(path: Path) -> str:
+    """SHA-256 of ``path``, re-read only when its stat changed."""
+    stat_result = path.stat()
+    key = (str(path), int(stat_result.st_size), int(stat_result.st_mtime_ns))
+    cached = _PROTECTED_DIGEST_CACHE.get(key)
+    if cached is not None:
+        _PROTECTED_DIGEST_CACHE.move_to_end(key)
+        return cached
+    digest = _sha256_file(path)
+    _PROTECTED_DIGEST_CACHE[key] = digest
+    _PROTECTED_DIGEST_CACHE.move_to_end(key)
+    while len(_PROTECTED_DIGEST_CACHE) > _PROTECTED_DIGEST_CACHE_SIZE:
+        _PROTECTED_DIGEST_CACHE.popitem(last=False)
+    return digest
+
+
+def _resolved_protected_path(workspace: Path, relative: str) -> Path:
+    """Confine one declared path to the workspace, rejecting link indirection."""
+    if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        raise ProtectedInputIntegrityError(
+            f"Protected input path is not workspace-relative: {relative!r}"
+        )
+    path = workspace / relative
+    if path.is_symlink():
+        raise ProtectedInputIntegrityError(
+            f"Protected input is a symlink: {relative}"
+        )
+    resolved = path.resolve()
+    try:
+        resolved.relative_to(workspace.resolve())
+    except ValueError as exc:
+        raise ProtectedInputIntegrityError(
+            f"Protected input escapes the workspace: {relative}"
+        ) from exc
+    return path
+
+
+def describe_protected_input_changes(
+    working_dir: str | Path,
+    declared: Sequence[ProtectedInputDeclaration],
+) -> list[str]:
+    """Compare declared size/hash against what is on disk right now."""
+    workspace = Path(working_dir)
+    changes: list[str] = []
+    for relative, size, digest in declared:
+        try:
+            path = _resolved_protected_path(workspace, relative)
+        except ProtectedInputIntegrityError as exc:
+            changes.append(str(exc))
+            continue
+        if not path.is_file():
+            changes.append(f"missing={relative}")
+            continue
+        try:
+            observed_size = path.stat().st_size
+        except OSError as exc:
+            changes.append(f"unreadable={relative}:{exc}")
+            continue
+        if int(observed_size) != int(size):
+            changes.append(
+                f"size_changed={relative}:{observed_size}!={size}"
+            )
+            continue
+        try:
+            observed_digest = _cached_file_digest(path)
+        except OSError as exc:
+            changes.append(f"unreadable={relative}:{exc}")
+            continue
+        if observed_digest != digest:
+            changes.append(f"modified={relative}")
+    return changes
+
+
+def snapshot_protected_inputs(
+    working_dir: str | Path,
+    declared: Sequence[ProtectedInputDeclaration],
+    skip_relatives: Iterable[str] = (),
+) -> ProtectedInputSnapshot | None:
+    """Hold restorable protected inputs in controller memory before launch."""
+    if not declared:
+        return None
+    workspace = Path(working_dir)
+    skip = {str(item) for item in skip_relatives}
+    files: dict[str, bytes] = {}
+    modes: dict[str, int] = {}
+    for relative, size, _digest in declared:
+        if relative in skip or int(size) > _PROTECTED_SNAPSHOT_MAX_BYTES:
+            continue
+        path = _resolved_protected_path(workspace, relative)
+        if not path.is_file():
+            raise ProtectedInputIntegrityError(f"missing={relative}")
+        files[relative] = path.read_bytes()
+        modes[relative] = stat.S_IMODE(path.stat().st_mode)
+    return ProtectedInputSnapshot(
+        workspace=workspace,
+        declared=tuple(declared),
+        files=files,
+        modes=modes,
+    )
+
+
+def verify_and_restore_protected_inputs(
+    snapshot: ProtectedInputSnapshot,
+) -> list[str]:
+    """Verify the protected inputs, restoring the ones held in memory."""
+    changes = describe_protected_input_changes(snapshot.workspace, snapshot.declared)
+    if not changes:
+        return changes
+
+    for relative, contents in snapshot.files.items():
+        path = snapshot.workspace / relative
+        try:
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(contents)
+            mode = snapshot.modes.get(relative)
+            if mode is not None:
+                path.chmod(mode)
+        except OSError as exc:
+            changes.append(f"restore_failed={relative}:{exc}")
+    return changes
+
+
 __all__ = [
     "CanonicalIntegrityError",
     "CanonicalIntegritySnapshot",
+    "ProtectedInputIntegrityError",
+    "ProtectedInputMutationError",
+    "ProtectedInputSnapshot",
+    "describe_protected_input_changes",
+    "reset_protected_input_digest_cache",
     "snapshot_canonical_contract",
+    "snapshot_protected_inputs",
     "verify_and_restore_canonical_contract",
+    "verify_and_restore_protected_inputs",
 ]

@@ -588,3 +588,54 @@ class TestGradingSurvivesACrash:
         )
 
         runner._finalize_run(self._result(), None, None, None, {})
+
+    def test_a_harness_truncated_run_still_grades_what_it_accepted(
+        self, tmp_path, monkeypatch
+    ):
+        """Iteration 2 dies in the injected preamble; iteration 1's artifact stands.
+
+        The run is invalid and eligible for rerun, but it demonstrably produced
+        a hash-verified submission. Refusing to grade it would report a valid
+        result as nothing at all, and the sweep would lose both the score and
+        the reason.
+        """
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        observed = self._accepted(workspace, "harness-run")
+        observed.update(
+            {
+                "workflow_valid": False,
+                "terminal_failure_origin": "harness",
+                "terminal_failure_detail": {
+                    "reason": "injected_header_failure",
+                    "component": "model_b",
+                    "contract_fingerprint": "c" * 64,
+                },
+                # Both legacy keys exist and are None: the run must still
+                # report a non-empty error.
+                "submission_validation_error": None,
+                "termination_reason": None,
+            }
+        )
+
+        runner = self._runner(tmp_path)
+        graded: list[Path] = []
+
+        def fake_grade(competition_id, path):
+            graded.append(path)
+            return {"valid_submission": True, "score": 0.66, "above_median": True}
+
+        monkeypatch.setattr(runner, "_grade_submission", fake_grade)
+        result = self._result()
+
+        runner._finalize_run(result, workspace, "harness-run", observed, {})
+
+        assert len(graded) == 1
+        assert result.valid_submission is True
+        assert result.score == pytest.approx(0.66)
+        # Invalid attempt, eligible for rerun - not a clean completion.
+        assert result.success is False
+        assert result.failure_origin == "harness"
+        assert classify_failure_origin(result.error) is not None
+        assert result.terminal_failure_detail["contract_fingerprint"] == "c" * 64
+        assert result.error

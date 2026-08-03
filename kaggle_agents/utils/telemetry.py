@@ -462,6 +462,19 @@ def summarize_run_telemetry(state: dict[str, Any]) -> dict[str, Any]:
             "components_succeeded": dev_succeeded,
             "code_attempts_by_stage": attempts_by_stage,
         },
+        # A run that stopped on a failure no candidate could repair must say so
+        # in its own artifact: the sweep needs to tell an invalid harness
+        # attempt apart from a real agent-quality outcome without re-reading
+        # logs, and the fingerprints name which contracts were suppressed.
+        "terminal_failure": {
+            "origin": state.get("terminal_failure_origin"),
+            "detail": _to_jsonable(state.get("terminal_failure_detail")),
+            "failed_contract_fingerprints": sorted(
+                str(fingerprint)
+                for fingerprint in (state.get("failed_contract_fingerprints") or {})
+            ),
+            "workflow_valid": bool(state.get("workflow_valid", True)),
+        },
         "search": {
             "target_identity": {
                 "aliases": _to_jsonable(identity_aliases),

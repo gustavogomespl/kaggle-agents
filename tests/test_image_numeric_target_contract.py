@@ -13,8 +13,22 @@ import pytest
 import kaggle_agents.agents.developer.code_generator as code_generator_module
 from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
 from kaggle_agents.agents.developer.retry import _maybe_add_encoding_hint
+from kaggle_agents.agents.developer.target_source import (
+    CanonicalTargetContractError,
+    reset_target_source_caches,
+)
 from kaggle_agents.core.state import AblationComponent, CompetitionInfo
 from kaggle_agents.prompts.templates.constraints.image import IMAGE_CONSTRAINTS
+from kaggle_agents.workflow.nodes.canonical_data import (
+    canonical_data_preparation_node,
+)
+
+
+@pytest.fixture(autouse=True)
+def _clean_target_source_caches():
+    reset_target_source_caches()
+    yield
+    reset_target_source_caches()
 
 
 class _HeaderGenerator(CodeGeneratorMixin):
@@ -27,7 +41,7 @@ class _HeaderGenerator(CodeGeneratorMixin):
     )
 
     @staticmethod
-    def _get_dataset_info(_working_dir: Path, _state: dict | None = None) -> str:
+    def _get_dataset_info(*_args, **_kwargs) -> str:
         return ""
 
     @staticmethod
@@ -39,65 +53,49 @@ class _HeaderGenerator(CodeGeneratorMixin):
         return response.strip()
 
 
-def _write_canonical_workspace(
-    tmp_path: Path,
-    *,
-    raw_labels: list[object],
-    class_order: list[str],
-) -> dict:
+def _write_canonical_workspace(tmp_path: Path, *, raw_labels: list[object]) -> dict:
+    """Build a COMPLETE canonical contract with the real producer.
+
+    The fixture used to hand-write ``{"y_path": ...}`` as the whole contract.
+    That partial claim is now corruption: the target-source selector fails
+    closed on it before generation, and weakening the rule to keep the stub
+    would remove exactly the protection this file exercises.
+    """
     train_dir = tmp_path / "train"
     test_dir = tmp_path / "test"
-    canonical_dir = tmp_path / "canonical"
     train_dir.mkdir()
     test_dir.mkdir()
-    canonical_dir.mkdir()
 
-    train_ids = np.asarray(
-        [f"train-{index}" for index in range(len(raw_labels))],
-        dtype=str,
-    )
-    np.save(canonical_dir / "train_ids.npy", train_ids, allow_pickle=False)
-    np.save(
-        canonical_dir / "y.npy",
-        np.asarray(raw_labels),
-        allow_pickle=False,
-    )
-    np.save(
-        canonical_dir / "folds.npy",
-        np.arange(len(raw_labels), dtype=np.int64) % 2,
-        allow_pickle=False,
-    )
-    (canonical_dir / "feature_cols.json").write_text("[]", encoding="utf-8")
-    (canonical_dir / "metadata.json").write_text(
-        json.dumps(
-            {
-                "n_folds": 2,
-                "id_col": "image_id",
-                "target_col": "label",
-                "target_cols": ["label"],
-                "target_type": "single",
-                "n_targets": 1,
-                "is_classification": True,
-                "class_order": class_order,
-                "canonical_rows": len(raw_labels),
-            }
-        ),
-        encoding="utf-8",
-    )
+    train_csv = tmp_path / "train.csv"
+    test_csv = tmp_path / "test.csv"
+    pd.DataFrame(
+        {
+            "image_id": [f"train-{index}" for index in range(len(raw_labels))],
+            "width": [float(index % 3) for index in range(len(raw_labels))],
+            "label": raw_labels,
+        }
+    ).to_csv(train_csv, index=False)
+    pd.DataFrame(
+        {
+            "image_id": ["test-0", "test-1"],
+            "width": [0.0, 1.0],
+        }
+    ).to_csv(test_csv, index=False)
+
     sample_submission_path = tmp_path / "sample_submission.csv"
-    pd.DataFrame({"image_id": ["test-0"], "label": [0]}).to_csv(
+    pd.DataFrame({"image_id": ["test-0", "test-1"], "label": [0, 0]}).to_csv(
         sample_submission_path,
         index=False,
     )
 
-    return {
+    state = {
         "working_directory": str(tmp_path),
         "run_mode": "mlebench",
-        "canonical_data_prepared": True,
+        "target_col": "label",
+        "target_cols": ["label"],
         "current_train_path": str(train_dir),
         "current_test_path": str(test_dir),
         "sample_submission_path": str(sample_submission_path),
-        "canonical_contract": {"y_path": str(canonical_dir / "y.npy")},
         "submission_contract": {
             "id_col": "image_id",
             "target_cols": ["label"],
@@ -106,23 +104,28 @@ def _write_canonical_workspace(
             "data_type": "image",
             "train": str(train_dir),
             "test": str(test_dir),
+            "train_csv": str(train_csv),
+            "test_csv": str(test_csv),
             "sample_submission": str(sample_submission_path),
         },
     }
+    state.update(canonical_data_preparation_node(state))
+    assert state["canonical_data_prepared"] is True
+    return state
 
 
-def _generate_and_execute_header(
+def _tamper_class_order(state: dict, class_order: list[str]) -> None:
+    metadata_path = Path(state["working_directory"]) / "canonical" / "metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["class_order"] = class_order
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+
+
+def _generate_header(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    *,
-    raw_labels: list[object],
-    class_order: list[str],
-) -> dict:
-    state = _write_canonical_workspace(
-        tmp_path,
-        raw_labels=raw_labels,
-        class_order=class_order,
-    )
+    state: dict,
+) -> str:
     monkeypatch.setattr(
         code_generator_module,
         "build_dynamic_instructions",
@@ -151,7 +154,17 @@ def _generate_and_execute_header(
         "image_classification",
         state,
     )
-    header = generated.split("# === END PATH CONSTANTS ===", 1)[0]
+    return generated.split("# === END PATH CONSTANTS ===", 1)[0]
+
+
+def _generate_and_execute_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    raw_labels: list[object],
+) -> dict:
+    state = _write_canonical_workspace(tmp_path, raw_labels=raw_labels)
+    header = _generate_header(tmp_path, monkeypatch, state)
     namespace: dict = {}
     exec(compile(header, "<generated-image-header>", "exec"), namespace)
     return namespace
@@ -161,71 +174,89 @@ def test_generated_image_header_preserves_raw_labels_and_injects_indices(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_labels = ["dog", "cat", "dog", "cat"]
+    raw_labels = ["dog", "cat"] * 6
 
     namespace = _generate_and_execute_header(
         tmp_path,
         monkeypatch,
         raw_labels=raw_labels,
-        class_order=["cat", "dog"],
     )
 
     assert namespace["CANONICAL_Y"].tolist() == raw_labels
     assert namespace["CANONICAL_CLASS_ORDER"] == ("cat", "dog")
     assert namespace["CANONICAL_CLASS_INDICES"].dtype == np.int64
-    assert namespace["CANONICAL_CLASS_INDICES"].tolist() == [1, 0, 1, 0]
+    assert namespace["CANONICAL_CLASS_INDICES"].tolist() == [1, 0] * 6
 
 
 def test_generated_header_maps_numeric_raw_labels_without_mutating_them(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_labels = [1, 0, 1, 0]
+    raw_labels = [1, 0] * 6
 
     namespace = _generate_and_execute_header(
         tmp_path,
         monkeypatch,
         raw_labels=raw_labels,
-        class_order=["0", "1"],
     )
 
     assert namespace["CANONICAL_Y"].tolist() == raw_labels
     assert namespace["CANONICAL_CLASS_ORDER"] == ("0", "1")
-    assert namespace["CANONICAL_CLASS_INDICES"].tolist() == [1, 0, 1, 0]
-
-
-def test_generated_image_header_rejects_duplicate_class_order(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with pytest.raises(ValueError, match=r"class order.*unique"):
-        _generate_and_execute_header(
-            tmp_path,
-            monkeypatch,
-            raw_labels=["cat", "dog"],
-            class_order=["cat", "cat"],
-        )
+    assert namespace["CANONICAL_CLASS_INDICES"].tolist() == [1, 0] * 6
 
 
 @pytest.mark.parametrize(
     "class_order",
     [
+        ["cat", "cat"],
         ["cat"],
         ["cat", "dog", "fox"],
     ],
 )
-def test_generated_image_header_requires_exact_class_coverage(
+def test_tampered_class_order_fails_before_any_generation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     class_order: list[str],
 ) -> None:
-    with pytest.raises(ValueError, match=r"class order.*exactly cover"):
-        _generate_and_execute_header(
-            tmp_path,
-            monkeypatch,
-            raw_labels=["cat", "dog"],
-            class_order=class_order,
-        )
+    """A class order that cannot describe the real labels never reaches an LLM."""
+    state = _write_canonical_workspace(
+        tmp_path,
+        raw_labels=["cat", "dog"] * 6,
+    )
+    _tamper_class_order(state, class_order)
+
+    with pytest.raises(CanonicalTargetContractError, match="class_order"):
+        _generate_header(tmp_path, monkeypatch, state)
+
+
+@pytest.mark.parametrize(
+    ("class_order", "expected"),
+    [
+        (["cat", "cat"], r"class order.*unique"),
+        (["cat"], r"class order.*exactly cover"),
+        (["cat", "dog", "fox"], r"class order.*exactly cover"),
+    ],
+)
+def test_injected_header_still_rejects_a_bad_class_order_at_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    class_order: list[str],
+    expected: str,
+) -> None:
+    """Defence in depth: the header validates what it loads, not what it was told.
+
+    Generation happens against a valid contract; the metadata is corrupted
+    afterwards, exactly as a concurrent component would corrupt it.
+    """
+    state = _write_canonical_workspace(
+        tmp_path,
+        raw_labels=["cat", "dog"] * 6,
+    )
+    header = _generate_header(tmp_path, monkeypatch, state)
+    _tamper_class_order(state, class_order)
+
+    with pytest.raises(ValueError, match=expected):
+        exec(compile(header, "<generated-image-header>", "exec"), {})
 
 
 def test_image_prompt_uses_injected_indices_with_loss_specific_dtypes() -> None:

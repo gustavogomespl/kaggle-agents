@@ -42,6 +42,11 @@ from .code_contracts import (
     untrusted_contract_helper_import,
 )
 from .code_generator import CodeGeneratorMixin, get_dynamic_temperature
+from .execution_failures import (
+    INJECTED_HEADER_END_MARKER,
+    execute_generated_candidate,
+    sanitize_candidate_body,
+)
 
 
 if TYPE_CHECKING:
@@ -112,11 +117,18 @@ _SUBMISSION_CONTRACT_HINT = (
     "scores nothing, because the graded column keeps its placeholder."
 )
 
-_INJECTED_HEADER_END = "# === END PATH CONSTANTS ==="
+_INJECTED_HEADER_END = INJECTED_HEADER_END_MARKER
 
 
 def preserve_injected_header(original_code: str, replacement_code: str) -> str:
-    """Keep generator-owned constants/helpers when a fixer returns only a body."""
+    """Keep generator-owned constants/helpers when a fixer returns only a body.
+
+    Every rewrite - fixer, debugger, refinement - comes back through here, so
+    this is where the trusted preamble is re-attached byte-for-byte. The
+    replacement is also sanitized: a rewrite that copied the marker or a
+    manifest comment into its body would otherwise produce a program with two
+    markers, which the executor must refuse to classify.
+    """
     original_end = original_code.find(_INJECTED_HEADER_END)
     if original_end < 0:
         return replacement_code
@@ -126,6 +138,7 @@ def preserve_injected_header(original_code: str, replacement_code: str) -> str:
         replacement_code = replacement_code[
             replacement_end + len(_INJECTED_HEADER_END) :
         ].lstrip("\n")
+    replacement_code, _collisions = sanitize_candidate_body(replacement_code)
     combined = f"{header}\n{replacement_code}"
     return CodeGeneratorMixin._strip_path_redefinitions(None, combined)
 
@@ -677,8 +690,9 @@ class RetryMixin:
         for attempt in range(3):
             print(f"Simplified attempt {attempt + 1}/3")
 
-            exec_result = self.executor.execute(
-                code=simplified_code,
+            exec_result = execute_generated_candidate(
+                self.executor,
+                simplified_code,
                 working_dir=working_dir,
                 component_type=component.component_type,
             )
@@ -686,6 +700,14 @@ class RetryMixin:
             if exec_result.success:
                 print("Simplified version successful!")
                 return simplified_code, True
+
+            if exec_result.retryable is False:
+                print(
+                    "Simplified version hit a non-retryable "
+                    f"{exec_result.failure_origin} failure; no rewrite can "
+                    "repair it"
+                )
+                return simplified_code, False
 
             print(
                 f"Simplified attempt failed: {exec_result.errors[0] if exec_result.errors else 'Unknown'}"
@@ -1152,12 +1174,24 @@ Output Dir: {paths.get('output_dir', '.')}"""
                 code = debugged_code
                 continue
 
-            test_result = self.executor.execute(
+            test_result = execute_generated_candidate(
+                self.executor,
                 debugged_code,
-                working_dir,
+                working_dir=working_dir,
                 expected_artifacts=expected_artifacts,
                 component_type=component_type,
             )
+
+            if test_result.retryable is False:
+                # Debugging cannot repair a failure that is not in the
+                # candidate; stop before spending the remaining iterations.
+                print(
+                    "Debug halted: non-retryable "
+                    f"{test_result.failure_origin} failure"
+                )
+                if original_timeout is not None:
+                    self.executor.timeout = original_timeout
+                return debugged_code, test_result, False
 
             if test_result.success:
                 print("Debug successful!")

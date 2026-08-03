@@ -13,7 +13,8 @@ from typing import Any
 
 import pandas as pd
 
-from .dataclasses import MLEBenchDataInfo
+from .artifact_roles import PRIMARY_TABLE_ALIASES, one_artifact_path
+from .dataclasses import MLEBenchDataInfo, PublicArtifact
 
 
 class WorkspaceMixin:
@@ -85,6 +86,27 @@ class WorkspaceMixin:
                     shutil.copy2(staged_source, alias)
             return alias
 
+        # Stage the typed records first: their aliases define the canonical
+        # primary table names every later compatibility field points at.
+        # Primary tables get a workspace-internal alias; auxiliary artifacts
+        # keep their copied relative path and are never re-rooted.
+        staged_artifacts: list[PublicArtifact] = []
+        for artifact in info.public_artifacts:
+            alias = PRIMARY_TABLE_ALIASES.get(artifact.role)
+            staged_table: Path | None = None
+            if alias is not None and artifact.layout == "rectangular_table":
+                staged_table = local_alias(alias, artifact.path)
+            if staged_table is None:
+                staged_table = staged(artifact.path)
+            if staged_table is None:
+                continue
+            staged_artifacts.append(
+                artifact.with_staged_paths(
+                    staged_table, staged(artifact.source_archive)
+                )
+            )
+        info.public_artifacts = staged_artifacts
+
         # Resolve a sample-submission directory to its actual CSV before
         # constructing the canonical local alias.
         if info.sample_submission_path and info.sample_submission_path.is_dir():
@@ -111,17 +133,43 @@ class WorkspaceMixin:
             "sample_submission.csv", info.sample_submission_path
         )
         info.audio_source_path = local_alias("audio", info.audio_source_path)
-        info.label_files = [
-            alias
-            for label_file in info.label_files
-            if (alias := local_alias(label_file.name, label_file)) is not None
-        ]
         info.description_path = staged(info.description_path)
         info.extra_files = [
             path
             for extra_file in info.extra_files
             if (path := staged(extra_file)) is not None
         ]
+
+        # Derive the compatibility views from the staged typed records, once.
+        # A role the bounded resolver left unresolved keeps whatever legitimate
+        # legacy fallback the finders produced: JSON tables, directory-packed
+        # submission templates and media directories are outside this
+        # resolver's delimited scope, and clearing them would break them.
+        # `label_files` is deliberately *replaced*, not merged: only an
+        # inspector-verified sparse-label artifact may reach the generated
+        # preamble, never a path a filename heuristic merely called a label.
+        resolved_train_csv = one_artifact_path(info.public_artifacts, "train")
+        resolved_test_csv = one_artifact_path(info.public_artifacts, "test")
+        resolved_submission = one_artifact_path(
+            info.public_artifacts,
+            "submission",
+        )
+        if resolved_train_csv is not None:
+            info.train_csv_path = resolved_train_csv
+        if resolved_test_csv is not None:
+            info.test_csv_path = resolved_test_csv
+        if resolved_submission is not None:
+            info.sample_submission_path = resolved_submission
+        info.label_files = [
+            artifact.path
+            for artifact in info.public_artifacts
+            if artifact.role == "auxiliary" and artifact.layout == "sparse_labels"
+        ]
+        if info.data_type == "tabular":
+            if resolved_train_csv is not None:
+                info.train_path = resolved_train_csv
+            if resolved_test_csv is not None:
+                info.test_path = resolved_test_csv
 
         # Competitions that ship their tables as JSON (e.g. train/train.json,
         # with no CSV anywhere) are unreadable to the whole tabular lane:
@@ -297,6 +345,10 @@ class WorkspaceMixin:
                 "label_files": label_file_paths,
                 # Audio source directory inferred from local extensions.
                 "audio_source": str(info.audio_source_path) if info.audio_source_path else "",
+                # The typed records every key above is derived from.
+                "public_artifacts": [
+                    artifact.to_state() for artifact in info.public_artifacts
+                ],
             },
         }
 

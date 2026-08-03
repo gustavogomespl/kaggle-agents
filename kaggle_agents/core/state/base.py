@@ -137,6 +137,16 @@ class KaggleState(TypedDict):
     current_performance_score: float
     mlebench_grade: dict[str, Any] | None
     skip_remaining_components: bool
+    # Generated contracts (normalized injected-header fingerprints) that
+    # already failed inside the immutable preamble. An identical contract is
+    # skipped before any LLM generation or execution: rerunning it can only
+    # reproduce the same harness failure.
+    failed_contract_fingerprints: dict[str, dict[str, Any]]
+    # Set once when the run hit a failure no candidate rewrite can repair.
+    # ``harness`` disables robustness recovery and marks the attempt invalid,
+    # while an already-accepted hash-verified snapshot still reaches grading.
+    terminal_failure_origin: str | None
+    terminal_failure_detail: dict[str, Any] | None
     errors: Annotated[list[str], add]
     current_train_path: str | None
     current_test_path: str | None
@@ -187,6 +197,16 @@ class KaggleState(TypedDict):
     canonical_feature_cols_path: str | None
     canonical_test_ids_path: str | None
     canonical_metadata: dict[str, Any] | None
+    # Proof recorded by canonical_data_preparation_node() right after it wrote
+    # and hashed the contract: a versioned fingerprint over the semantic
+    # fields, the metadata digest and each canonical file's (size, mtime_ns).
+    # Components match it instead of re-deserializing multi-million-row arrays.
+    canonical_contract_validation: dict[str, Any] | None
+    # The resolved DeveloperTargetSource each generated component was built
+    # against: mode, representation kind, fingerprint and the protected-input
+    # manifest. Written per component so an execution record can be replayed
+    # against the exact inputs the preamble read eagerly.
+    target_source_record: dict[str, Any] | None
     submission_contract: dict[str, Any] | None  # SubmissionContract.to_dict()
     eval_fidelity: dict[str, Any] | None  # EvalFidelityContract.to_dict()
     data_usage: dict[str, Any] | None  # DataUsageContract.to_dict()
@@ -435,6 +455,9 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         current_performance_score=0.0,
         mlebench_grade=None,
         skip_remaining_components=False,
+        failed_contract_fingerprints={},
+        terminal_failure_origin=None,
+        terminal_failure_detail=None,
         errors=[],
         current_train_path=None,
         current_test_path=None,
@@ -477,6 +500,8 @@ def create_initial_state(competition_name: str, working_dir: str) -> KaggleState
         canonical_feature_cols_path=None,
         canonical_test_ids_path=None,
         canonical_metadata=None,
+        canonical_contract_validation=None,
+        target_source_record=None,
         submission_contract=None,
         eval_fidelity=None,
         data_usage=None,

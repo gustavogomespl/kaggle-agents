@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from pathlib import Path
 
 import numpy as np
@@ -12,8 +13,10 @@ import pytest
 from kaggle_agents.prompts.templates.builders.cv import build_cv_instructions
 from kaggle_agents.agents.ensemble.scoring import compute_oof_score
 from kaggle_agents.utils.calibration import calibrate_oof_predictions
+from kaggle_agents.prompts.templates.developer.prompt_composition import (
+    _target_source_sections,
+)
 from kaggle_agents.utils.data_contract import (
-    get_canonical_data_instructions,
     load_canonical_data,
     prepare_canonical_data,
     validate_oof_alignment,
@@ -363,28 +366,40 @@ def test_cv_prompt_forbids_fold_complement_for_temporal_contract() -> None:
     assert "CANONICAL_OOF_ELIGIBLE_MASK" in prompt
 
 
-def test_legacy_canonical_prompt_uses_audited_splitter_and_artifact_helper(
+def test_canonical_prompt_uses_audited_splitter_and_artifact_helper(
     tmp_path: Path,
 ) -> None:
+    """The canonical prompt is built from the resolved decision, not a probe.
+
+    A bare ``canonical/metadata.json`` on disk must not turn into canonical
+    prompt text: the prompt used to probe the directory independently of the
+    executable header, so the two could disagree about what exists.
+    """
     canonical = tmp_path / "canonical"
     canonical.mkdir()
     (canonical / "metadata.json").write_text(
-        json.dumps(
-            {
-                "canonical_rows": 12,
-                "n_folds": 3,
-                "id_col": "id",
-            }
-        ),
+        json.dumps({"canonical_rows": 12, "n_folds": 3, "id_col": "id"}),
         encoding="utf-8",
     )
+    authoritative = SimpleNamespace(
+        canonical_authoritative=True,
+        packed_image_contract=False,
+        mode="canonical",
+    )
 
-    prompt = get_canonical_data_instructions(tmp_path)
+    prompt = "\n".join(
+        _target_source_sections(authoritative, {"output_dir": str(tmp_path)}, "model")
+    )
+    probed = "\n".join(
+        _target_source_sections(None, {"output_dir": str(tmp_path)}, "model")
+    )
 
     assert "iter_canonical_cv_splits()" in prompt
     assert "folds != fold_idx" not in prompt
     assert "save_component_artifacts(" in prompt
     assert 'np.save("models/oof_' not in prompt
+    # No decision -> no canonical prompt, however complete the directory looks.
+    assert probed == ""
 
 
 def test_oof_scoring_masks_temporal_warmup(tmp_path: Path) -> None:

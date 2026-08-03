@@ -368,6 +368,10 @@ def run_evaluation(
                 "run_id": provenance.get("run_id"),
                 "terminal_status": "completed",
                 "failure_origin": result.failure_origin,
+                # Which contract failed, in which component, and why. The
+                # top-level origin decides rerun eligibility; this says what
+                # has to be fixed before the rerun.
+                "terminal_failure_detail": result.terminal_failure_detail,
                 "attempted_at": datetime.now().isoformat(),
                 "success": result.success,
                 "valid_submission": result.valid_submission,

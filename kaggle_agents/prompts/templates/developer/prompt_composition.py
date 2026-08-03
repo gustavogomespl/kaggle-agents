@@ -61,52 +61,16 @@ def compose_generate_prompt(
     if requirements:
         parts.extend(("", "## Dynamic Component Contract", requirements))
 
-    # Inject dynamic canonical data instructions for model components
+    # The target section comes from the ONE resolved decision. Probing
+    # `output_dir/canonical` here was a second, independent authority check:
+    # it could announce a canonical contract the executable header never
+    # injected (or stay silent about one it did), so the model was told to
+    # parse a stale annotation file the preamble had deliberately hidden.
     comp_type = getattr(component, "component_type", "model")
-    if comp_type in ("model", "ensemble"):
-        try:
-            from ....utils.data_contract import get_canonical_data_instructions
-
-            output_dir = paths.get("output_dir", ".")
-            canonical_instructions = get_canonical_data_instructions(output_dir)
-            if canonical_instructions:
-                parts.append("")
-                parts.append(canonical_instructions)
-        except Exception:
-            pass  # Canonical data not available yet
-
-    # Non-standard label files are described from the files detected in this run.
-    label_files = paths.get("label_files", [])
-    if label_files:
-        label_section = """
-## NON-STANDARD LABEL FILES (MANDATORY PARSING)
-
-Label files detected: """ + ", ".join(str(lf) for lf in label_files) + """
-
-Parse these supplied files and fail clearly if their target role cannot be
-validated. Never manufacture dummy targets.
-
-Steps:
-1. Use parse_label_file() helper (injected in code header)
-2. Preserve the semantic record ID -> target mapping
-3. Pivot to a binary matrix only if the observed artifact is truly multi-label
-4. Match with training data BEFORE training
-
-Generic variable-width example:
-```python
-targets_df = parse_label_file(LABEL_FILES[0])
-assert {'record_id', 'target'}.issubset(targets_df.columns)
-# Only for a verified multi-label target:
-y_train = targets_df.pivot_table(
-    index='record_id',
-    columns='target',
-    aggfunc='size',
-    fill_value=0,
-)
-```
-"""
+    target_source = paths.get("target_source")
+    for section in _target_source_sections(target_source, paths, comp_type):
         parts.append("")
-        parts.append(label_section)
+        parts.append(section)
 
     # Runtime/objective hints (important for timeout-sensitive runs like MLE-bench).
     if context.run_mode or context.objective or context.timeout_per_component is not None:
@@ -265,6 +229,152 @@ y_train = targets_df.pivot_table(
         parts.append(guidance)
 
     return "\n".join(parts)
+
+
+_DENSE_CANONICAL_INSTRUCTIONS = """
+## MANDATORY: Canonical Data Contract
+
+The canonical contract is the ONLY authoritative source of rows, folds and
+targets for this run. It is already loaded by the injected header.
+
+```python
+# Already available - do NOT reload or redefine:
+#   CANONICAL_TRAIN_IDS, CANONICAL_Y, CANONICAL_FOLDS, CANONICAL_TEST_IDS
+#   CANONICAL_FEATURE_COLS, ID_COL, TARGET_COL, TARGET_COLS, N_FOLDS
+
+# Use the injected audited splitter for CV. It preserves temporal
+# forward-chaining and warm-up eligibility when the canonical strategy is
+# temporal; a simple fold-complement split does not.
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = CANONICAL_Y[train_idx], CANONICAL_Y[val_idx]
+    model.fit(X_train, y_train)
+    oof[val_idx] = model.predict_proba(X_val)
+```
+
+### CRITICAL RULES:
+1. NEVER use train_test_split() - use the canonical folds
+2. NEVER create your own KFold/StratifiedKFold - folds are pre-defined
+3. NEVER sample or shuffle the data independently
+4. ALWAYS save OOF predictions in canonical order (aligned with CANONICAL_TRAIN_IDS)
+5. Align a loaded training table with align_train_to_canonical(df)
+
+### Saving Predictions:
+```python
+assert len(oof) == len(CANONICAL_TRAIN_IDS), "OOF must match canonical row count"
+save_component_artifacts(
+    oof,
+    test_predictions,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=CANONICAL_TEST_IDS,
+)
+```
+"""
+
+_PACKED_CANONICAL_INSTRUCTIONS = """
+## MANDATORY: Canonical Data Contract (packed image targets)
+
+Targets are packed pixel arrays, not a dense `y` vector. The injected header
+already loaded and validated them; do NOT open the archive yourself.
+
+```python
+# Already available - do NOT reload or redefine:
+#   CANONICAL_TRAIN_IDS, CANONICAL_TEST_IDS, CANONICAL_FOLDS
+#   CANONICAL_TARGET_VALUES, CANONICAL_TARGET_OFFSETS,
+#   CANONICAL_TARGET_SHAPES, CANONICAL_TARGET_IMAGE_IDS
+#   CANONICAL_IMAGE_INPUT_PATHS, CANONICAL_IMAGE_TEST_INPUT_PATHS
+
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    ...  # index the packed target accessor by row, never by filename
+```
+
+### CRITICAL RULES:
+1. Row i of every canonical array describes CANONICAL_TRAIN_IDS[i]
+2. Read model inputs from CANONICAL_IMAGE_INPUT_PATHS (train) and
+   CANONICAL_IMAGE_TEST_INPUT_PATHS (test) - never re-scan directories
+3. Predictions are packed in the same order and saved with the injected helper
+"""
+
+
+def _target_source_sections(
+    target_source,
+    paths: dict,
+    component_type: str,
+) -> list[str]:
+    """Build the target-related prompt sections from the resolved decision."""
+    if target_source is None:
+        return []
+
+    sections: list[str] = []
+    if getattr(target_source, "canonical_authoritative", False):
+        if component_type in ("model", "ensemble"):
+            sections.append(
+                _PACKED_CANONICAL_INSTRUCTIONS
+                if getattr(target_source, "packed_image_contract", False)
+                else _DENSE_CANONICAL_INSTRUCTIONS
+            )
+        auxiliary = _auxiliary_records(paths, target_source)
+        if auxiliary:
+            described = "\n".join(
+                f"- `{record['path']}` (layout: {record['layout'] or 'unclassified'})"
+                for record in auxiliary
+            )
+            sections.append(
+                "## AUXILIARY PUBLIC ARTIFACTS (NOT TARGETS)\n\n"
+                "These public files may carry useful features or metadata. The\n"
+                "canonical contract already owns the targets and folds, so do NOT\n"
+                "read a target from them and do NOT rebuild the row set from them.\n\n"
+                f"{described}\n"
+            )
+        return sections
+
+    if getattr(target_source, "mode", "none") == "sparse_preload":
+        label_files = list(getattr(target_source, "label_files", ()))
+        sections.append(
+            """
+## NON-STANDARD LABEL FILES (MANDATORY PARSING)
+
+Verified sparse-label artifacts: """
+            + ", ".join(str(lf) for lf in label_files)
+            + """
+
+Their sparse layout was verified by inspection before injection. Parse them
+with the injected helper and fail clearly if the target role cannot be
+validated. Never manufacture dummy targets.
+
+Steps:
+1. Use parse_label_file() helper (injected in code header)
+2. Preserve the semantic record ID -> target mapping
+3. Pivot to a binary matrix only if the observed artifact is truly multi-label
+4. Match with training data BEFORE training
+
+Generic variable-width example:
+```python
+targets_df = parse_label_file(LABEL_FILES[0])
+assert {'record_id', 'target'}.issubset(targets_df.columns)
+# Only for a verified multi-label target:
+y_train = targets_df.pivot_table(
+    index='record_id',
+    columns='target',
+    aggfunc='size',
+    fill_value=0,
+)
+```
+"""
+        )
+    return sections
+
+
+def _auxiliary_records(paths: dict, target_source) -> list[dict]:
+    """Neutral auxiliary artifact records for the current decision."""
+    try:
+        from ....agents.developer.target_source import auxiliary_public_artifacts
+    except ImportError:  # pragma: no cover - defensive
+        return []
+    records = paths.get("public_artifacts")
+    if not records:
+        return []
+    return list(auxiliary_public_artifacts({"public_artifacts": records}, target_source))
 
 
 def _format_task(component, competition_info, paths: dict[str, str]) -> str:

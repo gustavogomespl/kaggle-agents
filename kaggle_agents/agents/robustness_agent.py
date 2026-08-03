@@ -1720,5 +1720,54 @@ def robustness_agent_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
+    terminal_origin = str(state.get("terminal_failure_origin") or "").strip()
+    if terminal_origin:
+        # Recovery is repair advice for a candidate. A terminal harness (or
+        # stale-input) failure is not about any candidate, so constructing the
+        # agent - let alone running its LLM checks - would spend budget to
+        # re-diagnose a program that never reached its own body.
+        detail = state.get("terminal_failure_detail")
+        detail = dict(detail) if isinstance(detail, dict) else {}
+        print(
+            "\n⏭️  Robustness validation skipped: the run already recorded a "
+            f"terminal {terminal_origin} failure "
+            f"({detail.get('reason', 'unspecified')})"
+        )
+        return {
+            "overall_validation_score": 0.0,
+            "robustness_passed": False,
+            "robustness_abstained": False,
+            "robustness_approved_components": dict(
+                state.get("robustness_approved_components") or {}
+            ),
+            "robustness_failure_details": {
+                "failed_modules": ["terminal_failure"],
+                "issues": [
+                    f"Terminal {terminal_origin} failure: "
+                    f"{detail.get('reason', 'unspecified')}"
+                ],
+                "suggestions": [],
+                "failed_components": [],
+            },
+            "critical_issues": [
+                f"Terminal {terminal_origin} failure recorded before validation"
+            ],
+            "telemetry_events": [
+                make_event(
+                    "harness",
+                    "robustness_skipped_terminal_failure",
+                    iteration=state.get("current_iteration", 0),
+                    origin=terminal_origin,
+                    reason=str(detail.get("reason") or ""),
+                    component_name=str(detail.get("component") or ""),
+                    header_sha256=str(detail.get("header_sha256") or ""),
+                    contract_fingerprint=str(
+                        detail.get("contract_fingerprint") or ""
+                    ),
+                )
+            ],
+            "last_updated": datetime.now(),
+        }
+
     agent = RobustnessAgent()
     return agent(state)

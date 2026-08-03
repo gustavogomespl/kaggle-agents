@@ -31,6 +31,8 @@ def _agent(implementation) -> DeveloperAgent:
     agent.executor = SimpleNamespace(timeout=60, run_mode="")
     agent._implement_component = implementation
     agent._last_reasoning_trace = None
+    agent._last_target_source = None
+    agent._last_target_source_metadata = None
     agent._last_self_evaluation = None
     agent._preference_collector = SimpleNamespace(
         get_pairs_for_state=lambda: []
@@ -232,3 +234,57 @@ def test_low_score_retry_uses_same_cleanup_and_does_not_advance(
     assert not (models / "test_threshold_model.npy").exists()
     assert not (tmp_path / "submission.csv").exists()
     assert "below required threshold" in updates["rollback_reason"]
+
+
+def test_non_retryable_harness_failure_is_not_cleaned_up_as_a_model_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A preamble failure is not evidence about the component.
+
+    ``_reject_model_candidate`` exists to invalidate a candidate that produced
+    something untrustworthy. A program that never reached its own body produced
+    nothing, so revoking the component's earlier evidence, charging it a retry
+    and eventually listing it as a failed component would all be wrong.
+    """
+    monkeypatch.setenv("KAGGLE_AGENTS_MAX_COMPONENT_RETRIES", "3")
+    models = tmp_path / "models"
+    models.mkdir()
+    (models / "oof_approved_model.npy").write_bytes(b"accepted-oof")
+    component = AblationComponent("approved_model", "model", "fit")
+    state = _state(tmp_path, component)
+    state["failed_contract_fingerprints"] = {}
+
+    def preamble_failure(_component, _state):
+        return (
+            DevelopmentResult(
+                code="header-only",
+                success=False,
+                stderr="RuntimeError inside the injected canonical loader",
+                errors=["RuntimeError inside the injected canonical loader"],
+                failure_origin="harness",
+                retryable=False,
+                header_sha256="a" * 64,
+                contract_fingerprint="b" * 64,
+            ),
+            [],
+        )
+
+    updates = _agent(preamble_failure)(state)
+
+    # Advanced once, never retried, never blamed on the component.
+    assert updates["current_component_index"] == 1
+    assert updates["code_retry_count"] == 0
+    assert "approved_model" not in (updates.get("failed_component_names") or [])
+    assert "rollback_reason" not in updates
+    # Prior accepted evidence is untouched.
+    assert "oof_availability" not in updates
+    assert "component_results" not in updates
+    assert "trusted_component_scores" not in updates
+    assert (models / "oof_approved_model.npy").read_bytes() == b"accepted-oof"
+    # Terminal, and the contract is suppressed for the rest of the run.
+    assert updates["workflow_valid"] is False
+    assert updates["terminal_failure_origin"] == "harness"
+    assert updates["terminal_failure_detail"]["contract_fingerprint"] == "b" * 64
+    assert "b" * 64 in updates["failed_contract_fingerprints"]
+    assert updates.get("skip_remaining_components") is not True

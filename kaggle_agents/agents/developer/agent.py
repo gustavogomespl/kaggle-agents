@@ -58,6 +58,12 @@ from .code_generator import (
     CodeGeneratorMixin,
 )
 from .dspy_modules import CodeFixerModule, CodeGeneratorModule
+from .execution_failures import (
+    GeneratedContractStructureError,
+    RepeatedInjectedContractError,
+    execute_generated_candidate,
+    execution_failure_to_development_result,
+)
 from .grpo import GRPOMixin
 from .quiet_star import QuietStarMixin
 from .refinement import REFINEMENT_TRUST_BOUNDARY, RefinementMixin
@@ -66,6 +72,7 @@ from .retry import (
     preserve_injected_header,
     require_oof_artifacts,
 )
+from .target_source import CanonicalTargetContractError
 from .utils import DeveloperUtilsMixin
 from .validation import (
     ValidationMixin,
@@ -387,6 +394,11 @@ class DeveloperAgent(
         # GRPO: Store last reasoning trace for state persistence
         self._last_reasoning_trace: ReasoningTrace | None = None
 
+        # The resolved target decision for the component being generated, kept
+        # here only until it is drained into the state updates below.
+        self._last_target_source = None
+        self._last_target_source_metadata: dict | None = None
+
         # DPO: Preference collector for learning from code fixes
         self._preference_collector = create_preference_collector()
 
@@ -457,6 +469,13 @@ class DeveloperAgent(
             "component_type": component.component_type,
             "attempt": attempt_id,
             "success": exec_result.success,
+            # The contract this attempt actually ran against, and how the
+            # failure was classified. Without these the log cannot distinguish
+            # an invalid harness attempt from a candidate defect.
+            "failure_origin": exec_result.failure_origin,
+            "retryable": exec_result.retryable,
+            "header_sha256": exec_result.header_sha256,
+            "contract_fingerprint": exec_result.contract_fingerprint,
             "execution_time_s": exec_result.execution_time,
             "exit_code": exec_result.exit_code,
             "expected_artifacts": expected,
@@ -655,6 +674,233 @@ class DeveloperAgent(
             if component.name not in existing_failed:
                 updates["failed_component_names"] = [component.name]
         return updates
+
+    def _record_injected_contract_failure(
+        self,
+        *,
+        state: KaggleState,
+        component: AblationComponent,
+        working_dir: Path,
+        current_index: int,
+        attempt_records: list[CodeAttempt],
+        result: DevelopmentResult,
+    ) -> dict[str, Any]:
+        """Close a non-retryable contract failure without blaming the model.
+
+        This is deliberately not ``_reject_model_candidate``: nothing here is
+        evidence about the component. The candidate never reached its own body
+        (or ran against inputs that had already changed), so there is no model
+        to roll back, no score to revoke and no reason to spend another
+        component retry. What must survive is everything the run had already
+        earned - accepted component results, trusted scores, and above all the
+        accepted-registry keys the single final grading pass reads.
+        """
+        from ...utils.submission_artifacts import restore_accepted_submission
+
+        origin = str(getattr(result, "failure_origin", "") or "harness")
+        fingerprint = str(getattr(result, "contract_fingerprint", "") or "")
+        reason = (
+            "injected_header_failure"
+            if origin == "harness"
+            else "protected_input_contract_failure"
+        )
+        detail_text = next(
+            (
+                str(value).strip()
+                for value in (result.errors or [])
+                if str(value).strip()
+            ),
+            (result.stderr or "").strip(),
+        )
+        print(
+            f"\n🛑 Non-retryable {origin} failure in '{component.name}': "
+            f"{reason}. Neither retry level may spend budget on it."
+        )
+
+        # Quarantine only what this unverified attempt actually produced. A
+        # preamble failure creates nothing, so an unconditional quarantine here
+        # would destroy evidence this same component had accepted earlier.
+        created = {str(path) for path in (result.artifacts_created or [])}
+        component_artifacts_written = any(
+            Path(path).name.endswith(f"_{component.name}.npy")
+            or Path(path).name.endswith(f"_{component.name}.npz")
+            for path in created
+        )
+        quarantined: list[str] = []
+        if component_artifacts_written:
+            quarantined = quarantine_component_artifacts(
+                working_dir / "models", component.name
+            )
+            if quarantined:
+                print(f"   Quarantined unverified artifacts: {', '.join(quarantined)}")
+
+        candidate_submission = working_dir / f"submission_{component.name}.csv"
+        if candidate_submission.is_file():
+            rejected_dir = working_dir / ".rejected_submissions"
+            rejected_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+            safe_component = "".join(
+                char if char.isalnum() or char in {"-", "_"} else "_"
+                for char in component.name
+            )
+            candidate_submission.replace(
+                rejected_dir / f"{safe_component}_component_{timestamp}.csv"
+            )
+        restored = restore_accepted_submission(state, working_dir)
+        if restored is not None:
+            print(f"   Restored verified accepted submission: {restored}")
+
+        failed_contracts = dict(state.get("failed_contract_fingerprints") or {})
+        terminal_detail: dict[str, Any] = {
+            "reason": reason,
+            "origin": origin,
+            "component": component.name,
+            "component_type": component.component_type,
+            "contract_fingerprint": fingerprint,
+            "header_sha256": str(getattr(result, "header_sha256", "") or ""),
+            "error": detail_text[:1000],
+        }
+        if fingerprint:
+            failed_contracts[fingerprint] = {
+                "component": component.name,
+                "component_type": component.component_type,
+                "origin": origin,
+                "reason": reason,
+                "header_sha256": terminal_detail["header_sha256"],
+                "error": detail_text[:500],
+            }
+
+        return {
+            "development_results": [],
+            "code_attempts": attempt_records,
+            # Advance: a genuinely different contract may still be diagnosed,
+            # so this does NOT set skip_remaining_components.
+            "current_component_index": current_index + 1,
+            "code_retry_count": 0,
+            "failed_contract_fingerprints": failed_contracts,
+            "workflow_valid": False,
+            "terminal_failure_origin": origin,
+            "terminal_failure_detail": terminal_detail,
+            "telemetry_events": [
+                make_event(
+                    "harness",
+                    "injected_header_failure",
+                    iteration=state.get("current_iteration", 0),
+                    component_name=component.name,
+                    component_type=component.component_type,
+                    origin=origin,
+                    reason=reason,
+                    contract_fingerprint=fingerprint,
+                    header_sha256=terminal_detail["header_sha256"],
+                    quarantined=quarantined,
+                )
+            ],
+            "last_updated": datetime.now(),
+        }
+
+    def _skip_duplicate_injected_contract(
+        self,
+        *,
+        state: KaggleState,
+        component: AblationComponent,
+        current_index: int,
+        error: RepeatedInjectedContractError,
+    ) -> dict[str, Any]:
+        """Advance past a contract that already failed, at zero cost.
+
+        No LLM generation, no execution, no fixer, no debugger: an identical
+        normalized contract can only reproduce the failure that was already
+        diagnosed, and the terminal origin recorded then still describes it.
+        """
+        print(
+            f"\n⏭️  Skipping '{component.name}': its generated contract already "
+            f"failed in this run ({error.contract_fingerprint[:12]})"
+        )
+        updates: dict[str, Any] = {
+            "current_component_index": current_index + 1,
+            "code_retry_count": 0,
+            "workflow_valid": False,
+            "telemetry_events": [
+                make_event(
+                    "harness",
+                    "duplicate_injected_contract_skipped",
+                    iteration=state.get("current_iteration", 0),
+                    component_name=component.name,
+                    component_type=component.component_type,
+                    contract_fingerprint=error.contract_fingerprint,
+                )
+            ],
+            "last_updated": datetime.now(),
+        }
+        # Preserve, never re-derive: the origin and detail belong to the
+        # attempt that actually failed.
+        existing_origin = state.get("terminal_failure_origin")
+        if existing_origin:
+            updates["terminal_failure_origin"] = str(existing_origin)
+        existing_detail = state.get("terminal_failure_detail")
+        if isinstance(existing_detail, dict):
+            updates["terminal_failure_detail"] = dict(existing_detail)
+        return updates
+
+    def _record_pregeneration_contract_failure(
+        self,
+        *,
+        state: KaggleState,
+        component: AblationComponent,
+        current_index: int,
+        error: Exception,
+    ) -> dict[str, Any]:
+        """Stop the run on a contract that cannot be rendered at all.
+
+        A corrupt canonical claim or a malformed generator-owned header is not
+        a property of one component: every remaining component would render the
+        same broken contract. Zero LLM, executor, fixer and debugger calls have
+        happened at this point, and no component or model is marked as failed.
+        """
+        violations = [
+            dict(violation)
+            for violation in getattr(error, "violations", []) or []
+            if isinstance(violation, Mapping)
+        ]
+        reason = (
+            "canonical_target_contract_error"
+            if isinstance(error, CanonicalTargetContractError)
+            else "generated_contract_structure_error"
+        )
+        print(
+            f"\n🛑 {reason} while preparing '{component.name}': {error}. "
+            "No candidate can be generated against this contract."
+        )
+        terminal_detail: dict[str, Any] = {
+            "reason": reason,
+            "origin": "harness",
+            "component": component.name,
+            "component_type": component.component_type,
+            "error": str(error)[:1000],
+            "violations": violations,
+        }
+        plan_length = len(state.get("ablation_plan", []) or [])
+        return {
+            "development_results": [],
+            "current_component_index": max(plan_length, current_index + 1),
+            "code_retry_count": 0,
+            "skip_remaining_components": True,
+            "workflow_valid": False,
+            "terminal_failure_origin": "harness",
+            "terminal_failure_detail": terminal_detail,
+            "telemetry_events": [
+                make_event(
+                    "harness",
+                    "generated_contract_unavailable",
+                    iteration=state.get("current_iteration", 0),
+                    component_name=component.name,
+                    component_type=component.component_type,
+                    reason=reason,
+                    violations=violations,
+                )
+            ],
+            "last_updated": datetime.now(),
+        }
 
     @staticmethod
     def _artifact_sha256(path: Path) -> str:
@@ -1138,6 +1384,29 @@ class DeveloperAgent(
         )
         try:
             result, attempt_records = self._implement_component(component, state)
+        except (
+            CanonicalTargetContractError,
+            GeneratedContractStructureError,
+            RepeatedInjectedContractError,
+        ) as exc:
+            self._verify_and_restore_approved_component_artifacts(
+                approved_artifact_snapshot,
+                working_dir,
+                active_component_name=component.name,
+            )
+            if isinstance(exc, RepeatedInjectedContractError):
+                return self._skip_duplicate_injected_contract(
+                    state=state,
+                    component=component,
+                    current_index=current_index,
+                    error=exc,
+                )
+            return self._record_pregeneration_contract_failure(
+                state=state,
+                component=component,
+                current_index=current_index,
+                error=exc,
+            )
         except Exception:
             self._verify_and_restore_approved_component_artifacts(
                 approved_artifact_snapshot,
@@ -1167,6 +1436,19 @@ class DeveloperAgent(
             state = self._state_with_revoked_component_evidence(
                 state,
                 unrecovered_approved,
+            )
+
+        if getattr(result, "retryable", True) is False:
+            # An invalid harness attempt, not model-quality evidence: the
+            # component is neither retried nor recorded as a model failure, and
+            # everything already accepted in this run stays exactly as it is.
+            return self._record_injected_contract_failure(
+                state=state,
+                component=component,
+                working_dir=working_dir,
+                current_index=current_index,
+                attempt_records=attempt_records,
+                result=result,
             )
 
         should_keep_component = True
@@ -1267,6 +1549,18 @@ class DeveloperAgent(
         # Save original train row count for data loss detection
         if n_train_original_to_save is not None:
             state_updates["n_train_original"] = n_train_original_to_save
+
+        # Persist the target decision this candidate was generated against:
+        # the fingerprint and protected-input manifest belong in the execution
+        # record, not in an instance attribute nothing ever reads.
+        if self._last_target_source_metadata is not None:
+            state_updates["target_source_record"] = {
+                "component_name": component.name,
+                "component_type": component.component_type,
+                **self._last_target_source_metadata,
+            }
+            self._last_target_source_metadata = None
+            self._last_target_source = None
 
         # GRPO: Persist reasoning trace in state
         if self._last_reasoning_trace is not None:
@@ -2193,9 +2487,10 @@ Based on the training results above, improve the model to achieve a {desired_dir
                                 f"class_order_{component.name}.npy"
                             )
                         try:
-                            refined_exec = self.executor.execute(
+                            refined_exec = execute_generated_candidate(
+                                self.executor,
                                 refined_code,
-                                working_dir,
+                                working_dir=working_dir,
                                 expected_artifacts=(
                                     refinement_expected_artifacts or None
                                 ),
@@ -2481,6 +2776,21 @@ Based on the training results above, improve the model to achieve a {desired_dir
         domain = state.get("domain_detected", "tabular")
         attempt_records: list[CodeAttempt] = []
 
+        # Resolve the target source and render the immutable contract FIRST:
+        # before dataset inspection, GRPO/CoT reasoning, prompt composition or
+        # any LLM call. A corrupt canonical claim must fail here, not after a
+        # model has already been asked to write code against a contract that
+        # does not hold - and a contract whose preamble already failed in this
+        # run must not be regenerated or re-executed at all.
+        prepared_contract = self._prepare_generated_contract(
+            component,
+            competition_info,
+            working_dir,
+            domain,
+            state,
+        )
+        target_source = prepared_contract.target_source
+
         # Prefer paths discovered during data download/previous steps
         train_candidates = [
             state.get("current_train_path"),
@@ -2656,7 +2966,11 @@ Based on the training results above, improve the model to achieve a {desired_dir
 
             # Chain-of-Thought: Generate explicit step-by-step thinking
             print("\n💭 Chain-of-Thought: Step-by-step reasoning...")
-            dataset_info = self._get_dataset_info(working_dir, state)
+            dataset_info = self._get_dataset_info(
+                working_dir,
+                state,
+                target_source=target_source,
+            )
             cot_result = self._generate_chain_of_thought(component, state, data_info=dataset_info)
             print(f"   Summary: {cot_result.thinking_summary[:100]}...")
 
@@ -2679,6 +2993,17 @@ Based on the training results above, improve the model to achieve a {desired_dir
             state,
             reasoning_trace=reasoning_trace,
             cot_result=cot_result,
+            target_source=target_source,
+            prepared_contract=prepared_contract,
+        )
+        # Execution metadata: the exact decision this candidate was generated
+        # against, including the fingerprint of every eagerly read input.
+        self._last_target_source = target_source
+        self._last_target_source_metadata = target_source.execution_metadata()
+        print(
+            f"   Target source: {target_source.mode} "
+            f"({target_source.representation_kind}, "
+            f"fingerprint={target_source.target_source_fingerprint[:12]})"
         )
 
         # GRPO Enforcement: Verify code alignment with reasoning trace
@@ -3022,8 +3347,9 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     errors=[combined_error],
                 )
             else:
-                exec_result = self.executor.execute(
-                    code=code,
+                exec_result = execute_generated_candidate(
+                    self.executor,
+                    code,
                     working_dir=working_dir,
                     expected_artifacts=execution_expected_artifacts or None,
                     component_type=component.component_type,
@@ -3040,6 +3366,44 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = old
+
+            if exec_result.retryable is False:
+                # The failure is not about this candidate: the injected
+                # preamble raised, or an input it was fingerprinted against
+                # changed. Return before meta-feedback, the fixer, the
+                # debugger, simplification and rollback execution - all of
+                # which would rewrite code that was never the problem.
+                print(
+                    "   Non-retryable execution failure "
+                    f"({exec_result.failure_origin}); skipping both retry "
+                    "levels for this component"
+                )
+                attempt_records.append(
+                    CodeAttempt(
+                        component_name=component.name,
+                        component_type=component.component_type,
+                        stage="generate" if attempt == 0 else "fix",
+                        attempt=attempt + 1,
+                        success=False,
+                        error=(
+                            exec_result.errors[0][:800]
+                            if exec_result.errors
+                            else (exec_result.stderr or "")[:800]
+                        ),
+                        code_excerpt="\n".join(code.splitlines()[:140]),
+                        stdout_tail=(exec_result.stdout or "")[-2000:],
+                        stderr_tail=(exec_result.stderr or "")[-2000:],
+                        execution_time=exec_result.execution_time,
+                        run_fidelity="full",
+                        failure_origin=exec_result.failure_origin,
+                        retryable=False,
+                        header_sha256=exec_result.header_sha256,
+                        contract_fingerprint=exec_result.contract_fingerprint,
+                    )
+                )
+                return execution_failure_to_development_result(
+                    code, exec_result, "full"
+                ), attempt_records
 
             if exec_result.success:
                 print(f"Execution successful ({exec_result.execution_time:.2f}s)")
@@ -3058,6 +3422,8 @@ Based on the training results above, improve the model to achieve a {desired_dir
                         execution_time=exec_result.execution_time,
                         run_fidelity="full",
                         meta_feedback=meta_feedback,
+                        header_sha256=exec_result.header_sha256,
+                        contract_fingerprint=exec_result.contract_fingerprint,
                     )
                 )
 
@@ -3109,6 +3475,10 @@ Based on the training results above, improve the model to achieve a {desired_dir
                     stderr_tail=(exec_result.stderr or "")[-2000:],
                     execution_time=exec_result.execution_time,
                     run_fidelity="full",
+                    failure_origin=exec_result.failure_origin,
+                    retryable=exec_result.retryable,
+                    header_sha256=exec_result.header_sha256,
+                    contract_fingerprint=exec_result.contract_fingerprint,
                 )
             )
 
@@ -3163,6 +3533,10 @@ Based on the training results above, improve the model to achieve a {desired_dir
                 stderr_tail=(exec_result.stderr or "")[-2000:],
                 execution_time=exec_result.execution_time,
                 run_fidelity="debug",
+                failure_origin=exec_result.failure_origin,
+                retryable=exec_result.retryable,
+                header_sha256=exec_result.header_sha256,
+                contract_fingerprint=exec_result.contract_fingerprint,
             )
         )
 
@@ -3175,6 +3549,12 @@ Based on the training results above, improve the model to achieve a {desired_dir
             artifacts_created=exec_result.artifacts_created,
             errors=exec_result.errors,
             run_fidelity="debug",
+            # A debug iteration can be the one that hits a non-retryable
+            # failure; the classification has to survive to the transition.
+            failure_origin=exec_result.failure_origin,
+            retryable=exec_result.retryable,
+            header_sha256=exec_result.header_sha256,
+            contract_fingerprint=exec_result.contract_fingerprint,
         ), attempt_records
 
     # _generate_code is now in CodeGeneratorMixin

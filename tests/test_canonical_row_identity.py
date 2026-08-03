@@ -884,7 +884,10 @@ class TestDebugLoopEnforcesTheSubmissionContract:
 
         source = inspect.getsource(retry.RetryMixin)
         marker = source.index("handwritten_submission_write(debugged_code)")
-        execution = source.index("self.executor.execute(\n                debugged_code")
+        execution = source.index(
+            "execute_generated_candidate(\n                self.executor,"
+            "\n                debugged_code"
+        )
 
         # The check must precede the execution it is meant to prevent.
         assert marker < execution

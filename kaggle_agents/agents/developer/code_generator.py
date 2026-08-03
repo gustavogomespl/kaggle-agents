@@ -11,7 +11,6 @@ Handles:
 from __future__ import annotations
 
 import ast
-import json
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -28,6 +27,43 @@ from ...prompts.templates.developer_prompts import (
     format_component_details,
 )
 from ...utils.llm_utils import get_text_content
+from .execution_failures import (
+    INJECTED_HEADER_END_MARKER,
+    GeneratedContractStructureError,
+    HeaderInputManifest,
+    PreparedGeneratedContract,
+    RepeatedInjectedContractError,
+    generated_contract_fingerprint,
+    generated_header_sha256,
+    render_header_manifest_line,
+    require_one_exact_generated_header_and_manifest,
+    sanitize_candidate_body,
+)
+from .target_source import (
+    DeveloperTargetSource,
+    auxiliary_public_artifacts,
+    resolve_developer_target_source,
+)
+
+
+def _is_workspace_relative(relative_path: str) -> bool:
+    """Whether a protected input can be verified inside the run workspace.
+
+    ``ProtectedInput`` falls back to an absolute path when the file lives
+    outside the workspace. Those bytes still shape ``target_source_fingerprint``
+    (and therefore the contract fingerprint), but the executor can only hold a
+    workspace-confined path immutable, so only those are declared.
+    """
+    path = Path(relative_path)
+    return bool(relative_path) and not path.is_absolute() and ".." not in path.parts
+
+
+def _reattach_trusted_header(path_header: str, code: str) -> str:
+    """Replace whatever precedes the marker with the fingerprinted header."""
+    marker_index = code.find(INJECTED_HEADER_END_MARKER)
+    if marker_index < 0:
+        return path_header + "\n" + code
+    return path_header + code[marker_index + len(INJECTED_HEADER_END_MARKER) :]
 
 
 # Path constants that should never be redefined by LLM-generated code
@@ -870,37 +906,22 @@ def _read_csv_references_label_file(
     return False
 
 
-def _resolve_semantic_data_artifacts(
-    raw_label_files: list[str | Path] | None,
-    precomputed_info: dict | None,
-) -> tuple[list[str], Path | None]:
-    """Separate target annotations from schema-classified metadata files."""
-    semantic_files = (
-        precomputed_info.get("features_found", {})
-        if isinstance(precomputed_info, dict)
-        else {}
-    )
-    if not isinstance(semantic_files, dict):
-        semantic_files = {}
+def _target_reference_paths(
+    target_source: DeveloperTargetSource | None,
+    label_files: list[str | Path] | None,
+) -> tuple[list[str], bool]:
+    """Paths a candidate must not re-parse, plus whether canonical rules.
 
-    metadata_paths = {
-        Path(path).expanduser().resolve()
-        for role, path in semantic_files.items()
-        if role in {"cv_folds", "id_mapping"} and path
-    }
-    label_files = [
-        str(path)
-        for path in raw_label_files or []
-        if path and Path(path).expanduser().resolve() not in metadata_paths
-    ]
-
-    raw_mapping_path = semantic_files.get("id_mapping")
-    mapping_path = (
-        Path(raw_mapping_path)
-        if raw_mapping_path and Path(raw_mapping_path).is_file()
-        else None
-    )
-    return label_files, mapping_path
+    In canonical mode the forbidden set is the HIDDEN sparse-label paths: they
+    were deliberately kept out of the preamble and prompts, so any reference
+    to them is the model reaching for a target file it was never given. In
+    sparse mode it is the rendered ``LABEL_FILES``.
+    """
+    if target_source is not None:
+        if target_source.canonical_authoritative:
+            return list(target_source.sparse_label_files), True
+        return list(target_source.label_files), False
+    return [str(path) for path in (label_files or [])], False
 
 
 if TYPE_CHECKING:
@@ -1300,25 +1321,31 @@ class CodeGeneratorMixin:
         code: str,
         data_type: str,
         label_files: list[str | Path] | None = None,
+        target_source: DeveloperTargetSource | None = None,
     ) -> list[str]:
         """
-        Validate that audio competition code uses pre-loaded labels correctly.
+        Validate that audio competition code uses the resolved target source.
 
         A read is considered label re-parsing only when its argument references
-        an artifact supplied in ``label_files`` (directly or through
-        ``LABEL_FILES``). No filename taxonomy is used.
+        an artifact the resolved :class:`DeveloperTargetSource` owns (directly
+        or through ``LABEL_FILES``). No filename taxonomy is used.
 
         Args:
             code: The generated code to validate
             data_type: Competition data type (audio, image, etc.)
-            label_files: Label artifacts detected from the supplied dataset
+            label_files: Legacy label artifacts (used only without a decision)
+            target_source: The one resolved target decision for this component
 
         Returns:
             List of warning messages (empty if no issues)
         """
         warnings: list[str] = []
 
-        if data_type not in ("audio", "audio_classification") or not label_files:
+        references, canonical = _target_reference_paths(
+            target_source,
+            label_files,
+        )
+        if data_type not in ("audio", "audio_classification") or not references:
             return warnings
 
         marker_idx = code.find("# === END PATH CONSTANTS ===")
@@ -1330,12 +1357,18 @@ class CodeGeneratorMixin:
         reparses_labels = any(
             _read_csv_references_label_file(
                 match.group(3),
-                label_files,
+                references,
                 aliases,
             )
             for match in _READ_CSV_ASSIGNMENT_PATTERN.finditer(code_after_header)
         )
-        if reparses_labels:
+        if reparses_labels and canonical:
+            warnings.append(
+                "⚠️ Generated code is reading a public annotation file that the "
+                "canonical contract supersedes. The injected canonical "
+                "targets are the only authoritative target source."
+            )
+        elif reparses_labels:
             warnings.append(
                 "⚠️ Generated code is re-parsing a supplied label artifact "
                 "instead of using _PRELOADED_TARGETS_DF."
@@ -1348,29 +1381,37 @@ class CodeGeneratorMixin:
         code: str,
         path_header_end_marker: str = "# === END PATH CONSTANTS ===",
         label_files: list[str | Path] | None = None,
+        target_source: DeveloperTargetSource | None = None,
     ) -> tuple[str, int]:
         """
-        Replace LLM-generated label file parsing with pre-loaded label variables.
+        Rewrite target-file re-parsing toward the resolved target source.
 
-        The LLM often ignores _PRELOADED_TARGETS_DF and re-parses label files,
-        causing FileNotFoundError or parsing errors. This function enforces the
-        use of pre-loaded labels by REPLACING (not just commenting) the bad code.
+        In sparse mode the candidate is redirected to ``_PRELOADED_TARGETS_DF``.
+        In canonical mode it is redirected to the canonical targets: the
+        injected canonical loader alone is not proof that the body used them,
+        so a body that still opens a hidden annotation file is rewritten.
 
         Args:
             code: The full generated code
             path_header_end_marker: Marker indicating end of injected path header
-            label_files: Label artifacts detected from the supplied dataset
+            label_files: Legacy label artifacts (used only without a decision)
+            target_source: The one resolved target decision for this component
 
         Returns:
             Tuple of (modified code, number of statements replaced)
         """
         marker_idx = code.find(path_header_end_marker)
-        if marker_idx == -1 or not label_files:
+        references, canonical = _target_reference_paths(
+            target_source,
+            label_files,
+        )
+        if marker_idx == -1 or not references:
             return code, 0
 
         header = code[: marker_idx + len(path_header_end_marker)]
         code_after_header = code[marker_idx + len(path_header_end_marker) :]
         aliases = _label_file_aliases(code_after_header)
+        packed = bool(target_source and target_source.packed_image_contract)
 
         replace_count = 0
 
@@ -1379,7 +1420,7 @@ class CodeGeneratorMixin:
             nonlocal replace_count
             if not _read_csv_references_label_file(
                 match.group(3),
-                label_files,
+                references,
                 aliases,
             ):
                 return match.group(0)
@@ -1387,6 +1428,16 @@ class CodeGeneratorMixin:
             indent = match.group(1)  # Preserve original indentation
             var_name = match.group(2)
             replace_count += 1
+            if canonical and packed:
+                return (
+                    f"{indent}{var_name} = None  # REMOVED: packed canonical "
+                    "targets (CANONICAL_TARGET_VALUES) are authoritative"
+                )
+            if canonical:
+                return (
+                    f"{indent}{var_name} = canonical_targets_frame()  "
+                    "# REPLACED: canonical targets (CANONICAL_Y) are authoritative"
+                )
             return (
                 f"{indent}{var_name} = _PRELOADED_TARGETS_DF.copy()  "
                 "# REPLACED: duplicate read of supplied label artifact"
@@ -1405,23 +1456,42 @@ class CodeGeneratorMixin:
 
         return header + code_after_header, replace_count
 
-    def _generate_code(
+    def _prepare_generated_contract(
         self: DeveloperAgent,
         component: AblationComponent,
         competition_info,
         working_dir: Path,
         domain: str,
         state: KaggleState = None,
-        reasoning_trace: ReasoningTrace = None,
-        cot_result=None,  # ChainOfThoughtResult from GRPO
-    ) -> str:
-        """Generate code for a component with optional GRPO reasoning trace and CoT."""
+        target_source: DeveloperTargetSource | None = None,
+    ) -> PreparedGeneratedContract:
+        """Resolve and render this component's immutable contract, with no LLM.
+
+        This is the first thing ``_implement_component`` does. It resolves the
+        one target decision, renders the complete generator-owned preamble
+        (path constants, canonical loaders, injected helpers, input manifest,
+        end marker) and identifies it two ways: byte-exact, and normalized over
+        ``COMPONENT_NAME``.
+
+        Nothing expensive may happen before this: if the normalized contract
+        already failed inside its preamble during this run, regenerating and
+        re-executing it can only reproduce the same harness failure, so the
+        component is skipped before dataset summarization, GRPO/CoT, prompt
+        composition or any candidate-generation LLM call.
+        """
         component_details = format_component_details(component)
 
-        dataset_info = self._get_dataset_info(working_dir, state)
-
-        # Get domain-specific code template
-        domain_template = self._get_domain_template(domain, component.component_type)
+        # One decision, taken before anything else can re-derive it from disk.
+        # _implement_component() normally supplies it; resolving here keeps
+        # direct callers on exactly the same code path.
+        if target_source is None:
+            target_source = resolve_developer_target_source(
+                working_dir=working_dir,
+                state=state,
+                data_files=(state or {}).get("data_files", {}),
+                precomputed_info=(state or {}).get("precomputed_features_info", {}),
+                component_type=component.component_type,
+            )
 
         # Resolve key paths from state (preferring downloaded locations)
         resolved_train_path = Path(
@@ -1454,11 +1524,11 @@ class CodeGeneratorMixin:
         train_csv_path = data_files.get("train_csv", "")
         test_csv_path = data_files.get("test_csv", "")
         clean_train_path = data_files.get("clean_train", "")
-        precomputed_info = state.get("precomputed_features_info", {}) if state else {}
-        label_files, id_mapping_path = _resolve_semantic_data_artifacts(
-            data_files.get("label_files"),
-            precomputed_info,
-        )
+        # Rendered target artifacts come from the resolved decision only: a
+        # stale sparse-label path never reaches executable code or a prompt
+        # while a canonical contract is authoritative.
+        label_files = list(target_source.label_files)
+        id_mapping_path = target_source.id_mapping_path
         audio_source_path = data_files.get("audio_source", "")
         data_type = data_files.get("data_type", "tabular")
 
@@ -1491,6 +1561,7 @@ class CodeGeneratorMixin:
                 state=state,
                 config=self.config,
                 working_dir=str(working_dir),
+                target_source=target_source,
             )
         else:
             requirements = f"""
@@ -1499,16 +1570,6 @@ class CodeGeneratorMixin:
             3. Print progress and metrics
             4. Handle errors gracefully
             """
-
-        # GRPO: Inject reasoning trace into requirements
-        if reasoning_trace:
-            reasoning_guidance = self._format_reasoning_for_prompt(reasoning_trace)
-            requirements = reasoning_guidance + "\n\n" + requirements
-
-        # Chain-of-Thought: Inject step-by-step thinking into requirements
-        if cot_result:
-            cot_guidance = self._format_cot_for_prompt(cot_result)
-            requirements = cot_guidance + "\n\n" + requirements
 
         # Build dynamic context from state (SOTA, feedback, rewards)
         context = build_context(state, component=component) if state else build_context({})
@@ -1530,75 +1591,46 @@ class CodeGeneratorMixin:
             "models": str(models_dir),
             "submission": str(submission_output_path),
             "sample_submission": str(sample_submission_path),
-            # Non-standard label files (for example, sparse .txt annotations)
+            # Verified sparse-label artifacts, rendered only in sparse mode
             "label_files": label_files,
             "audio_source": audio_source_path,
+            # The one target decision every downstream consumer must share.
+            "target_source": target_source,
+            "canonical_target_authoritative": target_source.canonical_authoritative,
+            "public_artifacts": list(data_files.get("public_artifacts") or []),
         }
 
         # Store resolved paths for use by fix/debug functions
         self._resolved_paths = paths
 
-        # Check for canonical data (prepared by canonical_data_preparation_node).
-        # Require metadata.json too: generated components sometimes create a
-        # partial canonical/ dir mid-run, and injecting the contract block for
-        # an incomplete dir crashes every subsequent script at import time.
-        canonical_dir = working_dir / "canonical"
-        canonical_metadata_path = canonical_dir / "metadata.json"
-        canonical_metadata: dict = {}
-        if canonical_metadata_path.is_file():
-            try:
-                canonical_metadata = json.loads(
-                    canonical_metadata_path.read_text(encoding="utf-8")
-                )
-            except (OSError, ValueError, TypeError):
-                canonical_metadata = {}
-        packed_image_contract = bool(
-            canonical_metadata.get("packed_image_contract")
-            and str(canonical_metadata.get("task_type")) == "image_to_image"
-        )
-        canonical_y_path = Path(
-            ((state or {}).get("canonical_contract") or {}).get("y_path")
-            or canonical_dir
-            / ("image_targets.npz" if packed_image_contract else "y.npy")
-        )
-        canonical_files = (
-            canonical_dir / "train_ids.npy",
-            canonical_y_path,
-            canonical_dir / "folds.npy",
-            canonical_dir / "feature_cols.json",
-            canonical_metadata_path,
-        )
-        if packed_image_contract:
-            canonical_files += (
-                canonical_dir / "test_ids.npy",
-                canonical_dir / "image_input_paths.npy",
-                canonical_dir / "image_test_input_paths.npy",
-            )
-        has_canonical = canonical_dir.is_dir() and all(
-            path.is_file() for path in canonical_files
+        # Canonical authority comes from the resolved decision, never from a
+        # directory probe: a partially written canonical/ dir used to look
+        # "prepared" to one consumer and "absent" to another, and the two
+        # answers produced code that referenced names nothing had defined.
+        # A claimed-but-corrupt contract already raised in the selector.
+        has_canonical = target_source.canonical_authoritative
+        packed_image_contract = target_source.packed_image_contract
+        canonical_dir = target_source.canonical_dir or (working_dir / "canonical")
+        canonical_y_path = target_source.canonical_target_path or (
+            canonical_dir / "y.npy"
         )
         run_mode = str((state or {}).get("run_mode", "")).lower()
-        # Canonical prep legitimately skips for some domains (image without
-        # train.csv, audio without label tables): those runs proceed without
-        # the contract and their candidates stay unscored/unpromoted. Only a
-        # contract that prep CLAIMED to produce but is missing on disk is
-        # corruption worth failing on.
-        canonical_prep_claimed = bool(
-            (state or {}).get("canonical_data_prepared")
-        )
-        if (
-            run_mode == "mlebench"
-            and component.component_type in {"model", "ensemble"}
-            and not has_canonical
-            and canonical_prep_claimed
-        ):
-            missing = [
-                path.name for path in canonical_files if not path.is_file()
-            ]
-            raise ValueError(
-                "MLE-bench model generation requires the complete canonical "
-                f"data contract; missing: {missing}"
+        # No substitute path: when the contract declares no test identity there
+        # is none, and a leftover canonical/test_ids.npy from an earlier prep
+        # must stay unread.
+        canonical_test_ids_path = target_source.canonical_test_ids_path
+        canonical_test_ids_block = (
+            f'CANONICAL_TEST_IDS_PATH = Path("{canonical_test_ids_path}")\n'
+            "CANONICAL_TEST_IDS = np.asarray(\n"
+            "    [str(_v) for _v in np.load(CANONICAL_TEST_IDS_PATH, allow_pickle=False)]\n"
+            ")"
+            if canonical_test_ids_path is not None
+            else (
+                "# The canonical contract declares no test identity for this run.\n"
+                "CANONICAL_TEST_IDS_PATH = None\n"
+                "CANONICAL_TEST_IDS = None"
             )
+        )
 
         # Generate path constants header to inject into code
         # This ensures the LLM cannot ignore the correct paths
@@ -1922,16 +1954,33 @@ def align_train_to_canonical(df):
 
 # Canonical test IDs name every public test row exactly once, so components
 # agree on prediction order even when the competition supplies no test key.
-CANONICAL_TEST_IDS_PATH = CANONICAL_DIR / "test_ids.npy"
-if CANONICAL_TEST_IDS_PATH.is_file():
-    CANONICAL_TEST_IDS = np.asarray(
-        [str(_v) for _v in np.load(CANONICAL_TEST_IDS_PATH, allow_pickle=False)]
-    )
-else:
-    CANONICAL_TEST_IDS = None
+# The path is DECLARED by the contract, never rediscovered by existence: a
+# leftover test-ID artifact from an earlier prep is not this run's identity.
+{canonical_test_ids_block}
 TEST_IDS_ARE_POSITIONAL = bool(
     CANONICAL_METADATA.get("test_ids_are_positional", False)
 )
+
+def canonical_targets_frame():
+    """Long-format view of the canonical targets: ['record_id', 'target'].
+
+    Use this instead of re-reading a public annotation file: the canonical
+    contract is the only authoritative target source for this run.
+    """
+    if TARGET_TYPE == "single":
+        return pd.DataFrame(
+            {{
+                "record_id": [str(_v) for _v in CANONICAL_TRAIN_IDS],
+                "target": CANONICAL_Y,
+            }}
+        )
+    _wide = pd.DataFrame(CANONICAL_Y, columns=list(TARGET_COLS))
+    _wide.insert(0, "record_id", [str(_v) for _v in CANONICAL_TRAIN_IDS])
+    return _wide.melt(
+        id_vars="record_id",
+        var_name="target_name",
+        value_name="target",
+    )
 
 CANONICAL_FOLDS_AVAILABLE = True
 print(f"[CANONICAL] Loaded folds.npy: {{len(CANONICAL_FOLDS)}} samples, {{N_FOLDS}} folds")
@@ -1953,94 +2002,50 @@ if ID_IS_SYNTHETIC:
 # CANONICAL_OOF_ELIGIBLE_MASK is True. Warm-up rows MUST remain NaN.
 # === END CANONICAL FOLDS ===
 '''
-        # Add label file paths when the detected layout uses a non-CSV format.
+        # Target preloading is rendered ONLY for a verified sparse-label
+        # artifact. In canonical mode these names are deliberately absent:
+        # defining them invites the model to prefer a stale annotation file
+        # over the contract every component is scored against.
         if label_files:
-            label_paths_code = "\n# Non-standard label files (e.g., .txt files)\nLABEL_FILES = [\n"
+            label_paths_code = "\n# Verified sparse-label target artifacts\nLABEL_FILES = [\n"
             for lf in label_files:
                 label_paths_code += f'    Path("{lf}"),\n'
             label_paths_code += "]\n"
             path_header += label_paths_code
-            # Add helper function for parsing label files (handles variable-width multi-label rows)
+            # The parser DELEGATES to the audited, bounded, quote-aware
+            # implementation. A duplicated raw-split parser in generated code
+            # drifted from it and disagreed about which files are targets.
             path_header += """
 # MANDATORY: Parse target files - DO NOT use dummy targets (np.zeros)
 # This handles variable-width sparse target rows.
 def parse_label_file(label_path, hidden_marker='?'):
-    '''Parse variable-width label file with automatic delimiter detection.
+    '''Parse a verified sparse-label file into long-format target rows.
+
+    Delegates to kaggle_agents.utils.label_parser.parse_sparse_label_rows,
+    which inspects the layout first (bounded, quote-aware) and refuses any
+    file that is not genuinely sparse labels.
 
     Returns DataFrame with columns: ['record_id', 'target'] in long format
     (one row per record-target pair for multi-label files).
 
     RAISES ValueError if parsing fails - NEVER returns empty DataFrame silently!
     '''
-    import csv
+    from kaggle_agents.utils.label_parser import parse_sparse_label_rows
+
     label_path = Path(label_path)
     if not label_path.exists():
         raise ValueError(f"Label file not found: {label_path}")
-
-    content = label_path.read_text(encoding='utf-8', errors='ignore')
-    lines = content.strip().split('\\n')
-    if len(lines) < 2:
-        raise ValueError(f"Label file has insufficient lines ({len(lines)}): {label_path}")
-
-    sample = '\\n'.join(lines[:20])
-
-    # Auto-detect delimiter
-    try:
-        dialect = csv.Sniffer().sniff(sample, delimiters=',\\t ;|')
-        delimiter = dialect.delimiter
-        has_header = csv.Sniffer().has_header(sample)
-    except csv.Error:
-        delimiter = ',' if ',' in sample else '\\t' if '\\t' in sample else ' '
-        has_header = False
-
-    header_columns = [
-        part.strip().lower().replace('-', '_')
-        for part in lines[0].split(delimiter)
-    ]
-    has_id_column = any(
-        column == 'id' or column.endswith('_id') or column.startswith('id_')
-        for column in header_columns
-    )
-    has_file_column = any(
-        'file' in column or 'path' in column
-        for column in header_columns
-    )
-    if has_id_column and has_file_column:
-        raise ValueError(f"File has ID-to-path mapping columns, not target labels: {label_path}")
-
-    # Parse line-by-line to handle variable-width rows
-    rows = []
-    for line_index, line in enumerate(lines):
-        if line_index == 0 and has_header:
-            continue
-        parts = line.strip().split(delimiter)
-        if len(parts) < 2:
-            continue
-        record_id = parts[0].strip()
-        # Each subsequent part is a label
-        for label in parts[1:]:
-            label = label.strip()
-            if label and label != hidden_marker:
-                # Try to cast numeric class IDs for MultiLabelBinarizer compatibility
-                try:
-                    label_val = int(label)
-                except ValueError:
-                    label_val = label  # Keep as string if not numeric
-                rows.append({'record_id': record_id, 'target': label_val})
-
-    # FAIL LOUDLY instead of returning empty DataFrame
-    if not rows:
-        raise ValueError(
-            f"parse_label_file() failed to parse any rows from {label_path}. "
-            f"Detected delimiter: {repr(delimiter)}. First 3 lines: {lines[:3]}. "
-            f"If this is a sparse multi-label format, "
-            f"use parse_sparse_multilabel() from kaggle_agents.utils.label_parser instead."
-        )
-
-    df = pd.DataFrame(rows)
+    df = parse_sparse_label_rows(label_path, hidden_marker=hidden_marker)
+    if df.empty:
+        raise ValueError(f"parse_label_file() parsed no rows from {label_path}")
     print(f"[parse_label_file] Parsed {len(df)} label rows from {label_path.name}")
     return df
+"""
 
+        # The ID-to-input mapping is independent of target preloading: it is
+        # still valid metadata when the canonical contract owns the targets.
+        if id_mapping_path is not None:
+            path_header += """
 def parse_id_mapping_file(mapping_path):
     '''Parse a two-column ID-to-file mapping discovered from its schema.
 
@@ -2078,6 +2083,8 @@ def parse_id_mapping_file(mapping_path):
         for record_id, file_path in valid_rows.itertuples(index=False, name=None)
     }
 """
+
+        if label_files:
             # === PRE-LOAD LABELS IMMEDIATELY (fail fast if broken) ===
             # This forces the LLM to use pre-loaded data instead of generating its own parsing code
             path_header += '''
@@ -2127,6 +2134,17 @@ print("="*60)
 #   _PRELOADED_N_TARGETS: Number of unique target values
 # ============================================================
 '''
+
+        # Neutral, non-target description of the remaining public artifacts.
+        # They may carry useful features or metadata; they are NOT targets and
+        # are never described as such while a canonical contract is authoritative.
+        auxiliary_artifacts = auxiliary_public_artifacts(data_files, target_source)
+        if auxiliary_artifacts:
+            path_header += (
+                "\n# Non-target public artifacts (features/metadata only; the\n"
+                "# authoritative targets come from the injected target contract).\n"
+                f"AUXILIARY_PUBLIC_ARTIFACTS = {list(auxiliary_artifacts)!r}\n"
+            )
 
         # Add audio source path if available
         if audio_source_path:
@@ -2372,57 +2390,63 @@ print("[INFO] smart_locate_file() available - use for loading audio/image by ID"
 '''
 
         # Inject record-ID-to-path mapping when identifiers and files differ.
-        # The mapping artifact is selected by its previously inferred schema.
-        # Only inject when target files define _PRELOADED_RECORD_IDS.
-        if data_type in ("audio", "audio_classification") and audio_source_path and label_files:
-            if id_mapping_path is not None:
-                path_header += f'''
-# === RECORD ID TO AUDIO PATH MAPPING (AUTO-INJECTED) ===
-# CRITICAL: Use _PRELOADED_RECORD_ID_TO_PATH for model input loading.
-_ID_MAPPING_FILE = Path("{id_mapping_path}")
-_RECORD_ID_TO_FILE = parse_id_mapping_file(_ID_MAPPING_FILE) if _ID_MAPPING_FILE.exists() else {{}}
+        # It is gated on having an audio source plus a source of record IDs -
+        # NOT on non-empty label files. Gating on labels meant a canonical
+        # audio contract (which needs no label file at all) silently lost the
+        # mapping, and every candidate had to invent its own path resolution.
+        record_id_expression = (
+            "CANONICAL_TRAIN_IDS"
+            if has_canonical
+            else "_PRELOADED_RECORD_IDS"
+            if label_files
+            else ""
+        )
+        if (
+            data_type in ("audio", "audio_classification")
+            and audio_source_path
+            and record_id_expression
+        ):
+            mapping_source = (
+                f'parse_id_mapping_file(Path("{id_mapping_path}"))'
+                if id_mapping_path is not None
+                else "{}"
+            )
+            path_header += f'''
+# === RECORD ID TO INPUT PATH MAPPING (AUTO-INJECTED) ===
+# CRITICAL: Use RECORD_ID_TO_INPUT_PATH for model input loading. It maps the
+# authoritative record IDs of this run to real files, without replacing the
+# semantic IDs the submission is keyed by.
+_RECORD_ID_TO_FILE = {mapping_source}
 
-def _resolve_audio_paths(record_ids, audio_dir, record_id_to_file):
-    """Resolve semantic record IDs to full audio paths.
+def _resolve_record_input_paths(record_ids, source_dir, record_id_to_file):
+    """Resolve semantic record IDs to full input paths.
 
     Args:
-        record_ids: List of semantic record IDs
-        audio_dir: Directory containing audio files
+        record_ids: Authoritative record IDs for this run
+        source_dir: Directory containing the media files
         record_id_to_file: Mapping from record ID to a file name/path
 
     Returns:
-        Dict mapping record ID (as string) to full audio path
+        Dict mapping record ID (as string) to full input path
     """
     record_id_to_path = {{}}
     for record_id in record_ids:
         record_id_str = str(record_id)
         file_ref = record_id_to_file.get(record_id_str, record_id_str)
-        path = smart_locate_file(audio_dir, file_ref)
+        path = smart_locate_file(source_dir, file_ref)
         if path:
             record_id_to_path[record_id_str] = path
     return record_id_to_path
 
-# Pre-resolve input paths without replacing semantic IDs.
-_PRELOADED_RECORD_ID_TO_PATH = _resolve_audio_paths(
-    _PRELOADED_RECORD_IDS,
+RECORD_ID_TO_INPUT_PATH = _resolve_record_input_paths(
+    {record_id_expression},
     AUDIO_SOURCE_DIR,
-    _RECORD_ID_TO_FILE
+    _RECORD_ID_TO_FILE,
 )
-print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_RECORD_IDS)}} audio paths")
-# === END RECORD ID MAPPING ===
-'''
-            else:
-                # No mapping file - use direct ID-based path resolution
-                path_header += f'''
-# === RECORD ID TO AUDIO PATH MAPPING (DIRECT) ===
-# Trying direct ID-based path resolution
-_PRELOADED_RECORD_ID_TO_PATH = {{}}
-for record_id in _PRELOADED_RECORD_IDS:
-    record_id_str = str(record_id)
-    path = smart_locate_file(AUDIO_SOURCE_DIR, record_id_str)
-    if path:
-        _PRELOADED_RECORD_ID_TO_PATH[record_id_str] = path
-print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_RECORD_IDS)}} audio paths (direct)")
+print(
+    f"[INFO] Resolved {{len(RECORD_ID_TO_INPUT_PATH)}}/"
+    f"{{len({record_id_expression})}} input paths"
+)
 # === END RECORD ID MAPPING ===
 '''
 
@@ -2499,7 +2523,118 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
             component.component_type,
             packed_image_contract,
         )
-        path_header += "\n# === END PATH CONSTANTS ===\n"
+
+        # The marker closes the COMPLETE generator-owned preamble: constants,
+        # canonical loaders and every injected helper are above it, the
+        # candidate body starts below it. Nothing generator-owned may be
+        # appended after this point, because that is the line the executor
+        # classifies against. The manifest declares what the preamble reads
+        # eagerly, so those bytes can be held immutable for the execution.
+        header_manifest = HeaderInputManifest(
+            target_source_fingerprint=target_source.target_source_fingerprint,
+            protected_inputs=tuple(
+                item
+                for item in target_source.protected_inputs
+                if _is_workspace_relative(item.relative_path)
+            ),
+        )
+        path_header += (
+            "\n"
+            + render_header_manifest_line(header_manifest)
+            + "\n"
+            + INJECTED_HEADER_END_MARKER
+            + "\n"
+        )
+
+        # Generator-owned malformation is the only structure failure allowed to
+        # be terminal; validating here keeps it out of the retry loops.
+        require_one_exact_generated_header_and_manifest(path_header)
+        header_sha256 = generated_header_sha256(path_header)
+        contract_fingerprint = generated_contract_fingerprint(path_header)
+        if header_sha256 is None or contract_fingerprint is None:
+            raise GeneratedContractStructureError(
+                "The rendered header does not contain exactly one end marker"
+            )
+
+        failed_contracts = (state or {}).get("failed_contract_fingerprints") or {}
+        if contract_fingerprint in failed_contracts:
+            raise RepeatedInjectedContractError(contract_fingerprint)
+
+        return PreparedGeneratedContract(
+            target_source=target_source,
+            path_header=path_header,
+            header_sha256=header_sha256,
+            contract_fingerprint=contract_fingerprint,
+            prompt_inputs={
+                "component_details": component_details,
+                "competition_context": competition_context,
+                "data_paths": data_paths,
+                "requirements": requirements,
+                "paths": paths,
+                "context": context,
+                "data_type": data_type,
+            },
+        )
+
+    def _generate_code(
+        self: DeveloperAgent,
+        component: AblationComponent,
+        competition_info,
+        working_dir: Path,
+        domain: str,
+        state: KaggleState = None,
+        reasoning_trace: ReasoningTrace = None,
+        cot_result=None,  # ChainOfThoughtResult from GRPO
+        target_source: DeveloperTargetSource | None = None,
+        prepared_contract: PreparedGeneratedContract | None = None,
+    ) -> str:
+        """Generate code for a component with optional GRPO reasoning trace and CoT.
+
+        ``prepared_contract`` is the object ``_implement_component`` already
+        built; consuming it is what keeps "one resolution and one rendered
+        header per component" true. A direct caller that omits it gets exactly
+        the same no-LLM preparation here, before any prompt work.
+        """
+        if prepared_contract is None:
+            prepared_contract = self._prepare_generated_contract(
+                component,
+                competition_info,
+                working_dir,
+                domain,
+                state,
+                target_source=target_source,
+            )
+        target_source = prepared_contract.target_source
+        path_header = prepared_contract.path_header
+        prompt_inputs = prepared_contract.prompt_inputs
+        component_details = prompt_inputs["component_details"]
+        competition_context = prompt_inputs["competition_context"]
+        data_paths = prompt_inputs["data_paths"]
+        requirements = prompt_inputs["requirements"]
+        paths = prompt_inputs["paths"]
+        context = prompt_inputs["context"]
+        data_type = prompt_inputs["data_type"]
+
+        # Store resolved paths for use by fix/debug functions
+        self._resolved_paths = paths
+
+        # Only a new contract reaches dataset summarization and the LLM.
+        self._get_dataset_info(
+            working_dir,
+            state,
+            target_source=target_source,
+        )
+        self._get_domain_template(domain, component.component_type)
+
+        # GRPO: Inject reasoning trace into requirements
+        if reasoning_trace:
+            reasoning_guidance = self._format_reasoning_for_prompt(reasoning_trace)
+            requirements = reasoning_guidance + "\n\n" + requirements
+
+        # Chain-of-Thought: Inject step-by-step thinking into requirements
+        if cot_result:
+            cot_guidance = self._format_cot_for_prompt(cot_result)
+            requirements = cot_guidance + "\n\n" + requirements
 
         def _generate_with_llm() -> str:
             prompt = compose_generate_prompt(
@@ -2564,6 +2699,18 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
         else:
             code = _generate_with_llm()
 
+        # A candidate that echoes the marker or a manifest comment is doing
+        # ordinary agent-side work; stripping those lines at assembly time
+        # keeps the program structurally valid and keeps the collision a normal
+        # bounded regeneration concern instead of a terminal structure error.
+        code, collisions = sanitize_candidate_body(code)
+        if collisions:
+            print(
+                f"⚠️  HEADER COLLISION STRIPPED: removed {len(collisions)} "
+                "candidate line(s) that duplicated generator-owned header "
+                "structure"
+            )
+
         # Prepend path constants header to ensure LLM-generated code uses correct paths
         full_code = path_header + "\n" + code
 
@@ -2594,28 +2741,36 @@ print(f"[INFO] Resolved {{len(_PRELOADED_RECORD_ID_TO_PATH)}}/{{len(_PRELOADED_R
         audio_warnings = self._validate_audio_label_usage(
             full_code,
             data_type,
-            label_files=label_files,
+            target_source=target_source,
         )
         for warning in audio_warnings:
             print(warning)
             print(
-                "   HINT: Use _PRELOADED_TARGETS_DF, "
+                "   HINT: Use the canonical target arrays."
+                if target_source.canonical_authoritative
+                else "   HINT: Use _PRELOADED_TARGETS_DF, "
                 "_PRELOADED_RECORD_IDS, _PRELOADED_N_TARGETS instead."
             )
 
-        # Replace label re-parsing for audio competitions - ENFORCE usage of pre-loaded labels
-        # This is stronger than warnings because LLMs often ignore prompt instructions
+        # Replace target re-parsing for audio competitions - ENFORCE the
+        # resolved target source. This is stronger than warnings because LLMs
+        # often ignore prompt instructions.
         if data_type in ("audio", "audio_classification"):
             full_code, replace_count = self._strip_label_reparsing(
                 full_code,
-                label_files=label_files,
+                target_source=target_source,
             )
             if replace_count > 0:
-                print(f"⚠️  REPLACED {replace_count} label re-parsing statement(s)")
+                print(f"⚠️  REPLACED {replace_count} target re-parsing statement(s)")
                 print(
-                    "   LLM code tried to re-parse target files instead of "
-                    "using _PRELOADED_TARGETS_DF."
+                    "   LLM code tried to re-read a public annotation file "
+                    "instead of using the resolved target source."
                 )
-                print("   Replaced with: varname = _PRELOADED_TARGETS_DF.copy()")
 
+        # The preamble that runs must be byte-identical to the one that was
+        # fingerprinted: the post-processing passes above rewrite whole-file
+        # patterns, and a single altered header line would make the recorded
+        # hash describe a program nothing executed.
+        full_code = _reattach_trusted_header(path_header, full_code)
+        require_one_exact_generated_header_and_manifest(full_code)
         return full_code

@@ -161,6 +161,10 @@ class MLEBenchResult:
     # sweep may retry, per the failure taxonomy in the experimental protocol.
     # None means no failure was raised.
     failure_origin: str | None = None
+    # Structured description of a terminal failure recorded by the workflow
+    # (which contract failed, in which component, and why). ``failure_origin``
+    # stays the normalized top-level category.
+    terminal_failure_detail: dict[str, Any] | None = None
 
     # Raw grading output
     grading_output: dict | None = None
@@ -500,6 +504,11 @@ class MLEBenchRunner:
                     "error": result.error,
                     "traceback": result.traceback,
                 }
+            # Both branches carry the normalized origin and its structured
+            # detail: a harness-truncated run is the one most in need of
+            # machine-readable failure evidence.
+            telemetry["failure_origin"] = result.failure_origin
+            telemetry["terminal_failure_detail"] = result.terminal_failure_detail
             telemetry["provenance"] = collect_run_provenance(
                 self.config,
                 Path(__file__).resolve().parents[2],
@@ -531,6 +540,80 @@ class MLEBenchRunner:
         except Exception as telemetry_err:
             _log(f"  Telemetry write failed (non-fatal): {telemetry_err}", "WARN")
 
+    @staticmethod
+    def _terminal_failure_from_state(
+        state: dict[str, Any] | None,
+    ) -> tuple[str, dict[str, Any] | None]:
+        """Read the workflow's terminal classification, whitelisted.
+
+        Only the three categories of the experimental failure taxonomy are
+        accepted; anything else a resumed or hand-edited state might carry is
+        ignored rather than reported as a new kind of outcome.
+        """
+        origin = str((state or {}).get("terminal_failure_origin") or "").strip()
+        if origin not in {"agent", "harness", "infrastructure"}:
+            return "", None
+        detail = (state or {}).get("terminal_failure_detail")
+        return origin, dict(detail) if isinstance(detail, dict) else None
+
+    def _invalid_run_still_grades(
+        self,
+        workspace: Path,
+        grading_state: dict[str, Any] | None,
+        terminal_origin: str,
+    ) -> bool:
+        """Whether an invalid run may still grade what it already accepted.
+
+        Fail closed, with one exception: a terminal origin must not destroy an
+        artifact this run already accepted. That snapshot is hash-verified
+        against the digest bound in state, so grading it adds no unverified
+        evidence - while refusing to grade it would report a run that produced
+        a valid submission as having produced nothing. Only a run with no
+        accepted artifact grades as nothing.
+        """
+        if not terminal_origin:
+            _log("  Grading blocked (fail-closed)", "ERROR")
+            return False
+        if self._find_submission(workspace, grading_state) is None:
+            _log(
+                f"  Terminal {terminal_origin} failure and no accepted "
+                "artifact; nothing to grade",
+                "ERROR",
+            )
+            return False
+        _log(
+            f"  Terminal {terminal_origin} failure: grading the artifact this "
+            "run had already accepted (harness-truncated run)",
+            "WARN",
+        )
+        return True
+
+    @staticmethod
+    def _terminal_failure_message(
+        origin: str,
+        detail: dict[str, Any] | None,
+    ) -> str | None:
+        """A human-readable error for a terminal failure the state described."""
+        if not origin:
+            return None
+        detail = detail or {}
+        parts = [f"Terminal {origin} failure"]
+        reason = str(detail.get("reason") or "").strip()
+        if reason:
+            parts.append(reason)
+        component = str(detail.get("component") or "").strip()
+        if component:
+            parts.append(f"component={component}")
+        fingerprint = str(detail.get("contract_fingerprint") or "").strip()
+        if fingerprint:
+            parts.append(f"contract={fingerprint[:12]}")
+        error = str(detail.get("error") or "").strip()
+        if error:
+            parts.append(error[:300])
+        return ": ".join(parts[:2]) + (
+            " (" + ", ".join(parts[2:]) + ")" if len(parts) > 2 else ""
+        )
+
     def _finalize_run(
         self,
         result: MLEBenchResult,
@@ -557,19 +640,36 @@ class MLEBenchRunner:
         crashed = final_state is None
         grading_state = final_state if final_state is not None else last_observed_state
 
+        # Classify before telemetry is written and before any early return: a
+        # run that stopped on a harness failure must be reported as an invalid
+        # attempt eligible for rerun, not as an agent-quality outcome.
+        terminal_origin, terminal_detail = self._terminal_failure_from_state(
+            grading_state
+        )
+        if terminal_origin:
+            result.failure_origin = terminal_origin
+            result.terminal_failure_detail = terminal_detail
+
         self._write_telemetry(result, workspace, run_id, final_state, provenance_kwargs)
 
         _log("Step 4: Grading submission")
 
         if grading_state is not None and not grading_state.get("workflow_valid", True):
             if not crashed:
-                result.error = grading_state.get(
-                    "submission_validation_error"
-                ) or grading_state.get(
-                    "termination_reason", "Workflow ended with an invalid candidate"
+                # ``.get(key, default)`` returns None for a declared key whose
+                # value is None, so both legacy keys can be present and empty.
+                # A run must never be reported with no error at all.
+                result.error = (
+                    grading_state.get("submission_validation_error")
+                    or grading_state.get("termination_reason")
+                    or self._terminal_failure_message(terminal_origin, terminal_detail)
+                    or result.error
+                    or "Workflow ended with an invalid candidate"
                 )
-            _log("  Grading blocked (fail-closed)", "ERROR")
-            return
+            if not self._invalid_run_still_grades(
+                workspace, grading_state, terminal_origin
+            ):
+                return
 
         submission_path = self._find_submission(workspace, grading_state)
         if submission_path is None:
@@ -601,9 +701,10 @@ class MLEBenchRunner:
         result.above_median = grading.get("above_median", False)
 
         if result.valid_submission:
-            # A crashed run keeps its error on the ledger: the artifact is
-            # graded, but the attempt is not reported as a clean completion.
-            result.success = not crashed
+            # A crashed or harness-truncated run keeps its error on the ledger:
+            # the artifact is graded, but the attempt is not reported as a
+            # clean completion.
+            result.success = not crashed and not terminal_origin
             _log(f"  Valid submission! Score: {result.score}")
         else:
             grading_error = grading.get("error", "Invalid submission")

@@ -24,6 +24,8 @@ from ...prompts.templates.developer_prompts import (
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
 from ...utils.run_budget import FINALIZATION_RESERVE_S, budget_exhausted
+from .execution_failures import execute_generated_candidate
+from .retry import preserve_injected_header
 
 
 if TYPE_CHECKING:
@@ -214,11 +216,26 @@ Based on the training results above, improve the model to achieve a HIGHER CV sc
                 refined_code = self._extract_code_from_response(
                     get_text_content(refined_response.content)
                 )
+                # A rewrite returns a body, not a program: without re-attaching
+                # the trusted preamble this loop used to execute code whose
+                # path constants, canonical loaders and injected helpers had
+                # simply vanished, and nothing downstream could classify it.
+                refined_code = preserve_injected_header(best_code, refined_code)
 
                 print("Executing refined code...")
-                refined_exec = self.executor.execute(
-                    refined_code, working_dir, component_type=component.component_type
+                refined_exec = execute_generated_candidate(
+                    self.executor,
+                    refined_code,
+                    working_dir=working_dir,
+                    component_type=component.component_type,
                 )
+
+                if refined_exec.retryable is False:
+                    print(
+                        "Refinement stopped: non-retryable "
+                        f"{refined_exec.failure_origin} failure"
+                    )
+                    break
 
                 if refined_exec.success:
                     refined_score = self._extract_cv_score(refined_exec.stdout)

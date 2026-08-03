@@ -438,6 +438,104 @@ def validate_image_fold_assignments(
     return folds
 
 
+def validate_packed_canonical_contract(
+    *,
+    target_path: str | Path | None,
+    train_ids_path: str | Path | None,
+    folds_path: str | Path | None,
+    test_ids_path: str | Path | None,
+    image_input_paths_path: str | Path | None,
+    image_test_input_paths_path: str | Path | None,
+    expected_n_train: int | None = None,
+    expected_n_test: int | None = None,
+) -> list[str]:
+    """Holistically validate a packed image-to-image canonical contract.
+
+    One place composes ``load_packed_images()``, ID/input-path alignment,
+    the declared train/test counts and ``validate_image_fold_assignments()``.
+    The target-source selector and the generated preamble used to maintain
+    separate, drifting versions of these checks; a contract that satisfied one
+    and not the other produced components that died at import time.
+
+    Returns:
+        A list of human-readable violations; empty when the contract holds.
+    """
+    violations: list[str] = []
+
+    def _missing(name: str, value: str | Path | None) -> bool:
+        if not value or not Path(value).is_file():
+            violations.append(f"missing packed canonical artifact {name}: {value!r}")
+            return True
+        return False
+
+    required = {
+        "y_path": target_path,
+        "train_ids_path": train_ids_path,
+        "folds_path": folds_path,
+        "test_ids_path": test_ids_path,
+        "image_input_paths_path": image_input_paths_path,
+        "image_test_input_paths_path": image_test_input_paths_path,
+    }
+    if any(_missing(name, value) for name, value in required.items()):
+        return violations
+
+    try:
+        packed = load_packed_images(Path(str(target_path)))
+    except ValueError as exc:
+        violations.append(f"packed canonical targets are unusable: {exc}")
+        return violations
+
+    try:
+        train_ids = np.asarray(np.load(Path(str(train_ids_path)), allow_pickle=False))
+        folds = np.asarray(np.load(Path(str(folds_path)), allow_pickle=False))
+        test_ids = np.asarray(np.load(Path(str(test_ids_path)), allow_pickle=False))
+        input_paths = np.asarray(
+            np.load(Path(str(image_input_paths_path)), allow_pickle=False)
+        )
+        test_input_paths = np.asarray(
+            np.load(Path(str(image_test_input_paths_path)), allow_pickle=False)
+        )
+    except Exception as exc:  # any load failure is corruption
+        violations.append(f"packed canonical arrays are unreadable: {exc}")
+        return violations
+
+    train_keys = [str(value) for value in train_ids.reshape(-1).tolist()]
+    packed_keys = [str(value) for value in packed.image_ids.reshape(-1).tolist()]
+    if train_keys != packed_keys:
+        violations.append(
+            "canonical train IDs do not match packed target image IDs "
+            f"({len(train_keys)} vs {len(packed_keys)})"
+        )
+    if len(input_paths.reshape(-1)) != len(train_keys):
+        violations.append(
+            "image input paths are not aligned with canonical train IDs "
+            f"({len(input_paths.reshape(-1))} vs {len(train_keys)})"
+        )
+    test_keys = [str(value) for value in test_ids.reshape(-1).tolist()]
+    if len(set(test_keys)) != len(test_keys):
+        violations.append("canonical test IDs are not unique")
+    if len(test_input_paths.reshape(-1)) != len(test_keys):
+        violations.append(
+            "test input paths are not aligned with canonical test IDs "
+            f"({len(test_input_paths.reshape(-1))} vs {len(test_keys)})"
+        )
+    if expected_n_train is not None and len(train_keys) != int(expected_n_train):
+        violations.append(
+            f"canonical train row count {len(train_keys)} does not match the "
+            f"declared {int(expected_n_train)}"
+        )
+    if expected_n_test is not None and len(test_keys) != int(expected_n_test):
+        violations.append(
+            f"canonical test row count {len(test_keys)} does not match the "
+            f"declared {int(expected_n_test)}"
+        )
+    try:
+        validate_image_fold_assignments(folds, train_ids)
+    except ValueError as exc:
+        violations.append(str(exc))
+    return violations
+
+
 def _relative_image_paths(directory: Path) -> dict[str, Path]:
     return {
         path.relative_to(directory).as_posix(): path

@@ -563,8 +563,89 @@ def _print_withheld_reason(
             print(f"      approval withheld for: {', '.join(quality_rejections)}")
 
 
+def _terminal_failure_stop(state: KaggleState) -> dict[str, Any] | None:
+    """Stop without spending recovery budget on a failure recovery cannot fix.
+
+    A recovery attempt re-plans and re-implements components. That is a
+    response to a disputed model, not to a preamble that raised before any
+    candidate ran.
+
+    An already-accepted snapshot stays bound by omission: the returned updates
+    never rewrite the accepted-registry keys. But this early return also skips
+    the normal exhausted-recovery path, which is the ONLY place that promotes a
+    verified best-candidate snapshot into that registry. A run whose first
+    iteration produced a verifiable candidate and then died in the preamble -
+    before the SubmissionAgent ever ran - would otherwise grade as nothing,
+    while the same candidate on the non-terminal path would have been graded.
+    So the same binding is performed here, with the same verification and the
+    same trusted-provenance rules, and fails closed on any verification error.
+    """
+    terminal_origin = str(state.get("terminal_failure_origin") or "").strip()
+    if not terminal_origin:
+        return None
+
+    detail = state.get("terminal_failure_detail")
+    detail = dict(detail) if isinstance(detail, dict) else {}
+    reason = str(detail.get("reason") or "unspecified")
+    print("\n" + "=" * 60)
+    print(f"=  ROBUSTNESS GATE: terminal {terminal_origin} failure")
+    print("=" * 60)
+    print(f"   Reason: {reason}")
+    try:
+        unspent_recoveries = max(0, int(state.get("robustness_recovery_count", 0)))
+    except (TypeError, ValueError):
+        unspent_recoveries = 0
+
+    # No component is rejected by a terminal failure, so nothing is quarantined
+    # and every snapshot owner remains eligible.
+    binding, preserved = _bind_restored_snapshot_for_grading(
+        state,
+        {},
+        _restore_best_valid_submission(state, []),
+    )
+    print(
+        "   Verified snapshot bound for grading"
+        if preserved
+        else "   No verified snapshot survives; there is nothing to grade"
+    )
+
+    return {
+        **binding,
+        "robustness_gate_action": "fail",
+        # Echoed unchanged: no recovery attempt is charged for a failure that
+        # no re-implementation could avoid.
+        "robustness_recovery_count": unspent_recoveries,
+        "current_candidate_valid": False,
+        "workflow_valid": False,
+        "should_continue": False,
+        "needs_refinement": False,
+        "force_refinement": False,
+        "termination_reason": f"terminal_{terminal_origin}_failure",
+        "submission_validation_error": (
+            f"Terminal {terminal_origin} failure: {reason}"
+        ),
+        "telemetry_events": [
+            make_event(
+                "harness",
+                "robustness_gate_terminal_failure",
+                iteration=state.get("current_iteration", 0),
+                origin=terminal_origin,
+                reason=reason,
+                component_name=str(detail.get("component") or ""),
+                header_sha256=str(detail.get("header_sha256") or ""),
+                contract_fingerprint=str(detail.get("contract_fingerprint") or ""),
+            )
+        ],
+        "last_updated": datetime.now(),
+    }
+
+
 def robustness_gate_node(state: KaggleState) -> dict[str, Any]:
     """Turn robustness results into pass, one bounded recovery, or safe stop."""
+    terminal_stop = _terminal_failure_stop(state)
+    if terminal_stop is not None:
+        return terminal_stop
+
     evidence_failures = _mle_evidence_failures(state)
     if state.get("robustness_abstained", False) and not evidence_failures:
         return {

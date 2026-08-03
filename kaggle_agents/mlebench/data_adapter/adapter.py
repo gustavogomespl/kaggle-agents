@@ -10,6 +10,11 @@ import os
 from itertools import islice
 from pathlib import Path
 
+from .artifact_roles import (
+    build_auxiliary_artifact,
+    one_artifact_path,
+    resolve_public_artifacts,
+)
 from .dataclasses import MLEBenchDataInfo
 from .detection import DetectionMixin
 from .file_finders import FileFinderMixin
@@ -184,7 +189,7 @@ class MLEBenchDataAdapter(
         print(f"   Workspace: {workspace_path}")
 
         # Extract ZIPs
-        self._extract_zips(public_dir)
+        provenance = self._extract_zips(public_dir)
 
         # Check if public_dir is still empty after extraction - attempt fallback
         public_contents = list(public_dir.glob("*"))
@@ -193,6 +198,10 @@ class MLEBenchDataAdapter(
             fallback_success = self._populate_from_fallback(competition_id, public_dir)
             if fallback_success:
                 public_contents = list(public_dir.glob("*"))
+                # The fallback copies archives that were never opened above.
+                # Extraction is idempotent, so re-running it only adds the
+                # provenance of the newly discovered archives.
+                provenance = self._extract_zips(public_dir)
 
         # If still empty after fallback, raise a clear error
         if not public_contents:
@@ -214,18 +223,27 @@ class MLEBenchDataAdapter(
             data_type=data_type,
         )
 
-        # Find sample submission (critical for format)
-        sample_sub = self._find_csv_file(
-            public_dir,
-            [
-                "sample_submission*.csv",
-                "sampleSubmission*.csv",
-                "*sample*.csv",
-            ],
+        # Resolve typed public artifacts before any legacy filename finder:
+        # role resolution reads archive/member provenance the globs cannot see.
+        info.public_artifacts = resolve_public_artifacts(
+            public_dir, provenance, data_type
         )
-        if sample_sub:
-            info.sample_submission_path = sample_sub
-            print(f"   Sample submission: {sample_sub.name}")
+        self._apply_resolved_roles(info, data_type)
+
+        # Find sample submission (critical for format), only when the bounded
+        # resolver left the role unresolved (e.g. a directory-packed template).
+        if info.sample_submission_path is None:
+            sample_sub = self._find_csv_file(
+                public_dir,
+                [
+                    "sample_submission*.csv",
+                    "sampleSubmission*.csv",
+                    "*sample*.csv",
+                ],
+            )
+            if sample_sub:
+                info.sample_submission_path = sample_sub
+                print(f"   Sample submission: {sample_sub.name}")
 
         # Find train data - check both directories and CSVs regardless of data_type
         info = self._find_train_data(info, public_dir, data_type)
@@ -233,15 +251,22 @@ class MLEBenchDataAdapter(
         # Find test data
         info = self._find_test_data(info, public_dir, data_type)
 
+        # Recursive auxiliary discovery runs last: every legacy label-named
+        # candidate is inspected and typed, so no untyped second label lane
+        # survives into state.
+        self._append_recursive_auxiliary_artifacts(info, public_dir)
+
         # Submission roles are resolved only once the public test schema is
         # known: position alone misreads templates whose first column is the
         # prediction and whose remaining columns echo the test input.
-        if sample_sub:
+        if info.sample_submission_path:
             info.target_columns = self._detect_target_columns(
-                sample_sub, info.test_csv_path
+                info.sample_submission_path, info.test_csv_path
             )
             info.target_column = info.target_columns[0]
-            info.id_column = self._detect_id_column(sample_sub, info.test_csv_path)
+            info.id_column = self._detect_id_column(
+                info.sample_submission_path, info.test_csv_path
+            )
             print(f"   Target column: {info.target_column}")
             if len(info.target_columns) > 1:
                 print(
@@ -268,6 +293,68 @@ class MLEBenchDataAdapter(
         self._create_workspace_links(info, workspace_path, public_dir)
 
         return info
+
+    @staticmethod
+    def _apply_resolved_roles(info: MLEBenchDataInfo, data_type: str) -> None:
+        """Fill the compatibility fields the typed resolver already decided.
+
+        Tabular runs consume the resolved tables directly, so both the CSV and
+        the primary data path come from them. Media runs only take the CSV
+        metadata fields: their train/test directories are detected
+        independently and must survive this step.
+        """
+        resolved_train = one_artifact_path(info.public_artifacts, "train")
+        resolved_test = one_artifact_path(info.public_artifacts, "test")
+        resolved_submission = one_artifact_path(info.public_artifacts, "submission")
+
+        if resolved_train is not None:
+            info.train_csv_path = resolved_train
+            if data_type == "tabular":
+                info.train_path = resolved_train
+        if resolved_test is not None:
+            info.test_csv_path = resolved_test
+            if data_type == "tabular":
+                info.test_path = resolved_test
+        if resolved_submission is not None:
+            info.sample_submission_path = resolved_submission
+
+    def _append_recursive_auxiliary_artifacts(
+        self, info: MLEBenchDataInfo, public_dir: Path
+    ) -> None:
+        """Type every recursively discovered label candidate.
+
+        The legacy finder only matches filename hints, which is a guess about
+        a file's *name*, never about its content. Each candidate it produces
+        is inspected here and appended as a typed auxiliary record (including
+        an ``unknown`` one carrying its rejection evidence); records already
+        resolved from the bounded pool are excluded by normalized path and by
+        archive/member identity.
+        """
+        known_paths = {artifact.path.resolve() for artifact in info.public_artifacts}
+        known_members = {
+            (artifact.source_archive.resolve(), artifact.path.resolve())
+            for artifact in info.public_artifacts
+            if artifact.source_archive is not None
+        }
+        discovered = list(self._find_label_files(public_dir, recursive=True))
+        discovered.extend(info.label_files)
+
+        for path in sorted({Path(candidate) for candidate in discovered}, key=str):
+            resolved = path.resolve()
+            if resolved in known_paths:
+                continue
+            if any(resolved == member for _, member in known_members):
+                continue
+            artifact = build_auxiliary_artifact(public_dir, path)
+            if artifact is None:
+                continue
+            known_paths.add(resolved)
+            info.public_artifacts.append(artifact)
+            try:
+                label = path.relative_to(public_dir)
+            except ValueError:  # pragma: no cover - defensive
+                label = path.name
+            print(f"   Auxiliary artifact: {label} [{artifact.layout}]", flush=True)
 
     def _find_train_data(
         self, info: MLEBenchDataInfo, public_dir: Path, data_type: str
@@ -333,9 +420,15 @@ class MLEBenchDataAdapter(
                     print(f"   Train dir (content detected): {data_dir.name}/ [{dtype}]")
                     break
 
-        # Train CSV (labels for image competitions, or data for tabular)
-        train_csv = self._find_csv_file(
-            public_dir, ["train.csv", "train_labels.csv", "labels.csv", "train*.csv"]
+        # Train CSV (labels for image competitions, or data for tabular).
+        # The legacy globs only fill a role the typed resolver left open.
+        train_csv = (
+            self._find_csv_file(
+                public_dir,
+                ["train.csv", "train_labels.csv", "labels.csv", "train*.csv"],
+            )
+            if info.train_csv_path is None
+            else None
         )
         if train_csv:
             info.train_csv_path = train_csv
@@ -430,8 +523,12 @@ class MLEBenchDataAdapter(
             info.test_path = info.audio_source_path
             print(f"   Test dir (shared media source): {info.audio_source_path.name}/")
 
-        # Test CSV
-        test_csv = self._find_csv_file(public_dir, ["test.csv", "test*.csv"])
+        # Test CSV - only when the typed resolver left the role unresolved.
+        test_csv = (
+            self._find_csv_file(public_dir, ["test.csv", "test*.csv"])
+            if info.test_csv_path is None
+            else None
+        )
         if test_csv:
             info.test_csv_path = test_csv
             if data_type == "tabular" and (info.test_path is None or info.test_path.is_file()):
@@ -461,7 +558,7 @@ class MLEBenchDataAdapter(
             train_patterns = ["train.csv", "train", "train_images", "training"]
             found = self._find_data_in_subdirs(public_dir, train_patterns)
             if found:
-                if found.is_file() and found.suffix == ".csv":
+                if found.is_file() and found.suffix == ".csv" and info.train_csv_path is None:
                     info.train_csv_path = found
                 info.train_path = found
                 print(f"   Train found in subdir: {found.relative_to(public_dir)}")
@@ -470,7 +567,7 @@ class MLEBenchDataAdapter(
             test_patterns = ["test.csv", "test", "test_images", "testing"]
             found = self._find_data_in_subdirs(public_dir, test_patterns)
             if found:
-                if found.is_file() and found.suffix == ".csv":
+                if found.is_file() and found.suffix == ".csv" and info.test_csv_path is None:
                     info.test_csv_path = found
                 info.test_path = found
                 print(f"   Test found in subdir: {found.relative_to(public_dir)}")

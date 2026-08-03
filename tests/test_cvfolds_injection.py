@@ -146,26 +146,32 @@ annotations = pd.read_csv("opaque_annotations_2026.txt")
         self,
         tmp_path: Path,
     ) -> None:
-        from kaggle_agents.agents.developer.code_generator import (
-            _resolve_semantic_data_artifacts,
+        from kaggle_agents.agents.developer.target_source import (
+            resolve_developer_target_source,
         )
 
         label_file = tmp_path / "opaque_annotations.txt"
         mapping_file = tmp_path / "opaque_lookup.csv"
-        label_file.touch()
-        mapping_file.touch()
-
-        label_files, resolved_mapping = _resolve_semantic_data_artifacts(
-            [label_file, mapping_file],
-            {
-                "features_found": {
-                    "id_mapping": str(mapping_file),
-                }
-            },
+        label_file.write_text(
+            "rec_1,3,7,11\nrec_2,4\nrec_3,3,4,9,12\nrec_4,7\n",
+            encoding="utf-8",
+        )
+        mapping_file.write_text(
+            "record_id,file_name\nrec_1,a.wav\nrec_2,b.wav\n",
+            encoding="utf-8",
         )
 
-        assert label_files == [str(label_file)]
-        assert resolved_mapping == mapping_file
+        source = resolve_developer_target_source(
+            working_dir=tmp_path,
+            state={},
+            data_files={"label_files": [str(label_file), str(mapping_file)]},
+            precomputed_info={"features_found": {"id_mapping": str(mapping_file)}},
+            component_type="model",
+        )
+
+        assert source.mode == "sparse_preload"
+        assert source.label_files == (str(label_file),)
+        assert source.id_mapping_path == mapping_file
 
 
 class TestCVfoldsInjection:
@@ -721,44 +727,60 @@ rec_ids = _PRELOADED_REC_IDS
 
 
 class TestLabelIntCasting:
-    """Tests for label integer casting in parse_label_file."""
+    """Tests for label scalar-type handling in parse_sparse_label_rows.
 
-    def test_numeric_labels_cast_to_int(self) -> None:
-        """Test that numeric labels are cast to integers."""
-        label = "42"
-        try:
-            label_val = int(label)
-        except ValueError:
-            label_val = label
+    The old inline ``try: int(label) except ValueError`` simulation this
+    class used to test produced mixed ``[int, str]`` columns per-row - a
+    shape the production parser never emits. These tests instead exercise
+    the real ``kaggle_agents.utils.label_parser.parse_sparse_label_rows``
+    helper and assert its uniform lexical output.
+    """
 
-        assert isinstance(label_val, int)
-        assert label_val == 42
+    def test_numeric_labels_remain_strings_by_default(self, tmp_path: Path) -> None:
+        """Numeric-looking labels are not auto-cast to int by default."""
+        from kaggle_agents.utils.label_parser import parse_sparse_label_rows
 
-    def test_non_numeric_labels_preserved_as_string(self) -> None:
-        """Test that non-numeric labels are kept as strings."""
-        label = "species_bird"
-        try:
-            label_val = int(label)
-        except ValueError:
-            label_val = label
+        label_path = tmp_path / "labels.csv"
+        label_path.write_text("record_id,target\n1,42\n2,7\n", encoding="utf-8")
 
-        assert isinstance(label_val, str)
-        assert label_val == "species_bird"
+        df = parse_sparse_label_rows(label_path)
+        values = df["target"].tolist()
 
-    def test_mixed_labels_handled_correctly(self) -> None:
-        """Test handling of mixed numeric and non-numeric labels."""
-        labels = ["1", "10", "species", "42"]
-        results = []
+        assert values == ["42", "7"]
+        assert all(isinstance(value, str) for value in values)
 
-        for label in labels:
-            try:
-                results.append(int(label))
-            except ValueError:
-                results.append(label)
+    def test_non_numeric_labels_preserved_as_string(self, tmp_path: Path) -> None:
+        """Non-numeric labels are kept as strings."""
+        from kaggle_agents.utils.label_parser import parse_sparse_label_rows
 
-        assert results == [1, 10, "species", 42]
-        assert isinstance(results[0], int)
-        assert isinstance(results[2], str)
+        label_path = tmp_path / "labels.csv"
+        label_path.write_text(
+            "record_id,target\n1,species_bird\n2,species_fish\n", encoding="utf-8"
+        )
+
+        df = parse_sparse_label_rows(label_path)
+        values = df["target"].tolist()
+
+        assert values == ["species_bird", "species_fish"]
+        assert all(isinstance(value, str) for value in values)
+
+    def test_mixed_labels_produce_uniform_lexical_output(self, tmp_path: Path) -> None:
+        """Mixed numeric-looking and alphabetic labels stay uniformly typed
+        as strings - the production helper never returns a column mixing
+        Python ``int`` and ``str`` scalars."""
+        from kaggle_agents.utils.label_parser import parse_sparse_label_rows
+
+        label_path = tmp_path / "labels.csv"
+        label_path.write_text(
+            "record_id,target\n1,1\n2,10\n3,species\n4,42\n", encoding="utf-8"
+        )
+
+        df = parse_sparse_label_rows(label_path)
+        values = df["target"].tolist()
+
+        assert values == ["1", "10", "species", "42"]
+        assert all(isinstance(value, str) for value in values)
+        assert not any(isinstance(value, int) for value in values)
 
 
 class TestCanonicalDirFallback:
@@ -1036,5 +1058,8 @@ class TestPathRedefinitionSanitizer:
         src = inspect.getsource(code_generator)
         assert "_required_canonical_fields" in src
         assert "Canonical metadata missing required fields" in src
-        assert "MLE-bench model generation requires the complete canonical" in src
         assert "if CANONICAL_METADATA_PATH.exists():" not in src
+        # Canonical authority is the resolved decision, never a second probe
+        # of whether canonical/ happens to look complete on disk.
+        assert "target_source.canonical_authoritative" in src
+        assert "canonical_dir.is_dir()" not in src

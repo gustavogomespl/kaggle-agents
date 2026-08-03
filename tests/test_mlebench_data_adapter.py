@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from kaggle_agents.mlebench.data_adapter import MLEBenchDataAdapter
+from kaggle_agents.mlebench.data_adapter import (
+    MLEBenchDataAdapter,
+    one_artifact_path,
+)
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -70,6 +73,13 @@ def test_json_table_competition_is_materialized_as_csv(tmp_path: Path) -> None:
     paths = adapter.get_state_paths(info)
     assert Path(paths["train_data_path"]).name == "train.csv"
     assert Path(paths["test_data_path"]).name == "test.csv"
+
+    # JSON tables are outside the bounded role resolver's delimited scope, so
+    # it must leave both roles unresolved -- and must not clear the legacy
+    # materialization fallback that is the only thing filling them here.
+    assert one_artifact_path(info.public_artifacts, "train") is None
+    assert one_artifact_path(info.public_artifacts, "test") is None
+    assert one_artifact_path(info.public_artifacts, "submission") is not None
 
     # The public tree is read-only for this pipeline: no CSV appears there.
     assert sorted(p.name for p in (public_dir / "train").iterdir()) == [
@@ -186,6 +196,16 @@ def test_tabular_state_paths_prefer_csvs_over_supplementary_directories(
     assert Path(paths["data_files"]["test"]) == workspace / "test.csv"
     assert (workspace / "train").is_dir()
     assert (workspace / "test").is_dir()
+
+    # Every compatibility key above is derived from the typed records, which
+    # travel into state alongside them.
+    typed_roles = {
+        record["role"]: Path(record["path"]).name
+        for record in paths["data_files"]["public_artifacts"]
+    }
+    assert typed_roles["train"] == "train.csv"
+    assert typed_roles["test"] == "test.csv"
+    assert typed_roles["submission"] == "sample_submission.csv"
 
 
 def test_sample_submission_directory_resolves_to_inner_csv(tmp_path: Path) -> None:

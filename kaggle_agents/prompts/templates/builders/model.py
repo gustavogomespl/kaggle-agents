@@ -5,7 +5,6 @@ Model component and dynamic instruction builders.
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 from ....core.config import is_metric_minimization
 from .budget import (
@@ -70,24 +69,12 @@ def _detect_is_classification(state: dict | None) -> bool | None:
         if is_classification is not None:
             return bool(is_classification)
 
-    # Step 1.5: Load from canonical directory using working_directory
-    # This bypasses state timing issues by reading directly from disk
-    try:
-        import json
-        from pathlib import Path
-
-        working_dir = state.get("working_directory")
-        if working_dir:
-            canonical_metadata_path = Path(working_dir) / "canonical" / "metadata.json"
-            if canonical_metadata_path.exists():
-                with open(canonical_metadata_path) as f:
-                    metadata = json.load(f)
-                    is_classification = metadata.get("is_classification")
-                    if is_classification is not None:
-                        print(f"[DEBUG] is_classification={is_classification} (from canonical/metadata.json)")
-                        return bool(is_classification)
-    except Exception:
-        pass
+    # NOTE: there is deliberately no `canonical/metadata.json` probe here.
+    # Reading the directory directly was a second, independent decision about
+    # the target semantics: it could disagree with the resolved target source
+    # (for example after a partially rewritten contract), and the prompt then
+    # described a task the injected header did not implement. The resolved
+    # decision writes `canonical_metadata` into the state above.
 
     # Step 2: Load metadata.json from canonical path if available
     try:
@@ -365,6 +352,7 @@ def build_model_component_instructions(
     target_col: str = "target",
     suggested_epochs: int = 600,
     early_stopping_patience: int = 30,
+    target_source=None,
 ) -> list[str]:
     """Build model component instructions with an adaptive epoch budget."""
     canonical_metadata = state.get("canonical_metadata", {}) or {}
@@ -538,9 +526,14 @@ def build_model_component_instructions(
     # when the contract was prepared; without it they would demand undefined
     # names and contradict the observed-data guidance.
     component_name = getattr(component, "name", "component")
+    # Authority comes from the resolved decision (or, for callers that have
+    # none, from the declared state flag) - never from whether a directory
+    # happens to exist on disk while another component is mid-write.
     canonical_ready = (
-        Path(str(working_dir)) / "canonical" / "metadata.json"
-    ).is_file()
+        target_source.canonical_authoritative
+        if target_source is not None
+        else bool(state.get("canonical_data_prepared"))
+    )
     if canonical_ready:
         instructions.extend(build_cv_instructions(working_dir, component_name))
         instructions.extend(
@@ -584,6 +577,7 @@ def build_dynamic_instructions(
     state: dict,
     config,
     working_dir: str,
+    target_source=None,
 ) -> str:
     """
     Build dynamic instructions based on current state (MLE-STAR pattern).
@@ -599,6 +593,9 @@ def build_dynamic_instructions(
         state: Current workflow state
         config: Agent configuration
         working_dir: Working directory path
+        target_source: The one resolved DeveloperTargetSource for this
+            component; when supplied it is the only source of canonical
+            authority (never a canonical/ directory probe)
 
     Returns:
         Dynamic instructions string
@@ -874,6 +871,7 @@ def build_dynamic_instructions(
                 target_col=target_col,
                 suggested_epochs=suggested_epochs,
                 early_stopping_patience=early_stopping_patience,
+                target_source=target_source,
             )
         )
 

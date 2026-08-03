@@ -10,18 +10,32 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...core.state import KaggleState
+    from .target_source import DeveloperTargetSource
 
 
 class DeveloperUtilsMixin:
     """Mixin providing utility methods."""
 
-    def _get_dataset_info(self, working_dir: Path, state: "KaggleState" = None) -> str:
+    def _get_dataset_info(
+        self,
+        working_dir: Path,
+        state: "KaggleState" = None,
+        *,
+        target_source: "DeveloperTargetSource | None" = None,
+    ) -> str:
         """
         Read dataset columns and file system structure to provide to LLM.
+
+        The summary may describe neutral features, but it may NOT select a
+        target: target paths and semantics come only from ``target_source``.
+        This method used to pick the first ``train_labels.csv``/``metadata.csv``
+        it found and announce a "contract target column" from it, which is a
+        second, competing target decision.
 
         Args:
             working_dir: Working directory containing data files
             state: Current state (optional)
+            target_source: The one resolved target decision for this component
 
         Returns:
             Formatted string with dataset information including file system structure
@@ -126,30 +140,29 @@ class DeveloperUtilsMixin:
                 info_parts.append(f"- `{csv_path.name}` (at {csv_path.parent.name}/): {len(columns)} columns")
                 info_parts.append(f"  - Columns: {', '.join(columns)}")
 
-                # Report only an explicit target role. Guessing from names such
-                # as "species" or from the last column encodes task-shaped
-                # priors and can mislead the generated program.
+                # Report only the target role the resolved decision declares.
+                # Guessing from names such as "species", from the last column,
+                # or from a second contract read here encodes task-shaped
+                # priors and can contradict the authoritative target source.
+                canonical_metadata = (
+                    target_source.canonical_metadata
+                    if target_source is not None and target_source.canonical_authoritative
+                    else {}
+                )
                 target_col = "UNKNOWN"
-                if state and state.get("target_col"):
+                declared_target = canonical_metadata.get("target_col")
+                if isinstance(declared_target, str) and declared_target:
+                    target_col = declared_target
+                elif target_source is None and state and state.get("target_col"):
                     target_col = state["target_col"]
-                elif state:
-                    canonical_contract = state.get("canonical_contract") or {}
-                    contracted_target = canonical_contract.get("target_col")
-                    if (
-                        isinstance(contracted_target, str)
-                        and contracted_target in columns
-                    ):
-                        target_col = contracted_target
 
                 info_parts.append(f"  - Contract target column: `{target_col}`")
-                if state:
-                    canonical_contract = state.get("canonical_contract") or {}
-                    contracted_targets = canonical_contract.get("target_cols")
-                    if isinstance(contracted_targets, list) and contracted_targets:
-                        info_parts.append(
-                            "  - Ordered contract target columns: "
-                            f"`{contracted_targets}`"
-                        )
+                declared_targets = canonical_metadata.get("target_cols")
+                if isinstance(declared_targets, list) and declared_targets:
+                    info_parts.append(
+                        "  - Ordered contract target columns: "
+                        f"`{declared_targets}`"
+                    )
 
                 # Show sample values for ID column (usually first column)
                 if columns:
@@ -170,13 +183,13 @@ class DeveloperUtilsMixin:
             if _analyze_csv(train_csv_path):
                 csv_found = True
 
-        # Second: Check standard CSV names in working directory root
+        # Second: the conventional training table only. Falling back to
+        # "train_labels.csv"/"metadata.csv" here was a filename-derived target
+        # decision competing with the resolved target source.
         if not csv_found:
-            for csv_name in ["train.csv", "train_labels.csv", "metadata.csv"]:
-                csv_path = working_dir / csv_name
-                if _analyze_csv(csv_path):
-                    csv_found = True
-                    break
+            csv_path = working_dir / "train.csv"
+            if _analyze_csv(csv_path):
+                csv_found = True
 
         # Third: Scan for CSVs inside the data directories discovered above.
         # This covers arbitrary nested layouts without privileging dataset names.

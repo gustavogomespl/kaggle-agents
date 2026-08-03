@@ -1625,11 +1625,19 @@ def _prepare_canonical_data_impl(
     # key leave each component to invent one, and the ones they reach for
     # (a repeated date, a placeholder target) are not unique - the artifacts
     # are then rejected however good the model was.
+    # A synthetic ID is this function's own invention: it is materialized into
+    # the staged tables so components can look it up, but it names row
+    # POSITIONS, not a public key. Offering it back as the preferred test
+    # identifier let it masquerade as a genuine public identifier and report
+    # non-positional test IDs, which silently changes how submissions are
+    # aligned. Positional identity is the only identity such a competition has.
     test_ids, test_ids_are_positional = _resolve_canonical_test_ids(
-        test_path, id_col
+        test_path, None if is_synthetic_id else id_col
     )
+    test_ids_path: Path | None = None
     if test_ids is not None:
-        np.save(canonical_dir / "test_ids.npy", test_ids, allow_pickle=False)
+        test_ids_path = canonical_dir / "test_ids.npy"
+        np.save(test_ids_path, test_ids, allow_pickle=False)
 
     # Save targets - use allow_pickle=True for string/object arrays (seq2seq tasks)
     if target_is_string or y.dtype == object:
@@ -1714,6 +1722,11 @@ def _prepare_canonical_data_impl(
         "metadata_path": str(canonical_dir / "metadata.json"),
         "metadata": metadata,
     }
+    # Test identity is an explicit contract artifact, never a directory probe:
+    # generated loaders must use the declared path instead of rediscovering
+    # canonical/test_ids.npy by existence.
+    if test_ids_path is not None:
+        result["test_ids_path"] = str(test_ids_path)
     if temporal_splits_path is not None:
         result["temporal_splits_path"] = str(temporal_splits_path)
     if oof_eligible_mask_path is not None:
@@ -2112,92 +2125,3 @@ def validate_canonical_data_usage(
             )
 
     return True, "", warnings
-
-
-def get_canonical_data_instructions(working_dir: str | Path) -> str:
-    """
-    Generate instructions for using canonical data in generated code.
-
-    Args:
-        working_dir: Working directory path
-
-    Returns:
-        Instruction string to inject into developer prompt
-    """
-    canonical_dir = Path(working_dir) / "canonical"
-
-    if canonical_dir.exists():
-        # Load metadata for context
-        try:
-            with open(canonical_dir / "metadata.json") as f:
-                metadata = json.load(f)
-            n_rows = metadata.get("canonical_rows", "unknown")
-            n_folds = metadata.get("n_folds", 5)
-            id_col = metadata.get("id_col", "id")
-        except Exception:
-            n_rows = "unknown"
-            n_folds = 5
-            id_col = "id"
-
-        return f'''
-## MANDATORY: Canonical Data Contract
-
-The canonical data has been prepared with {n_rows} rows and {n_folds} folds.
-You MUST use the canonical data to ensure consistency across all models.
-
-### How to Load Canonical Data:
-
-```python
-import numpy as np
-import json
-from pathlib import Path
-
-# Load canonical data
-canonical_dir = Path("{working_dir}/canonical")
-train_ids = np.load(canonical_dir / "train_ids.npy", allow_pickle=True)
-y = np.load(canonical_dir / "y.npy", allow_pickle=True)
-folds = np.load(canonical_dir / "folds.npy")
-
-with open(canonical_dir / "feature_cols.json") as f:
-    feature_cols = json.load(f)
-
-# Use the injected audited splitter for CV. It preserves temporal
-# forward-chaining and warm-up eligibility when the canonical strategy is
-# temporal; a simple fold-complement split does not.
-for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
-    X_train, X_val = X[train_idx], X[val_idx]
-    y_train, y_val = y[train_idx], y[val_idx]
-
-    # Train model...
-    model.fit(X_train, y_train)
-
-    # Store OOF predictions in order
-    oof[val_idx] = model.predict_proba(X_val)
-```
-
-### CRITICAL RULES:
-1. NEVER use train_test_split() - use canonical folds
-2. NEVER create your own KFold/StratifiedKFold - folds are pre-defined
-3. NEVER sample or shuffle the data independently
-4. ALWAYS save OOF predictions in canonical order (aligned with train_ids)
-5. ID column is: "{id_col}"
-
-### Saving Predictions:
-```python
-# Verify alignment, then use the injected artifact helper exactly once.
-assert len(oof) == len(train_ids), "OOF must match canonical row count"
-save_component_artifacts(
-    oof,
-    test_predictions,
-    train_ids=train_ids,
-    test_ids=CANONICAL_TEST_IDS,
-)
-```
-'''
-    return '''
-## Note: Canonical Data Will Be Prepared
-
-The canonical data contract will be prepared before your component runs.
-When it's ready, use load_canonical_data() to get train_ids, folds, and y.
-Do NOT create your own folds or sampling strategy.
-'''
