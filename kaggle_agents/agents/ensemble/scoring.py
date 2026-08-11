@@ -18,6 +18,12 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 
+from ...utils.bounded_array import (
+    DEFAULT_CHUNK_ROWS,
+    ProgressCallback,
+    iter_chunk_slices,
+)
+
 
 _LOG_LOSS_NAMES = ("logloss", "log_loss", "log loss", "cross_entropy")
 _RMSLE_NAMES = (
@@ -291,6 +297,10 @@ def score_predictions(
     y_true: np.ndarray,
     problem_type: str,
     metric_name: str,
+    *,
+    row_mask: np.ndarray | None = None,
+    chunk_rows: int = DEFAULT_CHUNK_ROWS,
+    progress: ProgressCallback | None = None,
 ) -> float:
     """Score predictions where LOWER is better.
 
@@ -306,10 +316,17 @@ def score_predictions(
     if preds is None or y_true is None:
         raise ValueError("preds and y_true cannot be None")
 
+    metric = (metric_name or "").lower().strip()
+    normalized_problem = (
+        str(problem_type or "").lower().replace("-", "_").replace(" ", "_")
+    )
     predictions = np.asarray(preds)
     targets = np.asarray(y_true)
     if len(predictions) != len(targets):
-        raise ValueError(f"Length mismatch: preds has {len(preds)} samples, y_true has {len(y_true)}")
+        raise ValueError(
+            f"Length mismatch: preds has {len(preds)} samples, "
+            f"y_true has {len(y_true)}"
+        )
     if (
         targets.ndim == 2
         and targets.shape[1] > 1
@@ -320,10 +337,6 @@ def score_predictions(
             f"{predictions.shape} != {targets.shape}"
         )
 
-    metric = (metric_name or "").lower().strip()
-    normalized_problem = (
-        str(problem_type or "").lower().replace("-", "_").replace(" ", "_")
-    )
     if normalized_problem in {
         "seq2seq",
         "seq_to_seq",
@@ -334,11 +347,40 @@ def score_predictions(
     }:
         if metric not in {"", "accuracy", "exact_match", "exact_match_accuracy"}:
             raise ValueError(f"Unsupported seq2seq metric: {metric}")
-        predicted_text = predictions.astype(str).reshape(-1)
-        target_text = targets.astype(str).reshape(-1)
-        if len(predicted_text) != len(target_text):
-            raise ValueError("Flattened seq2seq prediction/target lengths differ")
-        return -float(np.mean(predicted_text == target_text))
+        eligible = None
+        if row_mask is not None:
+            eligible = np.asarray(row_mask, dtype=bool)
+            if eligible.shape != (len(predictions),):
+                raise ValueError(
+                    "Seq2seq row eligibility mask must have shape "
+                    f"{(len(predictions),)}, got {eligible.shape}"
+                )
+        matches = 0
+        compared = 0
+        for row_slice in iter_chunk_slices(
+            len(predictions), chunk_rows=chunk_rows
+        ):
+            prediction_chunk = predictions[row_slice]
+            target_chunk = targets[row_slice]
+            if eligible is not None:
+                chunk_mask = eligible[row_slice]
+                prediction_chunk = prediction_chunk[chunk_mask]
+                target_chunk = target_chunk[chunk_mask]
+            predicted_text = np.asarray(prediction_chunk).astype(str).reshape(-1)
+            target_text = np.asarray(target_chunk).astype(str).reshape(-1)
+            if len(predicted_text) != len(target_text):
+                raise ValueError(
+                    "Flattened seq2seq prediction/target lengths differ"
+                )
+            matches += int(np.count_nonzero(predicted_text == target_text))
+            compared += len(predicted_text)
+            if progress is not None:
+                progress(int(row_slice.stop), len(predictions))
+        if compared == 0:
+            raise ValueError("Eligibility mask selects no seq2seq rows")
+        return -float(matches / compared)
+    if row_mask is not None:
+        raise ValueError("row_mask is currently supported only for seq2seq scoring")
     is_classification_problem = (
         "classification" in normalized_problem
         or normalized_problem

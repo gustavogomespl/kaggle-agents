@@ -16,12 +16,45 @@ import numpy as np
 
 from ...core.config import calculate_score_improvement, is_metric_minimization
 from ...core.state import AblationComponent, KaggleState
+from ...utils.bounded_array import (
+    DEFAULT_CHUNK_ROWS,
+    ProgressCallback,
+    load_npy_readonly,
+    string_arrays_equal,
+)
 from ...utils.image_to_image_contract import packed_image_rmse
 from ..ensemble.scoring import score_predictions
 
 
 if TYPE_CHECKING:
     from ...tools.code_executor import ExecutionResult
+
+
+TRUSTED_OOF_CHUNK_ROWS = DEFAULT_CHUNK_ROWS
+TRUSTED_OOF_HEARTBEAT_ROWS = 1_000_000
+
+
+def _trusted_oof_progress(
+    component_name: str,
+    stage: str,
+) -> ProgressCallback:
+    """Build a throttled progress logger for host-side trusted validation."""
+    last_reported = 0
+
+    def report(processed: int, total: int) -> None:
+        nonlocal last_reported
+        if (
+            processed == total
+            or processed - last_reported >= TRUSTED_OOF_HEARTBEAT_ROWS
+        ):
+            print(
+                "      [LOG:PROGRESS] trusted_oof "
+                f"component={component_name} stage={stage} "
+                f"rows={processed}/{total}"
+            )
+            last_reported = processed
+
+    return report
 
 
 # These four live here rather than beside their first caller because the
@@ -272,13 +305,12 @@ class ValidationMixin:
             normalized_problem_type = "classification"
 
         try:
-            oof = np.asarray(
-                np.load(
-                    oof_path,
-                    allow_pickle=False,
-                )
+            print(
+                "      [LOG:INFO] Trusted OOF validation started: "
+                f"component={component.name}"
             )
-            y_true = np.asarray(np.load(y_path, allow_pickle=True))
+            oof = load_npy_readonly(oof_path, allow_pickle=False)
+            y_true = load_npy_readonly(y_path, allow_pickle=True)
             if oof.shape[0] != y_true.shape[0]:
                 raise ValueError(
                     f"OOF/target row mismatch: {oof.shape[0]} != {y_true.shape[0]}"
@@ -298,24 +330,36 @@ class ValidationMixin:
             )
             if oof_eligible_mask_path.is_file():
                 oof_eligible_mask = np.asarray(
-                    np.load(oof_eligible_mask_path, allow_pickle=False),
+                    load_npy_readonly(
+                        oof_eligible_mask_path,
+                        allow_pickle=False,
+                    ),
                     dtype=bool,
                 )
                 if oof_eligible_mask.shape != (len(y_true),):
                     raise ValueError(
                         "Canonical OOF eligibility mask is not target-aligned"
                     )
-                warmup_oof = oof[~oof_eligible_mask]
-                if warmup_oof.size and (
-                    normalized_problem_type == "seq2seq"
-                    or not np.isnan(np.asarray(warmup_oof, dtype=float)).all()
-                ):
-                    raise ValueError(
-                        "Temporal warm-up OOF rows must remain NaN"
-                    )
-                oof_for_score = oof[oof_eligible_mask]
-                y_for_score = y_true[oof_eligible_mask]
+                if normalized_problem_type == "seq2seq":
+                    if not np.all(oof_eligible_mask):
+                        raise ValueError(
+                            "Temporal seq2seq OOF has no supported text "
+                            "warm-up sentinel"
+                        )
+                    oof_for_score = oof
+                    y_for_score = y_true
+                else:
+                    warmup_oof = oof[~oof_eligible_mask]
+                    if warmup_oof.size and not np.isnan(
+                        np.asarray(warmup_oof, dtype=float)
+                    ).all():
+                        raise ValueError(
+                            "Temporal warm-up OOF rows must remain NaN"
+                        )
+                    oof_for_score = oof[oof_eligible_mask]
+                    y_for_score = y_true[oof_eligible_mask]
             else:
+                oof_eligible_mask = None
                 oof_for_score = oof
                 y_for_score = y_true
             if (
@@ -338,15 +382,23 @@ class ValidationMixin:
             )
             if not canonical_ids_path.is_file() or not model_ids_path.is_file():
                 raise ValueError("Canonical/model train IDs are unavailable")
-            canonical_ids = np.asarray(
-                np.load(canonical_ids_path, allow_pickle=True)
+            canonical_ids = load_npy_readonly(
+                canonical_ids_path,
+                allow_pickle=True,
             ).reshape(-1)
-            model_ids = np.asarray(
-                np.load(model_ids_path, allow_pickle=False)
+            model_ids = load_npy_readonly(
+                model_ids_path,
+                allow_pickle=False,
             ).reshape(-1)
-            if [str(value) for value in model_ids] != [
-                str(value) for value in canonical_ids
-            ]:
+            if not string_arrays_equal(
+                model_ids,
+                canonical_ids,
+                chunk_rows=TRUSTED_OOF_CHUNK_ROWS,
+                progress=_trusted_oof_progress(
+                    component.name,
+                    "id_alignment",
+                ),
+            ):
                 raise ValueError("OOF train IDs do not match canonical row order")
 
             # score_predictions encodes targets in sorted-label order, but in
@@ -388,12 +440,26 @@ class ValidationMixin:
                         aligned[:, destinations] = oof_for_score
                         oof_for_score = aligned
 
-            internal_score = score_predictions(
-                oof_for_score,
-                y_for_score,
-                normalized_problem_type,
-                metric_name,
-            )
+            if normalized_problem_type == "seq2seq":
+                internal_score = score_predictions(
+                    oof_for_score,
+                    y_for_score,
+                    normalized_problem_type,
+                    metric_name,
+                    row_mask=oof_eligible_mask,
+                    chunk_rows=TRUSTED_OOF_CHUNK_ROWS,
+                    progress=_trusted_oof_progress(
+                        component.name,
+                        "seq2seq_score",
+                    ),
+                )
+            else:
+                internal_score = score_predictions(
+                    oof_for_score,
+                    y_for_score,
+                    normalized_problem_type,
+                    metric_name,
+                )
             score = (
                 float(internal_score)
                 if is_metric_minimization(metric_name)
@@ -403,6 +469,10 @@ class ValidationMixin:
                 score, metric_name, trusted=True
             ):
                 raise ValueError(f"implausible recomputed score: {score}")
+            print(
+                "      [LOG:INFO] Trusted OOF validation complete: "
+                f"component={component.name} score={score:.6f}"
+            )
             return score
         except Exception as exc:
             print(f"      Trusted OOF scoring failed: {exc}")

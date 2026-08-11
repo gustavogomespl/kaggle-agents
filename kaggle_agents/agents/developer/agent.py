@@ -43,6 +43,7 @@ from ...prompts.templates.developer_prompts import (
     HARD_CONSTRAINTS,
 )
 from ...tools.code_executor import ArtifactValidator, CodeExecutor, ExecutionResult
+from ...utils.bounded_array import load_npy_readonly
 from ...utils.llm_utils import get_text_content
 from ...utils.log_parser import format_feedback_for_llm, parse_training_logs
 from ...utils.run_budget import (
@@ -52,6 +53,23 @@ from ...utils.run_budget import (
     format_remaining,
 )
 from ...utils.telemetry import make_event
+from .code_contracts import (
+    ARTIFACT_HELPER as _ARTIFACT_HELPER,
+)
+from .code_contracts import (
+    HELPER_IMPORT_CONTRACT_ERROR,
+    MISSING_CLASS_ORDER_ERROR,
+    MISSING_SUBMISSION_HELPER_ERROR,
+    SUBMISSION_CONTRACT_ERROR,
+    handwritten_submission_write,
+    missing_class_order_helper_argument,
+    missing_submission_helper_call,
+    requires_submission_helper,
+    untrusted_contract_helper_import,
+)
+from .code_contracts import (
+    SUBMISSION_HELPER as _SUBMISSION_HELPER,
+)
 
 # Re-export temperature utilities for backward compatibility
 from .code_generator import (
@@ -80,21 +98,6 @@ from .validation import (
     _requires_class_order_artifact,
     _validation_class_order_for_state,
     quarantine_component_artifacts,
-)
-
-
-from .code_contracts import (
-    ARTIFACT_HELPER as _ARTIFACT_HELPER,
-    HELPER_IMPORT_CONTRACT_ERROR,
-    MISSING_CLASS_ORDER_ERROR,
-    MISSING_SUBMISSION_HELPER_ERROR,
-    SUBMISSION_CONTRACT_ERROR,
-    SUBMISSION_HELPER as _SUBMISSION_HELPER,
-    handwritten_submission_write,
-    missing_class_order_helper_argument,
-    missing_submission_helper_call,
-    requires_submission_helper,
-    untrusted_contract_helper_import,
 )
 
 
@@ -1616,8 +1619,9 @@ class DeveloperAgent(
             expected_train_ids = None
             canonical_train_ids_path = canonical_contract.get("train_ids_path")
             if canonical_train_ids_path and Path(canonical_train_ids_path).is_file():
-                expected_train_ids = np.load(
-                    canonical_train_ids_path, allow_pickle=True
+                expected_train_ids = load_npy_readonly(
+                    canonical_train_ids_path,
+                    allow_pickle=True,
                 ).reshape(-1)
             expected_test_ids = state.get("test_rec_ids") or None
             canonical_test_ids_path = canonical_contract.get("test_ids_path")
@@ -1626,8 +1630,9 @@ class DeveloperAgent(
                 and canonical_test_ids_path
                 and Path(canonical_test_ids_path).is_file()
             ):
-                expected_test_ids = np.load(
-                    canonical_test_ids_path, allow_pickle=False
+                expected_test_ids = load_npy_readonly(
+                    canonical_test_ids_path,
+                    allow_pickle=False,
                 ).reshape(-1)
 
             # Run comprehensive validation
@@ -1673,14 +1678,17 @@ class DeveloperAgent(
             )
             if oof_file.exists() and problem_type != "image_to_image":
                 try:
-                    oof_preds = np.load(oof_file, allow_pickle=False)
+                    oof_preds = load_npy_readonly(
+                        oof_file,
+                        allow_pickle=False,
+                    )
                     oof_eligible_mask_path = Path(
                         canonical_contract.get("oof_eligible_mask_path")
                         or working_dir / "canonical" / "oof_eligible_mask.npy"
                     )
                     if oof_eligible_mask_path.is_file():
                         oof_eligible_mask = np.asarray(
-                            np.load(
+                            load_npy_readonly(
                                 oof_eligible_mask_path,
                                 allow_pickle=False,
                             ),
@@ -1691,12 +1699,23 @@ class DeveloperAgent(
                                 "Canonical OOF eligibility mask is not "
                                 "prediction-aligned"
                             )
-                        warmup_oof = oof_preds[~oof_eligible_mask]
-                        if warmup_oof.size and not np.isnan(warmup_oof).all():
-                            raise ValueError(
-                                "Temporal warm-up OOF rows must remain NaN"
-                            )
-                        quality_oof = oof_preds[oof_eligible_mask]
+                        if np.issubdtype(oof_preds.dtype, np.number):
+                            warmup_oof = oof_preds[~oof_eligible_mask]
+                            if (
+                                warmup_oof.size
+                                and not np.isnan(warmup_oof).all()
+                            ):
+                                raise ValueError(
+                                    "Temporal warm-up OOF rows must remain NaN"
+                                )
+                            quality_oof = oof_preds[oof_eligible_mask]
+                        else:
+                            if not np.all(oof_eligible_mask):
+                                raise ValueError(
+                                    "Temporal seq2seq OOF has no supported "
+                                    "text warm-up sentinel"
+                                )
+                            quality_oof = oof_preds
                     else:
                         quality_oof = oof_preds
 

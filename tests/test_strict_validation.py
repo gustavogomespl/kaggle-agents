@@ -5,6 +5,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import kaggle_agents.utils.strict_validation as strict_validation_module
+from kaggle_agents.utils.bounded_array import load_npy_readonly
 from kaggle_agents.utils.image_to_image_contract import save_packed_images
 from kaggle_agents.utils.strict_validation import (
     StrictValidationConfig,
@@ -297,6 +299,126 @@ def test_seq2seq_accepts_text_oof_with_exact_id_contract(tmp_path):
 
     assert result.is_valid is True
     assert result.errors == []
+
+
+def test_seq2seq_artifact_gate_loads_large_arrays_as_memmaps(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _save_artifacts(
+        tmp_path,
+        "model",
+        np.array(["one", "two", "three", "four", "five"], dtype=str),
+        np.array(["six", "seven"], dtype=str),
+    )
+    models = tmp_path / "models"
+    np.save(models / "train_ids_model.npy", np.arange(5), allow_pickle=False)
+    np.save(
+        models / "test_ids_model.npy",
+        np.array(["x", "y"], dtype=str),
+        allow_pickle=False,
+    )
+    observed: list[tuple[str, bool]] = []
+
+    def recording_load(path, *, allow_pickle=False):
+        loaded = load_npy_readonly(path, allow_pickle=allow_pickle)
+        observed.append((Path(path).name, isinstance(loaded, np.memmap)))
+        return loaded
+
+    monkeypatch.setattr(
+        strict_validation_module,
+        "load_npy_readonly",
+        recording_load,
+    )
+    monkeypatch.setattr(strict_validation_module, "VALIDATION_CHUNK_ROWS", 2)
+
+    result = validate_model_artifacts(
+        tmp_path,
+        "model",
+        expected_n_train=5,
+        expected_n_test=2,
+        expected_train_ids=np.array(["0", "1", "2", "3", "4"]),
+        expected_test_ids=np.array(["x", "y"]),
+        problem_type="seq2seq",
+        config=StrictValidationConfig(
+            strict_mode=True,
+            require_train_ids=True,
+            require_test_ids=True,
+        ),
+    )
+
+    assert result.is_valid is True
+    assert {name for name, _ in observed} == {
+        "oof_model.npy",
+        "test_model.npy",
+        "train_ids_model.npy",
+        "test_ids_model.npy",
+    }
+    assert all(is_memmap for _, is_memmap in observed)
+
+
+def test_id_gate_rejects_duplicate_split_across_validation_chunks(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _save_artifacts(
+        tmp_path,
+        "model",
+        np.array([0.1, 0.2, 0.3, 0.4, 0.5]),
+        np.array([0.1]),
+    )
+    np.save(
+        tmp_path / "models" / "train_ids_model.npy",
+        np.array(["a", "b", "c", "d", "a"], dtype=str),
+        allow_pickle=False,
+    )
+    monkeypatch.setattr(strict_validation_module, "VALIDATION_CHUNK_ROWS", 2)
+
+    result = validate_model_artifacts(
+        tmp_path,
+        "model",
+        expected_n_train=5,
+        expected_n_test=1,
+        problem_type="binary_classification",
+        config=StrictValidationConfig(
+            strict_mode=True,
+            require_train_ids=True,
+        ),
+    )
+
+    assert result.is_valid is False
+    assert any("Train IDs contain duplicates" in error for error in result.errors)
+
+
+def test_matching_duplicate_expected_ids_do_not_prove_uniqueness(tmp_path):
+    duplicate_ids = np.array(["same", "same"], dtype=str)
+    _save_artifacts(
+        tmp_path,
+        "model",
+        np.array([0.1, 0.2]),
+        np.array([0.3, 0.4]),
+    )
+    models = tmp_path / "models"
+    np.save(models / "train_ids_model.npy", duplicate_ids, allow_pickle=False)
+    np.save(models / "test_ids_model.npy", duplicate_ids, allow_pickle=False)
+
+    result = validate_model_artifacts(
+        tmp_path,
+        "model",
+        expected_n_train=2,
+        expected_n_test=2,
+        expected_train_ids=duplicate_ids,
+        expected_test_ids=duplicate_ids,
+        problem_type="binary_classification",
+        config=StrictValidationConfig(
+            strict_mode=True,
+            require_train_ids=True,
+            require_test_ids=True,
+        ),
+    )
+
+    assert result.is_valid is False
+    assert any("IDs contain duplicates" in error for error in result.errors)
 
 
 def test_candidate_pickle_in_id_artifact_is_rejected_without_execution(

@@ -6,6 +6,8 @@ on disk) and unconditionally overwrote submission.csv with an average that had
 no validation score, replacing the scored best single model.
 """
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -20,11 +22,11 @@ from kaggle_agents.core.state import (
     KaggleState,
     create_initial_state,
 )
+from kaggle_agents.utils.oof_validation import validate_oof_stack
 from kaggle_agents.utils.submission_artifacts import (
     snapshot_accepted_submission,
     snapshot_best_candidate_submission,
 )
-from kaggle_agents.utils.oof_validation import validate_oof_stack
 from kaggle_agents.workflow.nodes.robustness_gate import robustness_gate_node
 from kaggle_agents.workflow.routing import route_after_robustness_gate
 
@@ -32,6 +34,19 @@ from kaggle_agents.workflow.routing import route_after_robustness_gate
 def _make_pair(models_dir, name, n=2):
     np.save(models_dir / f"oof_{name}.npy", np.linspace(0.0, 1.0, n))
     np.save(models_dir / f"test_{name}.npy", np.linspace(0.0, 1.0, n))
+
+
+def _make_text_pair(models_dir, name):
+    np.save(
+        models_dir / f"oof_{name}.npy",
+        np.array(["one", "two"], dtype=str),
+        allow_pickle=False,
+    )
+    np.save(
+        models_dir / f"test_{name}.npy",
+        np.array(["three", "four"], dtype=str),
+        allow_pickle=False,
+    )
 
 
 def _base_state(tmp_path, **extra):
@@ -55,6 +70,41 @@ def _base_state(tmp_path, **extra):
         },
     )
     return state
+
+
+def _accepted_text_snapshot(tmp_path, state):
+    submission = tmp_path / "submission.csv"
+    expected = b"id,after\n1,three\n2,four\n"
+    submission.write_bytes(expected)
+    snapshot, digest = snapshot_accepted_submission(
+        tmp_path,
+        submission,
+        run_id=state["run_id"],
+        iteration=0,
+    )
+    state.update(
+        {
+            "accepted_submission_path": str(snapshot),
+            "accepted_submission_snapshot_path": str(snapshot),
+            "accepted_submission_sha256": digest,
+        }
+    )
+    submission.write_bytes(b"id,after\n1,tampered\n2,tampered\n")
+    return submission, expected
+
+
+def _record_forbidden_text_array_loads(monkeypatch):
+    original_load = np.load
+    forbidden_loads = []
+
+    def recording_load(path, *args, **kwargs):
+        name = Path(path).name
+        if name == "y.npy" or name.startswith("oof_"):
+            forbidden_loads.append(name)
+        return original_load(path, *args, **kwargs)
+
+    monkeypatch.setattr(np, "load", recording_load)
+    return forbidden_loads
 
 
 class TestAcceptedPairFilter:
@@ -409,6 +459,90 @@ class TestAcceptedPairFilter:
         workflow.compile().invoke(state)
 
         assert seen["pairs"] == {"b"}
+
+
+class TestSeq2SeqEnsembleGuard:
+    @pytest.mark.parametrize("pair_count", [1, 2])
+    def test_restores_verified_snapshot_without_loading_y_or_oof(
+        self,
+        tmp_path,
+        monkeypatch,
+        pair_count,
+    ):
+        names = [f"text_{index}" for index in range(pair_count)]
+        state = _base_state(
+            tmp_path,
+            run_mode="mlebench",
+            run_id="seq2seq-run",
+            competition_info=CompetitionInfo(
+                "text normalization",
+                "",
+                "accuracy",
+                "seq2seq",
+            ),
+            oof_availability=dict.fromkeys(names, True),
+            robustness_approved_components=dict.fromkeys(names, True),
+            trusted_component_scores=dict.fromkeys(names, 0.9),
+        )
+        pd.DataFrame(
+            {"id": [1, 2], "after": ["placeholder", "placeholder"]}
+        ).to_csv(
+            state["sample_submission_path"],
+            index=False,
+        )
+        for name in names:
+            _make_text_pair(tmp_path / "models", name)
+        canonical = tmp_path / "canonical"
+        canonical.mkdir()
+        np.save(
+            canonical / "y.npy",
+            np.array(["one", "two"], dtype=object),
+            allow_pickle=True,
+        )
+        state["canonical_contract"] = {
+            "y_path": str(canonical / "y.npy"),
+        }
+        submission, expected = _accepted_text_snapshot(tmp_path, state)
+        forbidden_loads = _record_forbidden_text_array_loads(monkeypatch)
+
+        result = EnsembleAgent()(state)
+
+        assert result["ensemble_skipped"] is True
+        assert result["skip_reason"] == "seq2seq_kept_verified_snapshot"
+        assert submission.read_bytes() == expected
+        assert forbidden_loads == []
+
+    def test_missing_verified_snapshot_fails_closed_before_array_load(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        state = _base_state(
+            tmp_path,
+            run_mode="mlebench",
+            run_id="seq2seq-run",
+            competition_info=CompetitionInfo(
+                "text normalization",
+                "",
+                "accuracy",
+                "seq_to_seq",
+            ),
+            oof_availability={"text": True},
+            robustness_approved_components={"text": True},
+            trusted_component_scores={"text": 0.9},
+        )
+        _make_text_pair(tmp_path / "models", "text")
+        output = tmp_path / "submission.csv"
+        output.write_text("id,value\n1,mutable\n2,mutable\n", encoding="utf-8")
+        forbidden_loads = _record_forbidden_text_array_loads(monkeypatch)
+
+        result = EnsembleAgent()(state)
+
+        assert result["ensemble_skipped"] is True
+        assert result["skip_reason"] == "verified_snapshot_unavailable"
+        assert result["workflow_valid"] is False
+        assert not output.exists()
+        assert forbidden_loads == []
 
 
 class TestUnscoredFallbackGate:

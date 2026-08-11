@@ -16,6 +16,7 @@ from ...agents.developer.validation import (
     quarantine_component_artifacts,
 )
 from ...core.state import KaggleState
+from ...utils.bounded_array import load_npy_readonly, string_arrays_equal
 from ...utils.image_to_image_contract import load_packed_images
 from ...utils.submission_artifacts import (
     restore_accepted_submission,
@@ -90,11 +91,9 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
     canonical_test_ids: np.ndarray | None = None
     if canonical_ids_path is not None and canonical_ids_path.is_file():
         try:
-            canonical_ids = np.asarray(
-                np.load(
-                    canonical_ids_path,
-                    allow_pickle=not packed_image_contract,
-                )
+            canonical_ids = load_npy_readonly(
+                canonical_ids_path,
+                allow_pickle=not packed_image_contract,
             ).reshape(-1)
         except Exception:
             canonical_ids = None
@@ -104,8 +103,9 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
         and canonical_test_ids_path.is_file()
     ):
         try:
-            canonical_test_ids = np.asarray(
-                np.load(canonical_test_ids_path, allow_pickle=False)
+            canonical_test_ids = load_npy_readonly(
+                canonical_test_ids_path,
+                allow_pickle=False,
             ).reshape(-1)
         except Exception:
             canonical_test_ids = None
@@ -173,18 +173,18 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
 
             if canonical_ids is None:
                 issues.append("canonical train image IDs are unavailable")
-            elif "oof" in packed_artifacts and (
-                packed_artifacts["oof"].image_ids.tolist()
-                != [str(value) for value in canonical_ids]
+            elif "oof" in packed_artifacts and not string_arrays_equal(
+                packed_artifacts["oof"].image_ids,
+                canonical_ids,
             ):
                 issues.append(
                     "packed OOF image IDs do not match canonical OOF image order"
                 )
             if canonical_test_ids is None:
                 issues.append("canonical test image IDs are unavailable")
-            elif "test" in packed_artifacts and (
-                packed_artifacts["test"].image_ids.tolist()
-                != [str(value) for value in canonical_test_ids]
+            elif "test" in packed_artifacts and not string_arrays_equal(
+                packed_artifacts["test"].image_ids,
+                canonical_test_ids,
             ):
                 issues.append(
                     "packed test image IDs do not match canonical test image order"
@@ -209,12 +209,14 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
                 )
             else:
                 try:
-                    model_class_order = np.asarray(
-                        np.load(class_order_path, allow_pickle=False)
+                    model_class_order = load_npy_readonly(
+                        class_order_path,
+                        allow_pickle=False,
                     ).reshape(-1)
-                    if [str(value) for value in model_class_order] != [
-                        str(value) for value in expected_class_order
-                    ]:
+                    if not string_arrays_equal(
+                        model_class_order,
+                        expected_class_order,
+                    ):
                         issues.append(
                             "component class order does not match submission contract"
                         )
@@ -231,12 +233,11 @@ def _mle_evidence_failures(state: KaggleState) -> dict[str, list[str]]:
                 issues.append("model train IDs are unavailable")
             else:
                 try:
-                    model_ids = np.asarray(
-                        np.load(model_ids_path, allow_pickle=False)
+                    model_ids = load_npy_readonly(
+                        model_ids_path,
+                        allow_pickle=False,
                     ).reshape(-1)
-                    if [str(value) for value in model_ids] != [
-                        str(value) for value in canonical_ids
-                    ]:
+                    if not string_arrays_equal(model_ids, canonical_ids):
                         issues.append(
                             "model train IDs do not match canonical OOF row order"
                         )

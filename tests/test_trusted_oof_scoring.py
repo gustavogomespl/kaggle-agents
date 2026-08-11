@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import kaggle_agents.agents.developer.validation as validation_module
 from kaggle_agents.agents.developer.agent import DeveloperAgent
 from kaggle_agents.agents.developer.validation import ValidationMixin
 from kaggle_agents.core.state import AblationComponent, CompetitionInfo
@@ -61,6 +62,107 @@ def test_mlebench_ignores_fabricated_stdout_score(tmp_path: Path) -> None:
 
     assert keep is True
     assert score == 0.0
+
+
+def test_trusted_seq2seq_score_is_chunked_and_emits_heartbeats(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    (tmp_path / "models").mkdir()
+    (tmp_path / "canonical").mkdir()
+    targets = np.array(["zero", "one", "two", "three", "four"], dtype=str)
+    predictions = np.array(
+        ["zero", "wrong", "two", "three", "four"], dtype=str
+    )
+    np.save(tmp_path / "canonical" / "y.npy", targets, allow_pickle=False)
+    np.save(
+        tmp_path / "canonical" / "train_ids.npy",
+        np.arange(5),
+        allow_pickle=False,
+    )
+    np.save(
+        tmp_path / "models" / "oof_candidate.npy",
+        predictions,
+        allow_pickle=False,
+    )
+    np.save(
+        tmp_path / "models" / "train_ids_candidate.npy",
+        np.array(["0", "1", "2", "3", "4"], dtype=str),
+        allow_pickle=False,
+    )
+    monkeypatch.setattr(validation_module, "TRUSTED_OOF_CHUNK_ROWS", 2)
+    monkeypatch.setattr(validation_module, "TRUSTED_OOF_HEARTBEAT_ROWS", 2)
+
+    score = _Validator()._compute_trusted_oof_score(
+        AblationComponent("candidate", "model", "train"),
+        {
+            "working_directory": str(tmp_path),
+            "canonical_contract": {
+                "y_path": str(tmp_path / "canonical" / "y.npy"),
+                "train_ids_path": str(
+                    tmp_path / "canonical" / "train_ids.npy"
+                ),
+            },
+            "competition_info": CompetitionInfo(
+                "demo", "", "accuracy", "seq2seq"
+            ),
+        },
+    )
+
+    output = capsys.readouterr().out
+    assert score == pytest.approx(0.8)
+    assert "stage=id_alignment rows=2/5" in output
+    assert "stage=id_alignment rows=5/5" in output
+    assert "stage=seq2seq_score rows=2/5" in output
+    assert "stage=seq2seq_score rows=5/5" in output
+
+
+def test_trusted_seq2seq_legacy_object_targets_keep_exact_score(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "models").mkdir()
+    (tmp_path / "canonical").mkdir()
+    np.save(
+        tmp_path / "canonical" / "y.npy",
+        np.array(["one", "two", "three"], dtype=object),
+        allow_pickle=True,
+    )
+    np.save(
+        tmp_path / "canonical" / "train_ids.npy",
+        np.arange(3),
+        allow_pickle=False,
+    )
+    np.save(
+        tmp_path / "models" / "oof_candidate.npy",
+        np.array(["one", "wrong", "three"], dtype=str),
+        allow_pickle=False,
+    )
+    np.save(
+        tmp_path / "models" / "train_ids_candidate.npy",
+        np.arange(3),
+        allow_pickle=False,
+    )
+    monkeypatch.setattr(validation_module, "TRUSTED_OOF_CHUNK_ROWS", 1)
+
+    score = _Validator()._compute_trusted_oof_score(
+        AblationComponent("candidate", "model", "train"),
+        {
+            "working_directory": str(tmp_path),
+            "canonical_contract": {
+                "y_path": str(tmp_path / "canonical" / "y.npy"),
+                "train_ids_path": str(
+                    tmp_path / "canonical" / "train_ids.npy"
+                ),
+            },
+            "competition_info": CompetitionInfo(
+                "demo", "", "accuracy", "seq2seq"
+            ),
+        },
+    )
+
+    assert score == pytest.approx(2 / 3)
 
 
 def test_mlebench_rejects_when_canonical_exists_but_evidence_is_missing(

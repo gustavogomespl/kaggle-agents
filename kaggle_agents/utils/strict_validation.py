@@ -20,7 +20,39 @@ from pathlib import Path
 
 import numpy as np
 
+from .bounded_array import (
+    DEFAULT_CHUNK_ROWS,
+    ProgressCallback,
+    contains_none,
+    load_npy_readonly,
+    string_arrays_equal,
+    string_values_are_unique,
+)
 from .image_to_image_contract import load_packed_images
+
+
+VALIDATION_CHUNK_ROWS = DEFAULT_CHUNK_ROWS
+VALIDATION_HEARTBEAT_ROWS = 1_000_000
+
+
+def _artifact_validation_progress(label: str, stage: str) -> ProgressCallback:
+    """Emit sparse heartbeats while exact artifact checks scan large IDs."""
+    last_reported = 0
+
+    def report(processed: int, total: int) -> None:
+        nonlocal last_reported
+        if (
+            processed == total
+            or processed - last_reported >= VALIDATION_HEARTBEAT_ROWS
+        ):
+            print(
+                "   [LOG:PROGRESS] artifact_validation "
+                f"label={label.lower()} stage={stage} "
+                f"rows={processed}/{total}"
+            )
+            last_reported = processed
+
+    return report
 
 
 @dataclass
@@ -189,13 +221,14 @@ def _validate_packed_image_artifacts(
                 f"{label} image count mismatch: {len(packed)} vs expected "
                 f"{expected_image_rows}"
             )
-        if expected_ids is not None:
-            actual = packed.image_ids.tolist()
-            expected = [str(value) for value in expected_ids]
-            if actual != expected:
-                result.add_error(
-                    f"{label} image IDs do not match canonical IDs in exact order"
-                )
+        if expected_ids is not None and not string_arrays_equal(
+            packed.image_ids,
+            expected_ids,
+            chunk_rows=VALIDATION_CHUNK_ROWS,
+        ):
+            result.add_error(
+                f"{label} image IDs do not match canonical IDs in exact order"
+            )
     return result
 
 
@@ -226,7 +259,7 @@ def _validate_basic_array(
         return
     if not np.issubdtype(preds.dtype, np.number):
         if allow_text:
-            if any(value is None for value in preds.reshape(-1).tolist()):
+            if contains_none(preds, chunk_rows=VALIDATION_CHUNK_ROWS):
                 result.add_error(f"{label} text predictions contain null values")
             return
         result.add_error(
@@ -252,7 +285,7 @@ def _validate_id_artifact(
             result.add_error(f"Missing {label} IDs file: {path.name}")
         return
     try:
-        ids = np.asarray(np.load(path, allow_pickle=False)).reshape(-1)
+        ids = load_npy_readonly(path, allow_pickle=False).reshape(-1)
     except Exception as exc:
         result.add_error(f"Failed to load {label} IDs: {exc}")
         return
@@ -262,17 +295,30 @@ def _validate_id_artifact(
             f"{label} ID row count mismatch: {len(ids)} vs predictions {expected_rows}"
         )
         return
-    normalized = [str(value) for value in ids.tolist()]
-    if len(set(normalized)) != len(normalized):
+    print(
+        "   [LOG:INFO] Artifact ID validation started: "
+        f"label={label.lower()} rows={len(ids)}"
+    )
+    if not string_values_are_unique(
+        ids,
+        chunk_rows=VALIDATION_CHUNK_ROWS,
+        progress=_artifact_validation_progress(label, "id_uniqueness"),
+    ):
         result.add_error(f"{label} IDs contain duplicates")
         return
     if expected_ids is not None:
-        expected = [str(value) for value in expected_ids]
-        if normalized != expected:
-            result.add_error(
-                f"{label} IDs do not match canonical IDs in exact row order"
-            )
+        if string_arrays_equal(
+            ids,
+            expected_ids,
+            chunk_rows=VALIDATION_CHUNK_ROWS,
+            progress=_artifact_validation_progress(label, "id_alignment"),
+        ):
+            result.files_verified.append(path.name)
             return
+        result.add_error(
+            f"{label} IDs do not match canonical IDs in exact row order"
+        )
+        return
     result.files_verified.append(path.name)
 
 
@@ -346,14 +392,14 @@ def validate_model_artifacts(
 
     # 3. Load and validate OOF predictions
     try:
-        oof_preds = np.load(oof_path, allow_pickle=False)
+        oof_preds = load_npy_readonly(oof_path, allow_pickle=False)
     except Exception as e:
         result.add_error(f"Failed to load OOF file: {e}")
         return result
 
     # 4. Load and validate test predictions
     try:
-        test_preds = np.load(test_path, allow_pickle=False)
+        test_preds = load_npy_readonly(test_path, allow_pickle=False)
     except Exception as e:
         result.add_error(f"Failed to load test file: {e}")
         return result
@@ -365,12 +411,13 @@ def validate_model_artifacts(
     # Temporal forward chaining reserves the oldest block as training-only
     # history. It has no honest OOF prediction, so the full-shape artifact must
     # retain NaN there and validation operates only on the canonical mask.
-    oof_eligible_mask = np.ones(oof_preds.shape[0], dtype=bool)
+    oof_eligible_mask: np.ndarray | None = None
     oof_mask_path = working_dir / "canonical" / "oof_eligible_mask.npy"
     if oof_mask_path.is_file():
         try:
             oof_eligible_mask = np.asarray(
-                np.load(oof_mask_path, allow_pickle=False), dtype=bool
+                load_npy_readonly(oof_mask_path, allow_pickle=False),
+                dtype=bool,
             )
         except Exception as exc:
             result.add_error(f"Failed to load canonical OOF eligibility mask: {exc}")
@@ -381,16 +428,26 @@ def validate_model_artifacts(
                 f"{oof_eligible_mask.shape} vs {(oof_preds.shape[0],)}"
             )
             return result
-        warmup_oof = oof_preds[~oof_eligible_mask]
-        if warmup_oof.size and (
-            not np.issubdtype(warmup_oof.dtype, np.number)
-            or not np.isnan(warmup_oof).all()
-        ):
-            result.add_error(
-                "Temporal warm-up OOF rows must remain NaN and must not be "
-                "fabricated as validation coverage"
-            )
-    oof_for_validation = oof_preds[oof_eligible_mask]
+        if allow_text:
+            if not np.all(oof_eligible_mask):
+                result.add_error(
+                    "Temporal seq2seq OOF has no supported text warm-up sentinel"
+                )
+        else:
+            warmup_oof = oof_preds[~oof_eligible_mask]
+            if warmup_oof.size and (
+                not np.issubdtype(warmup_oof.dtype, np.number)
+                or not np.isnan(warmup_oof).all()
+            ):
+                result.add_error(
+                    "Temporal warm-up OOF rows must remain NaN and must not be "
+                    "fabricated as validation coverage"
+                )
+    oof_for_validation = (
+        oof_preds
+        if oof_eligible_mask is None or allow_text
+        else oof_preds[oof_eligible_mask]
+    )
     if oof_for_validation.shape[0] == 0:
         result.add_error("Canonical OOF eligibility mask selects no rows")
         return result
@@ -727,7 +784,7 @@ def validate_prediction_quality(
     validation_family = _normalize_problem_type(problem_type)
     if not np.issubdtype(preds.dtype, np.number):
         if validation_family == "seq2seq":
-            if any(value is None for value in preds.reshape(-1).tolist()):
+            if contains_none(preds, chunk_rows=VALIDATION_CHUNK_ROWS):
                 issues.append("Text predictions contain null values")
             return len(issues) == 0, issues
         issues.append(f"Predictions must be numeric, got dtype {preds.dtype}")
@@ -790,31 +847,51 @@ def quick_oof_validation(
         issues.append(f"OOF file not found: oof_{component_name}.npy")
     else:
         try:
-            oof = np.load(oof_path, allow_pickle=False)
+            oof = load_npy_readonly(oof_path, allow_pickle=False)
             eligible_mask_path = (
                 working_path / "canonical" / "oof_eligible_mask.npy"
             )
             if eligible_mask_path.is_file():
                 eligible_mask = np.asarray(
-                    np.load(eligible_mask_path, allow_pickle=False), dtype=bool
+                    load_npy_readonly(
+                        eligible_mask_path,
+                        allow_pickle=False,
+                    ),
+                    dtype=bool,
                 )
                 if eligible_mask.shape != (len(oof),):
                     issues.append(
                         "Canonical OOF eligibility mask shape mismatch"
                     )
                     eligible_oof = np.asarray([])
-                else:
+                elif np.issubdtype(oof.dtype, np.number):
                     warmup_oof = oof[~eligible_mask]
                     if warmup_oof.size and not np.isnan(warmup_oof).all():
                         issues.append(
                             "Temporal warm-up OOF rows must remain NaN"
                         )
                     eligible_oof = oof[eligible_mask]
+                else:
+                    if not np.all(eligible_mask):
+                        issues.append(
+                            "Temporal seq2seq OOF has no supported text "
+                            "warm-up sentinel"
+                        )
+                    eligible_oof = oof
             else:
                 eligible_oof = oof
-            if eligible_oof.size and np.any(~np.isfinite(eligible_oof)):
-                issues.append("Eligible OOF contains NaN or Inf values")
-            if eligible_oof.ndim > 1:
+            if np.issubdtype(eligible_oof.dtype, np.number):
+                if eligible_oof.size and np.any(~np.isfinite(eligible_oof)):
+                    issues.append("Eligible OOF contains NaN or Inf values")
+            elif contains_none(
+                eligible_oof,
+                chunk_rows=VALIDATION_CHUNK_ROWS,
+            ):
+                issues.append("Eligible OOF text contains null values")
+            if (
+                np.issubdtype(eligible_oof.dtype, np.number)
+                and eligible_oof.ndim > 1
+            ):
                 empty_rows = np.sum(eligible_oof.sum(axis=1) == 0)
                 if empty_rows > 0:
                     issues.append(f"{empty_rows} OOF rows are all zeros (unfilled)")
@@ -827,9 +904,12 @@ def quick_oof_validation(
         issues.append(f"Test file not found: test_{component_name}.npy")
     else:
         try:
-            test = np.load(test_path, allow_pickle=False)
-            if np.any(~np.isfinite(test)):
-                issues.append("Test predictions contain NaN or Inf values")
+            test = load_npy_readonly(test_path, allow_pickle=False)
+            if np.issubdtype(test.dtype, np.number):
+                if np.any(~np.isfinite(test)):
+                    issues.append("Test predictions contain NaN or Inf values")
+            elif contains_none(test, chunk_rows=VALIDATION_CHUNK_ROWS):
+                issues.append("Test text predictions contain null values")
         except Exception as e:
             issues.append(f"Failed to load test predictions: {e}")
 

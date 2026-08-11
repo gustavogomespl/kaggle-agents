@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import subprocess
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -394,9 +395,112 @@ def run_evaluation(
                 result_dict["traceback"] = result.traceback
                 print(f"  Traceback:\n{result.traceback}", flush=True)
 
+        except KeyboardInterrupt as exc:
+            error_tb = traceback.format_exc()
+            detail = str(exc).strip()
+            error = (
+                f"KeyboardInterrupt: {detail}"
+                if detail
+                else "KeyboardInterrupt"
+            )
+            print(f"  INTERRUPTED in solve_mlebench: {error}", flush=True)
+            runner_result = getattr(exc, "mlebench_result", None)
+            if runner_result is None:
+                result_dict = {
+                    "competition_id": comp_id,
+                    "seed": seed,
+                    "arm": arm,
+                    "config_fingerprint": fingerprint,
+                    "run_id": None,
+                    "terminal_status": "harness_exception",
+                    "failure_origin": "harness",
+                    "terminal_failure_detail": {
+                        "reason": "keyboard_interrupt"
+                    },
+                    "attempted_at": datetime.now().isoformat(),
+                    "success": False,
+                    "error": error,
+                    "traceback": error_tb,
+                }
+            else:
+                # runner.run() finalizes in ``finally`` and attaches this same
+                # result object to the re-raised Ctrl-C. Keep the accepted
+                # artifact's grading and telemetry instead of replacing them
+                # with a generic row that claims no run existed.
+                telemetry = getattr(runner_result, "telemetry", None)
+                if isinstance(telemetry, dict):
+                    telemetry = {
+                        key: value
+                        for key, value in telemetry.items()
+                        if key != "event_log"
+                    }
+                provenance = (
+                    telemetry.get("provenance", {})
+                    if isinstance(telemetry, dict)
+                    else {}
+                )
+                if not isinstance(provenance, dict):
+                    provenance = {}
+                terminal_detail = getattr(
+                    runner_result, "terminal_failure_detail", None
+                )
+                plain_interrupt = (
+                    isinstance(terminal_detail, dict)
+                    and terminal_detail.get("reason") == "keyboard_interrupt"
+                )
+                # A workflow terminal state observed before Ctrl-C is already
+                # a real countable outcome. Preserve it as completed so resume
+                # cannot selectively rerun a known agent failure.
+                terminal_status = (
+                    "harness_exception" if plain_interrupt else "completed"
+                )
+                failure_origin = getattr(
+                    runner_result, "failure_origin", None
+                )
+                if plain_interrupt and failure_origin is None:
+                    failure_origin = "harness"
+                run_id = provenance.get("run_id") or getattr(
+                    exc, "mlebench_run_id", None
+                )
+                result_dict = {
+                    "competition_id": comp_id,
+                    "seed": seed,
+                    "arm": arm,
+                    "config_fingerprint": fingerprint,
+                    "run_id": run_id,
+                    "terminal_status": terminal_status,
+                    "failure_origin": failure_origin,
+                    "terminal_failure_detail": terminal_detail,
+                    "attempted_at": datetime.now().isoformat(),
+                    # Control never returned normally, even if finalization
+                    # preserved and graded an accepted artifact.
+                    "success": False,
+                    "valid_submission": runner_result.valid_submission,
+                    "score": runner_result.score,
+                    "gold_medal": runner_result.gold_medal,
+                    "silver_medal": runner_result.silver_medal,
+                    "bronze_medal": runner_result.bronze_medal,
+                    "any_medal": bool(
+                        runner_result.gold_medal
+                        or runner_result.silver_medal
+                        or runner_result.bronze_medal
+                    ),
+                    "above_median": runner_result.above_median,
+                    "execution_time": runner_result.execution_time,
+                    "agent_execution_time": runner_result.agent_execution_time,
+                    "deadline_reached": runner_result.deadline_reached,
+                    "iterations": runner_result.iterations,
+                    "components_implemented": (
+                        runner_result.components_implemented
+                    ),
+                    "telemetry": telemetry,
+                    "error": runner_result.error or error,
+                    "traceback": runner_result.traceback or error_tb,
+                }
+            all_results.append(result_dict)
+            _write_json_atomic(results_file, all_results)
+            raise
         except Exception as e:
-            import traceback
-
             error_tb = traceback.format_exc()
             print(f"  EXCEPTION in solve_mlebench: {e}", flush=True)
             print(f"  Traceback:\n{error_tb}", flush=True)

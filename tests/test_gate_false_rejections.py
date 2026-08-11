@@ -39,10 +39,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import kaggle_agents.workflow.nodes.robustness_gate as robustness_gate_module
 from kaggle_agents.agents.ensemble.submission import safe_restore_submission
 from kaggle_agents.agents.robustness_agent import RobustnessAgent
 from kaggle_agents.agents.submission_agent import SubmissionAgent
 from kaggle_agents.core.config import metric_reads_rows_as_distribution
+from kaggle_agents.utils.bounded_array import load_npy_readonly
 from kaggle_agents.utils.data_contract import _ensure_id_column
 from kaggle_agents.utils.oof_validation import assert_oof_sanity
 from kaggle_agents.utils.strict_validation import (
@@ -384,6 +386,37 @@ class TestMultilabelEvidenceNeedsNoClassOrder:
         )
 
         assert _mle_evidence_failures(state) == {}
+
+    def test_evidence_id_alignment_uses_read_only_memmaps(
+        self,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        state = _evidence_state(
+            tmp_path,
+            name="tfidf_linear_baseline",
+            problem_type="multilabel_classification",
+            class_order=TOXICITY_LABELS,
+            width=6,
+        )
+        observed: list[tuple[str, bool]] = []
+
+        def recording_load(path, *, allow_pickle=False):
+            loaded = load_npy_readonly(path, allow_pickle=allow_pickle)
+            observed.append((Path(path).name, isinstance(loaded, np.memmap)))
+            return loaded
+
+        monkeypatch.setattr(
+            robustness_gate_module,
+            "load_npy_readonly",
+            recording_load,
+        )
+
+        assert _mle_evidence_failures(state) == {}
+        assert observed == [
+            ("train_ids.npy", True),
+            ("train_ids_tfidf_linear_baseline.npy", True),
+        ]
 
     def test_multiclass_still_must_declare_its_column_order(self, tmp_path) -> None:
         state = _evidence_state(

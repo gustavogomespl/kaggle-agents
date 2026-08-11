@@ -49,11 +49,15 @@ def _result(competition: str, **overrides) -> MLEBenchResult:
     return MLEBenchResult(**base)
 
 
-def _stub_runner(monkeypatch, results: dict[str, MLEBenchResult], calls: list):
+def _stub_runner(
+    monkeypatch,
+    results: dict[str, MLEBenchResult | BaseException],
+    calls: list,
+):
     def fake_solve(competition_id, **kwargs):
         calls.append(competition_id)
         outcome = results[competition_id]
-        if isinstance(outcome, Exception):
+        if isinstance(outcome, BaseException):
             raise outcome
         return outcome
 
@@ -209,6 +213,118 @@ class TestLedger:
         row = json.loads((tmp_path / "results.json").read_text())[0]
         assert row["terminal_status"] == "harness_exception"
         assert sweep.is_final_result(row) is False
+
+    def test_keyboard_interrupt_is_ledgered_retryably_and_reraised(
+        self,
+        sweep,
+        tmp_path,
+        monkeypatch,
+    ):
+        calls: list[str] = []
+        outcomes: dict[str, MLEBenchResult | BaseException] = {
+            "a": KeyboardInterrupt("stop"),
+            "b": _result("b"),
+        }
+        _stub_runner(monkeypatch, outcomes, calls)
+
+        with pytest.raises(KeyboardInterrupt, match="stop"):
+            sweep.run_evaluation(["a", "b"], output_dir=str(tmp_path))
+
+        assert calls == ["a"]
+        rows = json.loads((tmp_path / "results.json").read_text())
+        assert len(rows) == 1
+        interrupted = rows[0]
+        assert interrupted["terminal_status"] == "harness_exception"
+        assert interrupted["failure_origin"] == "harness"
+        assert interrupted["terminal_failure_detail"] == {
+            "reason": "keyboard_interrupt"
+        }
+        assert "KeyboardInterrupt" in interrupted["error"]
+        assert "KeyboardInterrupt" in interrupted["traceback"]
+        assert sweep.is_final_result(interrupted) is False
+
+        outcomes["a"] = _result("a")
+        sweep.run_evaluation(["a", "b"], output_dir=str(tmp_path))
+
+        assert calls == ["a", "a", "b"]
+        rows = json.loads((tmp_path / "results.json").read_text())
+        assert len(rows) == 3
+        assert [row["terminal_status"] for row in rows] == [
+            "harness_exception",
+            "completed",
+            "completed",
+        ]
+
+    def test_keyboard_interrupt_keeps_runner_grading_evidence(
+        self,
+        sweep,
+        tmp_path,
+        monkeypatch,
+    ):
+        calls: list[str] = []
+        result = _result(
+            "a",
+            success=False,
+            valid_submission=True,
+            score=0.91,
+            failure_origin="harness",
+            error="KeyboardInterrupt: stop",
+            terminal_failure_detail={
+                "reason": "keyboard_interrupt",
+                "exception_type": "KeyboardInterrupt",
+            },
+            telemetry={
+                "provenance": {"run_id": "run-accepted"},
+                "event_log": [{"event": "large"}],
+            },
+        )
+        interrupted = KeyboardInterrupt("stop")
+        interrupted.mlebench_result = result
+        _stub_runner(monkeypatch, {"a": interrupted}, calls)
+
+        with pytest.raises(KeyboardInterrupt, match="stop"):
+            sweep.run_evaluation(["a"], output_dir=str(tmp_path))
+
+        row = json.loads((tmp_path / "results.json").read_text())[0]
+        assert row["run_id"] == "run-accepted"
+        assert row["valid_submission"] is True
+        assert row["score"] == pytest.approx(0.91)
+        assert row["terminal_failure_detail"]["exception_type"] == (
+            "KeyboardInterrupt"
+        )
+        assert "event_log" not in row["telemetry"]
+
+    def test_terminal_agent_state_before_interrupt_is_final_and_not_rerun(
+        self,
+        sweep,
+        tmp_path,
+        monkeypatch,
+    ):
+        calls: list[str] = []
+        result = _result(
+            "a",
+            success=False,
+            valid_submission=False,
+            failure_origin="agent",
+            error="Terminal agent failure: model_failure",
+            terminal_failure_detail={"reason": "model_failure"},
+            telemetry={"provenance": {"run_id": "run-terminal-agent"}},
+        )
+        interrupted = KeyboardInterrupt("stop")
+        interrupted.mlebench_result = result
+        _stub_runner(monkeypatch, {"a": interrupted}, calls)
+
+        with pytest.raises(KeyboardInterrupt, match="stop"):
+            sweep.run_evaluation(["a"], output_dir=str(tmp_path))
+
+        row = json.loads((tmp_path / "results.json").read_text())[0]
+        assert row["terminal_status"] == "completed"
+        assert row["failure_origin"] == "agent"
+        assert row["terminal_failure_detail"] == {"reason": "model_failure"}
+        assert sweep.is_final_result(row) is True
+
+        sweep.run_evaluation(["a"], output_dir=str(tmp_path))
+        assert calls == ["a"]
 
     def test_ledger_write_is_atomic(self, sweep, tmp_path):
         target = tmp_path / "results.json"

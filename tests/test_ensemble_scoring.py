@@ -170,3 +170,39 @@ def test_score_predictions_supports_seq2seq_exact_match():
     )
 
     assert score == pytest.approx(-(2 / 3))
+
+
+def test_seq2seq_scoring_is_chunked_and_honors_row_eligibility():
+    predictions = np.array(
+        ["zero", "wrong", "two", "wrong", "four"], dtype=object
+    )
+    targets = np.array(
+        ["zero", "one", "two", "three", "four"], dtype=object
+    )
+    eligible = np.array([True, False, True, True, True])
+    progress: list[tuple[int, int]] = []
+
+    score = score_predictions(
+        predictions,
+        targets,
+        "seq2seq",
+        "accuracy",
+        row_mask=eligible,
+        chunk_rows=2,
+        progress=lambda processed, total: progress.append((processed, total)),
+    )
+
+    assert score == pytest.approx(-(3 / 4))
+    assert progress == [(2, 5), (4, 5), (5, 5)]
+
+
+def test_seq2seq_scoring_rejects_an_empty_eligibility_mask():
+    with pytest.raises(ValueError, match="selects no seq2seq rows"):
+        score_predictions(
+            np.array(["one", "two"], dtype=str),
+            np.array(["one", "two"], dtype=str),
+            "seq2seq",
+            "accuracy",
+            row_mask=np.array([False, False]),
+            chunk_rows=1,
+        )

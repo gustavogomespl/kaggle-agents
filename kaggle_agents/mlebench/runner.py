@@ -487,6 +487,8 @@ class MLEBenchRunner:
         run_id: str | None,
         final_state: dict[str, Any] | None,
         provenance_kwargs: dict[str, Any],
+        *,
+        terminal_state_observed: bool = False,
     ) -> None:
         """Write telemetry.json whether or not the workflow completed.
 
@@ -504,6 +506,16 @@ class MLEBenchRunner:
                     "error": result.error,
                     "traceback": result.traceback,
                 }
+            interrupt_detail = result.terminal_failure_detail
+            if (
+                isinstance(interrupt_detail, dict)
+                and interrupt_detail.get("reason") == "keyboard_interrupt"
+            ):
+                telemetry["terminal_status"] = "harness_exception"
+                telemetry["error"] = result.error
+                telemetry["traceback"] = result.traceback
+            elif terminal_state_observed:
+                telemetry["terminal_status"] = "completed"
             # Both branches carry the normalized origin and its structured
             # detail: a harness-truncated run is the one most in need of
             # machine-readable failure evidence.
@@ -525,8 +537,15 @@ class MLEBenchRunner:
                 )
             result.telemetry = telemetry
             telemetry_path = workspace / "telemetry.json"
-            with telemetry_path.open("w", encoding="utf-8") as f:
-                json.dump(telemetry, f, indent=2, default=str)
+            partial_path = telemetry_path.with_suffix(".json.partial")
+            try:
+                with partial_path.open("w", encoding="utf-8") as f:
+                    json.dump(telemetry, f, indent=2, default=str)
+                    f.flush()
+                    os.fsync(f.fileno())
+                partial_path.replace(telemetry_path)
+            finally:
+                partial_path.unlink(missing_ok=True)
             _log(f"  Telemetry written: {telemetry_path}")
             search_status = telemetry.get("search", {})
             if final_state is not None and not search_status.get("eligible_retrieved", False):
@@ -637,7 +656,11 @@ class MLEBenchRunner:
         if workspace is None:
             return
 
-        crashed = final_state is None
+        # A caught exception is still a crashed/truncated attempt even if the
+        # graph emitted a final-looking state immediately before control was
+        # interrupted. Grading may preserve its accepted artifact, but it must
+        # never turn the interrupted call into a clean success.
+        crashed = final_state is None or result.error is not None
         grading_state = final_state if final_state is not None else last_observed_state
 
         # Classify before telemetry is written and before any early return: a
@@ -647,10 +670,20 @@ class MLEBenchRunner:
             grading_state
         )
         if terminal_origin:
+            # A terminal state already emitted by the workflow is a countable
+            # outcome. It must win over a later Ctrl-C, otherwise selectively
+            # interrupting a known agent failure would make it retryable.
             result.failure_origin = terminal_origin
             result.terminal_failure_detail = terminal_detail
 
-        self._write_telemetry(result, workspace, run_id, final_state, provenance_kwargs)
+        self._write_telemetry(
+            result,
+            workspace,
+            run_id,
+            final_state,
+            provenance_kwargs,
+            terminal_state_observed=bool(terminal_origin),
+        )
 
         _log("Step 4: Grading submission")
 
@@ -762,6 +795,7 @@ class MLEBenchRunner:
         provenance_kwargs: dict[str, Any] = {}
         agent_start: float | None = None
         run_deadline: float | None = None
+        caught_interrupt = False
 
         try:
             forbidden_domain_overrides = {
@@ -1041,6 +1075,26 @@ class MLEBenchRunner:
             result.components_implemented = len(dev_results)
             _log(f"  Iterations: {result.iterations}, Components: {result.components_implemented}")
 
+        except KeyboardInterrupt as exc:
+            caught_interrupt = True
+            detail = str(exc).strip()
+            result.error = (
+                f"KeyboardInterrupt: {detail}" if detail else "KeyboardInterrupt"
+            )
+            result.traceback = tb.format_exc()
+            result.failure_origin = "harness"
+            result.terminal_failure_detail = {
+                "reason": "keyboard_interrupt",
+                "exception_type": "KeyboardInterrupt",
+            }
+            # The exception is the only value that crosses the runner/notebook
+            # boundary on Ctrl-C. Attach the same mutable result object before
+            # re-raising; the finally block below can then add telemetry and
+            # grading evidence without losing it from the durable sweep row.
+            setattr(exc, "mlebench_result", result)
+            setattr(exc, "mlebench_run_id", run_id)
+            _log(f"INTERRUPTED: {result.error}", "WARN")
+            raise
         except Exception as e:
             result.error = str(e)
             result.traceback = tb.format_exc()
@@ -1062,14 +1116,34 @@ class MLEBenchRunner:
                     )
             # Telemetry and the single grading pass must survive a crash: the
             # run may already have produced a hash-verified accepted artifact.
-            self._finalize_run(
-                result,
-                workspace,
-                run_id,
-                final_state,
-                provenance_kwargs,
-                last_observed_state=last_observed_state,
-            )
+            try:
+                self._finalize_run(
+                    result,
+                    workspace,
+                    run_id,
+                    final_state,
+                    provenance_kwargs,
+                    last_observed_state=last_observed_state,
+                )
+            except Exception as finalization_exc:
+                if not caught_interrupt:
+                    raise
+                # An ordinary telemetry/hash/IO failure during cleanup must
+                # not replace the user's KeyboardInterrupt. Preserve both in
+                # the result carried by the original exception.
+                failure_detail = dict(result.terminal_failure_detail or {})
+                failure_detail["finalization_error"] = (
+                    f"{type(finalization_exc).__name__}: {finalization_exc}"
+                )
+                result.terminal_failure_detail = failure_detail
+                _log(
+                    "Finalization after KeyboardInterrupt failed: "
+                    f"{failure_detail['finalization_error']}",
+                    "ERROR",
+                )
+            finally:
+                if caught_interrupt:
+                    result.execution_time = time.time() - start_time
 
         # Record execution time
         result.execution_time = time.time() - start_time

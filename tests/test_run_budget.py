@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import json
 import platform
 import signal
 import subprocess
@@ -537,6 +538,135 @@ class TestGradingSurvivesACrash:
         telemetry = json.loads((workspace / "telemetry.json").read_text())
         assert telemetry["terminal_status"] == "workflow_exception"
         assert telemetry["error"] == "boom"
+
+    def test_keyboard_interrupt_is_annotated_finalized_once_and_reraised(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        runner = self._runner(tmp_path)
+        finalized = []
+
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt("stop")
+
+        def record_finalization(result, *_args, **_kwargs):
+            finalized.append(result)
+
+        monkeypatch.setattr(runner, "_resolve_evaluation_metric", interrupt)
+        monkeypatch.setattr(runner, "_finalize_run", record_finalization)
+
+        with pytest.raises(KeyboardInterrupt, match="stop") as excinfo:
+            runner.run("competition")
+
+        assert len(finalized) == 1
+        result = finalized[0]
+        assert result.failure_origin == "harness"
+        assert result.terminal_failure_detail == {
+            "reason": "keyboard_interrupt",
+            "exception_type": "KeyboardInterrupt",
+        }
+        assert "KeyboardInterrupt" in result.error
+        assert "KeyboardInterrupt" in result.traceback
+        assert excinfo.value.mlebench_result is result
+
+    def test_finalization_error_does_not_replace_keyboard_interrupt(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        runner = self._runner(tmp_path)
+        finalized = []
+
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt("stop")
+
+        def broken_finalization(result, *_args, **_kwargs):
+            finalized.append(result)
+            raise RuntimeError("telemetry disk failed")
+
+        monkeypatch.setattr(runner, "_resolve_evaluation_metric", interrupt)
+        monkeypatch.setattr(runner, "_finalize_run", broken_finalization)
+
+        with pytest.raises(KeyboardInterrupt, match="stop") as excinfo:
+            runner.run("competition")
+
+        assert len(finalized) == 1
+        assert excinfo.value.mlebench_result is finalized[0]
+        assert finalized[0].terminal_failure_detail["finalization_error"] == (
+            "RuntimeError: telemetry disk failed"
+        )
+
+    def test_terminal_agent_state_takes_precedence_over_late_interrupt(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        runner = self._runner(tmp_path)
+        monkeypatch.setattr(runner, "_grade_submission", lambda *_args: {})
+        result = self._result(error="KeyboardInterrupt: stop")
+        result.failure_origin = "harness"
+        result.terminal_failure_detail = {
+            "reason": "keyboard_interrupt",
+            "exception_type": "KeyboardInterrupt",
+        }
+        final_state = {
+            "workflow_valid": False,
+            "terminal_failure_origin": "agent",
+            "terminal_failure_detail": {"reason": "model_failure"},
+        }
+
+        runner._finalize_run(
+            result,
+            workspace,
+            "run",
+            final_state,
+            {},
+        )
+
+        assert result.failure_origin == "agent"
+        assert result.terminal_failure_detail == {"reason": "model_failure"}
+        telemetry = json.loads((workspace / "telemetry.json").read_text())
+        assert telemetry["terminal_status"] == "completed"
+        assert telemetry["failure_origin"] == "agent"
+
+    def test_interrupt_after_final_state_never_becomes_clean_success(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        observed = self._accepted(workspace, "late-interrupt")
+        observed["workflow_valid"] = True
+        runner = self._runner(tmp_path)
+        monkeypatch.setattr(
+            runner,
+            "_grade_submission",
+            lambda *_args: {"valid_submission": True, "score": 0.8},
+        )
+        result = self._result(error="KeyboardInterrupt: stop")
+        result.failure_origin = "harness"
+        result.terminal_failure_detail = {
+            "reason": "keyboard_interrupt",
+            "exception_type": "KeyboardInterrupt",
+        }
+
+        runner._finalize_run(
+            result,
+            workspace,
+            "late-interrupt",
+            observed,
+            {},
+        )
+
+        assert result.valid_submission is True
+        assert result.success is False
+        assert result.failure_origin == "harness"
+        telemetry = json.loads((workspace / "telemetry.json").read_text())
+        assert telemetry["terminal_status"] == "harness_exception"
 
     def test_nothing_is_graded_when_no_artifact_was_accepted(
         self, tmp_path, monkeypatch

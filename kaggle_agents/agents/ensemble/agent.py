@@ -267,6 +267,35 @@ class EnsembleAgent:
             and str(state.get("run_mode", "")).strip().lower() == "mlebench"
         )
 
+    @staticmethod
+    def _is_text_output_problem(
+        state: KaggleState,
+        problem_type: str,
+    ) -> bool:
+        """Return whether predictions are semantic text, not numeric scores."""
+        aliases = {
+            "seq2seq",
+            "seq_to_seq",
+            "sequence_to_sequence",
+            "text_normalization",
+            "translation",
+            "summarization",
+        }
+        domain = state.get("domain_detected", "") if isinstance(state, dict) else ""
+        normalized = {
+            str(value or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+            for value in (problem_type, domain)
+        }
+        metadata = state.get("canonical_metadata") if isinstance(state, dict) else None
+        return bool(
+            normalized & aliases
+            or (isinstance(metadata, dict) and metadata.get("is_seq2seq") is True)
+        )
+
     def _restore_preserved_submission(
         self,
         state: KaggleState,
@@ -1555,7 +1584,6 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
             print(f"   Could not read sample submission ({e}) - using simple average")
             return None
 
-        n_test = len(sample_sub)
         submission_target_cols = self._submission_target_cols(state)
         pred_positions = prediction_positions(sample_sub, submission_target_cols)
         expected_cols = len(pred_positions)
@@ -2005,6 +2033,49 @@ Return a JSON object with: strategy_name, description, meta_learner_config (if a
                             "skipped",
                             iteration=current_iteration,
                             reason="no_prediction_pairs",
+                        )
+                    ],
+                }
+
+            # Semantic text predictions cannot enter the numeric OOF/stacking
+            # implementation below. Even a failed float conversion first loads
+            # the complete prediction array, which is unsafe for multi-million-
+            # row seq2seq artifacts. Preserve the already accepted component
+            # submission without opening canonical y or any OOF file.
+            if self._is_text_output_problem(state, problem_type):
+                print(
+                    "   Seq2seq/text output detected - keeping the verified "
+                    "component submission"
+                )
+                restored = self._restore_preserved_submission(
+                    state,
+                    working_dir,
+                    output_path,
+                    sample_path,
+                )
+                if mlebench_mode and not restored:
+                    return self._fail_closed_restore(
+                        output_path,
+                        reason=(
+                            "seq2seq ensemble is unsupported and no verified "
+                            "snapshot exists"
+                        ),
+                        current_iteration=current_iteration,
+                    )
+                skip_reason = (
+                    "seq2seq_kept_verified_snapshot"
+                    if restored
+                    else "seq2seq_ensemble_unsupported"
+                )
+                return {
+                    "ensemble_skipped": True,
+                    "skip_reason": skip_reason,
+                    "telemetry_events": [
+                        make_event(
+                            "ensemble",
+                            "skipped",
+                            iteration=current_iteration,
+                            reason=skip_reason,
                         )
                     ],
                 }
