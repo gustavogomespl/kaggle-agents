@@ -62,6 +62,51 @@ def _image_workspace(tmp_path: Path, rows: int = 40) -> dict:
     }
 
 
+def _sparse_multiclass_image_workspace(tmp_path: Path, rows: int = 42) -> dict:
+    train_ids = [f"img{index:04d}" for index in range(rows)]
+    test_ids = [f"t{index:04d}" for index in range(10)]
+    class_order = ["zebra", "ant", "moose"]
+    pd.DataFrame(
+        {
+            "id": train_ids,
+            "breed": ["ant", "moose", "zebra"] * (rows // 3),
+        }
+    ).to_csv(tmp_path / "train.csv", index=False)
+    pd.DataFrame(
+        {
+            "id": test_ids,
+            **{label: [0.0] * len(test_ids) for label in class_order},
+        }
+    ).to_csv(tmp_path / "sample_submission.csv", index=False)
+    for directory, names in (("train", train_ids), ("test", test_ids)):
+        (tmp_path / directory).mkdir()
+        for name in names:
+            (tmp_path / directory / f"{name}.jpg").write_bytes(b"\x00")
+    return {
+        "working_directory": str(tmp_path),
+        "run_mode": "mlebench",
+        "domain_detected": "image_classification",
+        # This is the upstream submission-role interpretation seen in the
+        # failing run: the first probability column is not the training target.
+        "target_col": class_order[0],
+        "submission_contract": {
+            "id_col": "id",
+            "target_cols": class_order,
+            "class_order": class_order,
+            "expected_rows": len(test_ids),
+            "format_type": "wide",
+        },
+        "data_files": {
+            "data_type": "image",
+            "train": str(tmp_path / "train"),
+            "train_csv": str(tmp_path / "train.csv"),
+            "test": str(tmp_path / "test"),
+            "sample_submission": str(tmp_path / "sample_submission.csv"),
+        },
+        "timeout_per_component": 2800,
+    }
+
+
 class TestIndependentTestSchemaDetection:
     def test_the_submission_template_is_not_test_evidence(
         self, tmp_path: Path
@@ -99,6 +144,81 @@ class TestIndependentTestSchemaDetection:
 
 
 class TestTargetResolutionWithTemplateAsTestSchema:
+    def test_sparse_multiclass_label_values_resolve_wide_submission(
+        self, tmp_path: Path
+    ) -> None:
+        train_df = pd.DataFrame(
+            {
+                "id": ["a", "b", "c", "d", "e", "f"],
+                "breed": ["ant", "moose", "zebra"] * 2,
+            }
+        )
+        template = tmp_path / "sample_submission.csv"
+        pd.DataFrame(
+            {
+                "id": ["test-a"],
+                "zebra": [0.0],
+                "ant": [0.0],
+                "moose": [0.0],
+            }
+        ).to_csv(template, index=False)
+
+        targets, target_type, _ = _resolve_supervised_target_contract(
+            train_df,
+            template,
+            train_path=tmp_path / "train.csv",
+            target_col="zebra",
+            target_cols=["zebra", "ant", "moose"],
+            target_type=None,
+            task_type="image_classification",
+            sample_submission=template,
+            column_contract=None,
+        )
+
+        assert targets == ["breed"]
+        assert target_type == "single"
+
+    @pytest.mark.parametrize(
+        "train_df",
+        [
+            pd.DataFrame(
+                {
+                    "id": ["a", "b", "c"],
+                    "breed": ["ant", "moose", "unknown"],
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "id": ["a", "b", "c"],
+                    "breed": ["ant", "moose", "zebra"],
+                    "duplicate_labels": ["zebra", "ant", "moose"],
+                }
+            ),
+        ],
+        ids=["class-set-mismatch", "ambiguous-candidates"],
+    )
+    def test_sparse_multiclass_resolution_stays_fail_closed(
+        self, tmp_path: Path, train_df: pd.DataFrame
+    ) -> None:
+        template = tmp_path / "sample_submission.csv"
+        template.write_text(
+            "id,zebra,ant,moose\ntest-a,0,0,0\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(TargetInferenceError):
+            _resolve_supervised_target_contract(
+                train_df,
+                template,
+                train_path=tmp_path / "train.csv",
+                target_col="zebra",
+                target_cols=["zebra", "ant", "moose"],
+                target_type=None,
+                task_type="image_classification",
+                sample_submission=template,
+                column_contract=None,
+            )
+
     def test_declared_target_survives_a_filled_placeholder_column(
         self, tmp_path: Path
     ) -> None:
@@ -172,6 +292,23 @@ class TestTargetResolutionWithTemplateAsTestSchema:
 
 
 class TestCanonicalNodeForImageLabelsCsv:
+    def test_sparse_multiclass_contract_preserves_submission_class_order(
+        self, tmp_path: Path
+    ) -> None:
+        state = _sparse_multiclass_image_workspace(tmp_path)
+
+        result = canonical_data_preparation_node(state)
+
+        assert result["canonical_data_prepared"] is True
+        assert result["target_col"] == "breed"
+        assert result["target_cols"] == ["breed"]
+        assert result["target_type"] == "single"
+        assert result["canonical_metadata"]["class_order"] == [
+            "zebra",
+            "ant",
+            "moose",
+        ]
+
     def test_image_competition_with_labels_csv_prepares_canonical_data(
         self, tmp_path: Path
     ) -> None:

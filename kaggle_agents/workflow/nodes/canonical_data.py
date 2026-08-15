@@ -649,6 +649,7 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                 or state.get("sample_submission_path")
             ),
             column_contract=state.get("column_contract"),
+            class_order=submission_contract.get("class_order"),
         )
 
         # CRITICAL: Validate canonical data is not empty

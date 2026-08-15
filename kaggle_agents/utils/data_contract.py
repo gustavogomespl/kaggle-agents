@@ -18,8 +18,9 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -789,6 +790,45 @@ def _resolve_canonical_test_ids(
     return positional, True
 
 
+def _resolve_sparse_multiclass_target_column(
+    train_df: pd.DataFrame,
+    *,
+    sample_echoes: Sequence[str],
+    sample_targets: Sequence[str],
+    task_type: str,
+    target_type: TargetType | None,
+) -> str | None:
+    """Resolve sparse labels only from an exact wide-submission class match."""
+    if (
+        target_type not in {None, "single"}
+        or "classification" not in str(task_type).lower()
+        or len(sample_targets) < 2
+    ):
+        return None
+
+    expected_classes = {str(value) for value in sample_targets}
+    excluded_columns = {str(column) for column in sample_echoes}
+    detected_id = _detect_id_column(train_df)
+    if detected_id:
+        excluded_columns.add(detected_id)
+
+    matching_columns: list[str] = []
+    for column in (str(value) for value in train_df.columns):
+        if column in excluded_columns or train_df[column].isna().any():
+            continue
+        labels = [str(value) for value in pd.unique(train_df[column]).tolist()]
+        if len(labels) == len(set(labels)) and set(labels) == expected_classes:
+            matching_columns.append(column)
+
+    if len(matching_columns) > 1:
+        raise TargetInferenceError(
+            "Ambiguous sparse multiclass target columns: more than one "
+            "training column has values matching the submission classes "
+            f"{list(sample_targets)!r}: {matching_columns!r}."
+        )
+    return matching_columns[0] if matching_columns else None
+
+
 def _resolve_supervised_target_contract(
     train_df: pd.DataFrame,
     test_path: Path,
@@ -817,9 +857,10 @@ def _resolve_supervised_target_contract(
     public_test_columns = (
         _supplied_test_columns(test_path) if independent_test_schema else set()
     )
+    sample_echoes: list[str] = []
     sample_targets: list[str] = []
     if len(sample_columns) > 1:
-        _, sample_targets = split_submission_schema(
+        sample_echoes, sample_targets = split_submission_schema(
             sample_columns,
             public_test_columns,
         )
@@ -840,6 +881,12 @@ def _resolve_supervised_target_contract(
     ]
     if len(declared_targets) != len(set(declared_targets)):
         raise TargetInferenceError("Declared target_cols contain duplicates")
+
+    explicit_target_type = target_type
+    if explicit_target_type is None and column_contract:
+        raw_target_type = column_contract.get("target_type")
+        if raw_target_type in {"single", "multi_label", "multi_target"}:
+            explicit_target_type = raw_target_type
 
     # An upstream contract that names a supplied test column as a target was
     # resolved positionally and is wrong. Drop those names so resolution falls
@@ -884,6 +931,17 @@ def _resolve_supervised_target_contract(
             resolved_targets = [contract_target]
 
     if not resolved_targets and not independent_test_schema:
+        sparse_target = _resolve_sparse_multiclass_target_column(
+            train_df,
+            sample_echoes=sample_echoes,
+            sample_targets=sample_targets,
+            task_type=task_type,
+            target_type=explicit_target_type,
+        )
+        if sparse_target:
+            resolved_targets = [sparse_target]
+
+    if not resolved_targets and not independent_test_schema:
         raise TargetInferenceError(
             "Cannot resolve training targets: no independent public test table "
             "is available to separate inputs from predictions, and neither the "
@@ -918,12 +976,6 @@ def _resolve_supervised_target_contract(
                 "target_cols/target_col contract; train-only candidates were "
                 f"{train_only!r} and submission outputs were {sample_targets!r}."
             )
-
-    explicit_target_type = target_type
-    if explicit_target_type is None and column_contract:
-        raw_target_type = column_contract.get("target_type")
-        if raw_target_type in {"single", "multi_label", "multi_target"}:
-            explicit_target_type = raw_target_type
 
     resolved_type, type_source = infer_target_type_from_train(
         train_df,
@@ -996,6 +1048,38 @@ def _build_multilabel_fold_assignments(
     if np.any(assignments < 0) or np.any(fold_sizes == 0):
         raise ValueError("Multilabel fold assignment did not cover every row")
     return assignments
+
+
+def _resolve_single_target_class_order(
+    y: np.ndarray,
+    declared_order: Sequence[Any] | None,
+) -> list[str]:
+    """Return a unique class order, honoring an exactly matching public order."""
+    try:
+        ordered_classes = np.unique(np.asarray(y).reshape(-1)).tolist()
+    except TypeError:
+        ordered_classes = sorted(
+            pd.unique(np.asarray(y).reshape(-1)).tolist(),
+            key=lambda value: (type(value).__name__, repr(value)),
+        )
+    observed_order = [str(value) for value in ordered_classes]
+    if len(observed_order) != len(set(observed_order)):
+        raise ValueError(
+            "Classification labels are ambiguous after string normalization; "
+            "cannot define a submission class order"
+        )
+    if declared_order is None:
+        return observed_order
+
+    normalized_declared_order = [str(value) for value in declared_order]
+    if len(normalized_declared_order) != len(set(normalized_declared_order)):
+        raise ValueError("Submission class order must be unique")
+    if set(normalized_declared_order) != set(observed_order):
+        raise ValueError(
+            "Submission class order must exactly cover the observed "
+            "single-target classification labels"
+        )
+    return normalized_declared_order
 
 
 def select_cv_strategy(
@@ -1226,6 +1310,7 @@ def _prepare_canonical_data_impl(
     temporal_col: str | None = None,
     sample_submission: str | Path | pd.DataFrame | None = None,
     column_contract: Mapping[str, Any] | None = None,
+    class_order: Sequence[Any] | None = None,
 ) -> dict[str, Any]:
     """
     Prepare canonical data artifacts that all model components must use.
@@ -1255,6 +1340,7 @@ def _prepare_canonical_data_impl(
         temporal_col: Explicit public temporal/order column for forecasting
         sample_submission: Optional public submission schema for target/ID roles
         column_contract: Optional canonical mapping of column names to roles
+        class_order: Optional public order of single-target classification labels
 
     Returns:
         Dict with paths to all canonical artifacts
@@ -1651,21 +1737,11 @@ def _prepare_canonical_data_impl(
     with open(canonical_dir / "feature_cols.json", "w") as f:
         json.dump(feature_cols, f, indent=2)
 
-    class_order: list[str] | None = None
-    if is_classification and resolved_target_type == "single":
-        try:
-            ordered_classes = np.unique(np.asarray(y).reshape(-1)).tolist()
-        except TypeError:
-            ordered_classes = sorted(
-                pd.unique(np.asarray(y).reshape(-1)).tolist(),
-                key=lambda value: (type(value).__name__, repr(value)),
-            )
-        class_order = [str(value) for value in ordered_classes]
-        if len(class_order) != len(set(class_order)):
-            raise ValueError(
-                "Classification labels are ambiguous after string "
-                "normalization; cannot define a submission class order"
-            )
+    canonical_class_order = (
+        _resolve_single_target_class_order(y, class_order)
+        if is_classification and resolved_target_type == "single"
+        else None
+    )
 
     # Save metadata
     metadata = {
@@ -1689,7 +1765,7 @@ def _prepare_canonical_data_impl(
         "group_col": group_col,
         "is_classification": is_classification,
         "n_classes": n_unique if is_classification else None,
-        "class_order": class_order,
+        "class_order": canonical_class_order,
         "canonical_version": "1.5",
         # Seq2seq specific metadata
         "task_type": task_type,
