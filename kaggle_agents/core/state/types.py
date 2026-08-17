@@ -50,8 +50,8 @@ SubmissionFormatType = Literal[
 # ==================== Audio Submission Format Types ====================
 
 AudioSubmissionFormatType = Literal[
-    "wide",  # One row per sample, one column per class (BirdCLEF style)
-    "long",  # One row per (sample, class) pair (MLSP style)
+    "wide",  # One row per sample, one column per class
+    "long",  # One row per (sample, class) pair
     "pixel_level",  # Image-based audio (spectrograms)
     "unknown",  # Could not detect format
 ]
@@ -59,7 +59,7 @@ AudioSubmissionFormatType = Literal[
 
 # ID pattern types for long format submissions
 AudioIdPatternType = Literal[
-    "multiplier",  # Id = rec_id * N + class_id (e.g., MLSP: N=100)
+    "multiplier",  # Id = rec_id * inferred_multiplier + class_id
     "underscore",  # Id = "rec_id_class_id" (e.g., "1_0", "1_1")
     "dash",  # Id = "rec_id-class_id" (e.g., "1-0", "1-1")
     "unknown",  # Could not detect pattern

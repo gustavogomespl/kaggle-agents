@@ -6,6 +6,174 @@ import numpy as np
 import pytest
 
 
+class TestDataDrivenDeveloperInjection:
+    """Regression tests for dataset-derived developer code contracts."""
+
+    def test_submission_ids_use_detected_multiplier(self) -> None:
+        from kaggle_agents.agents.developer.code_generator import (
+            _build_submission_format_header,
+        )
+
+        header = _build_submission_format_header(
+            {
+                "format_type": "long",
+                "num_classes": 3,
+                "id_pattern": "rec_id * inferred_multiplier + class_id",
+                "id_multiplier": 37,
+            }
+        )
+        namespace: dict = {}
+        exec(header, namespace)
+
+        assert namespace["ID_MULTIPLIER"] == 37
+        assert namespace["create_submission_ids"]([2, 5]) == [
+            74,
+            75,
+            76,
+            185,
+            186,
+            187,
+        ]
+
+    def test_id_pattern_text_does_not_activate_multiplier_logic(self) -> None:
+        from kaggle_agents.agents.developer.code_generator import (
+            _build_submission_format_header,
+        )
+
+        header = _build_submission_format_header(
+            {
+                "format_type": "long",
+                "num_classes": 3,
+                "id_pattern": "rec_id * 37 + class_id",
+            }
+        )
+
+        assert "create_submission_ids" not in header
+        assert "ID_MULTIPLIER" not in header
+
+    def test_path_resolution_discovers_arbitrary_data_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        supplied_dir = tmp_path / "opaque_bundle"
+        supplied_dir.mkdir()
+        train_csv = supplied_dir / "train.csv"
+        train_csv.write_text("id,target\n1,0\n", encoding="utf-8")
+
+        resolved_train, _ = CodeGeneratorMixin._validate_and_resolve_paths(
+            None,
+            tmp_path / "missing_train.csv",
+            tmp_path / "missing_test.csv",
+            tmp_path,
+        )
+
+        assert resolved_train == train_csv
+
+    def test_dataset_context_lists_arbitrary_data_directory(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from kaggle_agents.agents.developer.utils import DeveloperUtilsMixin
+
+        supplied_dir = tmp_path / "opaque_bundle"
+        supplied_dir.mkdir()
+        (supplied_dir / "train.csv").write_text(
+            "id,target\n1,0\n",
+            encoding="utf-8",
+        )
+
+        dataset_info = DeveloperUtilsMixin()._get_dataset_info(tmp_path)
+
+        assert "Directory `opaque_bundle/`" in dataset_info
+        assert "`train.csv`" in dataset_info
+
+    def test_label_reparsing_matches_supplied_artifact_not_filename_taxonomy(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        label_file = tmp_path / "opaque_annotations_2026.txt"
+        label_file.write_text("record_id,target\n1,0\n", encoding="utf-8")
+        code = f'''# === END PATH CONSTANTS ===
+artifact = LABEL_FILES[0]
+first = pd.read_csv(artifact)
+second = pd.read_csv("{label_file}")
+unrelated = pd.read_csv("unlabeled_records.csv")
+'''
+
+        rewritten, count = CodeGeneratorMixin._strip_label_reparsing(
+            None,
+            code,
+            label_files=[label_file],
+        )
+
+        assert count == 2
+        assert "first = _PRELOADED_TARGETS_DF.copy()" in rewritten
+        assert "second = _PRELOADED_TARGETS_DF.copy()" in rewritten
+        assert 'pd.read_csv("unlabeled_records.csv")' in rewritten
+
+    def test_label_validation_uses_supplied_artifact_identity(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        label_file = tmp_path / "opaque_annotations_2026.txt"
+        code = '''# === END PATH CONSTANTS ===
+annotations = pd.read_csv("opaque_annotations_2026.txt")
+'''
+
+        warnings = CodeGeneratorMixin._validate_audio_label_usage(
+            None,
+            code,
+            "audio",
+            label_files=[label_file],
+        )
+        unrelated_warnings = CodeGeneratorMixin._validate_audio_label_usage(
+            None,
+            code.replace("opaque_annotations_2026.txt", "other_table.csv"),
+            "audio",
+            label_files=[label_file],
+        )
+
+        assert len(warnings) == 1
+        assert unrelated_warnings == []
+
+    def test_schema_role_separates_mapping_from_label_artifacts(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from kaggle_agents.agents.developer.target_source import (
+            resolve_developer_target_source,
+        )
+
+        label_file = tmp_path / "opaque_annotations.txt"
+        mapping_file = tmp_path / "opaque_lookup.csv"
+        label_file.write_text(
+            "rec_1,3,7,11\nrec_2,4\nrec_3,3,4,9,12\nrec_4,7\n",
+            encoding="utf-8",
+        )
+        mapping_file.write_text(
+            "record_id,file_name\nrec_1,a.wav\nrec_2,b.wav\n",
+            encoding="utf-8",
+        )
+
+        source = resolve_developer_target_source(
+            working_dir=tmp_path,
+            state={},
+            data_files={"label_files": [str(label_file), str(mapping_file)]},
+            precomputed_info={"features_found": {"id_mapping": str(mapping_file)}},
+            component_type="model",
+        )
+
+        assert source.mode == "sparse_preload"
+        assert source.label_files == (str(label_file),)
+        assert source.id_mapping_path == mapping_file
+
+
 class TestCVfoldsInjection:
     """Tests for CVfolds injection in code_generator."""
 
@@ -107,46 +275,45 @@ class TestEnsembleValidation:
 
     def test_direct_match_validation(self) -> None:
         """Test validation passes when n_test matches expected."""
-        n_test = 323
-        expected_n_test = 323
-        n_cols = 19  # Wide format
+        n_test = 17
+        expected_n_test = 17
+        n_cols = 4  # Wide format
 
         is_direct_match = (n_test == expected_n_test)
-        is_mlsp_format = (n_cols == 1 and n_test % expected_n_test == 0)
+        is_long_format = (n_cols == 1 and n_test % expected_n_test == 0)
 
         assert is_direct_match is True
         # No warning should be triggered when there's a match
-        should_warn = not is_direct_match and not is_mlsp_format
+        should_warn = not is_direct_match and not is_long_format
         assert should_warn is False
 
-    def test_mlsp_format_validation(self) -> None:
-        """Test validation handles MLSP long format (n_test * n_classes rows)."""
-        expected_n_test = 323  # Number of recordings
-        n_test = 323 * 19  # MLSP format: 323 recordings * 19 classes = 6137 rows
+    def test_long_format_validation(self) -> None:
+        """Test validation handles generic sample-by-class long format."""
+        expected_n_test = 17
+        n_test = expected_n_test * 6
         n_cols = 1  # Long format has only 1 prediction column
 
         is_direct_match = (n_test == expected_n_test)
-        is_mlsp_format = (n_cols == 1 and n_test % expected_n_test == 0)
+        is_long_format = (n_cols == 1 and n_test % expected_n_test == 0)
 
         assert is_direct_match is False
-        assert is_mlsp_format is True
-        # No warning should be triggered for MLSP format
-        should_warn = not is_direct_match and not is_mlsp_format
+        assert is_long_format is True
+        should_warn = not is_direct_match and not is_long_format
         assert should_warn is False
 
     def test_mismatch_triggers_warning(self) -> None:
         """Test that true mismatch would trigger warning."""
-        expected_n_test = 323
-        n_test = 64  # Wrong count
-        n_cols = 19  # Wide format
+        expected_n_test = 17
+        n_test = 13
+        n_cols = 4  # Wide format
 
         is_direct_match = (n_test == expected_n_test)
-        is_mlsp_format = (n_cols == 1 and n_test % expected_n_test == 0)
+        is_long_format = (n_cols == 1 and n_test % expected_n_test == 0)
 
         assert is_direct_match is False
-        assert is_mlsp_format is False
+        assert is_long_format is False
         # This would trigger the warning
-        should_warn = not is_direct_match and not is_mlsp_format
+        should_warn = not is_direct_match and not is_long_format
         assert should_warn is True
 
 
@@ -219,12 +386,18 @@ class TestDataTypeOverride:
 class TestCVfoldsIDMapping:
     """Tests for CVfolds ID-to-filename mapping logic."""
 
-    def test_id_to_filename_mapping(self, tmp_path: Path) -> None:
-        """Test that numeric rec_ids are mapped to filenames."""
-        # Create mock rec_id2filename.txt mapping
+    def test_id_to_filename_mapping_keeps_semantic_ids(self, tmp_path: Path) -> None:
+        """Resolved filenames remain separate from semantic record IDs."""
+        # Create a mapping table whose role is inferred from its columns.
         mapping_data = {
             "rec_id": [0, 1, 2, 3, 4],
-            "filename": ["PC1_audio_01", "PC1_audio_02", "PC2_audio_01", "PC2_audio_02", "PC3_audio_01"],
+            "filename": [
+                "sensor_a_01",
+                "sensor_a_02",
+                "sensor_b_01",
+                "sensor_b_02",
+                "sensor_c_01",
+            ],
         }
         import pandas as pd
         mapping_df = pd.DataFrame(mapping_data)
@@ -247,11 +420,13 @@ class TestCVfoldsIDMapping:
         train_filenames = [f for f in train_filenames if f]
         test_filenames = [f for f in test_filenames if f]
 
-        assert train_filenames == ["PC1_audio_01", "PC1_audio_02", "PC2_audio_01"]
-        assert test_filenames == ["PC2_audio_02", "PC3_audio_01"]
+        assert train_filenames == ["sensor_a_01", "sensor_a_02", "sensor_b_01"]
+        assert test_filenames == ["sensor_b_02", "sensor_c_01"]
+        assert train_rec_ids == [0, 1, 2]
+        assert test_rec_ids == [3, 4]
 
-    def test_unmapped_ids_filtered_out(self) -> None:
-        """Test that IDs not in mapping are filtered out."""
+    def test_partial_mapping_is_not_accepted_as_aligned_file_paths(self) -> None:
+        """A partial file mapping must not silently shorten prediction entities."""
         import pandas as pd
 
         # Partial mapping (missing ID 5)
@@ -269,12 +444,12 @@ class TestCVfoldsIDMapping:
         # rec_ids include ID 5 which is not in mapping
         test_rec_ids = [0, 1, 5]
 
-        test_filenames = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
-        test_filenames = [f for f in test_filenames if f]
+        mapped = [id_to_filename.get(str(rid)) for rid in test_rec_ids]
+        test_file_paths = [str(path) for path in mapped] if all(mapped) else []
 
-        # ID 5 should be filtered out
-        assert test_filenames == ["audio_01", "audio_02"]
-        assert len(test_filenames) == 2
+        assert mapped == ["audio_01", "audio_02", None]
+        assert test_file_paths == []
+        assert test_rec_ids == [0, 1, 5]
 
     def test_empty_mapping_preserves_original_ids(self) -> None:
         """Test that if no mapping available, original IDs are preserved."""
@@ -301,16 +476,16 @@ class TestAudioLabelValidation:
         """Test that hardcoded non-existent paths are detected."""
         code = '''
 # Bad code that hardcodes a path
-labels_df = pd.read_csv("rec_labels_train.txt")
+labels_df = pd.read_csv("annotations_labels.txt")
 '''
-        bad_paths = ["rec_labels_train.txt", "train_labels.txt"]
+        bad_paths = ["annotations_labels.txt", "train_labels.txt"]
         warnings = []
         for bad_path in bad_paths:
             if bad_path in code:
                 warnings.append(f"Hardcoded path '{bad_path}'")
 
         assert len(warnings) == 1
-        assert "rec_labels_train.txt" in warnings[0]
+        assert "annotations_labels.txt" in warnings[0]
 
     def test_no_warning_when_using_preloaded(self) -> None:
         """Test that using pre-loaded labels generates no warnings."""
@@ -321,7 +496,7 @@ rec_ids = _PRELOADED_REC_IDS
 n_classes = _PRELOADED_N_CLASSES
 '''
         uses_preloaded = "_PRELOADED_LABELS_DF" in code
-        has_bad_paths = any(p in code for p in ["rec_labels_train.txt", "train_labels.txt"])
+        has_bad_paths = any(p in code for p in ["annotations_labels.txt", "train_labels.txt"])
 
         assert uses_preloaded is True
         assert has_bad_paths is False
@@ -366,7 +541,7 @@ labels_df = pd.read_csv(LABEL_FILE, header=None, names=['rec_id', 'class_id'])
             return full_match
 
         # Single consolidated pattern
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
 
         assert replace_count == 1
@@ -376,13 +551,13 @@ labels_df = pd.read_csv(LABEL_FILE, header=None, names=['rec_id', 'class_id'])
         assert "labels_df = pd.read_csv" not in result
 
     def test_replaces_plural_label_files(self) -> None:
-        """Test replacement of plural label file patterns (rec_labels, train_labels)."""
+        """Test replacement of plural label file patterns."""
         import re
 
         code = '''# === END PATH CONSTANTS ===
 
 # Bad code - real audio competition filenames
-df1 = pd.read_csv("rec_labels_train.txt")
+df1 = pd.read_csv("annotations_labels.txt")
 df2 = pd.read_csv("train_labels.txt")
 '''
         marker = "# === END PATH CONSTANTS ==="
@@ -402,15 +577,15 @@ df2 = pd.read_csv("train_labels.txt")
                 return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED"
             return full_match
 
-        # Single consolidated pattern (matches rec_labels, train_labels, labels)
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        # Single consolidated pattern (matches train_labels and labels)
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
 
         # Both df1 and df2 should be replaced
         assert replace_count == 2
         assert "df1 = _PRELOADED_LABELS_DF.copy()" in result
         assert "df2 = _PRELOADED_LABELS_DF.copy()" in result
-        assert 'pd.read_csv("rec_labels' not in result
+        assert 'pd.read_csv("annotations_labels' not in result
         assert 'pd.read_csv("train_labels' not in result
 
     def test_replaces_multiple_reads_same_variable(self) -> None:
@@ -422,7 +597,7 @@ df2 = pd.read_csv("train_labels.txt")
 # Multiple reads to same variable - ALL should be replaced
 labels_df = pd.read_csv(LABEL_FILE)
 labels_df = pd.read_csv("train_labels.txt")
-labels_df = pd.read_csv("rec_labels_train.txt")
+labels_df = pd.read_csv("annotations_labels.txt")
 '''
         marker = "# === END PATH CONSTANTS ==="
         marker_idx = code.find(marker)
@@ -441,7 +616,7 @@ labels_df = pd.read_csv("rec_labels_train.txt")
                 return f"{indent}{var_name} = _PRELOADED_LABELS_DF.copy()  # REPLACED"
             return full_match
 
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
 
         # ALL 3 reads should be replaced (not just the first one)
@@ -449,7 +624,7 @@ labels_df = pd.read_csv("rec_labels_train.txt")
         # No pd.read_csv calls should remain for label files
         assert "pd.read_csv(LABEL_FILE)" not in result
         assert 'pd.read_csv("train_labels' not in result
-        assert 'pd.read_csv("rec_labels' not in result
+        assert 'pd.read_csv("annotations_labels' not in result
 
     def test_preserves_indentation(self) -> None:
         """Test that replacement preserves original indentation."""
@@ -475,7 +650,7 @@ def load_data():
             return full_match
 
         # Single consolidated pattern
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         result = re.sub(pattern, make_replacement, code_after_header, flags=re.IGNORECASE)
 
         # Should preserve 4-space indentation inside function
@@ -496,7 +671,7 @@ train_df = pd.read_csv("train.csv")
         code_after_header = code[marker_idx + len(marker) :]
 
         # Single consolidated pattern
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         matches = re.findall(pattern, code_after_header, re.IGNORECASE)
 
         # No label files, so no matches
@@ -516,7 +691,7 @@ unlabeled_df = pd.read_csv("unlabeled_data.csv")
         code_after_header = code[marker_idx + len(marker) :]
 
         # Single consolidated pattern
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         matches = re.findall(pattern, code_after_header, re.IGNORECASE)
 
         # "unlabeled" should NOT match because "un" precedes "labeled"
@@ -539,7 +714,7 @@ rec_ids = _PRELOADED_REC_IDS
         code_after_header = code[marker_idx + len(marker) :]
 
         # Single consolidated pattern
-        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:rec_labels?|train_labels?|labels?)[^)]*\))"
+        pattern = r"([\t ]*)(\w+\s*=\s*pd\.read_csv\([^)]*(?<![a-zA-Z])(?:train_labels?|labels?)[^)]*\))"
         matches = re.findall(pattern, code_after_header, re.IGNORECASE)
 
         # Code using _PRELOADED_LABELS_DF should have no matches (no pd.read_csv)
@@ -552,44 +727,60 @@ rec_ids = _PRELOADED_REC_IDS
 
 
 class TestLabelIntCasting:
-    """Tests for label integer casting in parse_label_file."""
+    """Tests for label scalar-type handling in parse_sparse_label_rows.
 
-    def test_numeric_labels_cast_to_int(self) -> None:
-        """Test that numeric labels are cast to integers."""
-        label = "42"
-        try:
-            label_val = int(label)
-        except ValueError:
-            label_val = label
+    The old inline ``try: int(label) except ValueError`` simulation this
+    class used to test produced mixed ``[int, str]`` columns per-row - a
+    shape the production parser never emits. These tests instead exercise
+    the real ``kaggle_agents.utils.label_parser.parse_sparse_label_rows``
+    helper and assert its uniform lexical output.
+    """
 
-        assert isinstance(label_val, int)
-        assert label_val == 42
+    def test_numeric_labels_remain_strings_by_default(self, tmp_path: Path) -> None:
+        """Numeric-looking labels are not auto-cast to int by default."""
+        from kaggle_agents.utils.label_parser import parse_sparse_label_rows
 
-    def test_non_numeric_labels_preserved_as_string(self) -> None:
-        """Test that non-numeric labels are kept as strings."""
-        label = "species_bird"
-        try:
-            label_val = int(label)
-        except ValueError:
-            label_val = label
+        label_path = tmp_path / "labels.csv"
+        label_path.write_text("record_id,target\n1,42\n2,7\n", encoding="utf-8")
 
-        assert isinstance(label_val, str)
-        assert label_val == "species_bird"
+        df = parse_sparse_label_rows(label_path)
+        values = df["target"].tolist()
 
-    def test_mixed_labels_handled_correctly(self) -> None:
-        """Test handling of mixed numeric and non-numeric labels."""
-        labels = ["1", "10", "species", "42"]
-        results = []
+        assert values == ["42", "7"]
+        assert all(isinstance(value, str) for value in values)
 
-        for label in labels:
-            try:
-                results.append(int(label))
-            except ValueError:
-                results.append(label)
+    def test_non_numeric_labels_preserved_as_string(self, tmp_path: Path) -> None:
+        """Non-numeric labels are kept as strings."""
+        from kaggle_agents.utils.label_parser import parse_sparse_label_rows
 
-        assert results == [1, 10, "species", 42]
-        assert isinstance(results[0], int)
-        assert isinstance(results[2], str)
+        label_path = tmp_path / "labels.csv"
+        label_path.write_text(
+            "record_id,target\n1,species_bird\n2,species_fish\n", encoding="utf-8"
+        )
+
+        df = parse_sparse_label_rows(label_path)
+        values = df["target"].tolist()
+
+        assert values == ["species_bird", "species_fish"]
+        assert all(isinstance(value, str) for value in values)
+
+    def test_mixed_labels_produce_uniform_lexical_output(self, tmp_path: Path) -> None:
+        """Mixed numeric-looking and alphabetic labels stay uniformly typed
+        as strings - the production helper never returns a column mixing
+        Python ``int`` and ``str`` scalars."""
+        from kaggle_agents.utils.label_parser import parse_sparse_label_rows
+
+        label_path = tmp_path / "labels.csv"
+        label_path.write_text(
+            "record_id,target\n1,1\n2,10\n3,species\n4,42\n", encoding="utf-8"
+        )
+
+        df = parse_sparse_label_rows(label_path)
+        values = df["target"].tolist()
+
+        assert values == ["1", "10", "species", "42"]
+        assert all(isinstance(value, str) for value in values)
+        assert not any(isinstance(value, int) for value in values)
 
 
 class TestCanonicalDirFallback:
@@ -625,12 +816,22 @@ class TestCanonicalDirFallback:
         This prevents overriding the canonical contract when real canonical
         artifacts are present (e.g., train_ids.npy, folds.npy).
         """
-        # Simulate existing canonical data
+        # Simulate the complete canonical contract.
         canonical_dir = tmp_path / "canonical"
         canonical_dir.mkdir(parents=True, exist_ok=True)
-        (canonical_dir / "train_ids.npy").touch()  # Marker file
+        required = (
+            "train_ids.npy",
+            "y.npy",
+            "folds.npy",
+            "feature_cols.json",
+            "metadata.json",
+        )
+        for name in required:
+            (canonical_dir / name).touch()
 
-        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        has_canonical = canonical_dir.is_dir() and all(
+            (canonical_dir / name).is_file() for name in required
+        )
         data_type = "audio"
 
         # Fallback condition: only inject when has_canonical is False
@@ -644,7 +845,11 @@ class TestCanonicalDirFallback:
         # No canonical directory exists
         canonical_dir = tmp_path / "canonical"
 
-        has_canonical = canonical_dir.exists() and (canonical_dir / "train_ids.npy").exists()
+        has_canonical = (
+            canonical_dir.exists()
+            and (canonical_dir / "train_ids.npy").exists()
+            and (canonical_dir / "metadata.json").exists()
+        )
         data_type = "audio"
 
         # Fallback condition: inject when has_canonical is False for audio
@@ -652,6 +857,22 @@ class TestCanonicalDirFallback:
 
         assert has_canonical is False
         assert should_inject_fallback is True  # Fallback SHOULD be injected
+
+    def test_partial_canonical_dir_does_not_count(self, tmp_path: Path) -> None:
+        """A canonical/ dir created mid-run by generated code (train_ids.npy but
+        no metadata.json) must NOT trigger the canonical contract block: the
+        injected block would crash every script at import time."""
+        canonical_dir = tmp_path / "canonical"
+        canonical_dir.mkdir(parents=True, exist_ok=True)
+        (canonical_dir / "train_ids.npy").touch()
+
+        has_canonical = (
+            canonical_dir.exists()
+            and (canonical_dir / "train_ids.npy").exists()
+            and (canonical_dir / "metadata.json").exists()
+        )
+
+        assert has_canonical is False
 
 
 class TestEnsureFoldsFallback:
@@ -715,13 +936,18 @@ class TestPreloadedIdToPath:
             audio_dir.mkdir()
 
             # Create mapping file
-            mapping_file = Path(tmpdir) / "rec_id2filename.txt"
-            mapping_file.write_text("0,PC1_audio_001\n1,PC1_audio_002\n2,PC1_audio_003\n")
+            mapping_file = Path(tmpdir) / "opaque_lookup.csv"
+            mapping_file.write_text(
+                "record_id,filename\n"
+                "0,sensor_audio_001\n"
+                "1,sensor_audio_002\n"
+                "2,sensor_audio_003\n"
+            )
 
             # Create audio files
-            (audio_dir / "PC1_audio_001.wav").touch()
-            (audio_dir / "PC1_audio_002.wav").touch()
-            (audio_dir / "PC1_audio_003.wav").touch()
+            (audio_dir / "sensor_audio_001.wav").touch()
+            (audio_dir / "sensor_audio_002.wav").touch()
+            (audio_dir / "sensor_audio_003.wav").touch()
 
             # Simulate the mapping resolution
             id_to_filename = {}
@@ -743,7 +969,7 @@ class TestPreloadedIdToPath:
             # Verify mapping
             assert len(id_to_path) == 3
             assert "0" in id_to_path
-            assert "PC1_audio_001" in id_to_path["0"]
+            assert "sensor_audio_001" in id_to_path["0"]
 
     def test_keys_are_strings(self) -> None:
         """Test that _PRELOADED_ID_TO_PATH keys are always strings."""
@@ -764,3 +990,76 @@ class TestPreloadedIdToPath:
         assert id_to_path.get("1") == "/path/to/audio_1.wav"
         # Integer lookup should NOT work
         assert id_to_path.get(0) is None
+
+
+class TestPathRedefinitionSanitizer:
+    """The sanitizer must only protect constants the injected header defines.
+
+    Stripping a redefinition of a constant the header never defined (e.g.
+    CANONICAL_DIR on comps without canonical data) leaves the LLM's code with
+    a NameError at runtime.
+    """
+
+    HEADER = (
+        'TRAIN_PATH = Path("/data/train.csv")\n'
+        'OUTPUT_DIR = Path("/data")\n'
+        "# === END PATH CONSTANTS ===\n"
+    )
+
+    def test_llm_canonical_dir_kept_when_header_lacks_it(self):
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = self.HEADER + 'CANONICAL_DIR = OUTPUT_DIR / "canonical"\n'
+
+        is_valid, violations = CodeGeneratorMixin._validate_no_path_redefinition(None, code)
+        assert is_valid
+        assert violations == []
+
+        stripped = CodeGeneratorMixin._strip_path_redefinitions(None, code)
+        assert 'CANONICAL_DIR = OUTPUT_DIR / "canonical"' in stripped
+        assert "# STRIPPED" not in stripped
+
+    def test_header_defined_constant_still_stripped(self):
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = self.HEADER + 'OUTPUT_DIR = Path("/tmp/elsewhere")\n'
+
+        is_valid, violations = CodeGeneratorMixin._validate_no_path_redefinition(None, code)
+        assert not is_valid
+        assert "Path redefinition detected: OUTPUT_DIR" in violations
+
+        stripped = CodeGeneratorMixin._strip_path_redefinitions(None, code)
+        assert "# STRIPPED (path constant):" in stripped
+
+    def test_base_dir_always_stripped(self):
+        # _rewrite_base_dir_references later rewrites bare BASE_DIR to
+        # OUTPUT_DIR, so a surviving "BASE_DIR = ..." line would redefine
+        # OUTPUT_DIR at runtime even though the header never defines BASE_DIR.
+        from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
+
+        code = self.HEADER + 'BASE_DIR = Path("/tmp/other")\n'
+
+        is_valid, violations = CodeGeneratorMixin._validate_no_path_redefinition(None, code)
+        assert not is_valid
+
+        stripped = CodeGeneratorMixin._strip_path_redefinitions(None, code)
+        assert "# STRIPPED (path constant):" in stripped
+        assert 'BASE_DIR = Path("/tmp/other")' not in stripped.split(
+            "# === END PATH CONSTANTS ===",
+        )[1].splitlines()
+
+    def test_injected_canonical_block_fails_closed_on_missing_semantics(self):
+        # Missing metadata semantics must fail instead of silently selecting
+        # default folds, columns, or task type.
+        import inspect
+
+        from kaggle_agents.agents.developer import code_generator
+
+        src = inspect.getsource(code_generator)
+        assert "_required_canonical_fields" in src
+        assert "Canonical metadata missing required fields" in src
+        assert "if CANONICAL_METADATA_PATH.exists():" not in src
+        # Canonical authority is the resolved decision, never a second probe
+        # of whether canonical/ happens to look complete on disk.
+        assert "target_source.canonical_authoritative" in src
+        assert "canonical_dir.is_dir()" not in src

@@ -3,11 +3,13 @@
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from kaggle_agents.utils.data_contract import (
     SEQ2SEQ_GROUP_CANDIDATES,
     SEQ2SEQ_TASK_INDICATORS,
     _detect_seq2seq_group_column,
+    infer_seq2seq_columns,
     load_canonical_data,
     prepare_canonical_data,
 )
@@ -60,22 +62,97 @@ class TestSeq2seqGroupDetection:
 class TestSeq2seqConstants:
     """Tests for seq2seq constants."""
 
-    def test_seq2seq_group_candidates_includes_sentence_id(self):
-        """Should include sentence_id in candidates."""
-        assert "sentence_id" in SEQ2SEQ_GROUP_CANDIDATES
+    def test_seq2seq_group_candidates_are_generic_identifier_conventions(self):
+        """Group detection must not encode a task-specific column name."""
+        assert "_id" in SEQ2SEQ_GROUP_CANDIDATES
+        assert "sentence_id" not in SEQ2SEQ_GROUP_CANDIDATES
 
-    def test_text_normalization_indicators(self):
-        """Should have text_normalization task indicators."""
+    def test_text_normalization_indicator_has_no_fixed_schema(self):
+        """Task-family compatibility metadata must not prescribe column names."""
         assert "text_normalization" in SEQ2SEQ_TASK_INDICATORS
+        assert SEQ2SEQ_TASK_INDICATORS["text_normalization"] == {}
 
-        tn_indicator = SEQ2SEQ_TASK_INDICATORS["text_normalization"]
-        assert tn_indicator["source_col"] == "before"
-        assert tn_indicator["target_col"] == "after"
-        assert tn_indicator["class_col"] == "class"
+
+class TestSeq2seqColumnInference:
+    def test_derives_renamed_schema_from_train_test_and_sample(self):
+        train_df = pd.DataFrame(
+            {
+                "record_id": range(30),
+                "segment_id": [i // 3 for i in range(30)],
+                "kind": ["stable"] * 15 + ["variable"] * 15,
+                "raw_text": [f"input-{i}" for i in range(30)],
+                "normalized_text": [f"output-{i}" for i in range(30)],
+            }
+        )
+        test_df = train_df.drop(columns=["normalized_text"])
+        sample = pd.DataFrame(
+            {"record_id": test_df["record_id"], "normalized_text": ""}
+        )
+
+        resolved = infer_seq2seq_columns(
+            train_df,
+            test_df,
+            sample_submission=sample,
+        )
+
+        assert resolved["target_col"] == "normalized_text"
+        assert resolved["source_col"] == "raw_text"
+        assert resolved["class_col"] == "kind"
+        assert resolved["seq2seq_group_col"] == "segment_id"
+
+    def test_fails_closed_when_source_roles_are_ambiguous(self):
+        train_df = pd.DataFrame(
+            {
+                "input_a": ["a", "b", "c"],
+                "input_b": ["x", "y", "z"],
+                "output": ["m", "n", "o"],
+            }
+        )
+        test_df = train_df.drop(columns=["output"])
+
+        with pytest.raises(ValueError, match="Ambiguous seq2seq source column"):
+            infer_seq2seq_columns(train_df, test_df)
 
 
 class TestPrepareCanonicalDataSeq2seq:
     """Tests for prepare_canonical_data with seq2seq tasks."""
+
+    def test_prepares_renamed_schema_from_public_artifacts(self, tmp_path):
+        train_df = pd.DataFrame(
+            {
+                "record_id": range(40),
+                "segment_id": [i // 4 for i in range(40)],
+                "kind": ["stable"] * 20 + ["variable"] * 20,
+                "raw_text": [f"input-{i}" for i in range(40)],
+                "normalized_text": [f"output-{i}" for i in range(40)],
+            }
+        )
+        test_df = train_df.drop(columns=["normalized_text"])
+        sample = pd.DataFrame(
+            {"record_id": test_df["record_id"], "normalized_text": ""}
+        )
+        train_path = tmp_path / "train.csv"
+        test_path = tmp_path / "test.csv"
+        sample_path = tmp_path / "sample_submission.csv"
+        train_df.to_csv(train_path, index=False)
+        test_df.to_csv(test_path, index=False)
+        sample.to_csv(sample_path, index=False)
+
+        result = prepare_canonical_data(
+            train_path=train_path,
+            test_path=test_path,
+            target_col="unresolved_placeholder",
+            output_dir=tmp_path,
+            task_type="seq2seq",
+            sample_submission=sample_path,
+        )
+
+        metadata = result["metadata"]
+        assert metadata["target_col"] == "normalized_text"
+        assert metadata["source_col"] == "raw_text"
+        assert metadata["class_col"] == "kind"
+        assert metadata["group_col"] == "segment_id"
+        assert metadata["id_col"] == "record_id"
 
     def test_string_targets_saved_correctly(self, tmp_path):
         """Should save string targets with allow_pickle=True."""
@@ -136,6 +213,8 @@ class TestPrepareCanonicalDataSeq2seq:
             output_dir=tmp_path,
             task_type="text_normalization",
             n_folds=5,
+            source_col="before",
+            class_col="class",
         )
 
         # Load folds and verify no sentence is split across folds
@@ -181,7 +260,7 @@ class TestPrepareCanonicalDataSeq2seq:
         assert metadata["target_dtype"] == "object"
 
     def test_canonical_version_bumped(self, tmp_path):
-        """Should have canonical version 1.3 for seq2seq support."""
+        """Should expose the current canonical contract version."""
         train_data = {
             "id": range(50),
             "before": ["hello"] * 50,
@@ -204,10 +283,10 @@ class TestPrepareCanonicalDataSeq2seq:
         )
 
         metadata = result["metadata"]
-        assert metadata["canonical_version"] == "1.3"
+        assert metadata["canonical_version"] == "1.5"
 
     def test_canonical_version_correct_with_sampling(self, tmp_path):
-        """Should have version 1.3 even when sampling is triggered."""
+        """Should keep the current version when sampling is triggered."""
         # Create large dataset to trigger sampling
         train_data = {
             "id": range(1000),
@@ -232,8 +311,7 @@ class TestPrepareCanonicalDataSeq2seq:
         )
 
         metadata = result["metadata"]
-        # Version should be 1.3 even with sampling
-        assert metadata["canonical_version"] == "1.3"
+        assert metadata["canonical_version"] == "1.5"
         # Verify sampling actually occurred
         assert metadata["sampled"] is True
 
@@ -368,3 +446,64 @@ class TestStringLabeledClassification:
         # Should be classification with 2 classes
         assert result["metadata"]["is_classification"] is True
         assert result["metadata"]["n_classes"] == 2
+
+
+class TestExplicitTaskContract:
+    """Task metadata must override misleading target cardinality."""
+
+    def test_low_cardinality_integer_regression_remains_regression(
+        self,
+        tmp_path,
+    ):
+        train_df = pd.DataFrame(
+            {
+                "id": range(90),
+                "feature": range(90),
+                "outcome": [0, 1, 2] * 30,
+            }
+        )
+        train_path = tmp_path / "train.csv"
+        test_path = tmp_path / "test.csv"
+        train_df.to_csv(train_path, index=False)
+        train_df.drop(columns=["outcome"]).to_csv(test_path, index=False)
+
+        result = prepare_canonical_data(
+            train_path=train_path,
+            test_path=test_path,
+            target_col="outcome",
+            output_dir=tmp_path,
+            n_folds=3,
+            task_type="tabular_regression",
+        )
+
+        assert result["metadata"]["is_classification"] is False
+        assert result["metadata"]["task_type_source"] == "explicit_task_contract"
+
+    def test_more_than_twenty_classes_remains_classification(
+        self,
+        tmp_path,
+    ):
+        train_df = pd.DataFrame(
+            {
+                "id": range(150),
+                "feature": range(150),
+                "outcome": [class_id for class_id in range(30) for _ in range(5)],
+            }
+        )
+        train_path = tmp_path / "train.csv"
+        test_path = tmp_path / "test.csv"
+        train_df.to_csv(train_path, index=False)
+        train_df.drop(columns=["outcome"]).to_csv(test_path, index=False)
+
+        result = prepare_canonical_data(
+            train_path=train_path,
+            test_path=test_path,
+            target_col="outcome",
+            output_dir=tmp_path,
+            n_folds=5,
+            task_type="tabular_classification",
+        )
+
+        assert result["metadata"]["is_classification"] is True
+        assert result["metadata"]["n_classes"] == 30
+        assert result["metadata"]["task_type_source"] == "explicit_task_contract"

@@ -40,18 +40,42 @@ def recover_from_checkpoints(
 
     for state_file in state_files:
         try:
-            with open(state_file) as f:
+            with state_file.open() as f:
                 state = json.load(f)
 
-            component_name = state.get("component_name", "unknown")
+            component_name = state.get("component_name")
+            if (
+                not isinstance(component_name, str)
+                or not component_name
+                or state_file.name
+                != f"{component_name}_checkpoint_state.json"
+            ):
+                print(f"      Invalid component metadata in {state_file.name}")
+                continue
 
             # Skip if not in requested list
             if component_names and component_name not in component_names:
                 continue
 
-            n_completed = len(state.get("completed_folds", []))
-            min_folds = state.get("min_folds", 2)
+            completed_folds_raw = state.get("completed_folds")
+            if not isinstance(completed_folds_raw, list):
+                print(f"      {component_name}: Invalid completed_folds metadata")
+                continue
+            try:
+                completed_folds = [int(value) for value in completed_folds_raw]
+                min_folds = int(state.get("min_folds", 2))
+            except (TypeError, ValueError):
+                print(f"      {component_name}: Invalid checkpoint metadata")
+                continue
+            if (
+                min_folds < 1
+                or len(completed_folds) != len(set(completed_folds))
+                or any(fold_idx < 0 for fold_idx in completed_folds)
+            ):
+                print(f"      {component_name}: Invalid checkpoint fold metadata")
+                continue
 
+            n_completed = len(completed_folds)
             if n_completed < min_folds:
                 print(f"      {component_name}: Only {n_completed}/{min_folds} folds, skipping")
                 continue
@@ -62,46 +86,60 @@ def recover_from_checkpoints(
                 print(f"      {component_name}: No partial OOF found")
                 continue
 
-            oof = np.load(partial_oof_path)
+            oof = np.asarray(
+                np.load(partial_oof_path, allow_pickle=False)
+            )
 
-            # Check for test predictions (may not exist for partial)
+            # Prefer the completed component output, then the fold-averaged
+            # partial test predictions persisted by the checkpoint contract.
             test_path = models_dir / f"test_{component_name}.npy"
             if test_path.exists():
-                test = np.load(test_path)
+                test = np.asarray(np.load(test_path, allow_pickle=False))
             else:
-                # Generate test predictions from fold models
-                test = _generate_test_from_fold_models(
-                    checkpoints_dir, component_name, state
+                partial_test_path = (
+                    checkpoints_dir / f"{component_name}_test_partial.npy"
+                )
+                if not partial_test_path.exists():
+                    print(f"      {component_name}: No partial test predictions found")
+                    continue
+                test = np.asarray(
+                    np.load(partial_test_path, allow_pickle=False)
                 )
 
-            if test is not None:
-                recovered[component_name] = (oof, test)
-                print(f"      {component_name}: Recovered {n_completed} folds, OOF shape {oof.shape}")
+            if (
+                oof.ndim not in {1, 2}
+                or test.ndim not in {1, 2}
+                or oof.shape[0] == 0
+                or test.shape[0] == 0
+                or not np.issubdtype(oof.dtype, np.number)
+                or not np.issubdtype(test.dtype, np.number)
+                or not np.all(np.isfinite(oof))
+                or not np.all(np.isfinite(test))
+            ):
+                print(f"      {component_name}: Invalid/non-finite checkpoint arrays")
+                continue
+
+            expected_oof_shape = tuple(state.get("oof_shape", ()))
+            expected_test_shape = tuple(state.get("test_shape", ()))
+            expected_n_samples = state.get("n_samples")
+            if (
+                (expected_oof_shape and oof.shape != expected_oof_shape)
+                or (expected_test_shape and test.shape != expected_test_shape)
+                or (
+                    expected_n_samples is not None
+                    and oof.shape[0] != int(expected_n_samples)
+                )
+            ):
+                print(f"      {component_name}: Checkpoint shape metadata mismatch")
+                continue
+
+            recovered[component_name] = (oof, test)
+            print(f"      {component_name}: Recovered {n_completed} folds, OOF shape {oof.shape}")
 
         except Exception as e:
             print(f"      Error recovering from {state_file}: {e}")
 
     return recovered
-
-
-def _generate_test_from_fold_models(
-    checkpoints_dir: Path,
-    component_name: str,
-    state: dict,
-) -> np.ndarray | None:
-    """Generate test predictions by averaging fold model predictions.
-
-    Args:
-        checkpoints_dir: Directory containing fold checkpoints
-        component_name: Name of the component
-        state: Checkpoint state dictionary
-
-    Returns:
-        Test predictions array or None if not possible
-    """
-    # This would require loading test data and averaging predictions
-    # For now, return None to indicate test predictions need to be generated
-    return None
 
 
 def fallback_to_best_single_model(
@@ -138,8 +176,8 @@ def fallback_to_best_single_model(
             continue
 
         try:
-            oof = np.load(oof_path)
-            test = np.load(test_path)
+            oof = np.load(oof_path, allow_pickle=False)
+            test = np.load(test_path, allow_pickle=False)
 
             # Calculate coverage (non-zero predictions)
             if oof.ndim > 1:

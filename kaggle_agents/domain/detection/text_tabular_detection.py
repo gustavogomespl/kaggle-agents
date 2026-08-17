@@ -25,8 +25,8 @@ class TextTabularDetectionMixin:
         """
         Detect NLP/text domain from CSV files containing text columns.
 
-        This should be called BEFORE tabular detection to correctly classify
-        competitions like Spooky Author Identification as text_classification.
+        This should be called BEFORE tabular detection so prose-heavy datasets
+        are classified as text_classification instead of tabular.
 
         Signals:
         1. Column named "text", "sentence", "content", "body", "comment", "review"
@@ -57,9 +57,9 @@ class TextTabularDetectionMixin:
         if df.empty:
             return None
 
-        # Block text detection if strong numeric/tabular signal exists
-        # This prevents false-positives on competitions like NYC taxi fare
-        # where datetime string columns trigger text detection
+        # Block text detection if strong numeric/tabular signal exists.
+        # This prevents false-positives on numeric datasets where datetime
+        # string columns would otherwise trigger text detection.
         numeric_cols = df.select_dtypes(include="number").columns
         numeric_ratio = len(numeric_cols) / max(len(df.columns), 1)
 

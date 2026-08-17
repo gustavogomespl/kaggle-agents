@@ -1,15 +1,265 @@
 """Canonical data preparation node for the Kaggle Agents workflow."""
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
+from ...agents.developer.target_source import (
+    build_canonical_validation_marker as _validation_marker,
+)
 from ...core.state import KaggleState
 from ...core.state.contracts import CanonicalDataContract
+from ...utils.canonical_validation import (
+    describe_violations,
+    representation_kind_for,
+    validate_dense_rows,
+    validate_metadata_agreement,
+    validate_packed_representation,
+)
 from ...utils.data_contract import prepare_canonical_data
+from ...utils.image_to_image_contract import (
+    prepare_image_to_image_canonical_data,
+)
+from ...utils.target_inference import TargetInferenceError
+
+
+def _assert_contract_rows_and_semantics(
+    contract: dict[str, Any],
+    metadata: dict[str, Any],
+    *,
+    train_ids: np.ndarray | None = None,
+    folds: np.ndarray | None = None,
+    y: np.ndarray | None = None,
+) -> None:
+    """Prove the contract this node just wrote actually holds.
+
+    The rules live in ``utils.canonical_validation`` and are the SAME ones the
+    target-source selector applies later; keeping a second copy here is how the
+    producer and the consumer came to disagree about what a valid contract is.
+
+    Dense and media contracts pass the arrays they already hold, so a
+    freshly written multi-million-row contract is not re-read to check it.
+    Packed image contracts have no dense ``y`` at all: they are validated
+    through the shared packed path, which checks what a packed contract
+    actually guarantees (target/ID/input-path alignment and fold assignment)
+    instead of a fabricated array.
+    """
+    try:
+        typed_contract = CanonicalDataContract.from_dict(dict(contract))
+    except Exception as exc:  # any deserialization failure is corruption
+        raise ValueError(
+            f"Canonical preparation produced an undeserializable contract: {exc}"
+        ) from exc
+
+    kind = representation_kind_for(metadata, contract)
+    violations: list[dict[str, Any]] = []
+    validate_metadata_agreement(typed_contract, metadata, None, kind, violations)
+    if kind == "packed_image":
+        validate_packed_representation(typed_contract, violations)
+    else:
+        arrays = (
+            (train_ids, folds, y)
+            if train_ids is not None and folds is not None and y is not None
+            else None
+        )
+        validate_dense_rows(typed_contract, metadata, violations, arrays=arrays)
+    if violations:
+        raise ValueError(
+            describe_violations(
+                violations,
+                "Canonical preparation produced an inconsistent contract",
+            )
+        )
+
+
+def _filename_label_pattern_from_state(state: KaggleState) -> str | None:
+    """Return an explicit public-data parsing contract, if discovery supplied one."""
+    parsing_info = state.get("parsing_info") or {}
+    if not isinstance(parsing_info, dict):
+        return None
+
+    filename_labels = parsing_info.get("filename_labels")
+    if isinstance(filename_labels, dict):
+        value = filename_labels.get("pattern") or filename_labels.get("regex")
+        evidence = filename_labels.get("evidence")
+        if (
+            isinstance(value, str)
+            and value.strip()
+            and isinstance(evidence, str)
+            and evidence.strip()
+        ):
+            return value.strip()
+    return None
+
+
+def _resolve_filename_image_test_ids(
+    *,
+    data_files: dict[str, Any],
+    working_dir: Path,
+    submission_contract: dict[str, Any],
+    sample_submission_path: str | None,
+    image_extensions: frozenset[str],
+) -> list[str]:
+    """Load and prove the submission template's one-to-one image coverage."""
+    sample_submission = Path(
+        data_files.get("sample_submission")
+        or sample_submission_path
+        or working_dir / "sample_submission.csv"
+    )
+    id_col = submission_contract.get("id_col")
+    if not sample_submission.is_file() or not id_col:
+        raise ValueError(
+            f"Missing sample submission or submission ID column: {sample_submission}"
+        )
+
+    template = pd.read_csv(sample_submission, dtype=str, keep_default_na=False)
+    if id_col not in template.columns:
+        raise ValueError(
+            f"Submission template is missing ID column {id_col!r}: "
+            f"{template.columns.tolist()}"
+        )
+
+    raw_ids = template[id_col]
+    if raw_ids.isna().any() or (raw_ids == "").any():
+        raise ValueError("Submission template contains null IDs")
+    test_ids = [str(value) for value in raw_ids.tolist()]
+    if not test_ids:
+        raise ValueError("Submission template contains no IDs")
+    if len(set(test_ids)) != len(test_ids):
+        raise ValueError("Submission template IDs must be unique")
+
+    test_dir = Path(data_files.get("test") or working_dir / "test")
+    if not test_dir.is_dir():
+        raise ValueError(f"Missing test image directory: {test_dir}")
+    test_images = sorted(
+        path
+        for path in test_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in image_extensions
+    )
+    if not test_images:
+        raise ValueError(f"No supported test images found in {test_dir}")
+
+    aliases_to_paths: dict[str, set[Path]] = {}
+    for image_path in test_images:
+        relative_path = image_path.relative_to(test_dir).as_posix()
+        aliases = {
+            image_path.name,
+            image_path.stem,
+            relative_path,
+            str(Path(relative_path).with_suffix("")),
+        }
+        for alias in aliases:
+            aliases_to_paths.setdefault(alias, set()).add(image_path)
+
+    matching_paths: list[Path] = []
+    for test_id in test_ids:
+        matches = aliases_to_paths.get(test_id, set())
+        if len(matches) != 1:
+            raise ValueError(
+                f"Submission ID {test_id!r} resolves to {len(matches)} test images"
+            )
+        matching_paths.append(next(iter(matches)))
+
+    if (
+        len(test_ids) != len(test_images)
+        or len(set(matching_paths)) != len(test_images)
+    ):
+        raise ValueError(
+            "Submission template IDs do not provide one-to-one test image coverage"
+        )
+    return test_ids
+
+
+def _media_fallback_state_updates(
+    result: dict[str, Any],
+    test_ids: list[str],
+) -> dict[str, Any] | None:
+    """Build the complete canonical state a filename-derived contract carries.
+
+    The audio fallback used to return a success dict WITHOUT
+    ``canonical_contract``: the trusted scorer reads
+    ``canonical_contract["train_ids_path"]`` with no directory fallback, so
+    every model was rejected with "Canonical/model train IDs are unavailable"
+    and both audio benchmark competitions zeroed by construction. One
+    builder, shared by every media-filename path, keeps the fallback and
+    tabular contracts structurally identical.
+
+    Returns ``None`` (writing the reason into ``result["error"]``) when the
+    produced contract does not validate; the caller reports failure and the
+    run continues canonical-less.
+    """
+    metadata = result["metadata"]
+    train_ids = np.load(result["train_ids_path"], allow_pickle=True)
+    y = np.load(result["y_path"], allow_pickle=True)
+    folds = np.load(result["folds_path"], allow_pickle=True)
+    with Path(result["feature_cols_path"]).open(encoding="utf-8") as file:
+        feature_cols = json.load(file)
+    canonical_contract = CanonicalDataContract(
+        canonical_dir=result["canonical_dir"],
+        train_ids_path=result["train_ids_path"],
+        y_path=result["y_path"],
+        folds_path=result["folds_path"],
+        feature_cols_path=result["feature_cols_path"],
+        metadata_path=result["metadata_path"],
+        n_train=int(metadata["canonical_rows"]),
+        n_test=int(metadata["n_test"]),
+        n_folds=int(metadata["n_folds"]),
+        id_col=metadata["id_col"],
+        id_is_synthetic=bool(metadata.get("id_is_synthetic", False)),
+        target_col=metadata["target_col"],
+        target_cols=list(metadata["target_cols"]),
+        target_type=metadata["target_type"],
+        is_classification=bool(metadata["is_classification"]),
+        folds_hash=CanonicalDataContract.compute_array_hash(folds),
+        y_hash=CanonicalDataContract.compute_array_hash(y),
+        train_ids_hash=CanonicalDataContract.compute_array_hash(train_ids),
+        train_schema_hash=CanonicalDataContract.compute_schema_hash(
+            feature_cols, ["unknown"] * len(feature_cols)
+        ),
+        cv_strategy=metadata["cv_strategy"],
+        test_ids_path=result["test_ids_path"],
+    )
+    contract_is_valid, contract_violations = canonical_contract.validate()
+    if not contract_is_valid:
+        result["error"] = "; ".join(contract_violations)
+        return None
+    contract_dict = canonical_contract.to_dict()
+    try:
+        _assert_contract_rows_and_semantics(
+            contract_dict,
+            metadata,
+            train_ids=train_ids,
+            folds=folds,
+            y=y,
+        )
+    except ValueError as exc:
+        result["error"] = str(exc)
+        return None
+    return {
+        "canonical_data_prepared": True,
+        "canonical_dir": result["canonical_dir"],
+        "canonical_train_ids_path": result["train_ids_path"],
+        "canonical_y_path": result["y_path"],
+        "canonical_folds_path": result["folds_path"],
+        "canonical_feature_cols_path": result["feature_cols_path"],
+        "canonical_test_ids_path": result["test_ids_path"],
+        "canonical_metadata": metadata,
+        "canonical_contract": contract_dict,
+        "canonical_contract_validation": _validation_marker(contract_dict, metadata),
+        "canonical_data_skipped_reason": None,
+        "target_col": metadata["target_col"],
+        "target_cols": list(metadata["target_cols"]),
+        "target_type": metadata["target_type"],
+        "expected_train_rows": int(metadata["canonical_rows"]),
+        "expected_test_rows": int(metadata["n_test"]),
+        "test_rec_ids": test_ids,
+        "last_updated": datetime.now(),
+    }
 
 
 def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
@@ -36,6 +286,20 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
     working_dir = Path(state["working_directory"])
     data_files = state.get("data_files", {})
     target_col = state.get("target_col", "target")
+    submission_contract = state.get("submission_contract") or {}
+    target_cols = state.get("target_cols") or submission_contract.get(
+        "target_cols"
+    )
+    explicit_target_type = state.get("target_type")
+    expected_test_rows = state.get("expected_test_rows")
+    if expected_test_rows is None and state.get("test_rec_ids"):
+        expected_test_rows = len(state["test_rec_ids"])
+    submission_format = state.get("submission_format_info") or {}
+    if (
+        expected_test_rows is None
+        and submission_format.get("format_type") != "long"
+    ):
+        expected_test_rows = submission_contract.get("expected_rows")
 
     # Get train and test paths
     train_path = data_files.get("train_csv") or data_files.get("train")
@@ -43,6 +307,122 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
 
     # Handle non-tabular data (images, audio)
     data_type = str(data_files.get("data_type", "")).lower()
+    domain = str(state.get("domain_detected", "tabular") or "tabular").lower()
+    if domain == "image_to_image":
+        try:
+            image_test_dir = Path(
+                data_files.get("test") or working_dir / "test"
+            )
+            # Pass the path unconditionally: the preparer refuses a missing or
+            # empty test directory with a precise error. Collapsing it to None
+            # here used to produce a "complete" contract with zero test rows —
+            # it passed the executor integrity gate and every component then
+            # died on "Packed image evidence cannot be empty".
+            canonical_result = prepare_image_to_image_canonical_data(
+                noisy_dir=data_files.get("train") or working_dir / "train",
+                clean_dir=(
+                    data_files.get("clean_train")
+                    or working_dir / "train_cleaned"
+                ),
+                test_dir=image_test_dir,
+                output_dir=working_dir,
+                n_folds=5,
+            )
+            metadata = canonical_result["metadata"]
+            train_ids = np.load(
+                canonical_result["train_ids_path"], allow_pickle=False
+            )
+            folds = np.load(
+                canonical_result["folds_path"], allow_pickle=False
+            )
+            test_ids = np.load(
+                canonical_result["test_ids_path"], allow_pickle=False
+            )
+            feature_cols_path = (
+                Path(canonical_result["canonical_dir"]) / "feature_cols.json"
+            )
+            feature_cols_path.write_text(
+                json.dumps(["image_pixels"]),
+                encoding="utf-8",
+            )
+            y_bytes = Path(canonical_result["y_path"]).read_bytes()
+            canonical_contract = {
+                "canonical_dir": canonical_result["canonical_dir"],
+                "train_ids_path": canonical_result["train_ids_path"],
+                "y_path": canonical_result["y_path"],
+                "folds_path": canonical_result["folds_path"],
+                "feature_cols_path": str(feature_cols_path),
+                "metadata_path": canonical_result["metadata_path"],
+                "n_train": int(metadata["canonical_rows"]),
+                "n_test": int(metadata.get("n_test") or 0),
+                "n_folds": int(metadata["n_folds"]),
+                "id_col": metadata["id_col"],
+                "id_is_synthetic": False,
+                "target_col": metadata["target_col"],
+                "target_cols": list(metadata["target_cols"]),
+                "target_type": "multi_target",
+                "is_classification": False,
+                "folds_hash": CanonicalDataContract.compute_array_hash(folds),
+                "y_hash": hashlib.sha256(y_bytes).hexdigest(),
+                "train_ids_hash": CanonicalDataContract.compute_array_hash(
+                    train_ids
+                ),
+                "train_schema_hash": (
+                    CanonicalDataContract.compute_schema_hash(
+                        ["image_pixels"], ["packed_float32"]
+                    )
+                ),
+                "cv_strategy": metadata["cv_strategy"],
+                "temporal_splits_path": None,
+                "oof_eligible_mask_path": None,
+                "temporal_order_path": None,
+                "image_input_paths_path": canonical_result[
+                    "image_input_paths_path"
+                ],
+                "test_ids_path": canonical_result["test_ids_path"],
+                "image_test_input_paths_path": canonical_result[
+                    "image_test_input_paths_path"
+                ],
+                "packed_image_contract": True,
+            }
+            # Packed contracts carry no dense y: validating a fabricated
+            # array proved nothing. The shared packed path checks what this
+            # representation actually guarantees.
+            _assert_contract_rows_and_semantics(canonical_contract, metadata)
+            return {
+                "canonical_data_prepared": True,
+                "canonical_dir": canonical_result["canonical_dir"],
+                "canonical_train_ids_path": canonical_result[
+                    "train_ids_path"
+                ],
+                "canonical_y_path": canonical_result["y_path"],
+                "canonical_folds_path": canonical_result["folds_path"],
+                "canonical_feature_cols_path": str(feature_cols_path),
+                "canonical_test_ids_path": canonical_result["test_ids_path"],
+                "canonical_metadata": metadata,
+                "canonical_contract": canonical_contract,
+                "canonical_contract_validation": _validation_marker(
+                    canonical_contract, metadata
+                ),
+                "target_col": metadata["target_col"],
+                "target_cols": list(metadata["target_cols"]),
+                "target_type": "multi_target",
+                "expected_train_rows": int(metadata["canonical_rows"]),
+                "expected_test_rows": int(metadata["n_test"]),
+                "test_rec_ids": [str(value) for value in test_ids.tolist()],
+                "last_updated": datetime.now(),
+            }
+        except Exception as exc:
+            if str(state.get("run_mode", "")).lower() == "mlebench":
+                raise RuntimeError(
+                    "MLE-bench image-to-image canonical pair contract failed"
+                ) from exc
+            return {
+                "canonical_data_prepared": False,
+                "canonical_data_error": str(exc),
+                "last_updated": datetime.now(),
+            }
+
     if data_type == "image":
         # For IMAGE competitions: Try to create canonical data from train.csv
         # Image competitions typically have train.csv with columns [image_id, label1, label2, ...]
@@ -65,16 +445,68 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             test_path = str(test_csv_path) if test_csv_path else str(train_csv_path)
             # Continue with normal canonical data preparation below
         else:
-            print(f"   Skipping canonical data prep for {data_type} data type")
-            print("   (No train.csv found - image competitions without labels CSV)")
+            # No labels CSV: the labels may still live in the filenames or in
+            # class subdirectories. Skipping outright cost the whole canonical
+            # contract - no injected CANONICAL_* constants (so every candidate
+            # program raised NameError on the constants the prompts mandate),
+            # no y.npy, and therefore no trusted OOF score for any component.
+            print("   Image competition without train.csv detected")
+            print("   Attempting to create canonical data from image filenames...")
+
+            from ...mlebench.data_adapter.detection import DetectionMixin
+
+            detector = DetectionMixin()
+            image_train_dir = Path(
+                data_files.get("train") or working_dir / "train"
+            )
+            try:
+                test_ids = _resolve_filename_image_test_ids(
+                    data_files=data_files,
+                    working_dir=working_dir,
+                    submission_contract=submission_contract,
+                    sample_submission_path=state.get("sample_submission_path"),
+                    image_extensions=detector.IMAGE_LABEL_EXTENSIONS,
+                )
+            except ValueError as exc:
+                result = {"success": False, "error": str(exc)}
+            else:
+                result = (
+                    detector.create_canonical_from_image_filenames(
+                        image_dir=image_train_dir,
+                        canonical_dir=working_dir / "canonical",
+                        n_folds=5,
+                        explicit_pattern=_filename_label_pattern_from_state(state),
+                        test_ids=test_ids,
+                    )
+                    if image_train_dir.is_dir()
+                    else {"success": False, "error": f"Missing {image_train_dir}"}
+                )
+
+            if result.get("success"):
+                updates = _media_fallback_state_updates(result, test_ids)
+                if updates is not None:
+                    print(
+                        f"   Created canonical data from "
+                        f"{result['metadata']['canonical_rows']} image files"
+                    )
+                    return updates
+                result = {"success": False, "error": result.get("error")}
+
+            print(
+                "   Could not derive labels from image filenames: "
+                f"{result.get('error')}"
+            )
             return {
                 "canonical_data_prepared": False,
-                "canonical_data_skipped_reason": f"{data_type} data type - no train.csv",
+                "canonical_data_skipped_reason": (
+                    f"{data_type} data type - no train.csv and no "
+                    f"evidence-backed filename labels ({result.get('error')})"
+                ),
                 "last_updated": datetime.now(),
             }
 
     # For audio: try filename-based label extraction if no train.csv
-    if data_type == "audio":
+    if data_type in {"audio", "audio_classification"}:
         train_csv_path = working_dir / "train.csv"
         if not train_csv_path.exists():
             print("   Audio competition without train.csv detected")
@@ -84,8 +516,9 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             from ...mlebench.data_adapter.detection import DetectionMixin
 
             detector = DetectionMixin()
+            filename_label_pattern = _filename_label_pattern_from_state(state)
 
-            # Use actual train path from data_files if available (e.g., train2/ for whale competition)
+            # Use the train path discovered from the supplied local files.
             train_path_from_state = data_files.get("train")
             if train_path_from_state and Path(train_path_from_state).exists():
                 train_dir = Path(train_path_from_state)
@@ -95,26 +528,44 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                 train_dir = working_dir / "train"
 
             if train_dir.exists():
-                result = detector.create_canonical_from_audio_filenames(
-                    audio_dir=train_dir,
-                    canonical_dir=working_dir / "canonical",
-                    n_folds=5,
-                )
+                # Same identity requirements as the image fallback: graded
+                # test IDs come from the submission template with proven
+                # one-to-one media coverage, and the state must carry the
+                # SAME canonical_contract the tabular path produces — the
+                # trusted scorer reads train_ids_path only from the contract.
+                try:
+                    test_ids = _resolve_filename_image_test_ids(
+                        data_files=data_files,
+                        working_dir=working_dir,
+                        submission_contract=submission_contract,
+                        sample_submission_path=state.get(
+                            "sample_submission_path"
+                        ),
+                        image_extensions=detector.AUDIO_LABEL_EXTENSIONS,
+                    )
+                except ValueError as exc:
+                    result = {"success": False, "error": str(exc)}
+                else:
+                    result = detector.create_canonical_from_audio_filenames(
+                        audio_dir=train_dir,
+                        canonical_dir=working_dir / "canonical",
+                        n_folds=5,
+                        explicit_pattern=filename_label_pattern,
+                        test_ids=test_ids,
+                    )
 
                 if result.get("success"):
-                    print(f"   Created canonical data from {result['metadata']['canonical_rows']} audio files")
-                    return {
-                        "canonical_data_prepared": True,
-                        "canonical_dir": result["canonical_dir"],
-                        "canonical_train_ids_path": result["train_ids_path"],
-                        "canonical_y_path": result["y_path"],
-                        "canonical_folds_path": result["folds_path"],
-                        "canonical_metadata": result["metadata"],
-                        "canonical_data_skipped_reason": None,
-                        "last_updated": datetime.now(),
-                    }
-                else:
-                    print(f"   Failed to extract labels from filenames: {result.get('error')}")
+                    updates = _media_fallback_state_updates(result, test_ids)
+                    if updates is not None:
+                        print(
+                            f"   Created canonical data from "
+                            f"{result['metadata']['canonical_rows']} audio files"
+                        )
+                        return updates
+                print(
+                    "   Failed to extract labels from filenames: "
+                    f"{result.get('error')}"
+                )
 
             # Fallback: skip canonical data for audio without labels
             print("   Skipping canonical data prep for audio (no train.csv or filename labels)")
@@ -137,9 +588,11 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
         print(f"   Warning: Test path not found: {test_path}")
         # Continue anyway - test path is optional for canonical prep
 
-    # Determine max_rows for sampling based on config
+    # Determine max_rows for sampling based on config.
+    # The state key is `timeout_per_component`; reading a `timeout_s` that is
+    # never written left the budget-aware branch below permanently dead.
     fast_mode = state.get("fast_mode", False)
-    timeout_s = state.get("timeout_s")
+    timeout_s = state.get("timeout_per_component")
 
     # Budget-aware sampling thresholds
     max_rows = None
@@ -152,36 +605,51 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
 
     # Detect task type from domain for seq2seq handling
     domain = state.get("domain_detected", "tabular")
-    competition_name = state.get("competition_name", "").lower()
     seq2seq_domains = {"seq_to_seq", "text_normalization", "translation", "summarization"}
 
-    # Determine task_type with priority:
-    # 1. Specific text_normalization detection from competition name
-    # 2. Domain detected as seq_to_seq variant
-    # 3. Default to tabular
-    text_norm_keywords = ["normalization", "normalize", "text-norm", "tts"]
-    is_text_norm = any(kw in competition_name for kw in text_norm_keywords)
-
-    if is_text_norm:
-        task_type = "text_normalization"
-        print("   Task type: text_normalization (detected from competition name)")
-    elif domain in seq2seq_domains:
+    # The task family is inferred from inspected data/domain metadata, never
+    # from a benchmark competition name.
+    if domain in seq2seq_domains:
         # Map generic seq_to_seq to specific type if possible
         task_type = domain if domain != "seq_to_seq" else "seq2seq"
         print(f"   Task type from domain: {task_type}")
     else:
-        task_type = "tabular"
+        task_type = str(domain or "tabular")
+        if "classification" not in task_type and "regression" not in task_type:
+            competition_info = state.get("competition_info")
+            declared_problem = str(
+                getattr(competition_info, "problem_type", "") or ""
+            ).lower()
+            if "classification" in declared_problem:
+                task_type = f"{task_type}_classification"
+            elif "regression" in declared_problem:
+                task_type = f"{task_type}_regression"
+        print(f"   Task type from public contract: {task_type}")
 
     try:
         canonical_result = prepare_canonical_data(
             train_path=train_path,
             test_path=test_path if test_path and Path(test_path).exists() else train_path,
             target_col=target_col,
+            target_cols=target_cols,
+            target_type=(
+                explicit_target_type
+                if explicit_target_type
+                in {"single", "multi_label", "multi_target"}
+                else None
+            ),
             output_dir=working_dir,
             max_rows=max_rows,
             fast_mode=fast_mode,
             timeout_s=timeout_s,
             task_type=task_type,
+            temporal_col=state.get("temporal_col"),
+            sample_submission=(
+                data_files.get("sample_submission")
+                or state.get("sample_submission_path")
+            ),
+            column_contract=state.get("column_contract"),
+            class_order=submission_contract.get("class_order"),
         )
 
         # CRITICAL: Validate canonical data is not empty
@@ -194,26 +662,43 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             from ...mlebench.data_adapter.detection import DetectionMixin
 
             detector = DetectionMixin()
+            filename_label_pattern = _filename_label_pattern_from_state(state)
             train_dir = working_dir / "train"
 
             if train_dir.exists():
-                fallback_result = detector.create_canonical_from_audio_filenames(
-                    audio_dir=train_dir,
-                    canonical_dir=working_dir / "canonical",
-                    n_folds=5,
-                )
+                try:
+                    fallback_test_ids = _resolve_filename_image_test_ids(
+                        data_files=data_files,
+                        working_dir=working_dir,
+                        submission_contract=submission_contract,
+                        sample_submission_path=state.get(
+                            "sample_submission_path"
+                        ),
+                        image_extensions=detector.AUDIO_LABEL_EXTENSIONS,
+                    )
+                except ValueError as exc:
+                    fallback_result = {"success": False, "error": str(exc)}
+                else:
+                    fallback_result = (
+                        detector.create_canonical_from_audio_filenames(
+                            audio_dir=train_dir,
+                            canonical_dir=working_dir / "canonical",
+                            n_folds=5,
+                            explicit_pattern=filename_label_pattern,
+                            test_ids=fallback_test_ids,
+                        )
+                    )
 
                 if fallback_result.get("success"):
-                    print(f"   ✅ Fallback succeeded: {fallback_result['metadata']['canonical_rows']} files")
-                    return {
-                        "canonical_data_prepared": True,
-                        "canonical_dir": fallback_result["canonical_dir"],
-                        "canonical_train_ids_path": fallback_result["train_ids_path"],
-                        "canonical_y_path": fallback_result["y_path"],
-                        "canonical_folds_path": fallback_result["folds_path"],
-                        "canonical_metadata": fallback_result["metadata"],
-                        "last_updated": datetime.now(),
-                    }
+                    updates = _media_fallback_state_updates(
+                        fallback_result, fallback_test_ids
+                    )
+                    if updates is not None:
+                        print(
+                            "   ✅ Fallback succeeded: "
+                            f"{fallback_result['metadata']['canonical_rows']} files"
+                        )
+                        return updates
 
             print("   ❌ Fallback failed: No audio files with labels found")
             return {
@@ -263,20 +748,47 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             feature_cols_path=canonical_result["feature_cols_path"],
             metadata_path=str(Path(canonical_result["canonical_dir"]) / "metadata.json"),
             n_train=metadata["canonical_rows"],
-            n_test=0,  # Will be updated when test data is processed
+            n_test=int(metadata.get("n_test") or 0),
             n_folds=metadata["n_folds"],
             id_col=metadata["id_col"],
+            id_is_synthetic=bool(metadata.get("id_is_synthetic", False)),
             target_col=metadata["target_col"],
+            target_cols=list(
+                metadata.get("target_cols") or [metadata["target_col"]]
+            ),
+            target_type=metadata.get("target_type", "single"),
             is_classification=metadata["is_classification"],
             folds_hash=folds_hash,
             y_hash=y_hash,
             train_ids_hash=train_ids_hash,
             train_schema_hash=train_schema_hash,
+            cv_strategy=metadata["cv_strategy"],
+            temporal_splits_path=canonical_result.get(
+                "temporal_splits_path"
+            ),
+            oof_eligible_mask_path=canonical_result.get(
+                "oof_eligible_mask_path"
+            ),
+            temporal_order_path=canonical_result.get(
+                "temporal_order_path"
+            ),
+            # Declared, not rediscovered: generated loaders must read the
+            # contract's path instead of probing for canonical/test_ids.npy.
+            test_ids_path=canonical_result.get("test_ids_path"),
         )
 
         print(f"      folds_hash: {folds_hash[:8]}...")
         print(f"      y_hash: {y_hash[:8]}...")
         print(f"      train_ids_hash: {train_ids_hash[:8]}...")
+
+        contract_dict = canonical_contract.to_dict()
+        _assert_contract_rows_and_semantics(
+            contract_dict,
+            metadata,
+            train_ids=train_ids_arr,
+            folds=folds_arr,
+            y=y_arr,
+        )
 
         return {
             "canonical_data_prepared": True,
@@ -285,13 +797,58 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
             "canonical_y_path": canonical_result["y_path"],
             "canonical_folds_path": canonical_result["folds_path"],
             "canonical_feature_cols_path": canonical_result["feature_cols_path"],
+            "canonical_test_ids_path": canonical_result.get("test_ids_path"),
             "canonical_metadata": canonical_result["metadata"],
-            "canonical_contract": canonical_contract.to_dict(),
+            "canonical_contract": contract_dict,
+            "canonical_contract_validation": _validation_marker(
+                contract_dict, metadata
+            ),
+            "target_col": metadata["target_col"],
+            "target_cols": list(
+                metadata.get("target_cols") or [metadata["target_col"]]
+            ),
+            "target_type": metadata.get("target_type", "single"),
+            "expected_train_rows": int(metadata["canonical_rows"]),
+            "expected_test_rows": expected_test_rows,
             "last_updated": datetime.now(),
         }
 
     except Exception as e:
         print(f"\n   Error preparing canonical data: {e}")
+        if (
+            str(state.get("run_mode", "")).strip().lower() == "mlebench"
+            and isinstance(e, TargetInferenceError)
+        ):
+            raise RuntimeError(
+                "MLE-bench target contract is ambiguous or incompatible with "
+                "the public training labels/submission schema"
+            ) from e
+        if (
+            str(state.get("run_mode", "")).strip().lower() == "mlebench"
+            and any(
+                marker in str(task_type).strip().lower()
+                for marker in ("time_series", "forecast", "temporal")
+            )
+        ):
+            raise RuntimeError(
+                "MLE-bench temporal task cannot proceed without a trustworthy "
+                "forward-chaining canonical CV contract"
+            ) from e
+        if (
+            str(state.get("run_mode", "")).strip().lower() == "mlebench"
+            and isinstance(e, ValueError)
+            and any(
+                marker in str(task_type).strip().lower()
+                for marker in ("seq2seq", "seq_to_seq", "sequence")
+            )
+        ):
+            # Seq2seq generation depends on the canonical column contract;
+            # continuing without it burns the whole budget on components that
+            # are guaranteed to fail their own contract checks.
+            raise RuntimeError(
+                "MLE-bench seq2seq canonical contract could not be inferred "
+                "unambiguously from the observed schemas"
+            ) from e
         print("   Continuing without canonical data contract...")
         return {
             "canonical_data_prepared": False,

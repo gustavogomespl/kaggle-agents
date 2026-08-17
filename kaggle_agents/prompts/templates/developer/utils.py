@@ -9,12 +9,10 @@ def format_component_details(component) -> str:
     """Format component details for prompts."""
     name = getattr(component, "name", "Unknown")
     component_type = getattr(component, "component_type", "model")
-    estimated_impact = getattr(component, "estimated_impact", 0.0)
     code = getattr(component, "code", "No description")
 
     return f"""Name: {name}
 Type: {component_type}
-Estimated Impact: {estimated_impact:.1%}
 Description: {code}"""
 
 

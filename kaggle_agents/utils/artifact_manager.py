@@ -143,7 +143,7 @@ class ArtifactManager:
 
         # Load and validate OOF
         try:
-            oof = np.load(artifacts.oof_path)
+            oof = np.load(artifacts.oof_path, allow_pickle=False)
 
             # Shape check
             if expected_n_train and oof.shape[0] != expected_n_train:
@@ -177,7 +177,7 @@ class ArtifactManager:
 
         # Load and validate test predictions
         try:
-            test = np.load(artifacts.test_path)
+            test = np.load(artifacts.test_path, allow_pickle=False)
 
             if expected_n_test and test.shape[0] != expected_n_test:
                 issues.append(
@@ -195,7 +195,8 @@ class ArtifactManager:
         if expected_class_order and artifacts.class_order_path:
             try:
                 saved_order = np.load(
-                    artifacts.class_order_path, allow_pickle=True
+                    artifacts.class_order_path,
+                    allow_pickle=False,
                 ).tolist()
                 if saved_order != expected_class_order:
                     issues.append(
@@ -275,14 +276,17 @@ class ArtifactManager:
                 continue
 
             artifacts = self._discovered_models[name]
-            oof = np.load(artifacts.oof_path)
+            oof = np.load(artifacts.oof_path, allow_pickle=False)
 
             if align_by_ids and canonical_ids is not None:
                 if artifacts.train_ids_path is None:
                     print(f"   Skipping {name}: no train_ids for alignment")
                     continue
 
-                model_ids = np.load(artifacts.train_ids_path, allow_pickle=True)
+                model_ids = np.load(
+                    artifacts.train_ids_path,
+                    allow_pickle=False,
+                )
                 oof = self._align_by_id(oof, model_ids, canonical_ids)
 
             oofs.append(oof)
@@ -321,7 +325,7 @@ class ArtifactManager:
                 continue
 
             artifacts = self._discovered_models[name]
-            test = np.load(artifacts.test_path)
+            test = np.load(artifacts.test_path, allow_pickle=False)
             tests.append(test)
             names_used.append(name)
 

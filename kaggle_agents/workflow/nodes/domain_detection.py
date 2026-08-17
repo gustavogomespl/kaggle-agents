@@ -80,6 +80,15 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
 
     forced_type = (env_force_data_type or env_data_type or env_force_domain).strip().lower()
 
+    if (
+        str(state.get("run_mode", "")).strip().lower() == "mlebench"
+        and forced_type
+    ):
+        raise RuntimeError(
+            "Manual domain overrides are forbidden in MLE-bench mode; "
+            "domain must be inferred from public task data and metadata"
+        )
+
     # Debug: show which env vars are set
     if env_force_data_type or env_data_type or env_force_domain:
         print(f"   [ENV] KAGGLE_AGENTS_FORCE_DATA_TYPE={env_force_data_type!r}")
@@ -193,9 +202,17 @@ def domain_detection_node(state: KaggleState) -> dict[str, Any]:
         data_files.get("sample_submission", "")
         or state.get("sample_submission_path", "")
     )
+    test_csv_path = (
+        data_files.get("test_csv", "")
+        or data_files.get("test", "")
+        or state.get("test_data_path", "")
+    )
     if sample_sub_path and Path(sample_sub_path).exists():
         try:
-            submission_contract = create_submission_contract_from_sample(sample_sub_path)
+            submission_contract = create_submission_contract_from_sample(
+                sample_sub_path,
+                test_csv_path or None,
+            )
             submission_contract_dict = submission_contract.to_dict()
             print(f"\n   SubmissionContract created:")
             print(f"      id_col: {submission_contract.id_col}")

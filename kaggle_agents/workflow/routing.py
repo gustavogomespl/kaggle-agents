@@ -75,9 +75,8 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
 
     Simplified routing logic - only stops for:
     1. Explicit skip_remaining_components flag
-    2. Medal achievement (MLE-bench success)
-    3. Critical errors (data download failed, auth issues)
-    4. All components implemented
+    2. Critical errors (data download failed, auth issues)
+    3. All components implemented
 
     Target score checking is delegated to iteration_control to allow
     multiple refinement iterations with meta-evaluator insights.
@@ -92,16 +91,6 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     if state.get("skip_remaining_components"):
         print("\n⏩ skip_remaining_components=True - Moving to validation")
         return "end"
-
-    # Check for medal achievement in MLE-bench mode (immediate success)
-    mlebench_grade = state.get("mlebench_grade")
-    run_mode = str(state.get("run_mode", "")).lower()
-
-    if run_mode == "mlebench" and isinstance(mlebench_grade, dict):
-        if mlebench_grade.get("valid_submission"):
-            if any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"]):
-                print("\n🏅 MEDAL ACHIEVED - Moving to validation")
-                return "end"
 
     # Check for critical errors (data download failed, auth issues)
     errors = state.get("errors", [])
@@ -139,7 +128,9 @@ def route_after_developer(state: KaggleState) -> Literal["iterate", "end"]:
     return "end"
 
 
-def route_after_submission(state: KaggleState) -> Literal["retry_developer", "continue"]:
+def route_after_submission(
+    state: KaggleState,
+) -> Literal["retry_developer", "continue", "fail"]:
     """
     Route after submission agent - retry if submission is invalid.
 
@@ -154,16 +145,24 @@ def route_after_submission(state: KaggleState) -> Literal["retry_developer", "co
         "continue" otherwise
     """
     submissions = state.get("submissions", [])
+    current_error = state.get("submission_validation_error")
+    failure_count = state.get("retry_submission_count", 0)
+
+    # ``submissions`` is append-only. A missing artifact in the current
+    # iteration must not be masked by a valid submission from an earlier one.
+    if current_error:
+        if failure_count <= 3:
+            print(f"⚠️ Invalid submission: {str(current_error)[:100]}...")
+            print(f"   Retrying with error context... ({failure_count}/3)")
+            return "retry_developer"
+        print("❌ Max submission retries reached; candidate remains invalid")
+        return "fail"
 
     if not submissions:
-        # No submission generated at all - retry
-        retry_count = state.get("retry_submission_count", 0)
-        if retry_count < 3:
-            state["retry_submission_count"] = retry_count + 1
-            state["submission_validation_error"] = "No submission file generated"
-            print(f"⚠️ No submission generated, retrying... ({retry_count + 1}/3)")
+        if failure_count <= 3:
+            print(f"⚠️ No submission generated, retrying... ({failure_count}/3)")
             return "retry_developer"
-        return "continue"
+        return "fail"
 
     last_submission = submissions[-1]
 
@@ -179,16 +178,15 @@ def route_after_submission(state: KaggleState) -> Literal["retry_developer", "co
         is_valid = getattr(last_submission, "valid", True)
         error_msg = getattr(last_submission, "error", None)
 
-    if not is_valid and error_msg:
-        retry_count = state.get("retry_submission_count", 0)
+    if not is_valid:
+        error_msg = error_msg or "Submission validation failed"
 
-        if retry_count < 3:
-            state["retry_submission_count"] = retry_count + 1
-            state["submission_validation_error"] = error_msg
+        if failure_count <= 3:
             print(f"⚠️ Invalid submission: {error_msg[:100]}...")
-            print(f"   Retrying with error context... ({retry_count + 1}/3)")
+            print(f"   Retrying with error context... ({failure_count}/3)")
             return "retry_developer"
-        print("⚠️ Max submission retries reached, continuing...")
+        print("❌ Max submission retries reached; candidate remains invalid")
+        return "fail"
 
     return "continue"
 
@@ -199,7 +197,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
 
     Uses adaptive iteration logic:
     1. If score gap > threshold, extend iterations
-    2. In MLE-bench mode, aggressively refines until medal/max
+    2. In MLE-bench mode, refines from CV/OOF feedback until max iterations
     3. Respects minimum iterations before early stopping
 
     Args:
@@ -217,7 +215,6 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     current_iteration = state.get("current_iteration", 0)
     base_max_iterations = state.get("max_iterations", iter_config.max_iterations)
     run_mode = str(state.get("run_mode", "")).lower()
-    mlebench_grade = state.get("mlebench_grade")
 
     # Calculate effective max_iterations based on score gap (adaptive)
     max_iterations = base_max_iterations
@@ -239,32 +236,19 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     print(f"   Needs refinement: {needs_refinement}")
     print(f"   Run mode: {run_mode}")
 
-    # Check medal status
-    has_gold = False
-    has_any_medal = False
-    if isinstance(mlebench_grade, dict) and mlebench_grade.get("valid_submission"):
-        has_gold = mlebench_grade.get("gold_medal", False)
-        has_any_medal = any(mlebench_grade.get(m) for m in ["gold_medal", "silver_medal", "bronze_medal"])
-
-    # Handle skip flag - in MLE-bench mode, only end if gold or max iterations reached
+    # Respect explicit early stopping. MLE-bench test-set results are unavailable
+    # inside the workflow, so this decision cannot depend on scores or medals.
     if state.get("skip_remaining_components"):
-        if run_mode == "mlebench":
-            if has_gold:
-                print("   🥇 GOLD MEDAL ACHIEVED - Ending")
-                return "end"
-            if current_iteration >= max_iterations:
-                print(f"   ⏱️  Max iterations reached with medal ({current_iteration}/{max_iterations})")
-                return "end"
-            # Reset skip flag and continue refining for better medal
-            print(f"   🔄 Medal achieved but continuing for gold (iteration {current_iteration + 1}/{max_iterations})")
-                # Note: State update happens in iteration_control_node, not here
-        else:
-            print("   ⏩ skip_remaining_components=True - Ending")
-            return "end"
+        print("   ⏩ skip_remaining_components=True - Ending")
+        return "end"
 
-    # Check for gold medal achievement (always stop on gold)
-    if has_gold:
-        print("   🥇 GOLD MEDAL ACHIEVED - Success!")
+    # Hard wall-clock budget. Another iteration would need time for its own
+    # closing stages, so the reserve is checked, not just the raw deadline.
+    # This is a clock, not a score: it cannot leak test-set information.
+    from ..utils.run_budget import FINALIZATION_RESERVE_S, budget_exhausted, format_remaining
+
+    if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+        print(f"   ⏳ Wall-clock budget exhausted ({format_remaining(state)}) - Ending")
         return "end"
 
     # Max iterations reached
@@ -272,7 +256,7 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
         print(f"   ⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
         return "end"
 
-    # MLE-bench mode: aggressively refine until medal or max_iterations
+    # MLE-bench mode: use only CV/OOF and validation guidance until the budget ends.
     if run_mode == "mlebench":
         # Log refinement guidance if available
         refinement_guidance = state.get("refinement_guidance", {})
@@ -283,7 +267,10 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
             if refinement_guidance.get("developer_guidance"):
                 print(f"      Developer: {refinement_guidance['developer_guidance'][:80]}...")
 
-        print(f"   🔄 MLE-bench mode: Starting refinement iteration {current_iteration + 1}")
+        print(
+            "   🔄 MLE-bench mode: Starting CV/OOF-guided refinement "
+            f"iteration {current_iteration + 1}"
+        )
         return "refine"
 
     # Standard Kaggle mode: check target_score
@@ -346,7 +333,9 @@ def route_after_iteration_control(state: KaggleState) -> Literal["refine", "end"
     return "end"
 
 
-def route_after_meta_evaluator(state: KaggleState) -> Literal["sota_search", "curriculum", "continue"]:
+def route_after_meta_evaluator(
+    state: KaggleState,
+) -> Literal["sota_search", "curriculum", "continue", "skip_recovery"]:
     """
     Route after meta-evaluator - check for SOTA search or curriculum learning.
 
@@ -359,8 +348,25 @@ def route_after_meta_evaluator(state: KaggleState) -> Literal["sota_search", "cu
         state: Current state
 
     Returns:
-        "sota_search", "curriculum", or "continue"
+        "sota_search", "curriculum", "continue", or "skip_recovery"
     """
+    # A meta-evaluator ablation removes the complete recovery/refinement layer.
+    # Do not inspect stale signals left by an earlier iteration.
+    from ..core.config import get_config
+
+    toggles = getattr(get_config(), "ablation_toggles", None)
+    if toggles and toggles.disable_meta_evaluator:
+        return "skip_recovery"
+
+    # Recovery routes (SOTA search, curriculum, prompt refinement) only pay off
+    # if another iteration can still consume their output. Out of budget they
+    # would just burn the reserve set aside for closing the run.
+    from ..utils.run_budget import FINALIZATION_RESERVE_S, budget_exhausted
+
+    if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+        print("\n   ⏳ Wall-clock budget exhausted - skipping recovery routes")
+        return "skip_recovery"
+
     # Check for SOTA search trigger (stagnation or score gap)
     stagnation = state.get("stagnation_detection", {})
     if stagnation.get("trigger_sota_search"):
@@ -383,3 +389,13 @@ def route_after_meta_evaluator(state: KaggleState) -> Literal["sota_search", "cu
         return "curriculum"
 
     return "continue"
+
+
+def route_after_robustness_gate(
+    state: KaggleState,
+) -> Literal["pass", "recover", "fail"]:
+    """Route the explicit robustness gate outcome."""
+    action = str(state.get("robustness_gate_action", "fail"))
+    if action in {"pass", "recover", "fail"}:
+        return action
+    return "fail"

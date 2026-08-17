@@ -91,5 +91,6 @@ def build_feature_engineering_instructions() -> list[str]:
         "### OUTPUT REQUIREMENTS:",
         "  - Save to 'train_engineered.csv' and 'test_engineered.csv'",
         "  - NO model training in this component",
-        "  - Print 'Final Validation Performance: 1.0' on successful completion",
+        "  - Print '[LOG:COMPONENT] status=success type=feature_engineering' on completion",
+        "  - Do NOT print a validation score: this component has no held-out metric",
     ]

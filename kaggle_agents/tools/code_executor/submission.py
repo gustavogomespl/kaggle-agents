@@ -7,14 +7,19 @@ Contains methods for validating submission format and extracting metrics.
 from __future__ import annotations
 
 import re
+from itertools import zip_longest
 from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from kaggle_agents.utils.csv_utils import read_csv_auto
 
 
 class SubmissionValidationMixin:
     """Mixin providing submission validation methods."""
 
-    # Constant for gating pixel-level submissions
-    MAX_ROWS_FOR_VALIDATION = 100_000
+    CSV_VALIDATION_CHUNK_ROWS = 50_000
 
     def _should_validate_submission(
         self,
@@ -23,7 +28,6 @@ class SubmissionValidationMixin:
     ) -> bool:
         """
         Determine if submission validation should run.
-        Gated to avoid bottlenecks in pixel-level tasks.
 
         Args:
             component_type: Type of component ('model', 'ensemble', etc.)
@@ -37,22 +41,15 @@ class SubmissionValidationMixin:
             return False
 
         # Skip if sample_submission doesn't exist
-        if not sample_submission_path or not sample_submission_path.exists():
-            return False
+        return bool(
+            sample_submission_path and sample_submission_path.exists()
+        )
 
-        # Skip if pixel-level (too many rows)
-        try:
-            with open(sample_submission_path) as f:
-                row_count = sum(1 for _ in f) - 1  # -1 for header
-            if row_count > self.MAX_ROWS_FOR_VALIDATION:
-                print(f"   ⏭️ Skipping submission validation: {row_count} rows (pixel-level)")
-                return False
-        except Exception:
-            return False
-
-        return True
-
-    def _detect_problem_type(self, sample_submission_path: Path) -> str:
+    def _detect_problem_type(
+        self,
+        sample_submission_path: Path,
+        target_cols: list[str] | None = None,
+    ) -> str:
         """
         Detect problem type from sample_submission structure.
 
@@ -62,12 +59,29 @@ class SubmissionValidationMixin:
         Returns:
             'multiclass', 'multilabel', 'binary', or 'regression'
         """
-        import numpy as np
+        from kaggle_agents.agents.ensemble.submission import prediction_positions
 
-        from kaggle_agents.utils.csv_utils import read_csv_auto
-
-        sample_df = read_csv_auto(sample_submission_path)
-        pred_cols = sample_df.columns[1:].tolist()
+        sample_df = read_csv_auto(sample_submission_path, nrows=2048)
+        pred_cols = [
+            sample_df.columns[position]
+            for position in prediction_positions(sample_df, target_cols)
+        ]
+        numeric_cols = [
+            column
+            for column in pred_cols
+            if pd.api.types.is_numeric_dtype(sample_df[column])
+        ]
+        if not numeric_cols:
+            # The positional slice landed entirely on echoed test input. Fall
+            # back to whichever columns the template actually asks for numbers
+            # in, so a template whose prediction comes first still resolves.
+            pred_cols = [
+                str(column)
+                for column in sample_df.columns
+                if pd.api.types.is_numeric_dtype(sample_df[column])
+            ] or pred_cols
+        else:
+            pred_cols = numeric_cols
 
         if len(pred_cols) == 1:
             # Single column: regression or binary
@@ -79,89 +93,230 @@ class SubmissionValidationMixin:
         # Multiple columns
         # Multilabel: values are 0/1 independent (don't sum to 1)
         # Multiclass: probabilities (sum to ~1)
-        row_sums = sample_df[pred_cols].sum(axis=1)
+        # Templates that echo test input alongside the prediction carry text
+        # columns; summing those raises instead of describing the task.
+        numeric = sample_df[pred_cols].apply(pd.to_numeric, errors="coerce")
+        row_sums = numeric.sum(axis=1)
         if np.allclose(row_sums, 1.0, atol=0.1):
             return "multiclass"
         return "multilabel"
 
-    def validate_submission_format(
+    def validate_submission_format(  # noqa: PLR0911, PLR0912
         self,
         submission_path: Path,
         sample_submission_path: Path,
         component_type: str | None = None,
         problem_type: str | None = None,
+        target_cols: list[str] | None = None,
+        require_normalized_rows: bool = True,
     ) -> tuple[bool, str]:
         """
         Validate submission matches expected format exactly.
 
-        Performs gated validation with problem-type-aware checks.
+        Performs streaming validation with problem-type-aware checks.
 
         Args:
             submission_path: Path to generated submission.csv
             sample_submission_path: Path to sample_submission.csv
             component_type: Type of component (for gating)
             problem_type: Override problem type detection
+            target_cols: Resolved prediction column names. Without them the
+                first column is assumed to identify rows, which misreads
+                templates whose first column is the prediction.
+            require_normalized_rows: Whether multiclass rows must sum to 1.
+                Only true when the graded metric reads a row as a probability
+                vector. Under a column-wise ranking metric the grader accepts
+                and scores these predictions unchanged, so rejecting them
+                discards a valid submission to enforce a property nobody
+                measures.
 
         Returns:
             Tuple of (is_valid, message)
         """
-        import numpy as np
-        import pandas as pd
-
-        from kaggle_agents.utils.csv_utils import read_csv_auto
-
         # Gating check
         if not self._should_validate_submission(component_type, sample_submission_path):
             return True, "Validation skipped (gated)"
 
-        # Read files with auto-delimiter detection
+        # Read only schema/role samples up front. Full content validation below
+        # is chunked so pixel-level files cannot bypass the contract.
         try:
-            sub_df = pd.read_csv(submission_path)  # Submission always uses comma
-            sample_df = read_csv_auto(sample_submission_path)  # Sample may use non-standard delimiter
+            sub_header = pd.read_csv(submission_path, nrows=0)
+            sample_header = read_csv_auto(sample_submission_path, nrows=0)
+            sample_preview = read_csv_auto(sample_submission_path, nrows=2048)
         except Exception as e:
             return False, f"Failed to read files: {e}"
 
-        # Auto-detect problem type if not provided
-        if problem_type is None:
-            problem_type = self._detect_problem_type(sample_submission_path)
-
         # Check 1: Columns match exactly (order matters!)
-        if list(sub_df.columns) != list(sample_df.columns):
+        if list(sub_header.columns) != list(sample_header.columns):
             return False, (
                 f"Column mismatch!\n"
-                f"  Expected: {sample_df.columns.tolist()}\n"
-                f"  Got: {sub_df.columns.tolist()}"
+                f"  Expected: {sample_header.columns.tolist()}\n"
+                f"  Got: {sub_header.columns.tolist()}"
             )
 
-        # Check 2: Row count matches
-        if len(sub_df) != len(sample_df):
-            return False, f"Row count mismatch: expected {len(sample_df)}, got {len(sub_df)}"
+        # Auto-detect problem type if not provided
+        if problem_type is None:
+            problem_type = self._detect_problem_type(
+                sample_submission_path, target_cols
+            )
+        normalized_problem_type = (
+            str(problem_type or "").strip().lower().replace("-", "_")
+        )
+        is_multiclass = "multiclass" in normalized_problem_type
 
-        # Check 3: ID column matches exactly
-        id_col = sample_df.columns[0]
-        if not sub_df[id_col].equals(sample_df[id_col]):
-            if set(sub_df[id_col]) == set(sample_df[id_col]):
-                return False, "ID values present but in WRONG ORDER"
-            return False, "ID column values don't match sample_submission"
+        # Roles, not positions: a template may put the prediction first and echo
+        # the test input after it. Comparing the prediction column against the
+        # template's placeholders would reject every real submission, and
+        # running numeric checks over echoed text raises.
+        from kaggle_agents.agents.ensemble.submission import prediction_positions
 
-        # Check 4: No NaN values in prediction columns
-        pred_cols = sample_df.columns[1:].tolist()
-        nan_cols = sub_df[pred_cols].isna().any()
-        if nan_cols.any():
-            bad_cols = nan_cols[nan_cols].index.tolist()
-            return False, f"NaN values in columns: {bad_cols}"
+        predicted = {
+            sample_header.columns[position]
+            for position in prediction_positions(sample_preview, target_cols)
+        }
+        pred_cols = [
+            column for column in sample_header.columns if column in predicted
+        ]
+        echo_cols = [
+            column for column in sample_header.columns if column not in predicted
+        ]
+        label_prediction_format = (
+            len(pred_cols) == 1
+            and (
+                is_multiclass
+                or not pd.api.types.is_numeric_dtype(
+                    sample_preview[pred_cols[0]]
+                )
+            )
+        )
+        try:
+            submission_chunks = pd.read_csv(
+                submission_path,
+                chunksize=self.CSV_VALIDATION_CHUNK_ROWS,
+                dtype=str,
+                keep_default_na=False,
+                na_filter=False,
+            )
+            sample_chunks = read_csv_auto(
+                sample_submission_path,
+                chunksize=self.CSV_VALIDATION_CHUNK_ROWS,
+                dtype=str,
+                keep_default_na=False,
+                na_filter=False,
+            )
+            submission_rows = 0
+            sample_rows = 0
+            template_unchanged = True
+            for sub_chunk, sample_chunk in zip_longest(
+                submission_chunks,
+                sample_chunks,
+            ):
+                if sub_chunk is None:
+                    remaining = len(sample_chunk) if sample_chunk is not None else 0
+                    sample_rows += remaining
+                    return False, (
+                        "Row count mismatch: expected at least "
+                        f"{sample_rows}, got {submission_rows}"
+                    )
+                if sample_chunk is None:
+                    submission_rows += len(sub_chunk)
+                    return False, (
+                        f"Row count mismatch: expected {sample_rows}, "
+                        f"got at least {submission_rows}"
+                    )
+                submission_rows += len(sub_chunk)
+                sample_rows += len(sample_chunk)
+                if len(sub_chunk) != len(sample_chunk):
+                    return False, (
+                        f"Row count mismatch: expected {sample_rows}, "
+                        f"got {submission_rows}"
+                    )
 
-        # Check 5: No Inf values
-        inf_mask = ~np.isfinite(sub_df[pred_cols].values)
-        if inf_mask.any():
-            return False, "Inf values detected in predictions"
+                # Every template-supplied column, not only the first ID, is an
+                # ordered sequence contract.
+                for echo_col in echo_cols:
+                    if not sub_chunk[echo_col].equals(sample_chunk[echo_col]):
+                        if set(sub_chunk[echo_col]) == set(
+                            sample_chunk[echo_col]
+                        ):
+                            return (
+                                False,
+                                f"'{echo_col}' values present but in WRONG ORDER",
+                            )
+                        return False, (
+                            f"'{echo_col}' does not match sample_submission. "
+                            "This column is supplied by the template and must "
+                            f"be returned unchanged; predictions belong in "
+                            f"{pred_cols}. Write the submission with "
+                            "write_submission(test_preds) instead of choosing "
+                            "columns by position."
+                        )
 
-        # Check 6: Probabilities sum to ~1 ONLY for multiclass
-        if problem_type == "multiclass" and len(pred_cols) > 1:
-            row_sums = sub_df[pred_cols].sum(axis=1)
-            if not np.allclose(row_sums, 1.0, atol=0.01):
-                bad_rows = (~np.isclose(row_sums, 1.0, atol=0.01)).sum()
-                return False, f"{bad_rows} rows don't sum to 1.0 (multiclass probabilities)"
+                if label_prediction_format:
+                    if sub_chunk[pred_cols[0]].eq("").any():
+                        return False, (
+                            f"Blank label values in column: {pred_cols[0]}"
+                        )
+                    if template_unchanged:
+                        template_unchanged = sub_chunk[pred_cols].equals(
+                            sample_chunk[pred_cols]
+                        )
+                    numeric_values = None
+                else:
+                    numeric_predictions = sub_chunk[pred_cols].apply(
+                        pd.to_numeric,
+                        errors="coerce",
+                    )
+                    invalid = numeric_predictions.isna().any()
+                    if invalid.any():
+                        bad_cols = invalid[invalid].index.tolist()
+                        return (
+                            False,
+                            f"NaN or non-numeric values in columns: {bad_cols}",
+                        )
+                    numeric_values = numeric_predictions.to_numpy(dtype=float)
+                    if bool(np.isinf(numeric_values).any()):
+                        return False, "Inf values detected in predictions"
+
+                    sample_predictions = sample_chunk[pred_cols].apply(
+                        pd.to_numeric,
+                        errors="coerce",
+                    )
+                    if template_unchanged:
+                        template_unchanged = np.array_equal(
+                            numeric_values,
+                            sample_predictions.to_numpy(dtype=float),
+                            equal_nan=True,
+                        )
+
+                if (
+                    is_multiclass
+                    and require_normalized_rows
+                    and len(pred_cols) > 1
+                    and numeric_values is not None
+                ):
+                    row_sums = numeric_values.sum(axis=1)
+                    if not np.allclose(row_sums, 1.0, atol=0.01):
+                        bad_rows = int(
+                            (~np.isclose(row_sums, 1.0, atol=0.01)).sum()
+                        )
+                        return False, (
+                            f"{bad_rows} rows don't sum to 1.0 "
+                            "(multiclass probabilities)"
+                        )
+        except Exception as e:
+            return False, f"Failed to stream validation files: {e}"
+
+        if submission_rows != sample_rows:
+            return False, (
+                f"Row count mismatch: expected {sample_rows}, "
+                f"got {submission_rows}"
+            )
+        if submission_rows and template_unchanged:
+            return False, (
+                "Prediction columns are unchanged from sample_submission; "
+                "this is the sample submission template"
+            )
 
         return True, f"✅ Submission format validated ({problem_type})"
 

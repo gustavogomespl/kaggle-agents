@@ -14,12 +14,13 @@ def compose_generate_prompt(
     paths: dict[str, str],
     context: DynamicContext,
     use_modular_constraints: bool = True,
+    requirements: str = "",
 ) -> str:
     """
     Compose a dynamic, context-aware code generation prompt.
 
     Adaptive injection based on iteration:
-    - Iteration 0: SOTA-heavy (learn from winners)
+    - Iteration 0: retrieval-heavy (test external technique hypotheses)
     - Later iterations: Feedback-heavy + truncated SOTA reference
 
     Now supports modular constraints to reduce token usage (40-60% reduction).
@@ -57,55 +58,31 @@ def compose_generate_prompt(
         "",
         _format_task(component, competition_info, paths),
     ]
+    if requirements:
+        parts.extend(("", "## Dynamic Component Contract", requirements))
 
-    # Inject dynamic canonical data instructions for model components
+    # The target section comes from the ONE resolved decision. Probing
+    # `output_dir/canonical` here was a second, independent authority check:
+    # it could announce a canonical contract the executable header never
+    # injected (or stay silent about one it did), so the model was told to
+    # parse a stale annotation file the preamble had deliberately hidden.
     comp_type = getattr(component, "component_type", "model")
-    if comp_type in ("model", "ensemble"):
-        try:
-            from ....utils.data_contract import get_canonical_data_instructions
-
-            output_dir = paths.get("output_dir", ".")
-            canonical_instructions = get_canonical_data_instructions(output_dir)
-            if canonical_instructions:
-                parts.append("")
-                parts.append(canonical_instructions)
-        except Exception:
-            pass  # Canonical data not available yet
-
-    # Non-standard label files instruction (e.g., MLSP 2013 Birds .txt files)
-    label_files = paths.get("label_files", [])
-    if label_files:
-        label_section = """
-## NON-STANDARD LABEL FILES (MANDATORY PARSING)
-
-Label files detected: """ + ", ".join(str(lf) for lf in label_files) + """
-
-YOU MUST parse these files - NEVER use dummy labels (np.zeros)!
-
-Steps:
-1. Use parse_label_file() helper (injected in code header)
-2. Create ID -> label mapping
-3. For multi-label: pivot to binary matrix
-4. Match with training data BEFORE training
-
-Example for MLSP 2013 Birds:
-```python
-label_df = parse_label_file(LABEL_FILES[0])
-label_df.columns = ['rec_id', 'label']
-y_train = label_df.pivot_table(index='rec_id', columns='label', aggfunc=len, fill_value=0)
-```
-
-WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
-"""
+    target_source = paths.get("target_source")
+    for section in _target_source_sections(target_source, paths, comp_type):
         parts.append("")
-        parts.append(label_section)
+        parts.append(section)
 
     # Runtime/objective hints (important for timeout-sensitive runs like MLE-bench).
     if context.run_mode or context.objective or context.timeout_per_component is not None:
         parts.append("")
         parts.append("## Objective & Budget")
         if context.run_mode:
-            parts.append(f"- run_mode: {context.run_mode}")
+            displayed_run_mode = (
+                "fixed_budget_evaluation"
+                if context.run_mode.lower() == "mlebench"
+                else context.run_mode
+            )
+            parts.append(f"- run_mode: {displayed_run_mode}")
         if context.objective:
             parts.append(f"- objective: {context.objective}")
         if context.timeout_per_component is not None:
@@ -129,42 +106,46 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
         )
         parts.append("")
         parts.append("Fix requirements:")
-        parts.append("1. Read sample_submission.csv to match ID values and column order exactly")
+        parts.append("1. Keep the injected header and use write_submission(test_preds)")
         parts.append("2. Match row count exactly (no truncation/padding)")
-        parts.append("3. Preserve ID order from sample_submission.csv")
+        parts.append("3. Preserve the template's echoed columns and row order")
         parts.append(
             "4. For image-to-image: flatten per-pixel predictions to the sample submission ID format"
         )
-        parts.append("5. Use assertions before saving")
-        parts.append("```python")
-        parts.append("sample = pd.read_csv(sample_submission_path)")
-        parts.append("assert list(submission.columns) == list(sample.columns)")
-        parts.append("assert len(submission) == len(sample)")
-        parts.append(
-            "assert (submission[sample.columns[0]].values == sample[sample.columns[0]].values).all()"
-        )
-        parts.append("```")
+        parts.append("5. Do not assign template columns by position or call to_csv directly")
 
-    # Adaptive training guidance (GPU-accelerated, reduces epochs if timeout)
+    # Adaptive training guidance (GPU-accelerated, bounded by measured runtime)
     if context.run_mode.lower() == "mlebench" or "medal" in context.objective.lower():
         parts.append("")
-        parts.append("## NEURAL NETWORK TRAINING (GPU-ACCELERATED)")
+        parts.append("## BUDGET-MATCHED NEURAL TRAINING")
         parts.append(
-            f"- **EPOCHS**: Train for up to {context.suggested_epochs} epochs with early stopping"
+            f"- **UPPER BOUND**: At most {context.suggested_epochs} epochs; "
+            "select the feasible step budget from a throughput pilot"
         )
         parts.append(
-            "- **GPU**: MUST use CUDA if available: `device = 'cuda' if torch.cuda.is_available() else 'cpu'`"
+            "- **DEVICE**: Use CUDA when available, while preserving a valid CPU path"
         )
         parts.append(
-            "- **BACKBONE**: Full fine-tuning for maximum performance (do NOT freeze layers)"
+            "- **BACKBONE**: Compare frozen, partial, or full fine-tuning only "
+            "when each fits the deadline; choose by identical OOF folds"
         )
-        parts.append("- **LEARNING RATE**: Use warmup (5% of epochs) + cosine annealing schedule")
-        parts.append("- **AUGMENTATION**: Apply heavy augmentation (Cutmix, Mixup, RandAugment)")
         parts.append(
-            f"- **EARLY STOPPING**: Stop if validation loss doesn't improve for {context.early_stopping_patience} epochs (SOTA uses patience=30)"
+            "- **SCHEDULE**: Derive warmup and decay from the measured number of "
+            "optimizer steps; do not assume a fixed epoch percentage"
+        )
+        parts.append(
+            "- **AUGMENTATION**: Use only label-preserving transforms supported "
+            "by the observed task; retain each candidate through OOF evidence"
+        )
+        parts.append(
+            f"- **EARLY STOPPING UPPER BOUND**: {context.early_stopping_patience} "
+            "checks, shortened when the remaining deadline requires it"
         )
         parts.append("- **CHECKPOINTING**: Save best model checkpoint by validation metric")
-        parts.append("- **MIXED PRECISION**: Use torch.cuda.amp.autocast() for faster training")
+        parts.append(
+            "- **MIXED PRECISION**: Use it only when supported and numerically "
+            "validated for the chosen device/model"
+        )
 
         if context.timeout_occurred:
             parts.append("")
@@ -173,8 +154,8 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
                 f"- REDUCED epochs from {context.epoch_budget} to {context.suggested_epochs}"
             )
             parts.append("- Use smaller batch size if memory issues")
-            parts.append("- Consider freezing early backbone layers if still too slow")
-            parts.append("- STILL prioritize completing training over speed")
+            parts.append("- Reduce trainable capacity if the throughput pilot still misses the deadline")
+            parts.append("- Prioritize a complete, validated candidate within the deadline")
 
         parts.append("")
         parts.append("## SOFT-DEADLINE PATTERN (MANDATORY)")
@@ -192,11 +173,14 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
         parts.append("    # ... train epoch ...")
         parts.append("```")
 
-    # ADAPTIVE: First iteration = SOTA heavy
+    # ADAPTIVE: First iteration = external-hypothesis heavy
     if context.iteration_num == 0:
         if context.sota_patterns:
             parts.append("")
-            parts.append("## SOTA Patterns (Learn from top solutions):")
+            parts.append(
+                "## Retrieved External Technique Hypotheses "
+                "(unverified; validate locally):"
+            )
             parts.append(context.sota_patterns)
 
     # ADAPTIVE: Later iterations = Feedback heavy
@@ -232,10 +216,10 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
             parts.append("")
             parts.append(context.dpo_examples)
 
-        # Still include truncated SOTA as reference
+        # Still include bounded retrieved hypotheses as reference
         if context.sota_patterns:
             parts.append("")
-            parts.append("## SOTA Reference (condensed):")
+            parts.append("## Retrieved External Hypotheses (condensed):")
             parts.append(context.sota_patterns[:1000])
 
     # Component-specific minimal guidance
@@ -247,12 +231,157 @@ WARNING: Using np.zeros for labels causes AUC 0.5 (random predictions)!
     return "\n".join(parts)
 
 
+_DENSE_CANONICAL_INSTRUCTIONS = """
+## MANDATORY: Canonical Data Contract
+
+The canonical contract is the ONLY authoritative source of rows, folds and
+targets for this run. It is already loaded by the injected header.
+
+```python
+# Already available - do NOT reload or redefine:
+#   CANONICAL_TRAIN_IDS, CANONICAL_Y, CANONICAL_FOLDS, CANONICAL_TEST_IDS
+#   CANONICAL_FEATURE_COLS, ID_COL, TARGET_COL, TARGET_COLS, N_FOLDS
+
+# Use the injected audited splitter for CV. It preserves temporal
+# forward-chaining and warm-up eligibility when the canonical strategy is
+# temporal; a simple fold-complement split does not.
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    X_train, X_val = X[train_idx], X[val_idx]
+    y_train, y_val = CANONICAL_Y[train_idx], CANONICAL_Y[val_idx]
+    model.fit(X_train, y_train)
+    oof[val_idx] = model.predict_proba(X_val)
+```
+
+### CRITICAL RULES:
+1. NEVER use train_test_split() - use the canonical folds
+2. NEVER create your own KFold/StratifiedKFold - folds are pre-defined
+3. NEVER sample or shuffle the data independently
+4. ALWAYS save OOF predictions in canonical order (aligned with CANONICAL_TRAIN_IDS)
+5. Align a loaded training table with align_train_to_canonical(df)
+
+### Saving Predictions:
+```python
+assert len(oof) == len(CANONICAL_TRAIN_IDS), "OOF must match canonical row count"
+save_component_artifacts(
+    oof,
+    test_predictions,
+    train_ids=CANONICAL_TRAIN_IDS,
+    test_ids=CANONICAL_TEST_IDS,
+)
+```
+"""
+
+_PACKED_CANONICAL_INSTRUCTIONS = """
+## MANDATORY: Canonical Data Contract (packed image targets)
+
+Targets are packed pixel arrays, not a dense `y` vector. The injected header
+already loaded and validated them; do NOT open the archive yourself.
+
+```python
+# Already available - do NOT reload or redefine:
+#   CANONICAL_TRAIN_IDS, CANONICAL_TEST_IDS, CANONICAL_FOLDS
+#   CANONICAL_TARGET_VALUES, CANONICAL_TARGET_OFFSETS,
+#   CANONICAL_TARGET_SHAPES, CANONICAL_TARGET_IMAGE_IDS
+#   CANONICAL_IMAGE_INPUT_PATHS, CANONICAL_IMAGE_TEST_INPUT_PATHS
+
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    ...  # index the packed target accessor by row, never by filename
+```
+
+### CRITICAL RULES:
+1. Row i of every canonical array describes CANONICAL_TRAIN_IDS[i]
+2. Read model inputs from CANONICAL_IMAGE_INPUT_PATHS (train) and
+   CANONICAL_IMAGE_TEST_INPUT_PATHS (test) - never re-scan directories
+3. Predictions are packed in the same order and saved with the injected helper
+"""
+
+
+def _target_source_sections(
+    target_source,
+    paths: dict,
+    component_type: str,
+) -> list[str]:
+    """Build the target-related prompt sections from the resolved decision."""
+    if target_source is None:
+        return []
+
+    sections: list[str] = []
+    if getattr(target_source, "canonical_authoritative", False):
+        if component_type in ("model", "ensemble"):
+            sections.append(
+                _PACKED_CANONICAL_INSTRUCTIONS
+                if getattr(target_source, "packed_image_contract", False)
+                else _DENSE_CANONICAL_INSTRUCTIONS
+            )
+        auxiliary = _auxiliary_records(paths, target_source)
+        if auxiliary:
+            described = "\n".join(
+                f"- `{record['path']}` (layout: {record['layout'] or 'unclassified'})"
+                for record in auxiliary
+            )
+            sections.append(
+                "## AUXILIARY PUBLIC ARTIFACTS (NOT TARGETS)\n\n"
+                "These public files may carry useful features or metadata. The\n"
+                "canonical contract already owns the targets and folds, so do NOT\n"
+                "read a target from them and do NOT rebuild the row set from them.\n\n"
+                f"{described}\n"
+            )
+        return sections
+
+    if getattr(target_source, "mode", "none") == "sparse_preload":
+        label_files = list(getattr(target_source, "label_files", ()))
+        sections.append(
+            """
+## NON-STANDARD LABEL FILES (MANDATORY PARSING)
+
+Verified sparse-label artifacts: """
+            + ", ".join(str(lf) for lf in label_files)
+            + """
+
+Their sparse layout was verified by inspection before injection. Parse them
+with the injected helper and fail clearly if the target role cannot be
+validated. Never manufacture dummy targets.
+
+Steps:
+1. Use parse_label_file() helper (injected in code header)
+2. Preserve the semantic record ID -> target mapping
+3. Pivot to a binary matrix only if the observed artifact is truly multi-label
+4. Match with training data BEFORE training
+
+Generic variable-width example:
+```python
+targets_df = parse_label_file(LABEL_FILES[0])
+assert {'record_id', 'target'}.issubset(targets_df.columns)
+# Only for a verified multi-label target:
+y_train = targets_df.pivot_table(
+    index='record_id',
+    columns='target',
+    aggfunc='size',
+    fill_value=0,
+)
+```
+"""
+        )
+    return sections
+
+
+def _auxiliary_records(paths: dict, target_source) -> list[dict]:
+    """Neutral auxiliary artifact records for the current decision."""
+    try:
+        from ....agents.developer.target_source import auxiliary_public_artifacts
+    except ImportError:  # pragma: no cover - defensive
+        return []
+    records = paths.get("public_artifacts")
+    if not records:
+        return []
+    return list(auxiliary_public_artifacts({"public_artifacts": records}, target_source))
+
+
 def _format_task(component, competition_info, paths: dict[str, str]) -> str:
     """Format the task specification section."""
     component_type = getattr(component, "component_type", "model")
     component_name = getattr(component, "name", "component")
     component_code = getattr(component, "code", "")
-    estimated_impact = getattr(component, "estimated_impact", 0.0)
 
     name = getattr(competition_info, "name", "competition")
     domain = getattr(competition_info, "domain", "tabular")
@@ -267,7 +396,6 @@ def _format_task(component, competition_info, paths: dict[str, str]) -> str:
     return f"""## Task
 Component: {component_type} - {component_name}
 Goal: {component_code}
-Estimated Impact: {estimated_impact:.1%}
 
 ## Competition
 Name: {name}
@@ -334,8 +462,8 @@ The following path constants ARE pre-defined in the execution environment:
 
 The paths may point to:
 - CSV files: `train.csv`, `test.csv`
-- Directories: `supplemental_data/`, `train_images/`, `essential_data/`
-- Subdirectories: `essential_data/train.csv`
+- Directories: `media/`, `train_images/`, `dataset_bundle/`
+- Nested files: `dataset_bundle/train.csv`
 
 Always check if the path is a file or directory before loading."""
 

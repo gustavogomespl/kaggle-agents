@@ -9,8 +9,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import pandas as pd
-
+from ...utils.csv_utils import read_csv_preview_and_count
+from ...utils.target_inference import infer_pixel_submission_schema
 from .constants import IMAGE_EXTS
 
 
@@ -59,61 +59,91 @@ class SubmissionFormatMixin:
             return "standard", metadata
 
         try:
-            sample_sub = pd.read_csv(sample_path)
+            sample_sub, n_rows = read_csv_preview_and_count(
+                sample_path,
+                preview_rows=200,
+            )
         except Exception:
             return "standard", metadata
 
-        n_rows = len(sample_sub)
         metadata["expected_rows"] = n_rows
 
         if len(sample_sub.columns) == 0:
             return "standard", metadata
 
-        id_col = sample_sub.columns[0]
+        pixel_roles = infer_pixel_submission_schema(sample_sub)
+        if pixel_roles is not None:
+            echoed_cols, predicted_cols = pixel_roles
+            id_col = echoed_cols[0]
+            value_columns = predicted_cols
+        else:
+            id_col = sample_sub.columns[0]
+            value_columns = list(sample_sub.columns[1:])
         metadata["id_column"] = id_col
-        metadata["value_columns"] = list(sample_sub.columns[1:])
+        metadata["value_columns"] = value_columns
 
         # Count test samples (images or files)
         n_test_samples = 0
         if test_path and test_path.exists():
             if test_path.is_dir():
                 # Count test images
-                test_files = list(test_path.glob("*"))
-                n_test_samples = len(
-                    [f for f in test_files if f.is_file() and f.suffix.lower() in IMAGE_EXTS]
+                test_files = (
+                    file for file in test_path.rglob("*") if file.is_file()
                 )
+                n_test_images = 0
+                n_other_files = 0
+                for file in test_files:
+                    n_other_files += 1
+                    if file.suffix.lower() in IMAGE_EXTS:
+                        n_test_images += 1
+                n_test_samples = n_test_images
                 # If no images found, count all files
                 if n_test_samples == 0:
-                    n_test_samples = len([f for f in test_files if f.is_file()])
+                    n_test_samples = n_other_files
 
         metadata["n_test_samples"] = n_test_samples
 
-        # Heuristic 1: If rows >> test_samples, likely pixel-level
-        if n_test_samples > 0 and n_rows > n_test_samples * 100:
-            # Check ID pattern for pixel format (e.g., "1_1_1" = image_row_col)
-            sample_ids = sample_sub[id_col].astype(str).head(20).tolist()
+        # Detect repeated sample prefixes followed by two numeric coordinate
+        # suffixes. The packed writer has a deliberately narrow
+        # ``image_row_col`` contract; a single flat index is not routed here
+        # because its relationship to image width/axis order is unproven.
+        sample_ids = sample_sub[id_col].astype(str).head(200).tolist()
+        parsed_prefixes: list[str] = []
+        suffix_widths: set[int] = set()
+        for sample_id in sample_ids:
+            parts = sample_id.rsplit("_", 2)
+            if len(parts) == 3 and parts[-1].isdigit() and parts[-2].isdigit():
+                parsed_prefixes.append(parts[0])
+                suffix_widths.add(2)
+                continue
+            parts = sample_id.rsplit("_", 1)
+            if len(parts) == 2 and parts[-1].isdigit():
+                parsed_prefixes.append(parts[0])
+                suffix_widths.add(1)
+                continue
+            parsed_prefixes = []
+            suffix_widths.clear()
+            break
 
-            # Check if IDs contain underscores (common pixel format: image_row_col)
-            if sample_ids and all("_" in str(id_val) for id_val in sample_ids):
-                parts = str(sample_ids[0]).split("_")
-                if len(parts) >= 3:
-                    metadata["id_pattern"] = "image_row_col"
-                    metadata["pixel_format_detected"] = True
-                    metadata["estimated_pixels_per_image"] = n_rows // n_test_samples
-                    return "pixel_level", metadata
-                if len(parts) == 2:
-                    # Could be image_pixel_index format
-                    metadata["id_pattern"] = "image_pixel"
-                    metadata["pixel_format_detected"] = True
-                    metadata["estimated_pixels_per_image"] = n_rows // n_test_samples
-                    return "pixel_level", metadata
-
-            # Even without underscore pattern, high ratio suggests pixel-level
-            ratio = n_rows / n_test_samples
-            if ratio > 1000:  # More than 1000 rows per test sample
-                metadata["pixel_format_detected"] = True
-                metadata["estimated_pixels_per_image"] = int(ratio)
-                return "pixel_level", metadata
+        suffix_width = next(iter(suffix_widths)) if len(suffix_widths) == 1 else None
+        if (
+            parsed_prefixes
+            and suffix_width is not None
+            and len(set(parsed_prefixes)) < len(parsed_prefixes)
+            and n_test_samples > 0
+            and len(set(parsed_prefixes)) <= n_test_samples
+            and n_rows > n_test_samples * 100
+            and suffix_width == 2
+        ):
+            metadata["id_pattern"] = (
+                "prefix_two_numeric_suffixes"
+                if suffix_width == 2
+                else "prefix_numeric_suffix"
+            )
+            metadata["pixel_format_detected"] = True
+            if n_test_samples > 0:
+                metadata["estimated_pixels_per_image"] = n_rows // n_test_samples
+            return "pixel_level", metadata
 
         # Heuristic 2: Check for RLE encoding pattern (segmentation)
         if "rle" in id_col.lower() or "EncodedPixels" in sample_sub.columns:

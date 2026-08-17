@@ -16,87 +16,108 @@ def create_seq2seq_fallback_plan(
     """
     Create fallback plan for seq2seq/text normalization competitions.
 
-    Text normalization competitions (like Kaggle's text-normalization-challenge-english-language)
-    are best solved with a HYBRID approach:
-    1. Rule-based system for deterministic classes (PUNCT, LETTERS, etc.)
-    2. Neural seq2seq for ambiguous classes (CARDINAL, DATE with multiple formats)
-    3. Rule-priority ensemble (apply rules first, model for fallback)
+    Text-normalization tasks often benefit from a data-driven HYBRID approach:
+    1. Learn repeated input-to-output mappings from the training split.
+    2. Measure mapping ambiguity on held-out folds.
+    3. Use a neural seq2seq model only where the empirical mapping is uncertain.
 
     Args:
         domain: Competition domain (seq_to_seq, text_normalization)
         sota_analysis: SOTA analysis results
-        competition_name: Name of the competition
+        competition_name: Retained for API compatibility; never used for routing
 
     Returns:
         List of component dictionaries (3 components for hybrid approach)
     """
-    is_text_norm = domain == "text_normalization" or any(
-        kw in competition_name.lower()
-        for kw in ["normalization", "normalize", "text-norm", "tts", "speech"]
-    )
+    del competition_name
 
-    if is_text_norm:
-        # Specialized plan for text normalization (ITN/TN tasks)
-        # PRIORITY: Lookup-first strategy for 80%+ coverage, neural only for ambiguous
+    # Select the mapping-heavy plan only from an explicit task family produced
+    # by data/domain inspection. Competition titles are not evidence about the
+    # schema and must not alter the plan.
+    metadata = sota_analysis.get("canonical_metadata") or sota_analysis.get(
+        "data_contract"
+    )
+    if not isinstance(metadata, dict):
+        metadata = {}
+    task_family = str(
+        sota_analysis.get("task_type")
+        or metadata.get("task_type")
+        or domain
+    ).strip().lower()
+    # A lookup/rule candidate is cheap to evaluate for any seq2seq mapping.
+    # Its OOF coverage gate makes it a no-op for translation/summarization when
+    # inputs do not repeat, while preserving the strong data-derived path for
+    # tasks with recurring transformations.
+    use_validated_mapping_candidate = task_family in {
+        "seq2seq",
+        "seq_to_seq",
+        "text_normalization",
+        "translation",
+        "summarization",
+    }
+
+    if use_validated_mapping_candidate:
+        # The lookup path is selected from the detected domain, while its
+        # coverage and ambiguity thresholds are learned from the supplied data.
         return [
             {
                 "name": "lookup_baseline",
                 "component_type": "preprocessing",
                 "description": (
-                    "Frequency-based lookup table for (class, before) -> after mappings. "
-                    "Handles 80%+ of tokens with zero inference cost. "
-                    "Identifies ambiguous samples that need neural refinement."
+                    "Cross-validated frequency lookup for the detected input, optional "
+                    "type/context, and target columns. Measure lookup coverage and mapping "
+                    "purity from training folds, then flag uncertain samples for refinement."
                 ),
                 "estimated_impact": 0.75,
                 "rationale": (
-                    "Text normalization has high determinism: PUNCT/PLAIN/VERBATIM always map to <self>, "
-                    "LETTERS always spell out, common CARDINALs have fixed mappings. "
-                    "Building lookup from training data captures these patterns perfectly. "
-                    "Neural models are overkill for deterministic classes."
+                    "Repeated transformations can be learned cheaply from the supplied "
+                    "training data. Cross-validation determines whether lookup generalizes "
+                    "instead of assuming that named categories follow fixed rules."
                 ),
                 "code_outline": (
                     "from kaggle_agents.utils.text_normalization import LookupBaseline, create_hybrid_pipeline; "
-                    "pipeline = create_hybrid_pipeline(train_df, fast_mode=FAST_MODE); "
+                    "pipeline = create_hybrid_pipeline("
+                    "train_df, test_df=test_df, column_contract=CANONICAL_METADATA, "
+                    "sample_submission=SAMPLE_SUBMISSION_PATH, fast_mode=FAST_MODE); "
                     "lookup = pipeline['lookup']; "
                     "lookup.save(MODELS_DIR / 'lookup_baseline.json'); "
-                    "Identify ambiguous samples via pipeline['ambiguous_indices']"
+                    "Report held-out lookup coverage and identify ambiguous samples via "
+                    "pipeline['ambiguous_indices']"
                 ),
             },
             {
-                "name": "rule_based_normalizer",
+                "name": "validated_mapping_rules",
                 "component_type": "preprocessing",
                 "description": (
-                    "Class-specific fallback rules for deterministic text normalization. "
-                    "Handles PUNCT (keep as-is), LETTERS (spell out), PLAIN (keep), "
-                    "VERBATIM (keep), TRANS (transliteration), ELECTRONIC (URLs/emails). "
-                    "Complements lookup for unseen (class, before) pairs."
+                    "Infer conservative class-conditional fallback rules from training rows. "
+                    "Apply identity or character-level transformations only when held-out "
+                    "validation confirms that the rule is deterministic."
                 ),
                 "estimated_impact": 0.10,
                 "rationale": (
-                    "Fallback rules handle cases not seen in training data. "
-                    "For deterministic classes like PUNCT/PLAIN, keep as-is is always correct. "
-                    "LETTERS can be reliably spelled out. Rules provide guaranteed coverage."
+                    "Validated fallbacks cover unseen inputs without encoding target-specific "
+                    "class behavior in the prompt. Low-purity groups remain neural-model cases."
                 ),
                 "code_outline": (
-                    "Class-specific fallbacks already built into LookupBaseline; "
-                    "For additional coverage: use num2words for unseen CARDINALs, "
-                    "spell_out for LETTERS, keep-as-is for PLAIN/PUNCT/VERBATIM"
+                    "Estimate per-group identity rate, mapping entropy, and character-rule "
+                    "accuracy on held-out folds; enable only rules that pass the chosen "
+                    "validation threshold"
                 ),
             },
             {
                 "name": "t5_small_ambiguous_only",
                 "component_type": "model",
                 "description": (
-                    "T5-small fine-tuned ONLY on ambiguous cases (DATE, TIME, MEASURE). "
-                    "CRITICAL: max_steps=2000 guard prevents runaway training. "
+                    "T5-small fine-tuned only on samples marked ambiguous by the "
+                    "cross-validated lookup/rule stage. "
+                    "A budget-derived max_steps guard prevents runaway training. "
                     "Uses HF compatibility wrapper for eval_strategy parameter."
                 ),
                 "estimated_impact": 0.12,
                 "rationale": (
-                    "T5-small (60M params) is faster than T5-base (220M) and sufficient "
-                    "when most tokens are already handled by lookup/rules. "
-                    "Training only on ambiguous samples (~10-20% of data) dramatically "
-                    "reduces training time from 140 hours to ~30 minutes."
+                    "A compact model limits cost when a validated lookup handles a meaningful "
+                    "fraction of rows. The actual routed fraction and runtime must be measured "
+                    "on this dataset rather than assumed."
                 ),
                 "code_outline": (
                     "from kaggle_agents.utils.hf_compat import get_training_args_kwargs; "
@@ -113,19 +134,22 @@ def create_seq2seq_fallback_plan(
                 "component_type": "ensemble",
                 "description": (
                     "Lookup-priority ensemble: use lookup/rules first, T5 only for failures. "
-                    "Achieves high accuracy with sub-second inference per sample."
+                    "Use the validated deterministic prediction when available and the neural "
+                    "prediction otherwise; report routing coverage and fold performance."
                 ),
                 "estimated_impact": 0.03,
                 "rationale": (
-                    "Deterministic lookup is always correct when available. "
-                    "Neural model fills gaps for ambiguous patterns. "
-                    "This hybrid achieves winning-level accuracy with 100x faster inference."
+                    "The lookup reduces variance for mappings that repeat across folds, while "
+                    "the neural model handles uncertain mappings. Weights and routing thresholds "
+                    "come only from validation data."
                 ),
                 "code_outline": (
                     "from kaggle_agents.utils.text_normalization import apply_hybrid_predictions; "
                     "lookup = LookupBaseline.load(MODELS_DIR / 'lookup_baseline.json'); "
                     "final_preds = apply_hybrid_predictions(test_df, lookup, neural_preds, neural_indices); "
-                    "submission['after'] = final_preds"
+                    "assert len(SUBMISSION_TARGET_COLS) == 1, "
+                    "'hybrid output requires one submission target'; "
+                    "write_submission(final_preds)"
                 ),
             },
         ]
@@ -138,19 +162,21 @@ def create_seq2seq_fallback_plan(
             "description": (
                 "T5-base fine-tuned for seq2seq task using HuggingFace Seq2SeqTrainer. "
                 "T5 uses text-to-text format ideal for translation, summarization, and generation. "
-                "CRITICAL: Uses max_steps=2000 guard and HF compatibility wrapper."
+                "Uses a budget-derived max_steps guard and HF compatibility wrapper."
             ),
             "estimated_impact": 0.35,
             "rationale": (
-                "T5 (Text-to-Text Transfer Transformer) achieves SOTA on multiple seq2seq benchmarks. "
-                "The text-to-text format unifies different NLP tasks into a single paradigm. "
-                "max_steps=2000 prevents timeout in constrained environments."
+                "A compact text-to-text model is a candidate for rows the OOF router "
+                "marks uncertain. Retain it only when held-out sequence metrics improve "
+                "within the measured runtime budget."
             ),
             "code_outline": (
                 "from kaggle_agents.utils.hf_compat import get_training_args_kwargs; "
+                "from kaggle_agents.utils.text_normalization import get_neural_training_config; "
+                "config = get_neural_training_config(len(train_df), fast_mode=FAST_MODE); "
                 "T5ForConditionalGeneration.from_pretrained('t5-base'), "
                 "T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, "
-                "args = Seq2SeqTrainingArguments(max_steps=2000, learning_rate=1e-4, "
+                "args = Seq2SeqTrainingArguments(max_steps=config['max_steps'], learning_rate=1e-4, "
                 "**get_training_args_kwargs(eval_strategy='steps', eval_steps=500)), "
                 "metric: BLEU or ROUGE depending on task"
             ),

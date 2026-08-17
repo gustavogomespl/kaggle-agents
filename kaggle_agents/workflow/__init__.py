@@ -24,6 +24,7 @@ from .nodes import (
     domain_detection_node,
     iteration_control_node,
     performance_evaluation_node,
+    robustness_gate_node,
 )
 
 # Routing functions
@@ -31,6 +32,7 @@ from .routing import (
     route_after_developer,
     route_after_iteration_control,
     route_after_meta_evaluator,
+    route_after_robustness_gate,
     route_after_submission,
     should_continue_workflow,
     should_retry_component,
@@ -59,6 +61,7 @@ __all__ = [
     "route_after_submission",
     "route_after_iteration_control",
     "route_after_meta_evaluator",
+    "route_after_robustness_gate",
     # Node functions
     "data_download_node",
     "data_format_discovery_node",
@@ -69,4 +72,5 @@ __all__ = [
     "iteration_control_node",
     "performance_evaluation_node",
     "auto_sota_search_node",
+    "robustness_gate_node",
 ]

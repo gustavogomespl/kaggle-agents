@@ -35,19 +35,25 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     working_dir = Path(state.get("working_directory", "."))
     data_files = state.get("data_files", {})
 
-    # Try to find train data
+    # EDA below uses pd.read_csv, so choose a declared table and never a
+    # same-named supplementary directory.
     train_path = None
     candidates = [
-        Path(data_files.get("train", "")) if data_files.get("train") else None,
+        Path(data_files["train_csv"]) if data_files.get("train_csv") else None,
+        Path(state["current_train_path"])
+        if state.get("current_train_path")
+        else None,
+        Path(state["train_data_path"]) if state.get("train_data_path") else None,
+        Path(data_files["train"]) if data_files.get("train") else None,
         working_dir / "train.csv",
         working_dir / "data" / "train.csv",
     ]
     for cand in candidates:
-        if cand and cand.exists():
+        if cand and cand.is_file():
             train_path = cand
             break
 
-    if not train_path or not train_path.exists():
+    if not train_path or not train_path.is_file():
         print("   ⚠️ No train.csv found. Skipping EDA.")
         return {"last_updated": datetime.now()}
 
@@ -63,17 +69,29 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     n_train_samples = len(df)
     n_features = len(df.columns)
 
-    # Detect target column
-    target_col = state.get("target_column")
-    if not target_col:
-        # Try common target names
-        possible_targets = ["target", "label", "class", "y", "outcome"]
-        for pt in possible_targets:
-            if pt in df.columns:
-                target_col = pt
-                break
-        if not target_col and df.columns[-1] not in ["id", "Id", "ID"]:
-            target_col = df.columns[-1]
+    # Column roles must come from the public/canonical contract. Guessing from
+    # familiar target names or from "the last column" is benchmark-shaped prior
+    # knowledge and can silently analyze a feature as the target.
+    canonical_contract = state.get("canonical_contract") or {}
+    raw_target_cols = (
+        canonical_contract.get("target_cols")
+        or state.get("target_cols")
+        or [
+            state.get("target_col")
+            or canonical_contract.get("target_col")
+        ]
+    )
+    target_cols = [
+        str(column)
+        for column in raw_target_cols
+        if isinstance(column, str) and column in df.columns
+    ]
+    target_col = target_cols[0] if len(target_cols) == 1 else None
+    target_type = str(
+        canonical_contract.get("target_type")
+        or state.get("target_type")
+        or "single"
+    )
 
     # Feature type detection
     numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
@@ -81,14 +99,35 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     datetime_cols = []
 
     # Remove target and ID from feature lists
-    id_cols = [c for c in df.columns if c.lower() in ("id", "row_id", "index")]
-    exclude_cols = set(id_cols + ([target_col] if target_col else []))
+    contracted_id = canonical_contract.get("id_col")
+    id_cols = (
+        [contracted_id]
+        if isinstance(contracted_id, str) and contracted_id in df.columns
+        else []
+    )
+    exclude_cols = set(id_cols + target_cols)
+
+    canonical_metadata = state.get("canonical_metadata") or {}
+    declared_text_features = (
+        canonical_metadata.get("text_feature_cols")
+        or canonical_contract.get("text_feature_cols")
+        or []
+    )
+    text_features = [
+        str(column)
+        for column in declared_text_features
+        if isinstance(column, str) and column in df.columns and column not in exclude_cols
+    ]
 
     numeric_cols = [c for c in numeric_cols if c not in exclude_cols]
     categorical_cols = [c for c in categorical_cols if c not in exclude_cols]
+    n_features = len([column for column in df.columns if column not in exclude_cols])
 
-    # Try to detect datetime columns from object columns
+    # Declared prose roles take precedence over values that happen to parse as
+    # dates, so a canonical text feature cannot be reclassified here.
     for col in categorical_cols[:]:
+        if col in text_features:
+            continue
         try:
             sample = df[col].dropna().iloc[:100]
             if len(sample) > 0:
@@ -97,6 +136,10 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
                 categorical_cols.remove(col)
         except (ValueError, TypeError, IndexError):
             pass
+
+    categorical_cols = [
+        column for column in categorical_cols if column not in text_features
+    ]
 
     # Missing values analysis
     missing_value_cols = {}
@@ -124,7 +167,35 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
     imbalance_ratio = None
     n_classes = None
 
-    if target_col and target_col in df.columns:
+    is_classification = canonical_contract.get("is_classification")
+    if (
+        target_type == "multi_label"
+        and len(target_cols) > 1
+        and is_classification is True
+    ):
+        positive_rates = {
+            column: float(pd.to_numeric(df[column], errors="coerce").mean())
+            for column in target_cols
+        }
+        target_distribution = {
+            f"{column}:positive_rate": rate
+            for column, rate in positive_rates.items()
+        }
+        n_classes = len(target_cols)
+        per_label_ratios = []
+        for rate in positive_rates.values():
+            if 0.0 < rate < 1.0:
+                per_label_ratios.append(
+                    max(rate / (1.0 - rate), (1.0 - rate) / rate)
+                )
+        if per_label_ratios:
+            imbalance_ratio = float(max(per_label_ratios))
+            is_imbalanced = imbalance_ratio > 3.0
+    elif (
+        target_col
+        and target_col in df.columns
+        and is_classification is True
+    ):
         value_counts = df[target_col].value_counts(normalize=True)
         target_distribution = value_counts.to_dict()
         n_classes = len(value_counts)
@@ -188,7 +259,7 @@ def data_exploration_node(state: KaggleState) -> dict[str, Any]:
         numeric_features=numeric_cols,
         categorical_features=categorical_cols,
         datetime_features=datetime_cols,
-        text_features=[],  # TODO: detect text features
+        text_features=text_features,
         missing_value_cols=missing_value_cols,
         high_cardinality_cols=high_cardinality_cols,
         constant_cols=constant_cols,

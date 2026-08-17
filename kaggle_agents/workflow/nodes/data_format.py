@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from ...core.config import get_config, get_llm_for_role
 from ...core.state import KaggleState
 from ...tools.data_format_discovery import DataFormatDiscoverer, detect_traditional_format
 
@@ -13,8 +14,10 @@ def data_format_discovery_node(state: KaggleState) -> dict[str, Any]:
     Intelligent data format discovery with fallback mechanism.
 
     This node acts as a fallback when traditional CSV detection fails.
-    It fetches information from the competition's Kaggle page and uses
-    an LLM to generate adaptive parsing instructions.
+    It uses local file evidence and an LLM to generate adaptive parsing
+    instructions. Direct access to the target competition page/notebooks is
+    disabled for MLE-bench; the workflow's target-blind cross-competition
+    search remains active later. The search ablation disables both.
 
     Args:
         state: Current state
@@ -29,6 +32,7 @@ def data_format_discovery_node(state: KaggleState) -> dict[str, Any]:
     working_dir = Path(state["working_directory"])
     competition_info = state["competition_info"]
     competition = competition_info.name
+    run_mode = str(state.get("run_mode") or "").strip().lower()
 
     # Step 1: Try traditional detection first
     print("\n   Checking for standard CSV format...")
@@ -48,15 +52,36 @@ def data_format_discovery_node(state: KaggleState) -> dict[str, Any]:
 
     discoverer = DataFormatDiscoverer()
 
-    # Gather information from multiple sources
-    print("   📄 Fetching competition data page...")
-    data_page_content = discoverer.fetch_data_page(competition)
-
+    # Local file evidence is always available and is sufficient for the LLM to
+    # infer non-standard layouts without consulting target-competition code.
     print("   📁 Listing data files...")
     file_listing = discoverer.list_data_files(working_dir)
 
-    print("   🔍 Analyzing SOTA notebooks for data loading patterns...")
-    sota_loading_code = discoverer.analyze_sota_data_loading(competition, max_notebooks=3)
+    config = get_config()
+    toggles = getattr(config, "ablation_toggles", None)
+    search_disabled = bool(toggles and toggles.disable_search)
+    target_retrieval_forbidden = run_mode == "mlebench"
+    local_only = target_retrieval_forbidden or search_disabled
+
+    if local_only:
+        reason = (
+            "target-specific retrieval forbidden in MLE-bench"
+            if target_retrieval_forbidden
+            else "search ablation"
+        )
+        print(f"   🔒 Competition-page format retrieval disabled ({reason})")
+        data_page_content = ""
+        sota_loading_code: list[str] = []
+    else:
+        print("   📄 Fetching competition data page...")
+        data_page_content = discoverer.fetch_data_page(competition, run_mode=run_mode)
+
+        print("   🔍 Analyzing competition notebooks for data loading patterns...")
+        sota_loading_code = discoverer.analyze_sota_data_loading(
+            competition,
+            max_notebooks=3,
+            run_mode=run_mode,
+        )
 
     context = {
         "competition": competition,
@@ -68,8 +93,6 @@ def data_format_discovery_node(state: KaggleState) -> dict[str, Any]:
 
     # Step 3: Use LLM to generate parsing instructions
     print("   🤖 Generating parsing instructions with LLM...")
-
-    from ...core.config import get_llm_for_role
 
     try:
         llm = get_llm_for_role(role="planner", temperature=0.0)

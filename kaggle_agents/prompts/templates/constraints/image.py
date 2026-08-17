@@ -16,12 +16,44 @@ def resolve_image_dir(base_dir: Path, split: str) -> Path:
         base_dir / "images" / split,
     ]
     for path in candidates:
-        if path.exists():
+        if path.is_dir():
             return path
-    return candidates[0]  # fallback
+    raise FileNotFoundError(
+        f"No image directory for split={split!r}; checked "
+        f"{[str(path) for path in candidates]}"
+    )
 
 train_dir = resolve_image_dir(base_dir, "train")
 test_dir = resolve_image_dir(base_dir, "test")
+```
+
+Every model component must load `CANONICAL_FOLDS`, `CANONICAL_TRAIN_IDS`, and
+`CANONICAL_Y`, assert their lengths match the image records, and iterate those
+assignments. Never build an image-specific holdout or a new fold splitter.
+
+### 0b. Single-Target Classification Labels (CRITICAL)
+For single-target classification, `CANONICAL_Y` is the raw semantic evidence
+(for example, `"cat"` and `"dog"`). Never cast `CANONICAL_Y` directly with
+NumPy or PyTorch and never derive a second label encoder. Use the injected
+`CANONICAL_CLASS_INDICES`, whose integer values follow
+`CANONICAL_CLASS_ORDER`, for all model targets.
+
+Convert those already-encoded indices only to the dtype required by the loss:
+
+```python
+# Binary classification with one output logit:
+bce_targets = torch.as_tensor(
+    CANONICAL_CLASS_INDICES[indices],
+    dtype=torch.float32,
+)
+criterion = nn.BCEWithLogitsLoss()
+
+# Multiclass classification with one logit per canonical class:
+ce_targets = torch.as_tensor(
+    CANONICAL_CLASS_INDICES[indices],
+    dtype=torch.long,
+)
+criterion = nn.CrossEntropyLoss()
 ```
 
 ### 1. Variable Image Dimensions (CRITICAL)
@@ -35,9 +67,22 @@ train_transform = transforms.Compose([
 ])
 ```
 
-**VALIDATION/TEST**: Use `batch_size=1`:
+**VALIDATION/TEST**: Use the SAME fixed-size Resize, then BATCHED inference.
+NEVER use batch_size=1 for val/test - it is 10-30x slower and burns the time
+budget exactly on large datasets:
 ```python
-val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+val_transform = transforms.Compose([
+    transforms.Resize((256, 256)),  # fixed size -> batching is safe
+    transforms.ToTensor(),
+])
+val_loader = DataLoader(val_dataset, batch_size=128, shuffle=False,
+                        num_workers=2, pin_memory=True)
+
+model.eval()
+preds = []
+with torch.no_grad(), torch.cuda.amp.autocast():
+    for xb in val_loader:
+        preds.append(model(xb.to(device, non_blocking=True)).float().cpu())
 ```
 
 ### 1b. TensorFlow Image Decode Safety (CRITICAL)
@@ -52,9 +97,19 @@ def decode_image(path: tf.Tensor) -> tf.Tensor:
     img = tf.image.resize(img, (224, 224))
     return img
 
-dataset = dataset.map(decode_image, num_parallel_calls=tf.data.AUTOTUNE)
-dataset = dataset.apply(tf.data.Dataset.ignore_errors())
+dataset = dataset.map(
+    decode_image,
+    num_parallel_calls=tf.data.AUTOTUNE,
+    deterministic=True,
+)
+dataset = dataset.apply(
+    tf.data.experimental.assert_cardinality(len(canonical_image_paths))
+)
 ```
+
+Do not suppress dataset element errors or replace a failed decode with a blank
+image. A missing/corrupt record must raise with its canonical record ID;
+silently dropping it corrupts OOF and submission alignment.
 
 If you must use `tf.py_function`, always set shape after:
 ```python
@@ -81,6 +136,25 @@ def apply_augmentation(img: np.ndarray) -> np.ndarray:
 ```python
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = model.to(device)
+```
+
+Save PyTorch checkpoints as state dictionaries plus the explicit reconstruction
+configuration. Never pickle the full model object:
+
+```python
+torch.save(
+    {
+        "model_state_dict": model.state_dict(),
+        "architecture": architecture_name,
+        "architecture_kwargs": architecture_kwargs,
+        "class_order": class_order,
+    },
+    checkpoint_path,
+)
+
+restored = build_model(architecture_name, **architecture_kwargs)
+payload = torch.load(checkpoint_path, map_location=device, weights_only=True)
+restored.load_state_dict(payload["model_state_dict"])
 ```
 
 ### 5. Albumentations v2.x API Changes (CRITICAL)
@@ -179,6 +253,62 @@ For AUC-ROC, LogLoss, or any probability-based metric:
 - ALWAYS submit RAW PROBABILITIES (float between 0 and 1)
 - NEVER convert to hard labels - this destroys your score!
 
+### 9. Large-Dataset Throughput (MANDATORY for datasets > 5 GB or DICOM)
+Decoding/resizing the original images every epoch is what makes big
+competitions time out. Decode ONCE, then train from the cache:
+
+```python
+# PREPROCESSING (once): decode + resize/pad every image to a cache.
+# Hash the full source path: train/a.jpg and test/a.jpg must not collide.
+from hashlib import sha256
+import json
+
+CACHE_DIR = Path("models/img_cache"); CACHE_DIR.mkdir(parents=True, exist_ok=True)
+cache_manifest = {}
+for path in all_image_paths:  # includes DICOM via pydicom when needed
+    cache_key = sha256(str(path.resolve()).encode()).hexdigest()
+    is_medical = path.suffix.lower() in {".dcm", ".dicom"}
+    base_out = CACHE_DIR / cache_key[:2] / cache_key
+    existing = next((p for p in (base_out.with_suffix(".npy"), base_out.with_suffix(".jpg"))
+                     if p.exists()), None)
+    if existing is not None:
+        cache_manifest[str(path.resolve())] = str(existing)
+        continue  # resumable
+    img = load_any_format(path)          # PIL / pydicom array
+    img = resize_and_pad(img, (384, 384))  # exact shape -> safe batching
+    # Retain precision for DICOM, TIFF and any >8-bit decoded data. Pixel-level
+    # restoration tasks should also force lossless .npy even when inputs are PNG.
+    requires_lossless = (is_medical or path.suffix.lower() in {".tif", ".tiff"}
+                         or np.asarray(img).dtype.itemsize > 1)
+    out = base_out.with_suffix(".npy" if requires_lossless else ".jpg")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if requires_lossless:
+        np.save(out, img)                # lossless: retain DICOM/windowed precision
+    else:
+        Image.fromarray(img).save(out, quality=95)
+    cache_manifest[str(path.resolve())] = str(out)
+
+(CACHE_DIR / "manifest.json").write_text(json.dumps(cache_manifest, indent=2))
+
+# Fail closed if even one canonical source is absent from the cache manifest.
+expected_sources = {str(path.resolve()) for path in all_image_paths}
+if set(cache_manifest) != expected_sources:
+    missing = sorted(expected_sources - set(cache_manifest))
+    extra = sorted(set(cache_manifest) - expected_sources)
+    raise RuntimeError(
+        f"Image-cache coverage mismatch: missing={missing[:10]}, extra={extra[:10]}"
+    )
+
+# MODEL components: read manifest.json and resolve every source through it.
+# Never rediscover cached files by basename or stem.
+```
+
+Training throughput on GPU is also MANDATORY:
+- Mixed precision ALWAYS: `torch.cuda.amp.autocast()` + `GradScaler` (see #7 for loss safety)
+- `model = model.to(device, memory_format=torch.channels_last)`
+- `DataLoader(num_workers=2-4, pin_memory=True, persistent_workers=True)`
+- `torch.backends.cudnn.benchmark = True` (fixed input sizes)
+
 ```python
 # WRONG for AUC/LogLoss (Score will be ~0.5 - terrible!):
 sample_sub[target_col] = (predictions > 0.5).astype(int)
@@ -194,7 +324,7 @@ WHY: AUC measures ranking ability. Hard labels (0/1) lose all ranking informatio
 A model with 0.51 confidence and 0.99 confidence both become "1", destroying the metric.
 
 ### 9. MULTI-LABEL CLASSIFICATION (CRITICAL - PREVENTS NaN LOSS)
-Multi-label tasks (e.g., RANZCR, ChestX-ray14) require DIFFERENT setup than multi-class:
+Multi-label medical-image tasks require DIFFERENT setup than multi-class:
 
 **TRAINING SETUP:**
 ```python
@@ -241,16 +371,23 @@ with torch.no_grad():
     predictions = probabilities.cpu().numpy()
 ```
 
-**COLUMN ORDER (CRITICAL):**
-ALWAYS read target columns from sample_submission.csv, NEVER hardcode:
-```python
-# ✅ CORRECT - dynamic column reading:
-sample_sub = pd.read_csv(sample_submission_path)
-TARGET_COLS = sample_sub.columns[1:].tolist()  # Skip ID column
-print(f"Target columns from sample_sub: {TARGET_COLS}")
+**COLUMN ROLES AND ORDER (CRITICAL):**
+Use the exact ID/prediction roles from injected `submission_format_info`, then
+verify those names against the public template. The template alone does not
+prove that its first column is the ID.
 
-# ❌ WRONG - hardcoded column names may have typos:
-TARGET_COLS = ['ETT - Abnormal', 'NGT - Incomplete', ...]  # May not match!
+```python
+def validate_submission_roles(sample_submission_path, id_col, target_cols):
+    sample_sub = pd.read_csv(sample_submission_path)
+    target_cols = list(target_cols)
+    if not target_cols:
+        raise ValueError("Submission contract contains no prediction columns")
+    required = [id_col, *target_cols]
+    if len(set(required)) != len(required) or any(
+        col not in sample_sub.columns for col in required
+    ):
+        raise ValueError("Injected submission roles do not match public template")
+    return sample_sub, target_cols
 ```
 
 ### 10. FORBIDDEN: HARDCODED PLACEHOLDER METRICS

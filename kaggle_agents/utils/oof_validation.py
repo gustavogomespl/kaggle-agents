@@ -44,7 +44,9 @@ def validate_class_order(
     Returns:
         Tuple of (is_valid, message)
     """
-    # Try model-specific class order file first, then fallback to global
+    # Try model-specific class order file first, then fallback to global.
+    # Strict MLE callers use ``assert_oof_sanity(require_identity_artifacts=True)``
+    # below, where the mutable global fallback is deliberately disabled.
     class_order_path = models_dir / f"class_order_{model_name}.npy"
     if not class_order_path.exists():
         class_order_path = models_dir / "class_order.npy"
@@ -53,7 +55,10 @@ def validate_class_order(
         return False, f"Missing class_order file for {model_name} - cannot verify alignment"
 
     try:
-        model_class_order = np.load(class_order_path, allow_pickle=True).tolist()
+        model_class_order = np.load(
+            class_order_path,
+            allow_pickle=False,
+        ).tolist()
     except Exception as e:
         return False, f"Error loading class_order for {model_name}: {e}"
 
@@ -108,6 +113,7 @@ def assert_oof_sanity(
     expected_shape: tuple[int, ...] | None = None,
     folds_path: Path | None = None,
     problem_type: str | None = None,
+    require_identity_artifacts: bool = False,
 ) -> OOFSanityResult:
     """Comprehensive OOF sanity check.
 
@@ -136,7 +142,7 @@ def assert_oof_sanity(
 
     # Load OOF predictions
     try:
-        oof = np.load(oof_path)
+        oof = np.load(oof_path, allow_pickle=False)
     except Exception as e:
         return OOFSanityResult(
             model_name=name,
@@ -178,19 +184,32 @@ def assert_oof_sanity(
     class_order_match = True
     if expected_class_order is not None:
         class_order_path = models_dir / f"class_order_{name}.npy"
-        if not class_order_path.exists():
+        if not class_order_path.exists() and not require_identity_artifacts:
             class_order_path = models_dir / "class_order.npy"
 
         if class_order_path.exists():
             try:
-                saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+                saved_order = np.load(
+                    class_order_path,
+                    allow_pickle=False,
+                ).tolist()
                 if saved_order != expected_class_order:
                     class_order_match = False
                     errors.append(f"Class order mismatch: {saved_order} vs {expected_class_order}")
             except Exception as e:
-                warnings.append(f"Could not load class_order: {e}")
+                message = f"Could not load class_order: {e}"
+                if require_identity_artifacts:
+                    errors.append(message)
+                    class_order_match = False
+                else:
+                    warnings.append(message)
         else:
-            warnings.append("No class_order file found, cannot verify alignment")
+            message = "No class_order file found, cannot verify alignment"
+            if require_identity_artifacts:
+                errors.append(message)
+                class_order_match = False
+            else:
+                warnings.append(message)
 
     # Check train IDs (row order)
     train_ids_match = True
@@ -198,14 +217,41 @@ def assert_oof_sanity(
         train_ids_path = models_dir / f"train_ids_{name}.npy"
         if train_ids_path.exists():
             try:
-                saved_ids = np.load(train_ids_path, allow_pickle=True)
-                if not np.array_equal(saved_ids, expected_train_ids):
+                saved_ids = np.load(
+                    train_ids_path,
+                    allow_pickle=False,
+                )
+                # Compare identity, not dtype. The injected
+                # save_component_artifacts helper always writes IDs as text,
+                # while the canonical train_ids.npy keeps the public column's
+                # own dtype. np.array_equal across '<U' and int64 is False for
+                # identical IDs, which rejected every component's OOF on any
+                # competition with numeric IDs and silently disabled stacking.
+                # This is the same normalization the robustness gate applies.
+                saved_order = [
+                    str(value) for value in np.asarray(saved_ids).reshape(-1)
+                ]
+                expected_order = [
+                    str(value)
+                    for value in np.asarray(expected_train_ids).reshape(-1)
+                ]
+                if saved_order != expected_order:
                     train_ids_match = False
                     errors.append("Train IDs mismatch - row order inconsistent")
             except Exception as e:
-                warnings.append(f"Could not load train_ids: {e}")
+                message = f"Could not load train_ids: {e}"
+                if require_identity_artifacts:
+                    errors.append(message)
+                    train_ids_match = False
+                else:
+                    warnings.append(message)
         else:
-            warnings.append("No train_ids file found, cannot verify row order")
+            message = "No train_ids file found, cannot verify row order"
+            if require_identity_artifacts:
+                errors.append(message)
+                train_ids_match = False
+            else:
+                warnings.append(message)
 
     # Check fold info (for leakage verification)
     fold_info_available = False
@@ -217,9 +263,11 @@ def assert_oof_sanity(
         else:
             warnings.append("No fold_assignment file - cannot verify zero-leakage")
 
-    # Additional sanity checks (classification only)
+    # Additional sanity checks (classification only). Independent multilabel
+    # probabilities are not a simplex and therefore must not sum to one.
     if problem_type != "regression":
-        if oof.ndim > 1:
+        independent_outputs = problem_type in {"multi_label", "multilabel"}
+        if oof.ndim > 1 and not independent_outputs:
             row_sums = oof.sum(axis=1)
             empty_rows = int((row_sums == 0).sum())
             if empty_rows > 0:
@@ -260,9 +308,11 @@ def validate_oof_stack(
     models_dir: Path,
     train_ids: np.ndarray | None = None,
     expected_class_order: list[str] | None = None,
+    expected_shape: tuple[int, ...] | None = None,
     folds_path: Path | None = None,
     strict_mode: bool = False,
     problem_type: str | None = None,
+    require_identity_artifacts: bool = False,
 ) -> tuple[dict[str, tuple[Path, Path]], list[OOFSanityResult]]:
     """Validate all OOF files and filter to only valid ones.
 
@@ -271,6 +321,7 @@ def validate_oof_stack(
         models_dir: Directory containing model artifacts
         train_ids: Expected train IDs for row order validation
         expected_class_order: Expected class order from sample_submission
+        expected_shape: Canonical OOF shape when the target contract fixes it
         folds_path: Path to folds.csv for leakage verification
         strict_mode: If True, reject models with any warnings
         problem_type: Optional hint ("classification" or "regression")
@@ -281,15 +332,18 @@ def validate_oof_stack(
     all_results: list[OOFSanityResult] = []
     valid_pairs: dict[str, tuple[Path, Path]] = {}
 
-    # Determine expected shape from first valid OOF
-    expected_shape: tuple[int, ...] | None = None
-    for name, (oof_path, _) in prediction_pairs.items():
-        try:
-            oof = np.load(oof_path)
-            expected_shape = oof.shape
-            break
-        except Exception:
-            continue
+    # For single-target/multiclass data the first readable model establishes
+    # the probability width. Multi-output callers instead pass the immutable
+    # canonical y shape so consistently malformed models cannot validate one
+    # another.
+    if expected_shape is None:
+        for _name, (oof_path, _) in prediction_pairs.items():
+            try:
+                oof = np.load(oof_path, allow_pickle=False)
+                expected_shape = oof.shape
+                break
+            except Exception:
+                continue
 
     for name, (oof_path, test_path) in prediction_pairs.items():
         result = assert_oof_sanity(
@@ -300,6 +354,7 @@ def validate_oof_stack(
             expected_shape=expected_shape,
             folds_path=folds_path,
             problem_type=problem_type,
+            require_identity_artifacts=require_identity_artifacts,
         )
         all_results.append(result)
 
@@ -516,8 +571,8 @@ def validate_oof_quality(
 
     # Load predictions
     try:
-        oof = np.load(oof_path)
-        test = np.load(test_path)
+        oof = np.load(oof_path, allow_pickle=False)
+        test = np.load(test_path, allow_pickle=False)
     except Exception as e:
         return False, [f"Failed to load predictions: {e}"]
 

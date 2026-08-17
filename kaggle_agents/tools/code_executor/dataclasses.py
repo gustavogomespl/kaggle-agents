@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass
@@ -22,6 +22,23 @@ class ExecutionResult:
     exit_code: int
     artifacts_created: list[str]
     errors: list[str]
+
+    # Structured classification of a failure. ``None`` means "not classified":
+    # an ordinary candidate defect the fix/debug loop may still repair.
+    # ``harness`` marks a failure inside the generator-owned preamble, which no
+    # candidate rewrite can fix. Defaulted so existing callers and test doubles
+    # that build an ExecutionResult positionally keep working.
+    failure_origin: Literal["agent", "harness", "infrastructure"] | None = None
+    retryable: bool = True
+    header_sha256: str | None = None
+    contract_fingerprint: str | None = None
+
+    # Executor-only evidence. ``executed_script_path`` is the exact temporary
+    # script this execution launched: traceback frames are only evidence when
+    # they name it. ``candidate_body_reached`` is None for code without a
+    # generated header (a supported generic executor input).
+    executed_script_path: str | None = None
+    candidate_body_reached: bool | None = None
 
 
 @dataclass

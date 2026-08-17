@@ -26,6 +26,7 @@ __all__ = [
     "KaggleSearcher",
     "NotebookMetadata",
     "search_competition_notebooks",
+    "search_notebooks_cross_competition",
 ]
 
 _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
@@ -33,6 +34,7 @@ _LAZY_IMPORTS: dict[str, tuple[str, str]] = {
     "KaggleSearcher": ("kaggle_search", "KaggleSearcher"),
     "NotebookMetadata": ("kaggle_search", "NotebookMetadata"),
     "search_competition_notebooks": ("kaggle_search", "search_competition_notebooks"),
+    "search_notebooks_cross_competition": ("kaggle_search", "search_notebooks_cross_competition"),
 }
 
 

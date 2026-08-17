@@ -1,11 +1,11 @@
 """
-Text Normalization utilities for fast baseline and hybrid approaches.
+Text normalization utilities for data-driven lookup and hybrid approaches.
 
-This module implements the lookup-first strategy that handles 80%+ of tokens
-with deterministic rules, reserving neural models only for ambiguous cases.
+Rules and routing decisions are learned from the supplied training data. This
+module deliberately contains no benchmark-specific class taxonomy.
 
 Key classes:
-- LookupBaseline: Frequency-based lookup table for (class, before) -> after mappings
+- LookupBaseline: Frequency-based lookup for resolved context/source/target roles
 - HybridPipeline: Combines lookup baseline with neural model for ambiguous cases
 """
 
@@ -14,37 +14,23 @@ from __future__ import annotations
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import numpy as np
 import pandas as pd
 
+from .data_contract import infer_seq2seq_columns
 
-# Deterministic semiotic classes (rule-based, no neural needed)
-# These classes have near-deterministic mappings that can be handled by lookup/rules
-DETERMINISTIC_CLASSES = {
-    "PLAIN",      # Keep as-is
-    "PUNCT",      # Keep as-is
-    "VERBATIM",   # Keep as-is
-    "LETTERS",    # Spell out: "ABC" -> "a b c"
-    "ELECTRONIC", # URLs, emails - special formatting
-    "TRANS",      # Transliteration - usually keep as-is
-}
 
-# Ambiguous classes that benefit from neural model
-# These classes have context-dependent or multiple valid transformations
-AMBIGUOUS_CLASSES = {
-    "CARDINAL",   # 123 -> "one hundred twenty three" OR "one two three"
-    "ORDINAL",    # 1st -> "first"
-    "DATE",       # 1/2/2023 -> many possible formats
-    "TIME",       # 10:30 -> "ten thirty" or "ten thirty a m"
-    "MEASURE",    # 5kg -> "five kilograms" or "five k g"
-    "MONEY",      # $5 -> "five dollars" or "five bucks"
-    "DECIMAL",    # 3.14 -> "three point one four"
-    "FRACTION",   # 1/2 -> "one half" or "a half"
-    "TELEPHONE",  # Phone number formatting
-    "ADDRESS",    # Address formatting
-}
+# Backward-compatible exports. Class membership is now learned by
+# ``LookupBaseline.fit`` and exposed on each fitted instance.
+DETERMINISTIC_CLASSES: frozenset[str] = frozenset()
+AMBIGUOUS_CLASSES: frozenset[str] = frozenset()
+
+_GLOBAL_CONTEXT = "__global_context__"
+_CONTEXT_COL = "__context__"
+_SOURCE_COL = "__source__"
+_TARGET_COL = "__target__"
 
 # Max steps guard for neural training to prevent timeout
 DEFAULT_MAX_STEPS_FAST = 2000
@@ -55,58 +41,148 @@ class LookupBaseline:
     """
     Frequency-based lookup baseline for text normalization.
 
-    For each (class, before) pair, stores the most frequent 'after' value
-    from training data. Achieves 80%+ accuracy on deterministic classes.
-
-    This is the first component in the hybrid pipeline and handles most tokens
-    with zero inference cost.
+    For each context/input pair, stores the most frequent target observed in
+    training data. Confidence requires enough observations and high empirical
+    purity. Class-level identity, character-spelling, or constant-output rules
+    are enabled only when the same data-driven confidence test passes.
     """
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        confidence_threshold: float = 0.98,
+        min_lookup_count: int = 2,
+        min_rule_count: int = 3,
+    ):
+        if not 0.5 <= confidence_threshold <= 1.0:
+            raise ValueError("confidence_threshold must be in [0.5, 1.0]")
+        if min_lookup_count < 1 or min_rule_count < 1:
+            raise ValueError("minimum observation counts must be positive")
+
+        self.confidence_threshold = confidence_threshold
+        self.min_lookup_count = min_lookup_count
+        self.min_rule_count = min_rule_count
         self.lookup: dict[tuple[str, str], str] = {}
+        self.confident_lookup_keys: set[tuple[str, str]] = set()
         self.class_fallbacks: dict[str, str] = {}
+        self.deterministic_classes: set[str] = set()
+        self.ambiguous_classes: set[str] = set()
+        self.class_rule_metrics: dict[str, dict[str, float | int | str | None]] = {}
         self.stats: dict[str, int] = defaultdict(int)
+        self.class_col: str | None = None
+        self.before_col: str | None = None
+        self.after_col: str | None = None
 
     def fit(
         self,
         df: pd.DataFrame,
-        class_col: str = "class",
-        before_col: str = "before",
-        after_col: str = "after",
+        class_col: str | None = None,
+        before_col: str | None = None,
+        after_col: str | None = None,
+        *,
+        test_df: pd.DataFrame | None = None,
+        sample_submission: str | Path | pd.DataFrame | None = None,
+        column_contract: Mapping[str, Any] | None = None,
     ) -> LookupBaseline:
         """
         Build lookup table from training data.
 
         Args:
-            df: Training DataFrame with class, before, after columns
-            class_col: Name of class column
+            df: Training DataFrame
+            class_col: Optional context/type column
             before_col: Name of input column
             after_col: Name of target column
+            test_df: Test data used to derive train-only target/schema roles
+            sample_submission: Submission schema used to confirm the output
+            column_contract: Canonical column-role metadata
 
         Returns:
             self for chaining
         """
-        # Count (class, before) -> after frequencies using vectorized groupby
-        # This is 50-100x faster than iterrows for large datasets
-        counts = df.groupby(
-            [class_col, before_col, after_col], as_index=False
-        ).size()
-        counts.columns = [class_col, before_col, after_col, 'count']
+        resolved = infer_seq2seq_columns(
+            df,
+            test_df,
+            target_col=after_col,
+            source_col=before_col,
+            class_col=class_col,
+            sample_submission=sample_submission,
+            contract=column_contract,
+        )
+        class_col = resolved["class_col"]
+        before_col = resolved["source_col"]
+        after_col = resolved["target_col"]
 
-        # Get the most frequent 'after' for each (class, before) pair
-        idx = counts.groupby([class_col, before_col])['count'].idxmax()
+        required_columns = {before_col, after_col}
+        if class_col is not None:
+            required_columns.add(class_col)
+        missing_columns = required_columns - set(df.columns)
+        if missing_columns:
+            raise ValueError(f"Missing normalization columns: {sorted(missing_columns)}")
+        if df.empty:
+            raise ValueError("Cannot fit lookup baseline on an empty DataFrame")
+
+        self.class_col = class_col
+        self.before_col = before_col
+        self.after_col = after_col
+        self.lookup.clear()
+        self.confident_lookup_keys.clear()
+        self.class_fallbacks.clear()
+        self.deterministic_classes.clear()
+        self.ambiguous_classes.clear()
+        self.class_rule_metrics.clear()
+        self.stats.clear()
+
+        context = (
+            df[class_col].fillna("").astype(str)
+            if class_col is not None
+            else pd.Series(_GLOBAL_CONTEXT, index=df.index, dtype=object)
+        )
+        normalized = pd.DataFrame(
+            {
+                _CONTEXT_COL: context,
+                _SOURCE_COL: df[before_col].fillna("").astype(str),
+                _TARGET_COL: df[after_col].fillna("").astype(str),
+            },
+            index=df.index,
+        )
+
+        # Count context/input -> target frequencies.
+        counts = normalized.groupby(
+            [_CONTEXT_COL, _SOURCE_COL, _TARGET_COL], as_index=False,
+            dropna=False,
+        ).size()
+        counts.columns = [_CONTEXT_COL, _SOURCE_COL, _TARGET_COL, "count"]
+        counts["total"] = counts.groupby([_CONTEXT_COL, _SOURCE_COL], dropna=False)[
+            "count"
+        ].transform("sum")
+        counts["purity"] = counts["count"] / counts["total"]
+
+        # Get the most frequent target for each context/input pair.
+        idx = counts.groupby([_CONTEXT_COL, _SOURCE_COL], dropna=False)["count"].idxmax()
         best_mappings = counts.loc[idx]
 
-        # Build lookup dictionary
         for _, row in best_mappings.iterrows():
-            key = (str(row[class_col]), str(row[before_col]))
-            self.lookup[key] = str(row[after_col])
+            key = (str(row[_CONTEXT_COL]), str(row[_SOURCE_COL]))
+            self.lookup[key] = str(row[_TARGET_COL])
             self.stats["lookup_entries"] += 1
+            if (
+                int(row["total"]) >= self.min_lookup_count
+                and float(row["purity"]) >= self.confidence_threshold
+            ):
+                self.confident_lookup_keys.add(key)
 
-        # Build class-level fallbacks
-        self._build_class_fallbacks(df, class_col, before_col, after_col)
+        self._build_class_fallbacks(
+            normalized,
+            _CONTEXT_COL,
+            _SOURCE_COL,
+            _TARGET_COL,
+        )
 
-        print(f"[LookupBaseline] Built lookup with {len(self.lookup):,} entries")
+        print(
+            "[LookupBaseline] Built "
+            f"{len(self.lookup):,} mappings "
+            f"({len(self.confident_lookup_keys):,} confidence-qualified)"
+        )
         return self
 
     def _build_class_fallbacks(
@@ -116,57 +192,69 @@ class LookupBaseline:
         before_col: str,
         after_col: str,
     ):
-        """Build fallback rules per semiotic class for unseen tokens."""
-        # PLAIN: keep as-is
-        self.class_fallbacks["PLAIN"] = "<self>"
+        """Infer conservative fallback rules from observed transformations."""
+        for class_value, class_df in df.groupby(class_col, dropna=False):
+            class_name = str(class_value)
+            before = class_df[before_col].fillna("").astype(str)
+            after = class_df[after_col].fillna("").astype(str)
+            sample_count = len(class_df)
 
-        # PUNCT: keep as-is
-        self.class_fallbacks["PUNCT"] = "<self>"
+            identity_rate = float((before == after).mean())
+            spelled = before.map(lambda value: " ".join(value.lower()))
+            spell_rate = float((spelled == after).mean())
+            value_counts = after.value_counts(dropna=False)
+            constant_output = str(value_counts.index[0]) if not value_counts.empty else None
+            constant_rate = (
+                float(value_counts.iloc[0] / sample_count) if sample_count else 0.0
+            )
 
-        # VERBATIM: keep as-is
-        self.class_fallbacks["VERBATIM"] = "<self>"
+            selected_rule: str | None = None
+            if sample_count >= self.min_rule_count:
+                if identity_rate >= self.confidence_threshold:
+                    selected_rule = "<self>"
+                elif spell_rate >= self.confidence_threshold:
+                    selected_rule = "<spell>"
+                elif constant_output is not None and constant_rate >= self.confidence_threshold:
+                    selected_rule = constant_output
 
-        # LETTERS: spell out (will be handled in predict)
-        self.class_fallbacks["LETTERS"] = "<spell>"
+            if selected_rule is not None:
+                self.class_fallbacks[class_name] = selected_rule
+                self.deterministic_classes.add(class_name)
+            else:
+                self.ambiguous_classes.add(class_name)
 
-        # ELECTRONIC: usually keep as-is
-        self.class_fallbacks["ELECTRONIC"] = "<self>"
+            self.class_rule_metrics[class_name] = {
+                "sample_count": sample_count,
+                "identity_rate": identity_rate,
+                "spell_rate": spell_rate,
+                "constant_rate": constant_rate,
+                "selected_rule": selected_rule,
+            }
 
-        # TRANS: keep as-is
-        self.class_fallbacks["TRANS"] = "<self>"
-
-        # For other classes, use most common transformation pattern
-        for cls in df[class_col].unique():
-            cls_str = str(cls)
-            if cls_str in self.class_fallbacks:
-                continue
-            cls_df = df[df[class_col] == cls]
-            if len(cls_df) > 0:
-                # Most common 'after' value for this class
-                most_common = cls_df[after_col].value_counts().idxmax()
-                self.class_fallbacks[cls_str] = str(most_common)
-
-    def predict(self, class_val: str, before_val: str) -> tuple[str, bool]:
+    def predict(self, class_val: str | None, before_val: str) -> tuple[str, bool]:
         """
-        Predict 'after' value for a (class, before) pair.
+        Predict a target string for a (context, source) pair.
 
         Args:
-            class_val: Semiotic class
-            before_val: Input token
+            class_val: Optional context/type value
+            before_val: Source text
 
         Returns:
             Tuple of (prediction, is_confident)
             is_confident=False indicates fallback was used (may need neural refinement)
         """
-        key = (str(class_val), str(before_val))
+        context_value = (
+            _GLOBAL_CONTEXT if self.class_col is None else str(class_val)
+        )
+        key = (context_value, str(before_val))
 
         # Try exact lookup first
         if key in self.lookup:
             self.stats["lookup_hits"] += 1
-            return self.lookup[key], True
+            return self.lookup[key], key in self.confident_lookup_keys
 
         # Try class-level fallback
-        fallback = self.class_fallbacks.get(str(class_val))
+        fallback = self.class_fallbacks.get(context_value)
         self.stats["fallback_used"] += 1
 
         if fallback == "<self>":
@@ -177,39 +265,57 @@ class LookupBaseline:
             spelled = " ".join(before_val.lower())
             return spelled, True
         if fallback:
-            # Used class-level fallback, may need neural refinement
-            is_ambiguous = str(class_val) in AMBIGUOUS_CLASSES
-            return fallback, not is_ambiguous
+            return fallback, True
         # Unknown class, keep as-is
         return before_val, False
 
     def predict_batch(
         self,
         df: pd.DataFrame,
-        class_col: str = "class",
-        before_col: str = "before",
+        class_col: str | None = None,
+        before_col: str | None = None,
     ) -> pd.DataFrame:
         """
         Predict for entire DataFrame using vectorized operations.
 
         Args:
-            df: DataFrame with class and before columns
+            df: DataFrame with the fitted source and optional context columns
 
         Returns:
             DataFrame with predictions and confidence flags
         """
+        class_col = self.class_col if class_col is None else class_col
+        before_col = self.before_col if before_col is None else before_col
+        if before_col is None:
+            raise ValueError(
+                "Source column is unavailable; fit with before_col or a column contract"
+            )
+        if before_col not in df.columns:
+            raise ValueError(f"Source column '{before_col}' is missing from prediction data")
+        if class_col is not None and class_col not in df.columns:
+            raise ValueError(f"Context column '{class_col}' is missing from prediction data")
+
         # Vectorized approach - 50-100x faster than iterrows
-        class_str = df[class_col].astype(str)
-        before_str = df[before_col].astype(str)
+        class_str = (
+            df[class_col].fillna("").astype(str)
+            if class_col is not None
+            else pd.Series(_GLOBAL_CONTEXT, index=df.index, dtype=object)
+        )
+        before_str = df[before_col].fillna("").astype(str)
 
-        # Create lookup keys as tuples
-        keys = list(zip(class_str, before_str))
+        # Create lookup keys as tuples.
+        keys = list(zip(class_str, before_str, strict=True))
 
-        # Vectorized lookup using Series.map()
+        # Vectorized lookup using Series.map().
         predictions = pd.Series(keys, index=df.index).map(self.lookup)
 
-        # Track which had direct lookup hits
+        # A memorized mapping is only trusted when its observation count and
+        # empirical purity passed the thresholds during fit.
         is_lookup_hit = predictions.notna()
+        is_confident_lookup = pd.Series(
+            [key in self.confident_lookup_keys for key in keys],
+            index=df.index,
+        )
         self.stats["lookup_hits"] += int(is_lookup_hit.sum())
 
         # Get fallback values for misses
@@ -226,7 +332,7 @@ class LookupBaseline:
         # Handle unknown class (fallback is NaN): keep as-is, mark not confident
         is_unknown_class = needs_fallback & fallback_values.isna()
 
-        # Handle other known fallbacks (not <self>, not <spell>, not unknown)
+        # Handle learned constant-output fallbacks.
         is_other_fallback = needs_fallback & ~is_self_fallback & ~is_spell_fallback & ~is_unknown_class
 
         # Apply fallbacks
@@ -238,23 +344,16 @@ class LookupBaseline:
         # Track fallback usage
         self.stats["fallback_used"] += int(needs_fallback.sum())
 
-        # Calculate confidence:
-        # - Lookup hit = confident
-        # - <self> or <spell> fallback = confident (deterministic rules)
-        # - Other fallback for non-ambiguous class = confident
-        # - Other fallback for ambiguous class = not confident
-        # - Unknown class = NOT confident (must go to neural)
-        is_ambiguous_class = class_str.isin(AMBIGUOUS_CLASSES)
+        # Every class fallback was learned with the configured confidence and
+        # sample-count thresholds. Unknown and low-purity mappings fail closed.
         is_confident = (
-            is_lookup_hit |
-            is_self_fallback |
-            is_spell_fallback |
-            (is_other_fallback & ~is_ambiguous_class)
+            is_confident_lookup
+            | is_self_fallback
+            | is_spell_fallback
+            | is_other_fallback
         )
-        # Unknown class is explicitly NOT confident (handled by not being in any of the above)
-
-        # Mark as needing neural if not confident AND class is ambiguous
-        needs_neural = ~is_confident & is_ambiguous_class
+        needs_neural = ~is_confident
+        self.stats["uncertain_predictions"] += int(needs_neural.sum())
 
         result = df.copy()
         result["prediction"] = predictions
@@ -271,27 +370,63 @@ class LookupBaseline:
         # Convert tuple keys to strings for JSON
         lookup_serializable = {f"{k[0]}|||{k[1]}": v for k, v in self.lookup.items()}
 
-        with open(path, "w") as f:
-            json.dump({
-                "lookup": lookup_serializable,
-                "class_fallbacks": self.class_fallbacks,
-                "stats": dict(self.stats),
-            }, f)
+        confident_keys = [f"{key[0]}|||{key[1]}" for key in self.confident_lookup_keys]
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "lookup": lookup_serializable,
+                    "confident_lookup_keys": confident_keys,
+                    "class_fallbacks": self.class_fallbacks,
+                    "deterministic_classes": sorted(self.deterministic_classes),
+                    "ambiguous_classes": sorted(self.ambiguous_classes),
+                    "class_rule_metrics": self.class_rule_metrics,
+                    "confidence_threshold": self.confidence_threshold,
+                    "min_lookup_count": self.min_lookup_count,
+                    "min_rule_count": self.min_rule_count,
+                    "column_contract": {
+                        "class_col": self.class_col,
+                        "source_col": self.before_col,
+                        "target_col": self.after_col,
+                    },
+                    "stats": dict(self.stats),
+                },
+                f,
+            )
 
         print(f"[LookupBaseline] Saved to {path}")
 
     @classmethod
     def load(cls, path: str | Path) -> LookupBaseline:
         """Load lookup table from file."""
-        with open(path) as f:
+        with Path(path).open(encoding="utf-8") as f:
             data = json.load(f)
 
-        instance = cls()
+        instance = cls(
+            confidence_threshold=float(data.get("confidence_threshold", 0.98)),
+            min_lookup_count=int(data.get("min_lookup_count", 2)),
+            min_rule_count=int(data.get("min_rule_count", 3)),
+        )
         # Convert string keys back to tuples
         instance.lookup = {
             tuple(k.split("|||")): v for k, v in data["lookup"].items()
         }
+        serialized_confident_keys = data.get("confident_lookup_keys")
+        if serialized_confident_keys is None:
+            # Old artifacts did not record confidence; keep their mappings
+            # usable while requiring new fits to follow the stricter contract.
+            instance.confident_lookup_keys = set(instance.lookup)
+        else:
+            instance.confident_lookup_keys = {
+                tuple(key.split("|||")) for key in serialized_confident_keys
+            }
         instance.class_fallbacks = data["class_fallbacks"]
+        instance.deterministic_classes = set(data.get("deterministic_classes", []))
+        instance.ambiguous_classes = set(data.get("ambiguous_classes", []))
+        instance.class_rule_metrics = data.get("class_rule_metrics", {})
+        saved_contract = data.get("column_contract") or {}
+        instance.class_col = saved_contract.get("class_col")
+        instance.before_col = saved_contract.get("source_col")
+        instance.after_col = saved_contract.get("target_col")
         instance.stats = defaultdict(int, data.get("stats", {}))
 
         print(f"[LookupBaseline] Loaded {len(instance.lookup):,} entries from {path}")
@@ -303,6 +438,10 @@ class LookupBaseline:
             "total_entries": len(self.lookup),
             "lookup_hits": self.stats.get("lookup_hits", 0),
             "fallback_used": self.stats.get("fallback_used", 0),
+            "confidence_qualified_entries": len(self.confident_lookup_keys),
+            "uncertain_predictions": self.stats.get("uncertain_predictions", 0),
+            "learned_deterministic_classes": sorted(self.deterministic_classes),
+            "learned_ambiguous_classes": sorted(self.ambiguous_classes),
             "hit_rate": (
                 self.stats.get("lookup_hits", 0) /
                 max(1, self.stats.get("lookup_hits", 0) + self.stats.get("fallback_used", 0))
@@ -361,25 +500,34 @@ def create_hybrid_pipeline(
     train_df: pd.DataFrame,
     fast_mode: bool = True,
     timeout_s: int = 1800,
-    class_col: str = "class",
-    before_col: str = "before",
-    after_col: str = "after",
+    class_col: str | None = None,
+    before_col: str | None = None,
+    after_col: str | None = None,
+    validation_folds: int = 3,
+    *,
+    test_df: pd.DataFrame | None = None,
+    sample_submission: str | Path | pd.DataFrame | None = None,
+    column_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Create hybrid lookup + neural pipeline for text normalization.
 
     Strategy:
-    1. Build lookup baseline from training data
-    2. Identify ambiguous samples that need neural prediction
-    3. Configure neural model only for ambiguous subset
+    1. Estimate routing confidence out of fold.
+    2. Fit the final lookup baseline on all supplied training rows.
+    3. Configure a neural model only for rows not covered confidently OOF.
 
     Args:
         train_df: Training DataFrame
         fast_mode: Whether in fast mode
         timeout_s: Available timeout
-        class_col: Name of class column
+        class_col: Optional context/type column
         before_col: Name of input column
         after_col: Name of target column
+        validation_folds: Number of deterministic OOF routing folds
+        test_df: Test data used for schema-role resolution
+        sample_submission: Submission schema used to confirm the output
+        column_contract: Canonical column-role metadata
 
     Returns:
         Dict with pipeline components:
@@ -388,20 +536,102 @@ def create_hybrid_pipeline(
         - neural_config: Training config for neural model (or None if not needed)
         - stats: Coverage statistics
     """
-    # Step 1: Build lookup baseline
-    lookup = LookupBaseline().fit(train_df, class_col, before_col, after_col)
+    if train_df.empty:
+        raise ValueError("Cannot create hybrid pipeline from an empty DataFrame")
 
-    # Step 2: Identify samples needing neural prediction
-    predictions = lookup.predict_batch(train_df, class_col, before_col)
-    ambiguous_df = predictions[predictions["needs_neural"]]
-    n_ambiguous = len(ambiguous_df)
+    resolved = infer_seq2seq_columns(
+        train_df,
+        test_df,
+        target_col=after_col,
+        source_col=before_col,
+        class_col=class_col,
+        sample_submission=sample_submission,
+        contract=column_contract,
+    )
+    class_col = resolved["class_col"]
+    before_col = resolved["source_col"]
+    after_col = resolved["target_col"]
+
+    required_columns = {before_col, after_col}
+    if class_col is not None:
+        required_columns.add(class_col)
+    missing_columns = required_columns - set(train_df.columns)
+    if missing_columns:
+        raise ValueError(f"Missing normalization columns: {sorted(missing_columns)}")
+
     n_total = len(train_df)
 
-    coverage_pct = 100 * (n_total - n_ambiguous) / n_total
-    print(f"[HybridPipeline] Lookup coverage: {n_total - n_ambiguous:,} / {n_total:,} ({coverage_pct:.1f}%)")
-    print(f"[HybridPipeline] Samples for neural: {n_ambiguous:,} ({100 - coverage_pct:.1f}%)")
+    # Estimate routing out of fold so unique training keys cannot masquerade
+    # as generalizable lookup coverage.
+    n_splits = min(max(2, validation_folds), n_total) if n_total >= 2 else 1
+    oof_confident = np.zeros(n_total, dtype=bool)
+    oof_predictions = np.full(n_total, "", dtype=object)
 
-    # Step 3: Configure neural model
+    if n_splits >= 2:
+        rng = np.random.default_rng(0)
+        shuffled_positions = rng.permutation(n_total)
+        fold_by_position = np.empty(n_total, dtype=int)
+        fold_by_position[shuffled_positions] = np.arange(n_total) % n_splits
+
+        for fold in range(n_splits):
+            validation_positions = np.flatnonzero(fold_by_position == fold)
+            training_positions = np.flatnonzero(fold_by_position != fold)
+            fold_lookup = LookupBaseline().fit(
+                train_df.iloc[training_positions],
+                class_col=class_col,
+                before_col=before_col,
+                after_col=after_col,
+            )
+            validation_df = train_df.iloc[validation_positions]
+            fold_predictions = fold_lookup.predict_batch(
+                validation_df,
+                class_col=class_col,
+                before_col=before_col,
+            )
+            oof_confident[validation_positions] = fold_predictions["is_confident"].to_numpy()
+            oof_predictions[validation_positions] = fold_predictions["prediction"].to_numpy()
+        routing_evaluation = "out_of_fold"
+    else:
+        singleton_lookup = LookupBaseline().fit(
+            train_df,
+            class_col=class_col,
+            before_col=before_col,
+            after_col=after_col,
+        )
+        singleton_predictions = singleton_lookup.predict_batch(
+            train_df,
+            class_col=class_col,
+            before_col=before_col,
+        )
+        oof_confident[:] = singleton_predictions["is_confident"].to_numpy()
+        oof_predictions[:] = singleton_predictions["prediction"].to_numpy()
+        routing_evaluation = "in_sample_singleton"
+
+    ambiguous_df = train_df.iloc[np.flatnonzero(~oof_confident)].copy()
+    n_ambiguous = len(ambiguous_df)
+    coverage_count = int(oof_confident.sum())
+    coverage_pct = 100 * coverage_count / n_total
+    target_text = train_df[after_col].fillna("").astype(str).to_numpy()
+    confident_correct = (oof_predictions.astype(str) == target_text) & oof_confident
+    confident_accuracy = (
+        float(confident_correct.sum() / coverage_count) if coverage_count else None
+    )
+
+    # Final inference artifact uses every public training row, while routing
+    # statistics and neural selection remain OOF.
+    lookup = LookupBaseline().fit(
+        train_df,
+        class_col=class_col,
+        before_col=before_col,
+        after_col=after_col,
+    )
+
+    print(
+        "[HybridPipeline] OOF confident coverage: "
+        f"{coverage_count:,} / {n_total:,} ({coverage_pct:.1f}%)"
+    )
+    print(f"[HybridPipeline] Samples for neural: {n_ambiguous:,}")
+
     if n_ambiguous > 0:
         neural_config = get_neural_training_config(n_ambiguous, fast_mode, timeout_s)
         print(f"[HybridPipeline] Neural config: model={neural_config['model_name']}, max_steps={neural_config['max_steps']}")
@@ -414,11 +644,18 @@ def create_hybrid_pipeline(
         "ambiguous_df": ambiguous_df,
         "ambiguous_indices": ambiguous_df.index.tolist(),
         "neural_config": neural_config,
+        "column_contract": {
+            "class_col": class_col,
+            "source_col": before_col,
+            "target_col": after_col,
+        },
         "stats": {
             "total_samples": n_total,
-            "lookup_coverage": n_total - n_ambiguous,
+            "lookup_coverage": coverage_count,
             "neural_samples": n_ambiguous,
             "coverage_pct": coverage_pct,
+            "confident_accuracy": confident_accuracy,
+            "routing_evaluation": routing_evaluation,
         },
     }
 
@@ -428,8 +665,8 @@ def apply_hybrid_predictions(
     lookup: LookupBaseline,
     neural_predictions: np.ndarray | None = None,
     neural_indices: list[int] | None = None,
-    class_col: str = "class",
-    before_col: str = "before",
+    class_col: str | None = None,
+    before_col: str | None = None,
 ) -> np.ndarray:
     """
     Apply hybrid predictions: lookup first, then neural for ambiguous cases.

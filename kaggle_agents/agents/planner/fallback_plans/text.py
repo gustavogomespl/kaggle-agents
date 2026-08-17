@@ -1,7 +1,7 @@
 """
 Text/NLP competition fallback plan.
 
-Uses pre-trained language models (RoBERTa, DistilBERT, T5).
+Uses a fold-local sparse baseline unless the task is sequence-to-sequence.
 """
 
 from typing import Any
@@ -12,16 +12,14 @@ def create_text_fallback_plan(
     sota_analysis: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """
-    Create fallback plan for text/NLP competitions (HuggingFace transformers).
-
-    Uses pre-trained language models (RoBERTa, DistilBERT, or T5 for seq2seq).
+    Create a bounded fallback plan for text/NLP competitions.
 
     Args:
         domain: Competition domain (text_classification, seq_to_seq, etc.)
         sota_analysis: SOTA analysis results
 
     Returns:
-        List of component dictionaries (3 components for classification, 1 for seq2seq)
+        List of component dictionaries (1 component)
     """
     if domain == "seq_to_seq":
         # Sequence-to-sequence tasks (translation, text normalization, summarization)
@@ -35,30 +33,26 @@ def create_text_fallback_plan(
                 "code_outline": "transformers.T5ForConditionalGeneration.from_pretrained('t5-base'), T5Tokenizer, Seq2SeqTrainer with DataCollatorForSeq2Seq, train with learning_rate=1e-4, evaluate with BLEU/ROUGE metrics",
             }
         ]
-    # Classification or regression tasks
+    if "regression" in domain.lower():
+        return [
+            {
+                "name": "word_char_tfidf_ridge",
+                "component_type": "model",
+                "description": "A single word and character TF-IDF Ridge regression baseline fitted only on each fold's training rows.",
+                "estimated_impact": 0.24,
+                "rationale": "Sparse word and character features provide a deterministic continuous baseline without fitting vocabulary on validation or public test rows.",
+                "code_outline": "Load train_df with align_train_to_canonical(pd.read_csv(TRAIN_PATH)); read text_feature_cols from CANONICAL_METADATA and use its declared text column only; use CANONICAL_Y and TARGET_COLS. For every canonical fold, create word_vectorizer=TfidfVectorizer(max_features=5000, min_df=2, ngram_range=(1, 2)) and char_vectorizer=TfidfVectorizer(analyzer='char_wb', max_features=5000, min_df=2, ngram_range=(3, 5)); call fit_transform only on train_texts.iloc[train_idx], transform validation and test text with those fold-local vectorizers, hstack word+char matrices, and fit Ridge only on y[train_idx]. Accumulate continuous aligned OOF predictions and averaged test predictions; call save_component_artifacts(oof_preds, test_preds) and write_submission(test_preds).",
+            }
+        ]
+    # Classification or regression tasks. One candidate avoids duplicate GPU
+    # downloads and keeps the generated execution auditable.
     return [
         {
-            "name": "roberta_classifier",
+            "name": "word_char_tfidf_logreg",
             "component_type": "model",
-            "description": "RoBERTa-base fine-tuned for text classification with learning rate warmup and linear decay schedule.",
-            "estimated_impact": 0.28,
-            "rationale": "RoBERTa improves on BERT with dynamic masking and larger training corpus. Achieves SOTA on GLUE, SuperGLUE, and many NLP benchmarks. Warmup stabilizes training.",
-            "code_outline": "transformers.RobertaForSequenceClassification.from_pretrained('roberta-base'), AutoTokenizer, Trainer API with TrainingArguments, AdamW optimizer with warmup_steps=500, 5-fold StratifiedKFold CV, save OOF predictions",
-        },
-        {
-            "name": "distilbert_classifier",
-            "component_type": "model",
-            "description": "DistilBERT fine-tuned (60% faster than BERT, lighter for ensemble diversity).",
-            "estimated_impact": 0.22,
-            "rationale": "DistilBERT is 60% faster and 40% smaller than BERT while retaining 97% of performance through knowledge distillation. Provides architectural diversity for ensemble while being computationally efficient.",
-            "code_outline": "transformers.DistilBertForSequenceClassification.from_pretrained('distilbert-base-uncased'), similar training setup to RoBERTa, 5-fold CV",
-        },
-        {
-            "name": "transformer_ensemble",
-            "component_type": "ensemble",
-            "description": "Weighted average of RoBERTa and DistilBERT predictions using CV scores as weights.",
-            "estimated_impact": 0.12,
-            "rationale": "Different architectures (RoBERTa vs DistilBERT) capture different linguistic patterns. Ensemble reduces variance and overfitting to specific model biases.",
-            "code_outline": "Load OOF predictions from both models, compute optimal weights via Ridge regression on validation fold, apply weighted average to test predictions",
+            "description": "A single word and character TF-IDF LogisticRegression baseline fitted only on each fold's training rows.",
+            "estimated_impact": 0.24,
+            "rationale": "Sparse word and character features are fast, deterministic, and provide a valid baseline without downloading pretrained weights or fitting vocabulary on public test rows.",
+            "code_outline": "Load train_df with align_train_to_canonical(pd.read_csv(TRAIN_PATH)); read text_feature_cols from CANONICAL_METADATA and use its declared text column only; use CANONICAL_Y, N_TARGETS, TARGET_COLS, and SUBMISSION_TARGET_COLS (never infer a target and never feed a non-declared metadata column to the vectorizer). For every canonical fold, create word_vectorizer=TfidfVectorizer(max_features=5000, min_df=2, ngram_range=(1, 2)) and char_vectorizer=TfidfVectorizer(analyzer='char_wb', max_features=5000, min_df=2, ngram_range=(3, 5)); call fit_transform only on train_texts.iloc[train_idx], then transform val_texts and test_texts with those same fold-local vectorizers and hstack word+char matrices. For binary single-target classification fit LogisticRegression and save the positive-class probability as one output. For multiclass single-target classification keep all predict_proba columns as OOF/test artifact probabilities and save class_order. If len(SUBMISSION_TARGET_COLS) > 1, reorder those probabilities to the declared wide class_order and submit them; if len(SUBMISSION_TARGET_COLS) == 1, use argmax plus class_order to produce one column of submission labels while retaining full artifact probabilities. When N_TARGETS > 1, wrap LogisticRegression in OneVsRestClassifier and save exactly N_TARGETS multilabel probabilities without flattening y. Call save_component_artifacts(oof_preds, test_preds, class_order=class_order when multiclass) and write_submission(submission_predictions).",
         },
     ]

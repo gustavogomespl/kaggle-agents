@@ -8,20 +8,51 @@ Environment Variables:
     KAGGLE_AGENTS_STRICT_MODE: Enable hard failures (default: 0)
     KAGGLE_AGENTS_REQUIRE_CLASS_ORDER: Require class_order.npy (default: 0)
     KAGGLE_AGENTS_REQUIRE_TRAIN_IDS: Require train_ids.npy (default: 0)
+    KAGGLE_AGENTS_REQUIRE_TEST_IDS: Require test_ids.npy (default: 0)
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 import numpy as np
 
+from .bounded_array import (
+    DEFAULT_CHUNK_ROWS,
+    ProgressCallback,
+    contains_none,
+    load_npy_readonly,
+    string_arrays_equal,
+    string_values_are_unique,
+)
+from .image_to_image_contract import load_packed_images
 
-if TYPE_CHECKING:
-    from collections.abc import Sequence
+
+VALIDATION_CHUNK_ROWS = DEFAULT_CHUNK_ROWS
+VALIDATION_HEARTBEAT_ROWS = 1_000_000
+
+
+def _artifact_validation_progress(label: str, stage: str) -> ProgressCallback:
+    """Emit sparse heartbeats while exact artifact checks scan large IDs."""
+    last_reported = 0
+
+    def report(processed: int, total: int) -> None:
+        nonlocal last_reported
+        if (
+            processed == total
+            or processed - last_reported >= VALIDATION_HEARTBEAT_ROWS
+        ):
+            print(
+                "   [LOG:PROGRESS] artifact_validation "
+                f"label={label.lower()} stage={stage} "
+                f"rows={processed}/{total}"
+            )
+            last_reported = processed
+
+    return report
 
 
 @dataclass
@@ -30,7 +61,14 @@ class StrictValidationConfig:
 
     strict_mode: bool = False
     require_class_order: bool = False
+    require_component_class_order: bool = False
     require_train_ids: bool = False
+    require_test_ids: bool = False
+    # Whether unnormalized multiclass rows are a hard failure. Only true when
+    # the graded metric reads a row as a probability vector; under a ranking
+    # metric the same predictions grade fine, so failing on them destroys a
+    # valid candidate to enforce a property nobody scores.
+    require_normalized_rows: bool = True
     probability_tolerance: float = 0.01
     empty_row_threshold: float = 0.0  # Fraction of empty rows allowed (0 = none)
 
@@ -44,7 +82,13 @@ class StrictValidationConfig:
                 "KAGGLE_AGENTS_REQUIRE_CLASS_ORDER", "0"
             ).lower()
             in {"1", "true", "yes"},
+            require_component_class_order=os.getenv(
+                "KAGGLE_AGENTS_REQUIRE_COMPONENT_CLASS_ORDER", "0"
+            ).lower()
+            in {"1", "true", "yes"},
             require_train_ids=os.getenv("KAGGLE_AGENTS_REQUIRE_TRAIN_IDS", "0").lower()
+            in {"1", "true", "yes"},
+            require_test_ids=os.getenv("KAGGLE_AGENTS_REQUIRE_TEST_IDS", "0").lower()
             in {"1", "true", "yes"},
         )
 
@@ -68,12 +112,224 @@ class ValidationResult:
         self.warnings.append(msg)
 
 
+_CLASSIFICATION_PROBLEM_TYPES = {
+    "classification",
+    "binary_classification",
+    "multiclass_classification",
+    "tabular_classification",
+    "image_classification",
+    "audio_classification",
+    "text_classification",
+}
+_MULTILABEL_PROBLEM_TYPES = {
+    "multilabel",
+    "multi_label",
+    "multilabel_classification",
+    "multi_label_classification",
+}
+_REGRESSION_PROBLEM_TYPES = {
+    "regression",
+    "tabular_regression",
+    "image_regression",
+    "audio_regression",
+    "text_regression",
+    "time_series_forecasting",
+    "forecasting",
+}
+_SEQ2SEQ_PROBLEM_TYPES = {
+    "seq2seq",
+    "seq_to_seq",
+    "sequence_to_sequence",
+    "text_normalization",
+    "translation",
+    "summarization",
+}
+_IMAGE_TO_IMAGE_PROBLEM_TYPES = {
+    "image_to_image",
+    "image2image",
+    "image_restoration",
+    "image_denoising",
+}
+
+
+def _normalize_problem_type(problem_type: str) -> str:
+    """Map concrete workflow problem types to validation families."""
+    normalized = (
+        str(problem_type or "").strip().lower().replace("-", "_").replace(" ", "_")
+    )
+    if normalized in _MULTILABEL_PROBLEM_TYPES:
+        return "multilabel"
+    if normalized in _CLASSIFICATION_PROBLEM_TYPES:
+        return "classification"
+    if normalized in _REGRESSION_PROBLEM_TYPES:
+        return "regression"
+    if normalized in _SEQ2SEQ_PROBLEM_TYPES:
+        return "seq2seq"
+    if normalized in _IMAGE_TO_IMAGE_PROBLEM_TYPES:
+        return "image_to_image"
+    return normalized
+
+
+def _validate_packed_image_artifacts(
+    *,
+    models_dir: Path,
+    component_name: str,
+    expected_n_train: int | None,
+    expected_n_test: int | None,
+    expected_train_ids: Sequence[object] | None,
+    expected_test_ids: Sequence[object] | None,
+    result: ValidationResult,
+) -> ValidationResult:
+    """Validate variable-sized image artifacts using their embedded IDs."""
+    artifacts = [
+        (
+            "OOF",
+            models_dir / f"oof_{component_name}.npz",
+            expected_n_train,
+            expected_train_ids,
+        ),
+        (
+            "Test",
+            models_dir / f"test_{component_name}.npz",
+            expected_n_test,
+            expected_test_ids,
+        ),
+    ]
+    for label, path, expected_rows, expected_ids in artifacts:
+        if not path.is_file():
+            result.add_error(f"Missing {label} packed image file: {path.name}")
+            continue
+        try:
+            packed = load_packed_images(path)
+        except Exception as exc:
+            result.add_error(f"Failed to load {label} packed image file: {exc}")
+            continue
+        result.files_verified.append(path.name)
+        # For dense submissions expected_n_test is the CSV pixel-row count,
+        # not the number of packed test images. Semantic IDs are authoritative
+        # whenever supplied.
+        expected_image_rows = (
+            len(expected_ids)
+            if expected_ids is not None
+            else (expected_rows if label == "OOF" else None)
+        )
+        if (
+            expected_image_rows is not None
+            and len(packed) != expected_image_rows
+        ):
+            result.add_error(
+                f"{label} image count mismatch: {len(packed)} vs expected "
+                f"{expected_image_rows}"
+            )
+        if expected_ids is not None and not string_arrays_equal(
+            packed.image_ids,
+            expected_ids,
+            chunk_rows=VALIDATION_CHUNK_ROWS,
+        ):
+            result.add_error(
+                f"{label} image IDs do not match canonical IDs in exact order"
+            )
+    return result
+
+
+def _prediction_width(preds: np.ndarray) -> int | None:
+    """Return the prediction width for supported 1-D/2-D artifacts."""
+    if preds.ndim == 1:
+        return 1
+    if preds.ndim == 2:
+        return int(preds.shape[1])
+    return None
+
+
+def _validate_basic_array(
+    preds: np.ndarray,
+    *,
+    label: str,
+    result: ValidationResult,
+    allow_text: bool = False,
+) -> None:
+    """Validate properties that are mandatory for every problem type."""
+    if preds.ndim not in {1, 2}:
+        result.add_error(
+            f"{label} predictions must be a 1-D or 2-D array, got shape {preds.shape}"
+        )
+        return
+    if preds.shape[0] == 0 or (preds.ndim == 2 and preds.shape[1] == 0):
+        result.add_error(f"{label} predictions are empty (shape {preds.shape})")
+        return
+    if not np.issubdtype(preds.dtype, np.number):
+        if allow_text:
+            if contains_none(preds, chunk_rows=VALIDATION_CHUNK_ROWS):
+                result.add_error(f"{label} text predictions contain null values")
+            return
+        result.add_error(
+            f"{label} predictions must be numeric, got dtype {preds.dtype}"
+        )
+        return
+    if np.any(~np.isfinite(preds)):
+        result.add_error(f"{label} predictions contain NaN or Inf values")
+
+
+def _validate_id_artifact(
+    path: Path,
+    *,
+    label: str,
+    expected_rows: int,
+    expected_ids: Sequence[object] | None,
+    required: bool,
+    result: ValidationResult,
+) -> None:
+    """Validate the IDs that define prediction row order."""
+    if not path.exists():
+        if required or expected_ids is not None:
+            result.add_error(f"Missing {label} IDs file: {path.name}")
+        return
+    try:
+        ids = load_npy_readonly(path, allow_pickle=False).reshape(-1)
+    except Exception as exc:
+        result.add_error(f"Failed to load {label} IDs: {exc}")
+        return
+
+    if len(ids) != expected_rows:
+        result.add_error(
+            f"{label} ID row count mismatch: {len(ids)} vs predictions {expected_rows}"
+        )
+        return
+    print(
+        "   [LOG:INFO] Artifact ID validation started: "
+        f"label={label.lower()} rows={len(ids)}"
+    )
+    if not string_values_are_unique(
+        ids,
+        chunk_rows=VALIDATION_CHUNK_ROWS,
+        progress=_artifact_validation_progress(label, "id_uniqueness"),
+    ):
+        result.add_error(f"{label} IDs contain duplicates")
+        return
+    if expected_ids is not None:
+        if string_arrays_equal(
+            ids,
+            expected_ids,
+            chunk_rows=VALIDATION_CHUNK_ROWS,
+            progress=_artifact_validation_progress(label, "id_alignment"),
+        ):
+            result.files_verified.append(path.name)
+            return
+        result.add_error(
+            f"{label} IDs do not match canonical IDs in exact row order"
+        )
+        return
+    result.files_verified.append(path.name)
+
+
 def validate_model_artifacts(
     working_dir: Path,
     component_name: str,
     expected_n_train: int | None = None,
     expected_n_test: int | None = None,
     expected_class_order: Sequence[str] | None = None,
+    expected_train_ids: Sequence[object] | None = None,
+    expected_test_ids: Sequence[object] | None = None,
     problem_type: str = "classification",
     config: StrictValidationConfig | None = None,
 ) -> ValidationResult:
@@ -94,6 +350,8 @@ def validate_model_artifacts(
         expected_n_train: Expected number of training samples
         expected_n_test: Expected number of test samples
         expected_class_order: Expected class order from sample_submission
+        expected_train_ids: Canonical IDs in exact OOF row order
+        expected_test_ids: Canonical IDs in exact test-prediction row order
         problem_type: "classification", "regression", or "multilabel"
         config: Validation configuration (loads from env if None)
 
@@ -105,7 +363,17 @@ def validate_model_artifacts(
 
     result = ValidationResult()
     models_dir = working_dir / "models"
-
+    validation_family = _normalize_problem_type(problem_type)
+    if validation_family == "image_to_image":
+        return _validate_packed_image_artifacts(
+            models_dir=models_dir,
+            component_name=component_name,
+            expected_n_train=expected_n_train,
+            expected_n_test=expected_n_test,
+            expected_train_ids=expected_train_ids,
+            expected_test_ids=expected_test_ids,
+            result=result,
+        )
     # 1. Check OOF file exists
     oof_path = models_dir / f"oof_{component_name}.npy"
     if not oof_path.exists():
@@ -124,16 +392,78 @@ def validate_model_artifacts(
 
     # 3. Load and validate OOF predictions
     try:
-        oof_preds = np.load(oof_path)
+        oof_preds = load_npy_readonly(oof_path, allow_pickle=False)
     except Exception as e:
         result.add_error(f"Failed to load OOF file: {e}")
         return result
 
     # 4. Load and validate test predictions
     try:
-        test_preds = np.load(test_path)
+        test_preds = load_npy_readonly(test_path, allow_pickle=False)
     except Exception as e:
         result.add_error(f"Failed to load test file: {e}")
+        return result
+
+    oof_preds = np.asarray(oof_preds)
+    test_preds = np.asarray(test_preds)
+    allow_text = validation_family == "seq2seq"
+
+    # Temporal forward chaining reserves the oldest block as training-only
+    # history. It has no honest OOF prediction, so the full-shape artifact must
+    # retain NaN there and validation operates only on the canonical mask.
+    oof_eligible_mask: np.ndarray | None = None
+    oof_mask_path = working_dir / "canonical" / "oof_eligible_mask.npy"
+    if oof_mask_path.is_file():
+        try:
+            oof_eligible_mask = np.asarray(
+                load_npy_readonly(oof_mask_path, allow_pickle=False),
+                dtype=bool,
+            )
+        except Exception as exc:
+            result.add_error(f"Failed to load canonical OOF eligibility mask: {exc}")
+            return result
+        if oof_eligible_mask.shape != (oof_preds.shape[0],):
+            result.add_error(
+                "Canonical OOF eligibility mask shape mismatch: "
+                f"{oof_eligible_mask.shape} vs {(oof_preds.shape[0],)}"
+            )
+            return result
+        if allow_text:
+            if not np.all(oof_eligible_mask):
+                result.add_error(
+                    "Temporal seq2seq OOF has no supported text warm-up sentinel"
+                )
+        else:
+            warmup_oof = oof_preds[~oof_eligible_mask]
+            if warmup_oof.size and (
+                not np.issubdtype(warmup_oof.dtype, np.number)
+                or not np.isnan(warmup_oof).all()
+            ):
+                result.add_error(
+                    "Temporal warm-up OOF rows must remain NaN and must not be "
+                    "fabricated as validation coverage"
+                )
+    oof_for_validation = (
+        oof_preds
+        if oof_eligible_mask is None or allow_text
+        else oof_preds[oof_eligible_mask]
+    )
+    if oof_for_validation.shape[0] == 0:
+        result.add_error("Canonical OOF eligibility mask selects no rows")
+        return result
+
+    _validate_basic_array(
+        oof_for_validation,
+        label="OOF-eligible",
+        result=result,
+        allow_text=allow_text,
+    )
+    _validate_basic_array(
+        test_preds, label="Test", result=result, allow_text=allow_text
+    )
+
+    # Unsupported dimensions do not have a meaningful row/column contract.
+    if oof_preds.ndim not in {1, 2} or test_preds.ndim not in {1, 2}:
         return result
 
     # 5. Validate OOF shape
@@ -150,43 +480,78 @@ def validate_model_artifacts(
                 f"Test row count mismatch: {test_preds.shape[0]} vs expected {expected_n_test}"
             )
 
+    oof_width = _prediction_width(oof_preds)
+    test_width = _prediction_width(test_preds)
+    declared_multiclass = "multiclass" in str(problem_type).lower()
+    if oof_width != test_width:
+        result.add_error(
+            f"OOF/test prediction width mismatch: {oof_width} vs {test_width}"
+        )
+
     # 7. For classification, validate probabilities
-    # Debug: Log the problem_type being used for validation
-    print(f"   [VALIDATION] problem_type={problem_type}, validating {component_name}")
+    print(
+        f"   [VALIDATION] problem_type={problem_type} "
+        f"(family={validation_family}), validating {component_name}"
+    )
 
-    if problem_type in ("classification", "multilabel"):
+    if validation_family in {"classification", "multilabel"}:
+        if (
+            declared_multiclass
+            and oof_width is not None
+            and oof_width > 1
+            and expected_class_order is None
+        ):
+            result.add_error(
+                "Missing expected class order contract for multiclass "
+                "probability columns"
+            )
+
+        # Non-finite arrays were already rejected. Avoid deriving misleading
+        # extrema or row sums from them.
+        arrays_are_finite = bool(
+            np.all(np.isfinite(oof_for_validation))
+            and np.all(np.isfinite(test_preds))
+        )
+
         # Check range [0, 1]
-        oof_min, oof_max = oof_preds.min(), oof_preds.max()
-        test_min, test_max = test_preds.min(), test_preds.max()
-
-        if oof_min < -config.probability_tolerance or oof_max > 1 + config.probability_tolerance:
-            result.add_error(
-                f"OOF probabilities out of range: min={oof_min:.4f}, max={oof_max:.4f}"
+        if arrays_are_finite:
+            oof_min, oof_max = (
+                oof_for_validation.min(),
+                oof_for_validation.max(),
             )
+            test_min, test_max = test_preds.min(), test_preds.max()
 
-        if test_min < -config.probability_tolerance or test_max > 1 + config.probability_tolerance:
-            result.add_error(
-                f"Test probabilities out of range: min={test_min:.4f}, max={test_max:.4f}"
-            )
+            if (
+                oof_min < -config.probability_tolerance
+                or oof_max > 1 + config.probability_tolerance
+            ):
+                result.add_error(
+                    f"OOF probabilities out of range: "
+                    f"min={oof_min:.4f}, max={oof_max:.4f}"
+                )
 
-        # Check for NaN/Inf
-        if np.any(~np.isfinite(oof_preds)):
-            result.add_error("OOF predictions contain NaN or Inf values")
-
-        if np.any(~np.isfinite(test_preds)):
-            result.add_error("Test predictions contain NaN or Inf values")
+            if (
+                test_min < -config.probability_tolerance
+                or test_max > 1 + config.probability_tolerance
+            ):
+                result.add_error(
+                    f"Test probabilities out of range: "
+                    f"min={test_min:.4f}, max={test_max:.4f}"
+                )
 
         # Check for empty rows (all zeros - indicates unfilled OOF)
         # For classification: a row of all zeros means no prediction was made
-        if oof_preds.ndim > 1:
-            empty_oof_rows = np.sum(oof_preds.sum(axis=1) == 0)
+        if oof_for_validation.ndim > 1 and arrays_are_finite:
+            empty_oof_rows = int(
+                np.sum(oof_for_validation.sum(axis=1) == 0)
+            )
         else:
             # For 1D predictions (binary classification), 0 is a valid probability
             # Only flag if prediction is EXACTLY 0.0 AND this is truly empty
             empty_oof_rows = 0  # 1D classification predictions of 0 are valid
 
         if empty_oof_rows > 0:
-            empty_fraction = empty_oof_rows / oof_preds.shape[0]
+            empty_fraction = empty_oof_rows / oof_for_validation.shape[0]
             if empty_fraction > config.empty_row_threshold:
                 result.add_warning(
                     f"{empty_oof_rows} OOF rows have all-zero predictions ({empty_fraction:.1%})"
@@ -196,18 +561,40 @@ def validate_model_artifacts(
                         f"Empty OOF rows exceed threshold: {empty_oof_rows} rows"
                     )
 
+        if test_preds.ndim > 1 and arrays_are_finite:
+            empty_test_rows = int(np.sum(test_preds.sum(axis=1) == 0))
+            if empty_test_rows > 0:
+                empty_fraction = empty_test_rows / test_preds.shape[0]
+                result.add_warning(
+                    f"{empty_test_rows} test rows have all-zero predictions "
+                    f"({empty_fraction:.1%})"
+                )
+                if (
+                    config.strict_mode
+                    and empty_fraction > config.empty_row_threshold
+                ):
+                    result.add_error(
+                        f"Empty test rows exceed threshold: {empty_test_rows} rows"
+                    )
+
         # For multiclass (not multilabel), check row sums = 1.0
         if (
-            problem_type == "classification"
-            and oof_preds.ndim > 1
-            and oof_preds.shape[1] > 2
+            validation_family == "classification"
+            and oof_for_validation.ndim > 1
+            and oof_for_validation.shape[1] > 1
+            and arrays_are_finite
         ):
-            oof_row_sums = oof_preds.sum(axis=1)
+            enforce_row_sums = config.strict_mode and config.require_normalized_rows
+            oof_row_sums = oof_for_validation.sum(axis=1)
             bad_oof_rows = np.sum(np.abs(oof_row_sums - 1.0) > config.probability_tolerance)
             if bad_oof_rows > 0:
                 result.add_warning(
                     f"{bad_oof_rows} OOF rows do not sum to 1.0 (not normalized)"
                 )
+                if enforce_row_sums:
+                    result.add_error(
+                        f"{bad_oof_rows} OOF rows violate the probability-sum contract"
+                    )
 
             test_row_sums = test_preds.sum(axis=1)
             bad_test_rows = np.sum(np.abs(test_row_sums - 1.0) > config.probability_tolerance)
@@ -215,18 +602,36 @@ def validate_model_artifacts(
                 result.add_warning(
                     f"{bad_test_rows} test rows do not sum to 1.0 (not normalized)"
                 )
+                if enforce_row_sums:
+                    result.add_error(
+                        f"{bad_test_rows} test rows violate the probability-sum contract"
+                    )
+
+        if (
+            expected_class_order is not None
+            and len(expected_class_order) > 1
+            and oof_width is not None
+            and validation_family in {"classification", "multilabel"}
+            and oof_width != len(expected_class_order)
+        ):
+            result.add_error(
+                f"Prediction column count mismatch: {oof_width} vs "
+                f"{len(expected_class_order)} expected classes/targets"
+            )
 
     # 7b. For regression, validate prediction sanity
-    elif problem_type == "regression":
-        oof_min, oof_max = oof_preds.min(), oof_preds.max()
+    elif validation_family == "regression":
+        if (
+            not np.all(np.isfinite(oof_for_validation))
+            or not np.all(np.isfinite(test_preds))
+        ):
+            return result
+
+        oof_min, oof_max = (
+            oof_for_validation.min(),
+            oof_for_validation.max(),
+        )
         test_min, test_max = test_preds.min(), test_preds.max()
-
-        # Check for NaN/Inf values
-        if np.any(~np.isfinite(oof_preds)):
-            result.add_error("OOF predictions contain NaN or Inf values")
-
-        if np.any(~np.isfinite(test_preds)):
-            result.add_error("Test predictions contain NaN or Inf values")
 
         # Warn about extreme prediction ranges (may indicate undertrained model)
         pred_range = oof_max - oof_min
@@ -253,20 +658,30 @@ def validate_model_artifacts(
             )
 
         # Check for constant predictions (model not learning)
-        if np.std(oof_preds) < 1e-6:
+        if np.std(oof_for_validation) < 1e-6:
             result.add_error(
-                f"OOF predictions are constant (std={np.std(oof_preds):.2e})"
+                "OOF predictions are constant "
+                f"(std={np.std(oof_for_validation):.2e})"
             )
 
     # 8. Check class order file (for multiclass)
-    if expected_class_order is not None and len(expected_class_order) > 2:
+    if (
+        expected_class_order is not None
+        and len(expected_class_order) > 1
+        and validation_family == "classification"
+        and oof_width is not None
+        and oof_width > 1
+    ):
         class_order_path = models_dir / f"class_order_{component_name}.npy"
         global_class_order_path = models_dir / "class_order.npy"
 
         class_order_found = False
         if class_order_path.exists():
             try:
-                saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+                saved_order = np.load(
+                    class_order_path,
+                    allow_pickle=False,
+                ).tolist()
                 if saved_order != list(expected_class_order):
                     result.add_error(
                         f"Class order mismatch: model has {saved_order[:3]}..., "
@@ -277,9 +692,15 @@ def validate_model_artifacts(
                     class_order_found = True
             except Exception as e:
                 result.add_warning(f"Failed to verify class order: {e}")
-        elif global_class_order_path.exists():
+        elif (
+            not config.require_component_class_order
+            and global_class_order_path.exists()
+        ):
             try:
-                saved_order = np.load(global_class_order_path, allow_pickle=True).tolist()
+                saved_order = np.load(
+                    global_class_order_path,
+                    allow_pickle=False,
+                ).tolist()
                 if saved_order != list(expected_class_order):
                     result.add_error(
                         f"Global class order mismatch: has {saved_order[:3]}..., "
@@ -292,19 +713,37 @@ def validate_model_artifacts(
                 result.add_warning(f"Failed to verify global class order: {e}")
 
         if not class_order_found:
-            msg = f"Missing class_order file for {component_name} (multiclass alignment unknown)"
+            qualifier = (
+                "component-specific "
+                if config.require_component_class_order
+                else ""
+            )
+            msg = (
+                f"Missing {qualifier}class_order file for {component_name} "
+                "(multiclass alignment unknown)"
+            )
             if config.require_class_order:
                 result.add_error(msg)
             else:
                 result.add_warning(msg)
 
-    # 9. Check train IDs file (optional)
-    if config.require_train_ids:
-        train_ids_path = models_dir / f"train_ids_{component_name}.npy"
-        if not train_ids_path.exists():
-            result.add_error(f"Missing train IDs file: {train_ids_path.name}")
-        else:
-            result.files_verified.append(train_ids_path.name)
+    # 9. Prediction order is part of the artifact contract.
+    _validate_id_artifact(
+        models_dir / f"train_ids_{component_name}.npy",
+        label="Train",
+        expected_rows=oof_preds.shape[0],
+        expected_ids=expected_train_ids,
+        required=config.require_train_ids,
+        result=result,
+    )
+    _validate_id_artifact(
+        models_dir / f"test_ids_{component_name}.npy",
+        label="Test",
+        expected_rows=test_preds.shape[0],
+        expected_ids=expected_test_ids,
+        required=config.require_test_ids,
+        result=result,
+    )
 
     return result
 
@@ -315,16 +754,15 @@ def validate_prediction_quality(
     problem_type: str = "classification",
 ) -> tuple[bool, list[str]]:
     """
-    Detect random/broken predictions.
+    Detect structurally broken predictions.
 
     Checks:
-    - Constant predictions (all same value)
-    - Near-uniform predictions (suspiciously close to 1/n_classes)
-    - AUC close to 0.5 if y_true provided (indicates random guessing)
+    - Non-finite values
+    - Exactly constant predictions
 
     Args:
         preds: Prediction array
-        y_true: Ground truth labels (optional, enables AUC check)
+        y_true: Ground truth labels (reserved for metric-aware diagnostics)
         problem_type: "classification" or "regression"
 
     Returns:
@@ -337,60 +775,28 @@ def validate_prediction_quality(
         issues.append("Predictions array is empty or None")
         return False, issues
 
-    # Check for constant predictions
-    if preds.ndim == 1:
-        unique_vals = np.unique(preds)
-        if len(unique_vals) <= 3:
-            issues.append(
-                f"Near-constant predictions: only {len(unique_vals)} unique values"
-            )
-    else:
-        # For multiclass, check if all rows are nearly identical
-        row_variance = np.var(preds, axis=0)
-        if np.max(row_variance) < 0.001:
-            issues.append(
-                "All prediction rows are nearly identical (variance < 0.001)"
-            )
+    preds = np.asarray(preds)
+    if preds.ndim not in {1, 2}:
+        issues.append(
+            f"Predictions must be a 1-D or 2-D array, got shape {preds.shape}"
+        )
+        return False, issues
+    validation_family = _normalize_problem_type(problem_type)
+    if not np.issubdtype(preds.dtype, np.number):
+        if validation_family == "seq2seq":
+            if contains_none(preds, chunk_rows=VALIDATION_CHUNK_ROWS):
+                issues.append("Text predictions contain null values")
+            return len(issues) == 0, issues
+        issues.append(f"Predictions must be numeric, got dtype {preds.dtype}")
+        return False, issues
+    if np.any(~np.isfinite(preds)):
+        issues.append("Predictions contain NaN or Inf values")
+        return False, issues
 
-    # Check for uniform predictions (1/n_classes for all) - multiclass only
-    if preds.ndim > 1 and preds.shape[1] > 1:
-        expected_uniform = 1.0 / preds.shape[1]
-        mean_preds = preds.mean(axis=0)
-        max_deviation = np.max(np.abs(mean_preds - expected_uniform))
-        if max_deviation < 0.05:
-            issues.append(
-                f"Predictions are suspiciously uniform "
-                f"(max deviation from {expected_uniform:.3f} is {max_deviation:.4f})"
-            )
-
-    # Check AUC if ground truth provided
-    if y_true is not None and problem_type == "classification":
-        try:
-            from sklearn.metrics import roc_auc_score
-
-            # Handle different prediction shapes
-            if preds.ndim > 1 and preds.shape[1] == 2:
-                # Binary with both classes - use positive class
-                auc = roc_auc_score(y_true, preds[:, 1])
-            elif preds.ndim == 1:
-                # Binary with single column
-                auc = roc_auc_score(y_true, preds)
-            elif preds.ndim > 1 and preds.shape[1] > 2:
-                # Multiclass
-                auc = roc_auc_score(
-                    y_true, preds, multi_class="ovr", average="weighted"
-                )
-            else:
-                auc = None
-
-            if auc is not None and 0.48 < auc < 0.52:
-                issues.append(
-                    f"AUC is {auc:.4f} - suspiciously close to random guessing (0.5)"
-                )
-
-        except Exception:
-            # If AUC calculation fails, don't add an issue
-            pass
+    # Artifact validation should reject broken constants, not weak or balanced
+    # models. Class-balanced predictions legitimately have a uniform *mean*.
+    if float(np.max(np.std(preds, axis=0))) < 1e-12:
+        issues.append("Predictions are constant")
 
     return len(issues) == 0, issues
 
@@ -441,11 +847,52 @@ def quick_oof_validation(
         issues.append(f"OOF file not found: oof_{component_name}.npy")
     else:
         try:
-            oof = np.load(oof_path)
-            if np.any(~np.isfinite(oof)):
-                issues.append("OOF contains NaN or Inf values")
-            if oof.ndim > 1:
-                empty_rows = np.sum(oof.sum(axis=1) == 0)
+            oof = load_npy_readonly(oof_path, allow_pickle=False)
+            eligible_mask_path = (
+                working_path / "canonical" / "oof_eligible_mask.npy"
+            )
+            if eligible_mask_path.is_file():
+                eligible_mask = np.asarray(
+                    load_npy_readonly(
+                        eligible_mask_path,
+                        allow_pickle=False,
+                    ),
+                    dtype=bool,
+                )
+                if eligible_mask.shape != (len(oof),):
+                    issues.append(
+                        "Canonical OOF eligibility mask shape mismatch"
+                    )
+                    eligible_oof = np.asarray([])
+                elif np.issubdtype(oof.dtype, np.number):
+                    warmup_oof = oof[~eligible_mask]
+                    if warmup_oof.size and not np.isnan(warmup_oof).all():
+                        issues.append(
+                            "Temporal warm-up OOF rows must remain NaN"
+                        )
+                    eligible_oof = oof[eligible_mask]
+                else:
+                    if not np.all(eligible_mask):
+                        issues.append(
+                            "Temporal seq2seq OOF has no supported text "
+                            "warm-up sentinel"
+                        )
+                    eligible_oof = oof
+            else:
+                eligible_oof = oof
+            if np.issubdtype(eligible_oof.dtype, np.number):
+                if eligible_oof.size and np.any(~np.isfinite(eligible_oof)):
+                    issues.append("Eligible OOF contains NaN or Inf values")
+            elif contains_none(
+                eligible_oof,
+                chunk_rows=VALIDATION_CHUNK_ROWS,
+            ):
+                issues.append("Eligible OOF text contains null values")
+            if (
+                np.issubdtype(eligible_oof.dtype, np.number)
+                and eligible_oof.ndim > 1
+            ):
+                empty_rows = np.sum(eligible_oof.sum(axis=1) == 0)
                 if empty_rows > 0:
                     issues.append(f"{empty_rows} OOF rows are all zeros (unfilled)")
         except Exception as e:
@@ -457,9 +904,12 @@ def quick_oof_validation(
         issues.append(f"Test file not found: test_{component_name}.npy")
     else:
         try:
-            test = np.load(test_path)
-            if np.any(~np.isfinite(test)):
-                issues.append("Test predictions contain NaN or Inf values")
+            test = load_npy_readonly(test_path, allow_pickle=False)
+            if np.issubdtype(test.dtype, np.number):
+                if np.any(~np.isfinite(test)):
+                    issues.append("Test predictions contain NaN or Inf values")
+            elif contains_none(test, chunk_rows=VALIDATION_CHUNK_ROWS):
+                issues.append("Test text predictions contain null values")
         except Exception as e:
             issues.append(f"Failed to load test predictions: {e}")
 

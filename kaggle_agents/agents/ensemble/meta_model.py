@@ -4,9 +4,10 @@ from typing import Any
 
 import numpy as np
 from sklearn.linear_model import LogisticRegression, Ridge
-from sklearn.metrics import log_loss, mean_absolute_error, mean_squared_error, roc_auc_score
+from sklearn.metrics import log_loss, mean_squared_error
 from sklearn.model_selection import KFold, StratifiedKFold, cross_val_predict
 
+from ...core.config import get_run_seed
 from .scoring import score_predictions
 
 
@@ -31,6 +32,7 @@ def tune_meta_model(
         Tuple of (fitted_model, metric_name)
     """
     # Detect number of classes if not provided
+    run_seed = get_run_seed()
     if n_classes is None and problem_type == "classification":
         n_classes = len(np.unique(y))
 
@@ -40,17 +42,16 @@ def tune_meta_model(
         best_score = float("inf")
         best_C = 0.01
         # Explicit StratifiedKFold with shuffle
-        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+        cv = StratifiedKFold(n_splits=3, shuffle=True, random_state=run_seed)
 
         for C in [0.001, 0.01, 0.1, 1.0]:
             try:
                 # Use multinomial for multiclass, auto otherwise
                 model = LogisticRegression(
                     C=C,
-                    random_state=42,
+                    random_state=run_seed,
                     max_iter=1000,
-                    solver="lbfgs",
-                    multi_class="multinomial" if is_multiclass else "auto",
+                    solver="lbfgs",  # multinomial by default (multi_class kwarg removed in sklearn>=1.7)
                     class_weight="balanced" if is_multiclass else None,
                 )
                 # cross_val_predict to get OOF predictions
@@ -71,10 +72,9 @@ def tune_meta_model(
         print(f"   Using metric: {metric_name} for {'multiclass' if is_multiclass else 'binary'} classification")
         final_model = LogisticRegression(
             C=best_C,
-            random_state=42,
+            random_state=run_seed,
             max_iter=1000,
             solver="lbfgs",
-            multi_class="multinomial" if is_multiclass else "auto",
             class_weight="balanced" if is_multiclass else None,
         )
         return final_model, metric_name
@@ -82,11 +82,11 @@ def tune_meta_model(
     # Regression
     best_score = float("inf")
     best_alpha = 1.0
-    cv = KFold(n_splits=3, shuffle=True, random_state=42)
+    cv = KFold(n_splits=3, shuffle=True, random_state=run_seed)
 
     for alpha in [0.1, 1.0, 10.0, 100.0]:
         try:
-            model = Ridge(alpha=alpha, random_state=42)
+            model = Ridge(alpha=alpha, random_state=run_seed)
             oof_preds = cross_val_predict(model, meta_X, y, cv=cv)
             mean_score = np.sqrt(mean_squared_error(y, oof_preds))
             if mean_score < best_score:
@@ -97,7 +97,7 @@ def tune_meta_model(
             continue
 
     print(f"   Meta-model tuning: best alpha={best_alpha} (OOF RMSE={best_score:.4f})")
-    return Ridge(alpha=best_alpha, random_state=42), "neg_rmse"
+    return Ridge(alpha=best_alpha, random_state=run_seed), "neg_rmse"
 
 
 def diagnose_stacking_issues(
@@ -249,8 +249,19 @@ def constrained_meta_learner(
             bounds=[(0, 1)] * n_models,
             constraints={"type": "eq", "fun": lambda w: np.sum(w) - 1},
         )
-        opt_weights = result.x / result.x.sum()
+        raw_weights = np.asarray(result.x, dtype=float)
+        if (
+            not result.success
+            or not np.all(np.isfinite(raw_weights))
+            or raw_weights.sum() <= 0
+        ):
+            raise ValueError(
+                f"SLSQP did not produce valid weights: {result.message}"
+            )
+        opt_weights = raw_weights / raw_weights.sum()
         best_score = objective(opt_weights)
+        if not np.isfinite(best_score):
+            raise ValueError("SLSQP produced a non-finite validation score")
         print(f"   Constrained weights: score {best_score:.6f}")
         return opt_weights, best_score
     except Exception as e:
@@ -260,6 +271,141 @@ def constrained_meta_learner(
         )
         best_score = objective(opt_weights)
         return opt_weights, best_score
+
+
+def cross_validated_constrained_blend(
+    oof_stack: np.ndarray,
+    y_true: np.ndarray,
+    problem_type: str,
+    metric_name: str,
+    *,
+    split_targets: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, float]:
+    """Fit final blend weights while evaluating them out of sample.
+
+    Optimizing weights and reporting their score on the same OOF rows produces
+    a second level of overfitting. Each validation fold therefore receives
+    weights learned only from the other rows. Final weights are still refit on
+    all public OOF data for test inference.
+    """
+    y = np.asarray(y_true)
+    split_y = np.asarray(split_targets if split_targets is not None else y_true)
+    full_weights, _ = constrained_meta_learner(
+        oof_stack, y, problem_type, metric_name
+    )
+    n_samples = oof_stack.shape[1]
+    if n_samples < 2:
+        return full_weights, None, float("inf")
+
+    run_seed = get_run_seed()
+    if problem_type == "classification" and split_y.ndim == 1:
+        _, class_counts = np.unique(split_y, return_counts=True)
+        n_splits = min(3, int(class_counts.min())) if len(class_counts) else 0
+        if n_splits < 2:
+            return full_weights, None, float("inf")
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=run_seed,
+        )
+        splits = splitter.split(np.zeros(n_samples), split_y)
+    else:
+        n_splits = min(3, n_samples)
+        if n_splits < 2:
+            return full_weights, None, float("inf")
+        splitter = KFold(n_splits=n_splits, shuffle=True, random_state=run_seed)
+        splits = splitter.split(np.zeros(n_samples))
+
+    cross_fitted = np.empty_like(oof_stack[0], dtype=float)
+    covered = np.zeros(n_samples, dtype=bool)
+    try:
+        for train_idx, validation_idx in splits:
+            fold_weights, _ = constrained_meta_learner(
+                oof_stack[:, train_idx],
+                y[train_idx],
+                problem_type,
+                metric_name,
+            )
+            cross_fitted[validation_idx] = np.average(
+                oof_stack[:, validation_idx],
+                axis=0,
+                weights=fold_weights,
+            )
+            covered[validation_idx] = True
+        if not covered.all() or not np.all(np.isfinite(cross_fitted)):
+            raise ValueError("Cross-fitted blend did not cover every row")
+        score = score_predictions(
+            cross_fitted,
+            y,
+            problem_type,
+            metric_name,
+        )
+        return full_weights, cross_fitted, float(score)
+    except Exception as exc:
+        print(f"   Warning: Cross-fitted constrained blend failed: {exc}")
+        return full_weights, None, float("inf")
+
+
+def cross_fitted_meta_predictions(
+    meta_X: np.ndarray,
+    y: np.ndarray,
+    problem_type: str,
+    n_classes: int | None,
+    *,
+    binary_single_col: bool,
+) -> tuple[LogisticRegression | Ridge, np.ndarray]:
+    """Generate nested-CV predictions and return a full-data meta model."""
+    targets = np.asarray(y)
+    n_samples = len(targets)
+    run_seed = get_run_seed()
+
+    if problem_type == "classification":
+        _, class_counts = np.unique(targets, return_counts=True)
+        n_splits = min(3, int(class_counts.min())) if len(class_counts) else 0
+        if n_splits < 2:
+            raise ValueError("Not enough examples per class for nested stacking CV")
+        splitter = StratifiedKFold(
+            n_splits=n_splits,
+            shuffle=True,
+            random_state=run_seed,
+        )
+        splits = splitter.split(meta_X, targets)
+        prediction_width = 1 if binary_single_col else int(n_classes or 2)
+        cross_fitted = (
+            np.empty(n_samples, dtype=float)
+            if prediction_width == 1
+            else np.empty((n_samples, prediction_width), dtype=float)
+        )
+    else:
+        n_splits = min(3, n_samples)
+        if n_splits < 2:
+            raise ValueError("Not enough rows for nested stacking CV")
+        splitter = KFold(n_splits=n_splits, shuffle=True, random_state=run_seed)
+        splits = splitter.split(meta_X)
+        cross_fitted = np.empty(n_samples, dtype=float)
+
+    covered = np.zeros(n_samples, dtype=bool)
+    for train_idx, validation_idx in splits:
+        fold_model, _ = tune_meta_model(
+            meta_X[train_idx],
+            targets[train_idx],
+            problem_type,
+            n_classes,
+        )
+        fold_model.fit(meta_X[train_idx], targets[train_idx])
+        if problem_type == "classification":
+            fold_predictions = fold_model.predict_proba(meta_X[validation_idx])
+            if binary_single_col:
+                fold_predictions = fold_predictions[:, 1]
+        else:
+            fold_predictions = fold_model.predict(meta_X[validation_idx])
+        cross_fitted[validation_idx] = fold_predictions
+        covered[validation_idx] = True
+
+    if not covered.all() or not np.all(np.isfinite(cross_fitted)):
+        raise ValueError("Nested stacking CV did not produce finite full coverage")
+    final_model, _ = tune_meta_model(meta_X, targets, problem_type, n_classes)
+    return final_model, cross_fitted
 
 
 def dirichlet_weight_search(
@@ -286,36 +432,13 @@ def dirichlet_weight_search(
     best_score = float("inf")
 
     # Sample weights from simplex via Dirichlet(1,1,...,1)
-    rng = np.random.default_rng(42)
+    rng = np.random.default_rng(get_run_seed())
     for _ in range(n_samples):
         weights = rng.dirichlet(np.ones(n_models))
         blended = np.average(oof_stack, axis=0, weights=weights)
 
         try:
-            if problem_type == "classification":
-                blended = np.clip(blended, 1e-15, 1 - 1e-15)
-                if blended.ndim > 1 and blended.shape[1] > 1:
-                    blended = blended / blended.sum(axis=1, keepdims=True)
-                # Classification metrics
-                if metric_name in ["auc", "roc_auc"]:
-                    # Negate because we minimize, but AUC should be maximized
-                    score = -roc_auc_score(
-                        y_true, blended, multi_class="ovr", average="weighted"
-                    )
-                else:
-                    # Default: log_loss for classification
-                    score = log_loss(y_true, blended)
-            else:
-                # Regression
-                if blended.ndim > 1:
-                    blended = blended.ravel()
-                if metric_name in ["mae", "mean_absolute_error"]:
-                    score = mean_absolute_error(y_true, blended)
-                elif metric_name in ["mse", "mean_squared_error"]:
-                    score = mean_squared_error(y_true, blended)
-                else:
-                    # Default: RMSE for regression
-                    score = np.sqrt(mean_squared_error(y_true, blended))
+            score = score_predictions(blended, y_true, problem_type, metric_name)
 
             if score < best_score:
                 best_score = score

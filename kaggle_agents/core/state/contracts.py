@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+
 if TYPE_CHECKING:
     import numpy as np
     import pandas as pd
@@ -177,6 +178,26 @@ class CanonicalDataContract:
     train_ids_hash: str
     train_schema_hash: str
 
+    # Ordered training-label contract. ``target_col`` remains the first target
+    # for backward compatibility with single-target consumers.
+    target_cols: list[str] = field(default_factory=list)
+    target_type: Literal["single", "multi_label", "multi_target"] = "single"
+
+    # True when ``id_col`` names row positions rather than a column the public
+    # data supplies. Consumers must not expect to find it in any CSV.
+    id_is_synthetic: bool = False
+
+    # Evaluation protocol metadata. Temporal fields are mandatory when
+    # ``cv_strategy`` is ``temporal_forward_chaining`` and absent otherwise.
+    cv_strategy: str = ""
+    temporal_splits_path: str | None = None
+    oof_eligible_mask_path: str | None = None
+    temporal_order_path: str | None = None
+    test_ids_path: str | None = None
+    image_input_paths_path: str | None = None
+    image_test_input_paths_path: str | None = None
+    packed_image_contract: bool = False
+
     def validate(self) -> tuple[bool, list[str]]:
         """Validate all canonical files exist and match checksums.
 
@@ -195,7 +216,18 @@ class CanonicalDataContract:
             path = Path(getattr(self, attr))
             if not path.exists():
                 violations.append(f"Missing: {path}")
-
+        if self.packed_image_contract:
+            for attr in (
+                "test_ids_path",
+                "image_input_paths_path",
+                "image_test_input_paths_path",
+            ):
+                raw_path = getattr(self, attr)
+                if not raw_path or not Path(raw_path).is_file():
+                    violations.append(
+                        f"Missing packed image alignment artifact "
+                        f"{attr}: {raw_path!r}"
+                    )
         # Verify hashes if files exist
         # Use compute_array_hash() for consistency with contract creation
         # Use allow_pickle=True for object arrays (common for ID columns)
@@ -210,11 +242,15 @@ class CanonicalDataContract:
 
         y_path = Path(self.y_path)
         if y_path.exists():
-            arr = np.load(y_path, allow_pickle=True)
-            actual_hash = self.compute_array_hash(arr)
+            if self.packed_image_contract or y_path.suffix.lower() == ".npz":
+                actual_hash = hashlib.sha256(y_path.read_bytes()).hexdigest()
+            else:
+                arr = np.load(y_path, allow_pickle=True)
+                actual_hash = self.compute_array_hash(arr)
             if actual_hash != self.y_hash:
                 violations.append(
-                    f"y.npy hash mismatch: {actual_hash[:8]}... != {self.y_hash[:8]}..."
+                    f"canonical target hash mismatch: {actual_hash[:8]}... "
+                    f"!= {self.y_hash[:8]}..."
                 )
 
         train_ids_path = Path(self.train_ids_path)
@@ -223,8 +259,21 @@ class CanonicalDataContract:
             actual_hash = self.compute_array_hash(arr)
             if actual_hash != self.train_ids_hash:
                 violations.append(
-                    f"train_ids.npy hash mismatch: {actual_hash[:8]}... != {self.train_ids_hash[:8]}..."
+                    f"train_ids.npy hash mismatch: {actual_hash[:8]}... != "
+                    f"{self.train_ids_hash[:8]}..."
                 )
+
+        if self.cv_strategy == "temporal_forward_chaining":
+            for attr in (
+                "temporal_splits_path",
+                "oof_eligible_mask_path",
+                "temporal_order_path",
+            ):
+                raw_path = getattr(self, attr)
+                if not raw_path or not Path(raw_path).is_file():
+                    violations.append(
+                        f"Missing temporal contract artifact {attr}: {raw_path!r}"
+                    )
 
         return len(violations) == 0, violations
 
@@ -241,12 +290,23 @@ class CanonicalDataContract:
             "n_test": self.n_test,
             "n_folds": self.n_folds,
             "id_col": self.id_col,
+            "id_is_synthetic": self.id_is_synthetic,
             "target_col": self.target_col,
+            "target_cols": self.target_cols or [self.target_col],
+            "target_type": self.target_type,
             "is_classification": self.is_classification,
             "folds_hash": self.folds_hash,
             "y_hash": self.y_hash,
             "train_ids_hash": self.train_ids_hash,
             "train_schema_hash": self.train_schema_hash,
+            "cv_strategy": self.cv_strategy,
+            "temporal_splits_path": self.temporal_splits_path,
+            "oof_eligible_mask_path": self.oof_eligible_mask_path,
+            "temporal_order_path": self.temporal_order_path,
+            "test_ids_path": self.test_ids_path,
+            "image_input_paths_path": self.image_input_paths_path,
+            "image_test_input_paths_path": self.image_test_input_paths_path,
+            "packed_image_contract": self.packed_image_contract,
         }
 
     def __repr__(self) -> str:
@@ -260,7 +320,16 @@ class CanonicalDataContract:
     @classmethod
     def from_dict(cls, data: dict) -> CanonicalDataContract:
         """Deserialize from checkpoint."""
-        return cls(**data)
+        payload = dict(data)
+        payload.setdefault(
+            "target_cols",
+            [payload["target_col"]] if payload.get("target_col") else [],
+        )
+        payload.setdefault(
+            "target_type",
+            "single" if len(payload["target_cols"]) <= 1 else "multi_target",
+        )
+        return cls(**payload)
 
     @staticmethod
     def compute_array_hash(arr: "np.ndarray") -> str:
@@ -517,6 +586,7 @@ def create_metric_contract(
             "mse",
             "mae",
             "mape",
+            "rmsle",
             "logloss",
             "log_loss",
             "cross_entropy",
@@ -535,38 +605,52 @@ def create_metric_contract(
 
 def create_submission_contract_from_sample(
     sample_submission_path: str,
+    test_data_path: str | None = None,
 ) -> SubmissionContract:
     """Create a SubmissionContract from sample_submission.csv.
 
     Args:
         sample_submission_path: Path to sample_submission.csv
+        test_data_path: Path to the public test table. When given, columns the
+            test set supplies are treated as echoed inputs rather than
+            predictions, instead of assuming the first column identifies rows.
 
     Returns:
         SubmissionContract instance
     """
-    import pandas as pd
+    from kaggle_agents.utils.csv_utils import read_csv_preview_and_count
+    from kaggle_agents.utils.target_inference import (
+        _read_schema_columns,
+        infer_pixel_submission_schema,
+        split_submission_schema,
+    )
 
-    sample_sub = pd.read_csv(sample_submission_path)
-    cols = sample_sub.columns.tolist()
+    sample_sub, expected_rows = read_csv_preview_and_count(
+        sample_submission_path,
+        preview_rows=200,
+    )
+    cols = [str(column) for column in sample_sub.columns]
 
     if len(cols) < 2:
         raise ValueError(
             f"sample_submission must have at least 2 columns (id + target), got: {cols}"
         )
 
-    id_col = cols[0]
-    target_cols = cols[1:]
-    expected_rows = len(sample_sub)
-
-    # Determine format type
+    test_columns = _read_schema_columns(test_data_path)
+    echoed_cols, target_cols = split_submission_schema(cols, test_columns)
+    test_path = Path(test_data_path) if test_data_path else None
+    if not test_columns and test_path is not None and test_path.is_dir():
+        pixel_roles = infer_pixel_submission_schema(sample_sub)
+        if pixel_roles is not None:
+            echoed_cols, target_cols = pixel_roles
+    id_col = echoed_cols[0] if echoed_cols else cols[0]
+    # Determine only the public layout. Template values are placeholders and
+    # cannot identify multilabel classification versus multi-target regression.
     if len(target_cols) == 1:
         format_type = "label"
         class_order = None
     else:
-        # Check if binary (multi-label) or continuous (multi-target)
-        sample_values = sample_sub[target_cols].iloc[:100]
-        is_binary = sample_values.isin([0, 1, 0.0, 1.0]).all().all()
-        format_type = "wide" if is_binary else "multi_target"
+        format_type = "wide"
         class_order = target_cols
 
     return SubmissionContract(

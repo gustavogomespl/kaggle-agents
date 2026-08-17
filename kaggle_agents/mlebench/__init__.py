@@ -7,7 +7,7 @@ competitions with proper data handling, grading, and evaluation.
 Example:
     >>> from kaggle_agents.mlebench import solve_mlebench
     >>> result = solve_mlebench(
-    ...     competition_id="aerial-cactus-identification",
+    ...     competition_id="competition-slug",
     ...     problem_type="binary_classification",
     ...     evaluation_metric="auc",
     ... )

@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ...core.state import KaggleState
 
+from .plan_refinement import (
+    _component_evidence,
+    _finite_score,
+    _metric_direction,
+)
 from .strategies import (
     EXTENDED_STRATEGIES_CV,
     EXTENDED_STRATEGIES_NLP,
@@ -104,7 +109,7 @@ def generate_multiple_plans(
 
     candidate_plans = []
 
-    for i, strategy in enumerate(strategies[:n_candidates]):
+    for strategy in strategies[:n_candidates]:
         print(f"   - Generating {strategy['name']} plan...")
 
         # Generate plan with strategy-specific modifications
@@ -116,14 +121,32 @@ def generate_multiple_plans(
         if strategy.get("inherit_from_best") and current_iteration >= 2:
             plan = mutate_plan_hyperparameters(plan, state)
 
-        # Evaluate fitness
-        fitness = evaluate_plan_fitness(plan, state)
+        # Store only a real local measurement. Self-declared impact estimates
+        # never enter fitness or selection.
+        evidence_kind, fitness, evidence_count = _plan_fitness_evidence(plan, state)
 
         candidate_plans.append((plan, strategy["name"], fitness))
-        print(f"     Fitness: {fitness:.3f}")
+        if evidence_kind == "actual_impact":
+            print(
+                "     Fitness evidence: "
+                f"{evidence_count} measured actual-impact value(s), "
+                f"mean={fitness:.3f}"
+            )
+        elif evidence_kind == "trusted_oof":
+            print(
+                "     Fitness evidence: "
+                f"{evidence_count} trusted canonical OOF score(s), "
+                f"mean={fitness:.3f}, direction={_metric_direction(state)}"
+            )
+        else:
+            print("     Fitness evidence: unmeasured exploration candidate")
 
-    # Sort by fitness (highest first)
-    candidate_plans.sort(key=lambda x: x[2], reverse=True)
+    # Stable selection: trusted local evidence first, then deterministic diversity.
+    # Python's stable sort preserves strategy generation order for exact ties.
+    candidate_plans.sort(
+        key=lambda item: _plan_selection_key(item[0], state),
+        reverse=True,
+    )
 
     return candidate_plans
 
@@ -194,18 +217,30 @@ def _get_domain_strategies(
         return [
             {
                 "name": "conservative",
-                "prompt_modifier": "Use proven audio models: mel-spectrogram + EfficientNet, simple CNN. Focus on stable preprocessing.",
-                "model_preference": ["efficientnet_audio", "resnet_audio", "simple_cnn"],
+                "prompt_modifier": (
+                    "Compare summary features with a compact time-frequency "
+                    "model using data-derived preprocessing."
+                ),
+                "model_preference": [
+                    "summary_feature_baseline",
+                    "compact_spectrogram_model",
+                ],
             },
             {
                 "name": "aggressive",
-                "prompt_modifier": "Use SOTA audio: AST (Audio Spectrogram Transformer), wav2vec2, PANN. Heavy augmentation (SpecAugment, mixup).",
-                "model_preference": ["ast", "wav2vec2", "pann", "whisper"],
+                "prompt_modifier": (
+                    "Evaluate an installed pretrained audio candidate only when "
+                    "compatible with the observed data and runtime budget."
+                ),
+                "model_preference": ["pretrained_audio_candidate"],
             },
             {
                 "name": "balanced",
-                "prompt_modifier": "Use mid-size audio models: EfficientNet-B2 on mel-specs. Balance preprocessing with model complexity.",
-                "model_preference": ["efficientnet_b2_audio", "sed_model", "cnn_transformer"],
+                "prompt_modifier": (
+                    "Select capacity from observed feature shape, sample count, "
+                    "installed resources, and trusted CV."
+                ),
+                "model_preference": ["budget_matched_audio_model"],
             },
         ]
     # TABULAR domain strategies (default)
@@ -266,12 +301,6 @@ def _generate_plan_with_strategy(
             )
         ] or plan[:2]
 
-    elif strategy["name"] == "aggressive":
-        # Boost feature engineering and ensemble components
-        for comp in plan:
-            if comp.component_type in ["feature_engineering", "ensemble"]:
-                comp.estimated_impact = min(comp.estimated_impact * 1.3, 1.0)
-
     return plan
 
 
@@ -297,31 +326,41 @@ def mutate_plan_hyperparameters(
 
     iteration_memory = state.get("iteration_memory", [])
 
-    # Get best hyperparameters from previous iterations
-    best_hyperparams = {}
+    # Record whether trusted local configurations exist. Mutation hints never
+    # inject generic numeric recipes; all variants must survive canonical CV.
+    has_local_hyperparameters = False
     if iteration_memory:
         for memory in iteration_memory:
-            if hasattr(memory, "best_hyperparameters") and memory.best_hyperparameters:
-                best_hyperparams.update(memory.best_hyperparameters)
+            used = getattr(memory, "hyperparameters_used", None)
+            if used:
+                has_local_hyperparameters = True
 
     mutated_plan = []
     for comp in plan:
         # Only mutate model components with some probability
-        if comp.component_type == "model" and random.random() < mutation_rate:
+        rng = random.Random(
+            f"{state.get('seed', 42)}:{state.get('current_iteration', 0)}:{comp.name}"
+        )
+        if comp.component_type == "model" and rng.random() < mutation_rate:
             # Create a mutated version
             mutated_name = f"{comp.name}_hp_variant"
 
             # Define mutation suggestions for common hyperparameters
-            mutation_hints = _get_hyperparameter_mutations(comp.name)
+            mutation_hints = _get_hyperparameter_mutations(
+                comp.name,
+                has_local_hyperparameters=has_local_hyperparameters,
+            )
 
             mutated_comp = AblationComponent(
                 name=mutated_name,
                 component_type=comp.component_type,
-                description=f"{getattr(comp, 'description', '')} (hyperparameter variant: {mutation_hints})",
-                code=comp.code,
-                estimated_impact=comp.estimated_impact * 0.95,  # Slight uncertainty penalty
-                dependencies=comp.dependencies,
-                ablatable=comp.ablatable,
+                code=f"{comp.code}\n# VALIDATION-GATED VARIANT: {mutation_hints}",
+                estimated_impact=comp.estimated_impact,
+                tested=False,
+                actual_impact=None,
+                external_source_ids=list(
+                    getattr(comp, "external_source_ids", [])
+                ),
             )
             mutated_plan.append(mutated_comp)
         else:
@@ -330,45 +369,22 @@ def mutate_plan_hyperparameters(
     return mutated_plan
 
 
-def _get_hyperparameter_mutations(model_name: str) -> str:
-    """Get suggested hyperparameter mutations for a model type."""
-    model_lower = model_name.lower()
-
-    if "lightgbm" in model_lower or "lgb" in model_lower:
-        mutations = [
-            "learning_rate: [0.01, 0.03, 0.05]",
-            "num_leaves: [31, 63, 127]",
-            "max_depth: [5, 7, 9]",
-            "reg_alpha: [0, 0.1, 0.5]",
-        ]
-        return random.choice(mutations)
-
-    if "xgboost" in model_lower or "xgb" in model_lower:
-        mutations = [
-            "learning_rate: [0.01, 0.05, 0.1]",
-            "max_depth: [4, 6, 8]",
-            "subsample: [0.7, 0.8, 0.9]",
-            "colsample_bytree: [0.7, 0.8, 0.9]",
-        ]
-        return random.choice(mutations)
-
-    if "catboost" in model_lower:
-        mutations = [
-            "learning_rate: [0.01, 0.03, 0.1]",
-            "depth: [4, 6, 8]",
-            "l2_leaf_reg: [1, 3, 5]",
-        ]
-        return random.choice(mutations)
-
-    if "neural" in model_lower or "mlp" in model_lower or "tabnet" in model_lower:
-        mutations = [
-            "learning_rate: [1e-4, 1e-3, 1e-2]",
-            "dropout: [0.1, 0.2, 0.3]",
-            "hidden_dims: [128, 256, 512]",
-        ]
-        return random.choice(mutations)
-
-    return "try different hyperparameter values"
+def _get_hyperparameter_mutations(
+    model_name: str,
+    *,
+    has_local_hyperparameters: bool = False,
+) -> str:
+    """Describe a validation-gated mutation without prescribing fixed values."""
+    local_basis = (
+        "the best locally measured configuration"
+        if has_local_hyperparameters
+        else "a budget-feasible baseline derived from the observed data"
+    )
+    return (
+        f"create one bounded {model_name} variant around {local_basis}; change one "
+        "capacity or regularization dimension, measure it on the canonical folds, "
+        "and retain it only when trusted CV improves"
+    )
 
 
 def evaluate_plan_fitness(
@@ -376,65 +392,111 @@ def evaluate_plan_fitness(
     state: KaggleState,
 ) -> float:
     """
-    Eureka-style: Evaluate fitness of a plan based on history.
+    Return the auditable local evidence value available for a plan.
 
-    Considers:
-    - Past success/failure patterns from iteration_memory
-    - Component type diversity
-    - Estimated impact scores
-    - Crossover guidance from meta-evaluator
+    Tested finite ``actual_impact`` values take precedence. When they are
+    absent, finite independently recomputed canonical OOF scores can provide
+    evidence if their structural/artifact/robustness gates are eligible and
+    metric direction is known. Unmeasured plans return 0.0 and are tie-broken
+    deterministically. ``estimated_impact`` is intentionally ignored.
 
     Args:
         plan: Candidate plan to evaluate
         state: Current workflow state
 
     Returns:
-        Fitness score (0-1)
+        Mean local evidence value, or 0.0 when no measurement exists.
     """
-    score = 0.0
-    iteration_memory = state.get("iteration_memory", [])
-    crossover_guidance = state.get("crossover_guidance", {})
+    _kind, value, _count = _plan_fitness_evidence(plan, state)
+    return value
 
-    # 1. Historical success/failure (40% weight)
-    historical_score = 0.0
-    for comp in plan:
-        for memory in iteration_memory:
-            # Reward components similar to what worked
-            if comp.component_type in memory.what_worked:
-                historical_score += 0.2
-            # Penalize components similar to what failed
-            if comp.component_type in memory.what_failed:
-                historical_score -= 0.1
 
-    historical_score = max(0, min(historical_score, 1.0))
-    score += 0.4 * historical_score
+def _trusted_actual_impacts(plan: list, state: KaggleState) -> list[float]:
+    """Collect finite impacts explicitly marked tested, including prior names."""
+    approvals = state.get("robustness_approved_components")
+    component_results = state.get("component_results")
 
-    # 2. Diversity bonus (20% weight)
-    unique_types = len(set(c.component_type for c in plan))
-    diversity_score = min(unique_types / 4.0, 1.0)
-    score += 0.2 * diversity_score
+    def is_explicitly_rejected(name: str) -> bool:
+        return isinstance(approvals, dict) and approvals.get(name) is False
 
-    # 3. Estimated impact (25% weight)
-    if plan:
-        avg_impact = sum(c.estimated_impact for c in plan) / len(plan)
-        score += 0.25 * avg_impact
+    def structurally_failed(name: str) -> bool:
+        if not isinstance(component_results, dict) or name not in component_results:
+            return False
+        result = component_results[name]
+        success = result.get("success") if isinstance(result, dict) else getattr(
+            result, "success", None
+        )
+        return success is False
 
-    # 4. Crossover guidance alignment (15% weight)
-    if crossover_guidance:
-        preserve_components = crossover_guidance.get("preserve_components", [])
-        avoid_components = crossover_guidance.get("avoid_components", [])
+    prior_by_name = {
+        component.name: _finite_score(component.actual_impact)
+        for component in (state.get("ablation_plan", []) or [])
+        if getattr(component, "tested", False) is True
+        and _finite_score(getattr(component, "actual_impact", None)) is not None
+        and not is_explicitly_rejected(str(component.name))
+        and not structurally_failed(str(component.name))
+    }
+    impacts: list[float] = []
+    for component in plan:
+        name = str(getattr(component, "name", ""))
+        if is_explicitly_rejected(name) or structurally_failed(name):
+            continue
+        impact = None
+        if getattr(component, "tested", False) is True:
+            impact = _finite_score(getattr(component, "actual_impact", None))
+        if impact is None:
+            impact = prior_by_name.get(name)
+        if impact is not None:
+            impacts.append(impact)
+    return impacts
 
-        alignment_score = 0.0
-        for comp in plan:
-            if comp.component_type in preserve_components:
-                alignment_score += 0.3
-            if comp.component_type in avoid_components:
-                alignment_score -= 0.2
 
-        alignment_score = max(0, min(alignment_score, 1.0))
-        score += 0.15 * alignment_score
+def _trusted_oof_scores(plan: list, state: KaggleState) -> list[float]:
+    """Collect eligible raw OOF scores when their direction is known."""
+    if _metric_direction(state) == "unknown":
+        return []
+    scores = []
+    for component in plan:
+        evidence = _component_evidence(state, component)
+        if evidence["selection_eligible"]:
+            scores.append(float(evidence["trusted_oof_score"]))
+    return scores
 
-    return min(max(score, 0.0), 1.0)
+
+def _plan_fitness_evidence(
+    plan: list,
+    state: KaggleState,
+) -> tuple[str, float, int]:
+    """Return evidence kind, raw mean value, and measurement count."""
+    impacts = _trusted_actual_impacts(plan, state)
+    if impacts:
+        return "actual_impact", sum(impacts) / len(impacts), len(impacts)
+
+    scores = _trusted_oof_scores(plan, state)
+    if scores:
+        return "trusted_oof", sum(scores) / len(scores), len(scores)
+    return "unmeasured", 0.0, 0
+
+
+def _plan_selection_key(
+    plan: list,
+    state: KaggleState,
+) -> tuple[int, float, int, int]:
+    """Build an evidence-first, deterministic key for candidate selection."""
+    evidence_kind, raw_value, count = _plan_fitness_evidence(plan, state)
+    if evidence_kind == "actual_impact":
+        evidence_rank = 2
+        directed_value = raw_value
+    elif evidence_kind == "trusted_oof":
+        evidence_rank = 1
+        directed_value = (
+            -raw_value if _metric_direction(state) == "minimize" else raw_value
+        )
+    else:
+        evidence_rank = 0
+        directed_value = 0.0
+    unique_types = len({component.component_type for component in plan})
+    return evidence_rank, directed_value, count, unique_types
 
 
 def select_best_plan(
@@ -452,8 +514,11 @@ def select_best_plan(
     if not candidate_plans:
         return [], "none"
 
-    best_plan, strategy, fitness = candidate_plans[0]
-    print(f"\n   Eureka: Selected '{strategy}' plan (fitness: {fitness:.3f})")
+    best_plan, strategy, _fitness = candidate_plans[0]
+    print(
+        f"\n   Eureka: Selected '{strategy}' plan "
+        "using trusted evidence when available, otherwise deterministic exploration"
+    )
 
     return best_plan, strategy
 

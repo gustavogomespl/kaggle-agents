@@ -66,9 +66,13 @@ class PromptOptimizer:
                     flush=True,
                 )
 
+            # OpenAI-compatible gateways (e.g. OpenRouter): honor OPENAI_BASE_URL
+            # so LiteLLM hits the same endpoint as the LangChain clients
+            api_base = os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE")
             lm = dspy.LM(
                 model=f"openai/{model}",
                 api_key=os.getenv("OPENAI_API_KEY"),
+                api_base=api_base,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )

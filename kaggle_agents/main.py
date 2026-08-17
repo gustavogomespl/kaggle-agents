@@ -113,12 +113,12 @@ def extract_competition_slug(competition_input: str) -> str:
         competition_input: Competition name or URL
 
     Returns:
-        Competition slug (e.g., 'titanic')
+        Competition slug (e.g., 'competition-slug')
 
     Examples:
-        'titanic' -> 'titanic'
-        'https://www.kaggle.com/competitions/titanic' -> 'titanic'
-        'https://www.kaggle.com/c/titanic' -> 'titanic'
+        'competition-slug' -> 'competition-slug'
+        'https://www.kaggle.com/competitions/competition-slug' -> 'competition-slug'
+        'https://www.kaggle.com/c/competition-slug' -> 'competition-slug'
     """
     # Remove trailing slash
     competition_input = competition_input.rstrip("/")
@@ -151,7 +151,10 @@ def main():
     parser.add_argument(
         "competition",
         type=str,
-        help="Kaggle competition name or URL (e.g., 'titanic' or 'https://www.kaggle.com/competitions/titanic')",
+        help=(
+            "Kaggle competition name or URL (e.g., 'competition-slug' or "
+            "'https://www.kaggle.com/competitions/competition-slug')"
+        ),
     )
     parser.add_argument(
         "--max-iterations",

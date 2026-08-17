@@ -204,6 +204,7 @@ class FoldCheckpointManager:
     def _save_checkpoint_state(self) -> None:
         """Save checkpoint state to disk."""
         state = {
+            "checkpoint_version": 1,
             "component_name": self.component_name,
             "n_samples": self.n_samples,
             "n_classes": self.n_classes,
@@ -230,18 +231,125 @@ class FoldCheckpointManager:
                 state = json.load(f)
 
             # Verify compatibility
+            if state.get("component_name") != self.component_name:
+                print("   Warning: Checkpoint component mismatch, ignoring")
+                return
             if state.get("n_samples") != self.n_samples:
                 print("   Warning: Checkpoint n_samples mismatch, ignoring")
                 return
+            if state.get("n_classes") != self.n_classes:
+                print("   Warning: Checkpoint n_classes mismatch, ignoring")
+                return
+            if state.get("min_folds") != self.min_folds:
+                print("   Warning: Checkpoint min_folds mismatch, ignoring")
+                return
+
+            completed_folds_raw = state.get("completed_folds")
+            if not isinstance(completed_folds_raw, list):
+                print("   Warning: Invalid completed_folds metadata, ignoring")
+                return
+            try:
+                completed_folds = [int(value) for value in completed_folds_raw]
+            except (TypeError, ValueError):
+                print("   Warning: Invalid completed_folds values, ignoring")
+                return
+            if (
+                len(completed_folds) != len(set(completed_folds))
+                or any(fold_idx < 0 for fold_idx in completed_folds)
+            ):
+                print("   Warning: Invalid completed_folds values, ignoring")
+                return
+
+            checkpoint_entries = state.get("checkpoints", {})
+            if not isinstance(checkpoint_entries, dict):
+                print("   Warning: Invalid checkpoint entries, ignoring")
+                return
+            try:
+                entry_folds = {int(key) for key in checkpoint_entries}
+            except (TypeError, ValueError):
+                print("   Warning: Invalid checkpoint fold keys, ignoring")
+                return
+            if entry_folds != set(completed_folds):
+                print("   Warning: Checkpoint fold metadata is inconsistent, ignoring")
+                return
 
             # Load checkpoints
-            for fold_idx_str, ckpt_data in state.get("checkpoints", {}).items():
+            seen_validation_indices: set[int] = set()
+            for fold_idx_str, ckpt_data in checkpoint_entries.items():
                 fold_idx = int(fold_idx_str)
                 model_path, oof_path, idx_path = self._get_fold_paths(fold_idx)
 
                 if oof_path.exists() and idx_path.exists():
-                    oof = np.load(oof_path)
-                    val_idx = np.load(idx_path)
+                    oof = np.asarray(np.load(oof_path, allow_pickle=False))
+                    val_idx = np.asarray(np.load(idx_path, allow_pickle=False))
+
+                    if (
+                        oof.ndim not in {1, 2}
+                        or len(oof) == 0
+                        or not np.issubdtype(oof.dtype, np.number)
+                        or not np.all(np.isfinite(oof))
+                    ):
+                        print(
+                            f"   Warning: Invalid OOF checkpoint for fold {fold_idx}, "
+                            "ignoring fold"
+                        )
+                        continue
+                    if val_idx.ndim != 1 or not np.issubdtype(
+                        val_idx.dtype, np.integer
+                    ):
+                        print(
+                            f"   Warning: Invalid validation indices for fold {fold_idx}, "
+                            "ignoring fold"
+                        )
+                        continue
+                    if (
+                        len(val_idx) != len(oof)
+                        or len(np.unique(val_idx)) != len(val_idx)
+                        or np.any(val_idx < 0)
+                        or np.any(val_idx >= self.n_samples)
+                    ):
+                        print(
+                            f"   Warning: Validation index/OOF mismatch for fold {fold_idx}, "
+                            "ignoring fold"
+                        )
+                        continue
+                    if self.n_classes > 1 and (
+                        oof.ndim != 2 or oof.shape[1] != self.n_classes
+                    ):
+                        print(
+                            f"   Warning: OOF class width mismatch for fold {fold_idx}, "
+                            "ignoring fold"
+                        )
+                        continue
+                    if self.n_classes == 1 and not (
+                        oof.ndim == 1 or (oof.ndim == 2 and oof.shape[1] == 1)
+                    ):
+                        print(
+                            f"   Warning: OOF width mismatch for fold {fold_idx}, "
+                            "ignoring fold"
+                        )
+                        continue
+
+                    expected_shape = tuple(ckpt_data.get("oof_shape", ()))
+                    expected_idx_len = ckpt_data.get("val_indices_len")
+                    if (
+                        (expected_shape and oof.shape != expected_shape)
+                        or expected_idx_len != len(val_idx)
+                    ):
+                        print(
+                            f"   Warning: Stored checkpoint metadata mismatch for fold "
+                            f"{fold_idx}, ignoring fold"
+                        )
+                        continue
+
+                    current_indices = {int(value) for value in val_idx.tolist()}
+                    if current_indices & seen_validation_indices:
+                        print(
+                            f"   Warning: Overlapping validation indices for fold "
+                            f"{fold_idx}, ignoring fold"
+                        )
+                        continue
+                    seen_validation_indices.update(current_indices)
 
                     self.checkpoints[fold_idx] = FoldCheckpoint(
                         fold_idx=fold_idx,
@@ -363,8 +471,11 @@ class FoldCheckpointManager:
         """Get scores for all completed folds."""
         return {fold_idx: ckpt.score for fold_idx, ckpt in self.checkpoints.items()}
 
-    def get_best_fold(self) -> tuple[int, float]:
+    def get_best_fold(self, *, maximize: bool = False) -> tuple[int, float]:
         """Get the fold with the best score.
+
+        Args:
+            maximize: Whether larger metric values are better.
 
         Returns:
             Tuple of (fold_idx, score)
@@ -373,7 +484,8 @@ class FoldCheckpointManager:
             raise ValueError("No checkpoints available")
 
         scores = self.get_fold_scores()
-        best_fold = min(scores, key=scores.get)  # Assuming lower is better
+        selector = max if maximize else min
+        best_fold = selector(scores, key=scores.get)
         return best_fold, scores[best_fold]
 
     def cleanup(self) -> None:

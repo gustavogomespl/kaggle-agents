@@ -136,6 +136,50 @@ class TestDetectPrecomputedFeatures:
         # Should not find the file in subdirectory
         assert "histogram" not in result.features_found
 
+    def test_detects_novel_numeric_matrix_from_schema(self, tmp_path: Path) -> None:
+        """Feature discovery must not depend on a memorized filename."""
+        matrix = pd.DataFrame(
+            {
+                "item_id": [11, 12, 13],
+                "descriptor_a": [0.1, 0.2, 0.3],
+                "descriptor_b": [1.1, 1.2, 1.3],
+            }
+        )
+        matrix.to_csv(tmp_path / "opaque_matrix_abc.csv", index=False)
+
+        result = detect_precomputed_features(tmp_path)
+
+        assert result.features_found["opaque_matrix_abc"] == (
+            tmp_path / "opaque_matrix_abc.csv"
+        )
+        assert result.feature_shapes["opaque_matrix_abc"] == (3, 3)
+
+    def test_schema_infers_split_and_mapping_roles_with_novel_names(
+        self, tmp_path: Path
+    ) -> None:
+        """Metadata roles are inferred from columns, not benchmark filenames."""
+        pd.DataFrame(
+            {"item_id": [1, 2], "split_assignment": ["fit", "holdout"]}
+        ).to_csv(tmp_path / "partition_table.csv", index=False)
+        pd.DataFrame(
+            {"item_id": [1, 2], "asset_path": ["a.wav", "b.wav"]}
+        ).to_csv(tmp_path / "asset_index.csv", index=False)
+
+        result = detect_precomputed_features(tmp_path)
+
+        assert result.features_found["cv_folds"].name == "partition_table.csv"
+        assert result.features_found["id_mapping"].name == "asset_index.csv"
+
+    def test_target_table_is_not_misclassified_as_features(self, tmp_path: Path) -> None:
+        """A numeric label table is training data, not a feature matrix."""
+        pd.DataFrame(
+            {"item_id": [1, 2], "target": [0, 1], "label_weight": [1.0, 1.0]}
+        ).to_csv(tmp_path / "targets.csv", index=False)
+
+        result = detect_precomputed_features(tmp_path)
+
+        assert not result.has_features()
+
 
 class TestLoadPrecomputedFeatures:
     """Tests for load_precomputed_features function."""

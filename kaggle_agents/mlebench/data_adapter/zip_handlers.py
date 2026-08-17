@@ -9,6 +9,89 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
+from .dataclasses import ArchiveMemberProvenance, ArchiveProvenance
+
+
+# Delimited files whose rows are cheap to inspect for a role (train/test/
+# submission/auxiliary) without knowing the archive's competition-specific
+# meaning. `.json`/`.jsonl` are intentionally excluded: their bounded readers
+# differ by JSON shape and belong to the existing JSON materialization path.
+_ROLE_INSPECTABLE_SUFFIXES = {".csv", ".tsv", ".txt"}
+
+
+def _should_extract_to_subdir(z: zipfile.ZipFile, sample_limit: int = 2000) -> bool:
+    """Heuristic: extract to subdir if there are files at zip root."""
+    seen = 0
+    for name in z.namelist():
+        if not name or name.endswith("/"):
+            continue
+        seen += 1
+        # Root-level files -> no directory structure
+        if "/" not in name:
+            return True
+        if seen >= sample_limit:
+            break
+    return False
+
+
+def _already_extracted(
+    z: zipfile.ZipFile, destination_root: Path, sample_limit: int = 50
+) -> bool:
+    """Best-effort check to avoid re-extracting large archives."""
+    checked = 0
+    for name in z.namelist():
+        if not name or name.endswith("/"):
+            continue
+        checked += 1
+        if (destination_root / name).exists():
+            return True
+        if checked >= sample_limit:
+            break
+    return False
+
+
+def _build_archive_provenance(
+    z: zipfile.ZipFile, zip_file: Path, destination_root: Path
+) -> ArchiveProvenance:
+    """Open the central directory and record bounded, idempotent provenance.
+
+    Counts every non-directory member (without retaining media names) and
+    retains per-member details only for role-inspectable delimited files, so
+    the record stays cheap even for large media archives.
+    """
+    member_count = 0
+    supported_tabular_member_count = 0
+    supported_tabular_root_member_count = 0
+    supported_members: list[ArchiveMemberProvenance] = []
+    for member in z.infolist():
+        name = member.filename
+        if not name or name.endswith("/"):
+            continue
+        member_count += 1
+        if Path(name).suffix.lower() not in _ROLE_INSPECTABLE_SUFFIXES:
+            continue
+        at_archive_root = "/" not in name
+        supported_tabular_member_count += 1
+        if at_archive_root:
+            supported_tabular_root_member_count += 1
+        supported_members.append(
+            ArchiveMemberProvenance(
+                member_name=name,
+                extracted_path=destination_root / name,
+                crc=member.CRC,
+                file_size=member.file_size,
+                at_archive_root=at_archive_root,
+            )
+        )
+    return ArchiveProvenance(
+        archive_path=zip_file,
+        extraction_root=destination_root,
+        member_count=member_count,
+        supported_tabular_member_count=supported_tabular_member_count,
+        supported_tabular_root_member_count=supported_tabular_root_member_count,
+        supported_members=tuple(supported_members),
+    )
+
 
 class ZipHandlerMixin:
     """Mixin providing ZIP file handling methods."""
@@ -16,50 +99,31 @@ class ZipHandlerMixin:
     # mle_cache attribute will be provided by the main class
     mle_cache: Path
 
-    def _extract_zips(self, directory: Path) -> None:
-        """Extract all ZIP files in directory.
+    def _extract_zips(self, directory: Path) -> list[ArchiveProvenance]:
+        """Extract all ZIP files in directory and return their provenance.
 
         Notes:
             Some competitions ship flat zips (files at root). For those, we extract into
             a subdirectory named after the zip stem to avoid polluting `directory/` and
             to create stable `train/` / `test/` folders when the zip is named similarly.
+
+            Provenance is additive observation, not a behavior change: every call
+            opens each ZIP's central directory -- even when extraction itself is
+            skipped because the archive was already extracted -- and returns one
+            aggregate `ArchiveProvenance` record per valid ZIP. Repeated calls
+            against an unchanged directory therefore return equal provenance.
         """
-
-        def _should_extract_to_subdir(z: zipfile.ZipFile, sample_limit: int = 2000) -> bool:
-            """Heuristic: extract to subdir if there are files at zip root."""
-            seen = 0
-            for name in z.namelist():
-                if not name or name.endswith("/"):
-                    continue
-                seen += 1
-                # Root-level files -> no directory structure
-                if "/" not in name:
-                    return True
-                if seen >= sample_limit:
-                    break
-            return False
-
-        def _already_extracted(
-            z: zipfile.ZipFile, destination_root: Path, sample_limit: int = 50
-        ) -> bool:
-            """Best-effort check to avoid re-extracting large archives."""
-            checked = 0
-            for name in z.namelist():
-                if not name or name.endswith("/"):
-                    continue
-                checked += 1
-                if (destination_root / name).exists():
-                    return True
-                if checked >= sample_limit:
-                    break
-            return False
-
-        for zip_file in directory.glob("*.zip"):
+        provenance: list[ArchiveProvenance] = []
+        for zip_file in sorted(directory.glob("*.zip")):
             extract_dir = directory / zip_file.stem
             try:
                 with zipfile.ZipFile(zip_file, "r") as z:
                     extract_to_subdir = _should_extract_to_subdir(z)
                     destination_root = extract_dir if extract_to_subdir else directory
+
+                    provenance.append(
+                        _build_archive_provenance(z, zip_file, destination_root)
+                    )
 
                     if destination_root.exists() and _already_extracted(z, destination_root):
                         continue
@@ -72,6 +136,7 @@ class ZipHandlerMixin:
                         z.extractall(directory)
             except zipfile.BadZipFile:
                 print(f"   Warning: {zip_file.name} is not a valid zip")
+        return provenance
 
     def _populate_from_fallback(self, competition_id: str, public_dir: Path) -> bool:
         """

@@ -1,9 +1,4 @@
-"""
-Audio competition fallback plan.
-
-Converts audio to spectrograms, then uses image models.
-Includes mandatory data audit to prevent wasted compute on broken pipelines.
-"""
+"""Benchmark-neutral fallback plan for audio data."""
 
 from typing import Any
 
@@ -12,155 +7,254 @@ def create_audio_fallback_plan(
     domain: str,
     sota_analysis: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """
-    Create fallback plan for audio competitions (mel-spectrograms + CNNs).
+    """Create an audited, data-derived audio fallback plan."""
+    del sota_analysis
+    target_requirement = (
+        "Treat targets as continuous only after validating the public target "
+        "artifact and metric."
+        if "regression" in domain
+        else "Infer single-label versus multi-label structure from the public "
+        "target artifact before selecting loss and activation."
+    )
 
-    Converts audio to spectrograms, then uses image models.
-    Starts with mandatory data audit to fail-fast if data is missing.
-
-    Args:
-        domain: Competition domain (audio_classification, audio_regression)
-        sota_analysis: SOTA analysis results
-
-    Returns:
-        List of component dictionaries (5 components: 1 audit + 1 preprocessing + 2 models + 1 ensemble)
-    """
     return [
         {
             "name": "data_audit",
             "component_type": "preprocessing",
-            "description": "Validate audio files exist and labels are parseable. FAIL FAST if data is missing or invalid.",
-            "estimated_impact": 0.0,  # No score impact, but prevents wasted compute
-            "rationale": "Audio competitions often have non-standard data layouts (e.g., mlsp-2013-birds with essential_data/src_wavs/). Audit ensures data is accessible before expensive training begins. MUST run first to prevent 70+ minutes wasted on broken pipelines.",
+            "description": (
+                "Verify supplied audio coverage, target artifacts, and readable "
+                "media metadata before training."
+            ),
+            "estimated_impact": 0.0,
+            "rationale": (
+                "A schema- and path-driven audit prevents silent row loss while "
+                "remaining independent of any competition-specific layout."
+            ),
             "code_outline": """
-# MANDATORY DATA AUDIT - Run this FIRST before any other processing
+from collections import Counter
 from pathlib import Path
+import json
+import numpy as np
+import torchaudio
 
-AUDIO_EXTS = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.aiff', '.aif'}
+AUDIO_EXTS = {
+    '.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.wma', '.aiff', '.aif'
+}
 
-def find_audio_files(directory):
-    '''Recursively find audio files with case-insensitive extension matching.'''
-    audio_files = []
-    for f in directory.rglob('*'):
-        if f.is_file() and f.suffix.lower() in AUDIO_EXTS:
-            audio_files.append(f)
-    return sorted(audio_files)
-
-# Search for audio in multiple possible locations
-search_dirs = [AUDIO_SOURCE_DIR if 'AUDIO_SOURCE_DIR' in dir() else None, TRAIN_PATH, OUTPUT_DIR]
-search_dirs = [d for d in search_dirs if d and Path(d).exists()]
-
-audio_files = []
-audio_source = None
-for d in search_dirs:
-    files = find_audio_files(Path(d))
-    if files:
-        audio_files = files
-        audio_source = d
-        break
-
-# FAIL FAST if insufficient data
-if len(audio_files) < 10:
-    raise FileNotFoundError(
-        f"AUDIT FAILED: Only {len(audio_files)} audio files found. "
-        f"Searched: {search_dirs}. Check data paths."
+def find_audio_files(path):
+    path = Path(path)
+    if path.is_file():
+        return [path] if path.suffix.lower() in AUDIO_EXTS else []
+    if not path.is_dir():
+        return []
+    return sorted(
+        item for item in path.rglob('*')
+        if item.is_file() and item.suffix.lower() in AUDIO_EXTS
     )
 
-# Validate label files
-for lf in LABEL_FILES if 'LABEL_FILES' in dir() else []:
-    if not Path(lf).exists():
-        raise FileNotFoundError(f"AUDIT FAILED: Label file not found: {lf}")
+candidate_roots = []
+for variable_name in ('AUDIO_SOURCE_DIR', 'TRAIN_PATH', 'TEST_PATH'):
+    value = globals().get(variable_name)
+    if value and Path(value).exists():
+        candidate_roots.append(Path(value))
 
-print("=== DATA AUDIT PASSED ===")
-print(f"Audio files found: {len(audio_files)}")
-print(f"Audio source: {audio_source}")
-print(f"Sample file: {audio_files[0]}")
-print(f"Extensions: {set(f.suffix.lower() for f in audio_files[:100])}")
+audio_files = sorted({
+    path.resolve()
+    for root in candidate_roots
+    for path in find_audio_files(root)
+})
+if not audio_files:
+    raise FileNotFoundError(
+        f"AUDIT FAILED: no audio files under supplied roots {candidate_roots}"
+    )
 
-# Save audit results for downstream components
-import json
+declared_paths = [
+    Path(path)
+    for variable_name in ('TRAIN_FILE_PATHS', 'TEST_FILE_PATHS')
+    for path in globals().get(variable_name, [])
+]
+missing_declared = [str(path) for path in declared_paths if not path.is_file()]
+if missing_declared:
+    raise FileNotFoundError(
+        f"AUDIT FAILED: unresolved declared files; sample={missing_declared[:5]}"
+    )
+if declared_paths and len(audio_files) < len(set(map(str, declared_paths))):
+    raise ValueError("AUDIT FAILED: discovered audio does not cover declared records")
+
+for target_path in globals().get('LABEL_FILES', []):
+    if not Path(target_path).is_file():
+        raise FileNotFoundError(f"AUDIT FAILED: target file missing: {target_path}")
+
+observations = []
+metadata_errors = []
+for path in audio_files[:64]:
+    try:
+        info = torchaudio.info(str(path))
+        if info.sample_rate > 0 and info.num_frames > 0:
+            observations.append({
+                'sample_rate': int(info.sample_rate),
+                'duration': info.num_frames / info.sample_rate,
+            })
+    except Exception as exc:
+        metadata_errors.append(f"{path}: {exc}")
+if not observations:
+    raise RuntimeError(
+        f"AUDIT FAILED: no readable audio metadata; sample={metadata_errors[:3]}"
+    )
+
+sample_rates = [item['sample_rate'] for item in observations]
+durations = np.asarray([item['duration'] for item in observations], dtype=float)
+target_sample_rate = Counter(sample_rates).most_common(1)[0][0]
 audit_result = {
     'audio_files_count': len(audio_files),
-    'audio_source': str(audio_source),
-    'sample_files': [str(f) for f in audio_files[:5]]
+    'audio_files': [str(path) for path in audio_files],
+    'candidate_roots': [str(path) for path in candidate_roots],
+    'observed_sample_rates': dict(Counter(sample_rates)),
+    'observed_duration_quantiles': {
+        str(q): float(np.quantile(durations, q)) for q in (0.1, 0.5, 0.9)
+    },
+    'target_sample_rate': target_sample_rate,
 }
-(MODELS_DIR / 'audit_result.json').write_text(json.dumps(audit_result))
-print("Final Validation Performance: 1.0")  # Audit passed
+(MODELS_DIR / 'audio_audit.json').write_text(json.dumps(audit_result, indent=2))
+print(json.dumps(audit_result, indent=2))
 """,
         },
         {
-            "name": "mel_spectrogram_preprocessing",
+            "name": "data_derived_spectrogram_preprocessing",
             "component_type": "preprocessing",
-            "description": "Convert audio files to mel-spectrograms. Cache to disk for reuse across folds.",
-            "estimated_impact": 0.20,
-            "rationale": "Mel-spectrograms are the standard time-frequency representation for audio. Caching avoids recomputing spectrograms every epoch, significantly reducing training time.",
+            "description": (
+                "Cache time-frequency features using sample rate and duration "
+                "derived from the audited files."
+            ),
+            "estimated_impact": 0.18,
+            "rationale": (
+                "A shared deterministic representation supports fair model "
+                "comparison without imposing a domain-specific frequency range."
+            ),
             "code_outline": """
-# Use torchaudio for faster loading (preferred over librosa)
-import torchaudio
-import torch
-import numpy as np
+import json
+from hashlib import sha256
 from pathlib import Path
-from tqdm import tqdm
+import numpy as np
+import torch
+import torchaudio
 
-# Create cache directory
-cache_dir = MODELS_DIR / 'mel_cache'
-cache_dir.mkdir(exist_ok=True)
-
-# Mel spectrogram transform
+audit = json.loads((MODELS_DIR / 'audio_audit.json').read_text())
+audio_files = [Path(path) for path in audit['audio_files']]
+target_sr = int(audit['target_sample_rate'])
+duration = float(audit['observed_duration_quantiles']['0.5'])
+window_samples = max(16, round(target_sr * 0.025))
+n_fft = int(2 ** round(np.log2(window_samples)))
+hop_length = max(1, n_fft // 4)
+n_mels = max(32, min(128, n_fft // 8))
 mel_transform = torchaudio.transforms.MelSpectrogram(
-    sample_rate=22050,
-    n_mels=128,
-    n_fft=1024,
-    hop_length=512,
+    sample_rate=target_sr,
+    n_mels=n_mels,
+    n_fft=n_fft,
+    hop_length=hop_length,
+    f_min=0.0,
+    f_max=target_sr / 2,
 )
 
-# Find all audio files
-audio_files = find_audio_files(AUDIO_SOURCE_DIR if 'AUDIO_SOURCE_DIR' in dir() else TRAIN_PATH)
-
-# Cache spectrograms
-for audio_path in tqdm(audio_files, desc="Caching mels"):
-    cache_path = cache_dir / f'{audio_path.stem}.npy'
+cache_dir = MODELS_DIR / 'audio_feature_cache'
+cache_dir.mkdir(exist_ok=True)
+failures = []
+expected_cache_paths = []
+for audio_path in audio_files:
+    cache_key = sha256(str(audio_path.resolve()).encode()).hexdigest()
+    cache_path = cache_dir / cache_key[:2] / f'{cache_key}.npy'
+    expected_cache_paths.append(cache_path)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
     if cache_path.exists():
         continue
     try:
-        waveform, sr = torchaudio.load(audio_path)
-        if sr != 22050:
-            waveform = torchaudio.functional.resample(waveform, sr, 22050)
-        # Ensure mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-        mel = mel_transform(waveform)
-        mel_db = torchaudio.functional.amplitude_to_DB(mel, multiplier=10, amin=1e-10, db_multiplier=1)
-        np.save(cache_path, mel_db.numpy())
-    except Exception as e:
-        print(f"Warning: Failed to process {audio_path}: {e}")
-
-print(f"Cached {len(list(cache_dir.glob('*.npy')))} spectrograms")
-print("Final Validation Performance: 1.0")  # Preprocessing complete
+        waveform, source_sr = torchaudio.load(str(audio_path))
+        waveform = waveform.mean(dim=0, keepdim=True)
+        if source_sr != target_sr:
+            waveform = torchaudio.functional.resample(
+                waveform,
+                source_sr,
+                target_sr,
+                resampling_method='sinc_interp_hann',
+            )
+        target_length = max(1, round(duration * target_sr))
+        waveform = torch.nn.functional.pad(
+            waveform[:, :target_length],
+            (0, max(0, target_length - waveform.shape[1])),
+        )
+        features = mel_transform(waveform)
+        features = torchaudio.functional.amplitude_to_DB(
+            features,
+            multiplier=10,
+            amin=1e-10,
+            db_multiplier=1,
+        )
+        np.save(cache_path, features.numpy())
+    except Exception as exc:
+        failures.append(f"{audio_path}: {exc}")
+if failures:
+    raise RuntimeError(f"Audio preprocessing failed; sample={failures[:5]}")
+if not all(path.is_file() for path in expected_cache_paths):
+    raise RuntimeError("Feature cache coverage does not match audited audio")
 """,
         },
         {
-            "name": "efficientnet_audio",
+            "name": "regularized_spectrogram_candidate",
             "component_type": "model",
-            "description": "EfficientNet-B0 trained on mel-spectrogram images. Transfer learning from ImageNet.",
-            "estimated_impact": 0.25,
-            "rationale": "CNNs excel at recognizing patterns in spectrograms (frequency bands, temporal patterns). EfficientNet-B0 provides excellent accuracy with computational efficiency.",
-            "code_outline": "Load cached mel-spectrograms from MODELS_DIR/mel_cache/, use torchvision.models.efficientnet_b0(pretrained=True), replace classifier head, train with BCEWithLogitsLoss for multi-label, save OOF predictions to MODELS_DIR/oof_efficientnet_audio.npy",
+            "description": (
+                "Train a budget-appropriate regularized model over cached "
+                "time-frequency features."
+            ),
+            "estimated_impact": 0.22,
+            "rationale": (
+                "Select a compact CNN, pretrained encoder, or shallow network "
+                "from installed resources, then retain it only by trusted CV."
+            ),
+            "code_outline": (
+                "Load the aligned cached features and canonical folds. "
+                f"{target_requirement} Choose output shape, activation, and loss "
+                "from that verified contract. Select architecture capacity from "
+                "sample count, feature shape, installed weights, and runtime "
+                "budget; save honest OOF/test predictions with semantic IDs."
+            ),
         },
         {
-            "name": "resnet_audio",
+            "name": "summary_feature_baseline",
             "component_type": "model",
-            "description": "ResNet18 for architectural diversity in ensemble. Lighter than ResNet50 for faster training.",
-            "estimated_impact": 0.20,
-            "rationale": "ResNet18 learns different features than EfficientNet due to residual connections. Lighter architecture (ResNet18 vs ResNet50) reduces training time and risk of timeout. Ensemble benefits from model diversity.",
-            "code_outline": "Similar pipeline to EfficientNet but with torchvision.models.resnet18(pretrained=True). ResNet18 is preferred over ResNet50 for faster training. Save OOF predictions to MODELS_DIR/oof_resnet_audio.npy",
+            "description": (
+                "Build a cheap diversity baseline from pooled spectral and "
+                "temporal statistics."
+            ),
+            "estimated_impact": 0.14,
+            "rationale": (
+                "A low-cost feature baseline provides a robust fallback and a "
+                "genuinely different error profile from a spectrogram encoder."
+            ),
+            "code_outline": (
+                "Compute deterministic per-record summary features from the "
+                "cached representation. "
+                f"{target_requirement} Fit a regularized linear or tree model "
+                "appropriate to the verified target/metric using canonical "
+                "folds; persist aligned OOF/test predictions and IDs."
+            ),
         },
         {
             "name": "audio_ensemble",
             "component_type": "ensemble",
-            "description": "Weighted average of EfficientNet and ResNet predictions.",
-            "estimated_impact": 0.12,
-            "rationale": "Ensemble reduces overfitting to specific architecture biases and improves generalization.",
-            "code_outline": "Load OOF predictions from MODELS_DIR/oof_*.npy, compute weights by CV score (higher score = higher weight), weighted average for test predictions, save submission.csv",
+            "description": (
+                "Blend only valid, aligned candidates when held-out OOF "
+                "performance improves."
+            ),
+            "estimated_impact": 0.08,
+            "rationale": (
+                "OOF-based gating measures whether diversity helps instead of "
+                "assuming that a named architecture pair will ensemble well."
+            ),
+            "code_outline": (
+                "Load trusted prediction artifacts, verify fold/ID/target order, "
+                "fit weights using the declared metric and direction, and keep "
+                "the blend only if it beats the best constituent under the same "
+                "OOF protocol. Otherwise restore the best valid candidate."
+            ),
         },
     ]

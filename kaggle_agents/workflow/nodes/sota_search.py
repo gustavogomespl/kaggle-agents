@@ -3,14 +3,18 @@
 from datetime import datetime
 from typing import Any
 
+from ...core.config import get_config
 from ...core.state import KaggleState
+from ...utils.telemetry import make_event
 
 
 def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
     """
     Automatic SOTA search triggered by stagnation or score gap detection.
 
-    Searches for winning solutions and techniques when progress stalls.
+    Searches for external technique candidates when progress stalls.
+    Retrieval goes through SearchAgent.retrieve(), so the MLE-bench
+    contamination guard applies here as well.
 
     Args:
         state: Current workflow state
@@ -18,7 +22,7 @@ def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates with SOTA search results and guidance
     """
-    from ...agents.search_agent import SearchAgent
+    from ...agents.search_agent import SearchAgent, describe_search_outcome
 
     print("\n" + "=" * 60)
     print("= AUTO SOTA SEARCH: Finding solutions to break stagnation")
@@ -29,63 +33,179 @@ def auto_sota_search_node(state: KaggleState) -> dict[str, Any]:
         print("   Skipping - no SOTA search trigger")
         return {}
 
-    competition_name = state.get("competition_name", "")
+    try:
+        competition_name = state["competition_info"].name
+    except Exception:
+        competition_name = ""
     domain = state.get("domain_detected", "tabular")
     current_score = state.get("current_performance_score", 0.0)
+    current_iteration = state.get("current_iteration", 0)
 
     print(f"\n   🔍 Searching SOTA solutions for: {competition_name}")
     print(f"   📊 Current score: {current_score}")
     print(f"   🎯 Trigger reason: {stagnation.get('reason', 'unknown')}")
 
+    # Ablation toggle: Search-First disabled -> generic guidance only
+    toggles = getattr(get_config(), "ablation_toggles", None)
+    if toggles and toggles.disable_search:
+        print("   ABLATION: Search disabled - using generic stagnation guidance")
+        return {
+            "sota_search_triggered": True,
+            "search_attempted": False,
+            "search_eligible_retrieved": False,
+            "search_last_attempt_eligible_retrieved": False,
+            "search_last_attempt_reason": "ablation_disabled",
+            "search_eligibility_reason": "ablation_disabled",
+            "search_downstream_gain": None,
+            "search_downstream_gain_status": ("not_applicable_search_disabled"),
+            "search_effective": False,
+            "search_failure_reason": "ablation_disabled",
+            "refinement_guidance": {
+                **state.get("refinement_guidance", {}),
+                "sota_guidance": _generate_fallback_sota_guidance(domain, stagnation),
+            },
+            "telemetry_events": [
+                make_event(
+                    "ablation",
+                    "sota_search_skipped",
+                    iteration=current_iteration,
+                    component="search",
+                )
+            ],
+            "last_updated": datetime.now(),
+        }
+
     try:
         search_agent = SearchAgent()
 
-        # Focus search on areas that could improve the score
-        focus_areas = ["feature_engineering", "model_architecture", "ensemble_strategy"]
+        # Retrieve fresh solutions (mode-aware; contamination guard in MLE-bench)
+        solutions, queries, audit_records, events, retrieval_k = search_agent.retrieve(state)
+        eligible_now, eligibility_reason = describe_search_outcome(
+            solutions,
+            audit_records,
+        )
+        eligible_any_attempt = bool(
+            state.get(
+                "search_eligible_retrieved",
+                state.get("search_effective"),
+            )
+            or eligible_now
+        )
+        if not eligible_now:
+            events.append(
+                make_event(
+                    "search",
+                    "eligible_retrieval_empty",
+                    iteration=current_iteration,
+                    eligibility_reason=eligibility_reason,
+                    downstream_gain_status=("not_applicable_no_eligible_sources"),
+                    recovery=True,
+                )
+            )
 
-        # If stagnation is the issue, focus on novel approaches
-        if stagnation.get("stagnated"):
-            focus_areas.insert(0, "novel_approaches")
-            focus_areas.insert(1, "hyperparameter_optimization")
-
-        # Search for solutions
-        search_results = search_agent.search_with_focus(
-            competition=competition_name,
-            domain=domain,
-            focus_areas=focus_areas,
-            max_results=5,
-        ) if hasattr(search_agent, 'search_with_focus') else {}
+        search_results = {
+            "solutions": [
+                {
+                    "candidate": f"External candidate {index}",
+                    "approach": ", ".join(sol.models_used) or "; ".join(sol.strategies[:2]),
+                }
+                for index, sol in enumerate(solutions, 1)
+            ]
+        }
 
         # Generate guidance from search results
         sota_guidance = _generate_sota_guidance_from_results(search_results, stagnation)
 
-        print(f"\n   ✅ SOTA search complete - found {len(search_results.get('solutions', []))} relevant solutions")
+        print(f"\n   ✅ SOTA search complete - found {len(solutions)} relevant solutions")
+
+        events.append(
+            make_event(
+                "recovery",
+                "sota_search_executed",
+                iteration=current_iteration,
+                found=len(solutions),
+                reason=stagnation.get("reason", "stagnation"),
+            )
+        )
 
         return {
+            "sota_solutions": solutions,
             "sota_search_results": search_results,
             "sota_search_triggered": True,
+            "search_queries_used": queries,
+            "sota_retrieval_k": retrieval_k,
+            "last_sota_update_iteration": current_iteration,
+            "search_attempted": True,
+            "search_eligible_retrieved": eligible_any_attempt,
+            "search_last_attempt_eligible_retrieved": eligible_now,
+            "search_last_attempt_reason": eligibility_reason,
+            "search_eligibility_reason": (None if eligible_any_attempt else eligibility_reason),
+            "search_downstream_gain": None,
+            "search_downstream_gain_status": (
+                "unknown_not_measured"
+                if eligible_any_attempt
+                else "not_applicable_no_eligible_sources"
+            ),
+            # Legacy alias retained for state/checkpoint compatibility only.
+            "search_effective": eligible_any_attempt,
+            "search_failure_reason": (None if eligible_any_attempt else eligibility_reason),
+            "search_audit": audit_records,
             "refinement_guidance": {
                 **state.get("refinement_guidance", {}),
                 "sota_guidance": sota_guidance,
                 "sota_triggered_by": stagnation.get("reason"),
             },
+            "telemetry_events": events,
             "last_updated": datetime.now(),
         }
 
     except Exception as e:
         print(f"\n   ⚠️ SOTA search failed: {e}")
+        eligible_before_exception = bool(
+            state.get(
+                "search_eligible_retrieved",
+                state.get("search_effective"),
+            )
+        )
+        exception_reason = f"recovery_exception:{type(e).__name__}"
         # Return minimal guidance even if search fails
         return {
             "sota_search_triggered": True,
+            "search_attempted": True,
+            "search_eligible_retrieved": eligible_before_exception,
+            "search_last_attempt_eligible_retrieved": False,
+            "search_last_attempt_reason": exception_reason,
+            "search_eligibility_reason": (None if eligible_before_exception else exception_reason),
+            "search_downstream_gain": None,
+            "search_downstream_gain_status": (
+                "unknown_not_measured"
+                if eligible_before_exception
+                else "not_applicable_no_eligible_sources"
+            ),
+            "search_effective": eligible_before_exception,
+            "search_failure_reason": (None if eligible_before_exception else exception_reason),
             "refinement_guidance": {
                 **state.get("refinement_guidance", {}),
                 "sota_guidance": _generate_fallback_sota_guidance(domain, stagnation),
             },
+            "telemetry_events": [
+                make_event(
+                    "recovery",
+                    "sota_search_executed",
+                    iteration=current_iteration,
+                    found=0,
+                    error=str(e)[:300],
+                )
+            ],
         }
 
 
 def _generate_sota_guidance_from_results(search_results: dict, stagnation: dict) -> str:
     """Generate guidance string from SOTA search results."""
+    from ...agents.planner.sota_analysis import (
+        sanitize_external_fact_for_prompt,
+    )
+
     solutions = search_results.get("solutions", [])
 
     guidance_parts = [
@@ -98,15 +218,21 @@ def _generate_sota_guidance_from_results(search_results: dict, stagnation: dict)
     if solutions:
         guidance_parts.append("### Top Solutions Found:")
         for i, sol in enumerate(solutions[:3], 1):
-            title = sol.get("title", "Unknown")
-            approach = sol.get("approach", "Not specified")
-            guidance_parts.append(f"{i}. **{title}**")
+            candidate = sanitize_external_fact_for_prompt(
+                sol.get("candidate", f"External candidate {i}")
+            )
+            approach = sanitize_external_fact_for_prompt(sol.get("approach", "Not specified"))
+            guidance_parts.append(f"{i}. **{candidate or f'External candidate {i}'}**")
             guidance_parts.append(f"   - Approach: {approach}")
 
         guidance_parts.append("")
         guidance_parts.append("### Recommended Actions:")
-        guidance_parts.append("1. Try feature engineering techniques from top solutions")
-        guidance_parts.append("2. Consider model architectures used by winners")
+        guidance_parts.append(
+            "1. Validate feature-engineering hypotheses from retrieved candidates"
+        )
+        guidance_parts.append(
+            "2. Test model architectures observed in retrieved candidates"
+        )
         guidance_parts.append("3. Explore ensemble strategies mentioned")
     else:
         guidance_parts.append("### No specific solutions found - general recommendations:")

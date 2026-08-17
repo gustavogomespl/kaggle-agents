@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ...core.config import get_config, get_llm_for_role
-from ...optimization import create_training_collector
+from ...utils.telemetry import make_event
 from .analysis import AnalysisMixin
 from .detection import DetectionMixin
 from .eureka import EurekaMixin
@@ -50,8 +50,13 @@ class MetaEvaluatorAgent(
     - Collects training data for DSPy optimization
     """
 
-    def __init__(self):
-        """Initialize meta-evaluator with configured model."""
+    def __init__(self, *, enable_training_collection: bool = True):
+        """Initialize meta-evaluator with configured model.
+
+        Args:
+            enable_training_collection: Whether this run may persist online
+                DSPy training examples. Formal MLE-bench runs disable it.
+        """
         self.config = get_config()
 
         # Use configured LLM (supports OpenAI and Anthropic)
@@ -61,8 +66,21 @@ class MetaEvaluatorAgent(
         model = self.config.llm.model
         print(f"   🧠 Meta-Evaluator initialized with {provider} ({model})")
 
-        # Training data collector for RL
-        self.training_collector = create_training_collector()
+        # Creating TrainingDataCollector creates the global ``training_data``
+        # directory immediately. Keep it lazy so read-only evaluation paths
+        # and runs without usable examples have no cross-run side effects.
+        self._training_collection_enabled = enable_training_collection
+        self.training_collector = None
+
+    def _get_training_collector(self):
+        """Create the persistent collector only when collection is authorized."""
+        if not self._training_collection_enabled:
+            return None
+        if self.training_collector is None:
+            from ...optimization import create_training_collector
+
+            self.training_collector = create_training_collector()
+        return self.training_collector
 
     def __call__(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -81,6 +99,36 @@ class MetaEvaluatorAgent(
         current_iteration = state.get("current_iteration", 0)
         print(f"\n📊 Iteration: {current_iteration}")
 
+        # Ablation toggle: meta-evaluation disabled -> no guidance, no recovery
+        # routes (stagnation/SOTA-search/curriculum never trigger)
+        toggles = getattr(self.config, "ablation_toggles", None)
+        if toggles and toggles.disable_meta_evaluator:
+            print("\n   ABLATION: Meta-Evaluator disabled - skipping analysis")
+            return {
+                # Clear every signal consumed by downstream recovery routing;
+                # LangGraph otherwise retains values from the previous turn.
+                "failure_analysis": {},
+                "reward_signals": {},
+                "refinement_guidance": {},
+                "crossover_guidance": {},
+                "stagnation_detection": {},
+                "trigger_debug_loop": False,
+                "debug_target_model": None,
+                "debug_hints": [],
+                "performance_gap": None,
+                "curriculum_subtasks": [],
+                "needs_subtask_resolution": False,
+                "telemetry_events": [
+                    make_event(
+                        "ablation",
+                        "meta_evaluator_skipped",
+                        iteration=current_iteration,
+                        component="meta_evaluator",
+                    )
+                ],
+                "last_updated": datetime.now(),
+            }
+
         # Analyze component performance
         failure_analysis = self._analyze_failures(state)
 
@@ -95,8 +143,10 @@ class MetaEvaluatorAgent(
         # Create iteration memory for learning
         iteration_memory = self._create_iteration_memory(state, failure_analysis, reward_signals)
 
-        # Collect training data for DSPy optimization
-        self._collect_training_data(state, failure_analysis, reward_signals)
+        # Collect training data for DSPy optimization. MLE-bench is explicitly
+        # excluded so sequential benchmark tasks cannot train one another.
+        if self._training_collection_enabled:
+            self._collect_training_data(state, failure_analysis, reward_signals)
 
         # Eureka: Perform evolutionary crossover for next generation planning
         crossover_guidance = self._evolutionary_crossover(state)
@@ -118,6 +168,28 @@ class MetaEvaluatorAgent(
             }
             print(f"\n   ⚠️  TRIGGERING DEBUG LOOP for {debug_loop_trigger.get('worst_model')}")
 
+        # Telemetry: meta-evaluation outcome for this iteration
+        events = [
+            make_event(
+                "meta_evaluator",
+                "evaluated",
+                iteration=current_iteration,
+                stagnated=bool(stagnation_detection.get("stagnated")),
+                trigger_sota_search=bool(stagnation_detection.get("trigger_sota_search")),
+                trigger_debug_loop=bool(debug_loop_trigger.get("trigger_debug")),
+                rewards=reward_signals,
+            )
+        ]
+        if stagnation_detection.get("trigger_sota_search"):
+            events.append(
+                make_event(
+                    "recovery",
+                    "sota_search_triggered",
+                    iteration=current_iteration,
+                    reason=stagnation_detection.get("reason", "stagnation"),
+                )
+            )
+
         result = {
             "failure_analysis": failure_analysis,
             "reward_signals": reward_signals,
@@ -125,6 +197,7 @@ class MetaEvaluatorAgent(
             "crossover_guidance": crossover_guidance,  # Eureka: for planner
             "stagnation_detection": stagnation_detection,  # For SOTA search trigger
             "iteration_memory": [iteration_memory],  # Append to list
+            "telemetry_events": events,
             "last_updated": datetime.now(),
         }
         result.update(debug_updates)  # Add debug loop trigger if applicable
@@ -141,5 +214,6 @@ def meta_evaluator_node(state: KaggleState) -> dict[str, Any]:
     Returns:
         State updates
     """
-    agent = MetaEvaluatorAgent()
+    is_mlebench = str(state.get("run_mode", "")).strip().lower() == "mlebench"
+    agent = MetaEvaluatorAgent(enable_training_collection=not is_mlebench)
     return agent(state)

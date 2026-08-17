@@ -1,228 +1,171 @@
-"""
-Audio domain templates for code generation.
+"""Data-derived audio templates used by the developer prompt."""
 
-Provides reusable patterns for audio classification/detection tasks.
-Based on best practices from librosa and common Kaggle audio competition patterns.
-"""
+from __future__ import annotations
 
-# Domain-specific audio configurations
-# Bird vocalization parameters (500-12500 Hz range, higher sample rate)
-BIRD_AUDIO_CONFIG = {
-    "sample_rate": 32000,    # Higher SR for bird calls (up to 16 kHz Nyquist)
-    "n_mels": 128,           # Good resolution for bird vocalizations
-    "n_fft": 2048,           # Good frequency resolution
-    "hop_length": 512,       # ~16ms hop at 32kHz
-    "fmin": 500,             # Bird calls typically start around 500 Hz
-    "fmax": 12500,           # Upper range of most bird vocalizations
-    "duration": 5.0,         # Standard clip duration
-    "power": 2.0,            # Power spectrogram
-}
-
-# General audio parameters (human speech, music, environmental sounds)
-GENERAL_AUDIO_CONFIG = {
-    "sample_rate": 22050,    # Standard for general audio
-    "n_mels": 128,
-    "n_fft": 2048,
-    "hop_length": 512,
-    "fmin": 20,              # Include low frequencies
-    "fmax": 8000,            # Most important frequency content
-    "duration": 5.0,
-    "power": 2.0,
-}
-
-# Music parameters (wider frequency range, higher sample rate)
-MUSIC_AUDIO_CONFIG = {
-    "sample_rate": 44100,    # CD quality
-    "n_mels": 128,
-    "n_fft": 2048,
-    "hop_length": 512,
-    "fmin": 20,
-    "fmax": 16000,           # Full audible range
-    "duration": 10.0,        # Longer clips for music
-    "power": 2.0,
-}
+from collections import Counter
+from math import log2
+from statistics import median
 
 
-def get_audio_config(domain: str = "general") -> dict:
-    """Get audio configuration for a specific domain.
+def get_audio_config(
+    observed_sample_rates: list[int],
+    observed_durations: list[float],
+) -> dict[str, int | float]:
+    """Derive preprocessing parameters from successfully inspected audio files."""
+    sample_rates = [int(value) for value in observed_sample_rates if int(value) > 0]
+    durations = [float(value) for value in observed_durations if float(value) > 0]
+    if not sample_rates or not durations:
+        raise ValueError(
+            "Audio configuration requires observed sample rates and durations"
+        )
 
-    Args:
-        domain: One of "bird", "birds", "avian", "general", "speech", "music"
+    sample_rate = Counter(sample_rates).most_common(1)[0][0]
+    duration = median(durations)
+    target_window = max(16, round(sample_rate * 0.025))
+    n_fft = 2 ** round(log2(target_window))
+    hop_length = max(1, n_fft // 4)
+    n_mels = max(32, min(128, n_fft // 8))
+    return {
+        "sample_rate": sample_rate,
+        "duration": duration,
+        "n_mels": n_mels,
+        "n_fft": n_fft,
+        "hop_length": hop_length,
+        "fmin": 0.0,
+        "fmax": sample_rate / 2,
+        "power": 2.0,
+    }
 
-    Returns:
-        Dictionary with audio processing parameters
-    """
-    domain_lower = domain.lower() if domain else "general"
 
-    if domain_lower in ("bird", "birds", "avian", "bird_classification", "wildlife"):
-        return BIRD_AUDIO_CONFIG
-    if domain_lower in ("music", "song", "musical"):
-        return MUSIC_AUDIO_CONFIG
-    return GENERAL_AUDIO_CONFIG
-
-
-# Audio preprocessing configuration constants (default to general)
 AUDIO_CONFIG_TEMPLATE = '''
-# === AUDIO CONFIGURATION ===
-# Sample rate: 32000 Hz recommended for bird vocalizations (captures up to 16 kHz)
-# Use 22050 Hz for general audio (captures up to 11 kHz Nyquist limit)
-SR = 32000  # Sample rate in Hz
-DURATION = 5  # Clip duration in seconds
-N_MELS = 128  # Number of mel frequency bins
-N_FFT = 2048  # FFT window size
-HOP_LENGTH = 512  # Hop length between frames
-FMIN = 500  # Minimum frequency for mel filterbank (500 Hz for bird vocalizations)
-FMAX = 12500  # Maximum frequency for mel filterbank (12.5 kHz for bird vocalizations)
+# === AUDIO CONFIGURATION: DERIVE FROM SUPPLIED FILES ===
+def infer_audio_config(file_paths):
+    """Inspect readable training files; never select parameters by task name."""
+    import soundfile as sf
+    from collections import Counter
+
+    observations = []
+    errors = []
+    for path in list(file_paths)[:64]:
+        try:
+            info = sf.info(str(path))
+            if info.samplerate > 0 and info.frames > 0:
+                observations.append((int(info.samplerate), info.frames / info.samplerate))
+        except Exception as exc:
+            errors.append(f"{path}: {exc}")
+
+    if not observations:
+        raise RuntimeError(
+            "Could not inspect any training audio file; "
+            f"sample errors={errors[:3]}"
+        )
+
+    sample_rates = [sample_rate for sample_rate, _ in observations]
+    durations = np.asarray([duration for _, duration in observations], dtype=float)
+    sample_rate = Counter(sample_rates).most_common(1)[0][0]
+    duration = float(np.median(durations))
+    target_window = max(16, round(sample_rate * 0.025))
+    n_fft = 2 ** round(np.log2(target_window))
+    return {
+        "sample_rate": sample_rate,
+        "duration": duration,
+        "n_fft": int(n_fft),
+        "hop_length": max(1, int(n_fft) // 4),
+        "n_mels": max(32, min(128, int(n_fft) // 8)),
+        "fmin": 0.0,
+        "fmax": sample_rate / 2,
+    }
+
+# Resolve semantic record IDs to real paths first, then call:
+# AUDIO_CONFIG = infer_audio_config(train_file_paths)
 '''
 
-# Core audio loading function
+
 AUDIO_LOAD_TEMPLATE = '''
-def load_audio(path, sr=SR, duration=DURATION, offset=0.0):
-    """Load and preprocess audio file.
-
-    Args:
-        path: Path to audio file
-        sr: Target sample rate
-        duration: Duration in seconds to load
-        offset: Start time in seconds
-
-    Returns:
-        Audio waveform as numpy array, padded/trimmed to fixed length
-    """
+def load_audio(path, config, offset=0.0):
+    """Load one file using a configuration inferred from supplied audio."""
+    sample_rate = int(config["sample_rate"])
+    duration = float(config["duration"])
     try:
-        y, _ = librosa.load(path, sr=sr, duration=duration, offset=offset)
-        if len(y) == 0:
-            y = np.zeros(sr * duration, dtype=np.float32)
-    except Exception as e:
-        print(f"[WARN] Failed to load {path}: {e}")
-        y = np.zeros(sr * duration, dtype=np.float32)
+        waveform, _ = librosa.load(
+            path,
+            sr=sample_rate,
+            duration=duration,
+            offset=offset,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load audio file {path}: {exc}") from exc
+    if waveform.size == 0:
+        raise ValueError(f"Decoded audio is empty: {path}")
 
-    # Pad or trim to fixed length
-    target_len = int(sr * duration)
-    if len(y) < target_len:
-        y = np.pad(y, (0, target_len - len(y)), mode='constant')
+    target_len = max(1, int(round(sample_rate * duration)))
+    if len(waveform) < target_len:
+        waveform = np.pad(
+            waveform,
+            (0, target_len - len(waveform)),
+            mode="constant",
+        )
     else:
-        y = y[:target_len]
-
-    return y.astype(np.float32)
+        waveform = waveform[:target_len]
+    return waveform.astype(np.float32)
 '''
 
-# Mel spectrogram conversion
+
 AUDIO_MELSPEC_TEMPLATE = '''
-def audio_to_melspec(y, sr=SR, n_mels=N_MELS, n_fft=N_FFT, hop_length=HOP_LENGTH,
-                     fmin=FMIN, fmax=FMAX, normalize=True, to_db=True):
-    """Convert audio waveform to mel spectrogram.
-
-    Args:
-        y: Audio waveform
-        sr: Sample rate
-        n_mels: Number of mel bins
-        n_fft: FFT window size
-        hop_length: Hop length between frames
-        fmin: Minimum frequency
-        fmax: Maximum frequency
-        normalize: Whether to normalize to [0, 1]
-        to_db: Whether to convert to decibels
-
-    Returns:
-        Mel spectrogram as numpy array (n_mels, time_frames)
-    """
-    # Compute mel spectrogram
-    S = librosa.feature.melspectrogram(
-        y=y, sr=sr, n_mels=n_mels, n_fft=n_fft,
-        hop_length=hop_length, fmin=fmin, fmax=fmax
+def audio_to_melspec(waveform, config, normalize=True, to_db=True):
+    """Convert audio using only parameters inferred from supplied files."""
+    spectrogram = librosa.feature.melspectrogram(
+        y=waveform,
+        sr=int(config["sample_rate"]),
+        n_mels=int(config["n_mels"]),
+        n_fft=int(config["n_fft"]),
+        hop_length=int(config["hop_length"]),
+        fmin=float(config["fmin"]),
+        fmax=float(config["fmax"]),
     )
-
-    # Convert to decibels
     if to_db:
-        S = librosa.power_to_db(S, ref=np.max)
-
-    # Normalize to [0, 1]
+        spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
     if normalize:
-        S_min, S_max = S.min(), S.max()
-        if S_max - S_min > 1e-6:
-            S = (S - S_min) / (S_max - S_min)
-        else:
-            S = np.zeros_like(S)
-
-    return S.astype(np.float32)
+        low, high = spectrogram.min(), spectrogram.max()
+        if not np.isfinite([low, high]).all() or high - low <= 1e-6:
+            raise ValueError("Degenerate spectrogram; inspect the source audio")
+        spectrogram = (spectrogram - low) / (high - low)
+    return spectrogram.astype(np.float32)
 '''
 
-# PyTorch Dataset class
+
 AUDIO_DATASET_TEMPLATE = '''
 class AudioDataset(torch.utils.data.Dataset):
-    """PyTorch Dataset for audio classification.
+    """Audio dataset with an explicit, data-derived preprocessing contract."""
 
-    Converts audio files to mel spectrograms on-the-fly.
-    Outputs 3-channel images for pretrained CNN compatibility.
-    """
-
-    def __init__(self, file_paths, labels=None, sr=SR, duration=DURATION,
-                 n_mels=N_MELS, transform=None, mixup_alpha=0.0):
-        """
-        Args:
-            file_paths: List of audio file paths
-            labels: Optional labels array (n_samples,) or (n_samples, n_classes)
-            sr: Sample rate
-            duration: Clip duration in seconds
-            n_mels: Number of mel bins
-            transform: Optional torchvision transform
-            mixup_alpha: Mixup augmentation alpha (0 to disable)
-        """
-        self.file_paths = file_paths
-        self.labels = labels
-        self.sr = sr
-        self.duration = duration
-        self.n_mels = n_mels
+    def __init__(self, file_paths, config, targets=None, transform=None):
+        self.file_paths = list(file_paths)
+        self.config = dict(config)
+        self.targets = targets
         self.transform = transform
-        self.mixup_alpha = mixup_alpha
-        self.is_train = labels is not None
 
     def __len__(self):
         return len(self.file_paths)
 
-    def __getitem__(self, idx):
-        path = self.file_paths[idx]
-
-        # Load audio and convert to mel spectrogram
-        y = load_audio(path, sr=self.sr, duration=self.duration)
-        spec = audio_to_melspec(y, sr=self.sr, n_mels=self.n_mels)
-
-        # Stack to 3 channels for pretrained CNN (e.g., ResNet, EfficientNet)
-        # Shape: (3, n_mels, time_frames)
-        spec_3ch = np.stack([spec] * 3, axis=0)
-
-        # Apply transform if provided
-        if self.transform:
-            # Convert to 3-channel PIL Image (RGB) for torchvision transforms
-            # Transpose from (3, H, W) to (H, W, 3) for PIL
-            spec_uint8 = (spec_3ch * 255).astype(np.uint8)
-            spec_pil = Image.fromarray(spec_uint8.transpose(1, 2, 0), mode='RGB')
-            spec_3ch = self.transform(spec_pil)
-        else:
-            spec_3ch = torch.tensor(spec_3ch, dtype=torch.float32)
-
-        if self.labels is not None:
-            label = self.labels[idx]
-            if isinstance(label, np.ndarray):
-                label = torch.tensor(label, dtype=torch.float32)
-            else:
-                label = torch.tensor(label, dtype=torch.long)
-            return spec_3ch, label
-
-        return spec_3ch
+    def __getitem__(self, index):
+        waveform = load_audio(self.file_paths[index], self.config)
+        spectrogram = audio_to_melspec(waveform, self.config)
+        channels = np.stack([spectrogram] * 3, axis=0)
+        tensor = torch.tensor(channels, dtype=torch.float32)
+        if self.transform is not None:
+            tensor = self.transform(tensor)
+        if self.targets is None:
+            return tensor
+        target = self.targets[index]
+        target_tensor = torch.as_tensor(target)
+        return tensor, target_tensor
 '''
 
-# Complete audio pipeline template
+
 AUDIO_FULL_TEMPLATE = f'''
 import librosa
 import numpy as np
 import torch
-import torch.nn as nn
-from pathlib import Path
-from PIL import Image
-import warnings
-warnings.filterwarnings('ignore')
 
 {AUDIO_CONFIG_TEMPLATE}
 
@@ -233,66 +176,32 @@ warnings.filterwarnings('ignore')
 {AUDIO_DATASET_TEMPLATE}
 '''
 
-# Audio-specific constraints for prompts
+
 AUDIO_CONSTRAINTS = """
 ## Audio Domain Constraints
 
-1. SAMPLE RATE SELECTION:
-   - Bird/wildlife vocalizations: Use SR=32000 Hz or SR=44100 Hz (high-frequency calls)
-   - General audio/speech: Use SR=22050 Hz (standard)
-   - Music: Use SR=44100 Hz or SR=48000 Hz
-   - NEVER use SR=8000 Hz or lower - too much frequency loss
-
-2. MEL SPECTROGRAM PARAMETERS:
-   - n_mels=128 is a good default (balance between resolution and compute)
-   - n_fft=2048 for high resolution, n_fft=1024 for speed
-   - hop_length=512 is standard (n_fft / 4)
-   - fmin=20, fmax=SR/2 (Nyquist limit) or fmax=16000 for 32kHz SR
-
-3. DURATION HANDLING:
-   - ALWAYS pad short clips to fixed duration
-   - ALWAYS trim long clips (or use sliding window for inference)
-   - 5-10 seconds is typical for bird/wildlife classification
-
-4. 3-CHANNEL CONVERSION:
-   - Pretrained CNNs (ResNet, EfficientNet) expect 3-channel input
-   - Stack mel spectrogram 3 times: np.stack([spec] * 3, axis=0)
-   - OR use delta features: [spec, delta, delta-delta]
-
-5. NORMALIZATION:
-   - Convert power to dB: librosa.power_to_db(S, ref=np.max)
-   - Normalize to [0, 1] for CNN input
-   - Mean/std normalization with ImageNet stats for pretrained models
-
-6. LABEL FILE PARSING (CRITICAL for audio competitions):
-   - Many audio competitions use non-standard label formats (.txt files)
-   - ALWAYS use parse_label_file() helper for .txt label files
-   - ALWAYS use parse_id_mapping_file() for rec_id to filename mapping
-   - NEVER assume labels are in train.csv - check for .txt files first
+- Inspect readable training files before choosing sample rate, clip duration,
+  FFT size, hop length, or frequency bounds. Record the observed distributions
+  and the derived values.
+- Preserve semantic record IDs separately from resolved file paths. Use a
+  supplied ID-to-file artifact when present; otherwise resolve exact stems and
+  extensions without changing the IDs.
+- A failed or empty decode is a data error. Raise it with the offending path;
+  never replace it with a silent waveform.
+- Infer whether targets are single-label, multi-label, or continuous from the
+  public target artifact and metric before selecting loss and activation.
+- Cache deterministic features when useful, but validate row/ID alignment
+  before training and before writing OOF/test artifacts.
 """
 
-# Audio model architecture recommendations
+
 AUDIO_MODEL_RECOMMENDATIONS = """
-## Audio Model Architecture Recommendations
+## Audio Model Selection
 
-1. PRETRAINED CNN (Recommended for most tasks):
-   - EfficientNet-B0/B2: Best balance of accuracy vs. speed
-   - ResNet50: Robust baseline, well-tested
-   - ConvNeXt: Modern architecture, good for larger datasets
-
-2. AUDIO-SPECIFIC MODELS:
-   - PANNs (Pretrained Audio Neural Networks): Trained on AudioSet
-   - AST (Audio Spectrogram Transformer): State-of-the-art but compute-heavy
-   - SED models: For sound event detection tasks
-
-3. LOSS FUNCTIONS:
-   - Multi-label: BCEWithLogitsLoss
-   - Single-label: CrossEntropyLoss
-   - Focal loss for imbalanced data
-
-4. AUGMENTATIONS:
-   - SpecAugment: Random time/frequency masking
-   - Mixup: Blend samples with interpolated labels
-   - Time shift: Random offset when loading audio
-   - Pitch shift: librosa.effects.pitch_shift (compute-heavy)
+- Start with a budget-appropriate baseline over data-derived spectrograms.
+- Consider pretrained audio or image encoders only when available within the
+  runtime budget and compatible with the observed input/target contract.
+- Choose loss, output shape, and activation from the verified target structure.
+- Evaluate augmentations through the same trusted CV folds; do not assume that
+  a domain-named augmentation is beneficial.
 """

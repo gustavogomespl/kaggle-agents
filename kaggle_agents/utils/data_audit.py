@@ -202,7 +202,7 @@ def check_id_integrity(
     This prevents the common error where ID mappings don't include file extensions.
 
     Args:
-        sample_ids: List of file IDs to check (typically from rec_id2filename.txt)
+        sample_ids: File IDs inferred from the public mapping metadata
         data_dir: Directory where files should exist
         extensions: Extensions to probe (None = common audio/image types)
 
@@ -214,7 +214,7 @@ def check_id_integrity(
 
     Examples:
         >>> is_valid, msg, details = check_id_integrity(
-        ...     ['PC1_123', 'PC1_456'], audio_dir
+        ...     ["record-a", "record-b"], audio_dir
         ... )
         >>> if not is_valid and details.get('suggested_extension'):
         ...     print(f"Add {details['suggested_extension']} to IDs when loading")
@@ -335,7 +335,8 @@ def audit_audio_competition(
     label_files: list[Path] | None = None,
     train_path: Path | None = None,
     test_path: Path | None = None,
-    min_audio_files: int = 10,
+    expected_file_paths: list[Path] | None = None,
+    min_audio_files: int = 1,
     strict: bool = True,
 ) -> AudioAuditResult:
     """
@@ -350,7 +351,8 @@ def audit_audio_competition(
         label_files: List of label file paths to validate
         train_path: Path to training data directory
         test_path: Path to test data directory
-        min_audio_files: Minimum number of audio files required
+        expected_file_paths: Public-contract paths that require full coverage
+        min_audio_files: Basic non-empty threshold (defaults to one)
         strict: If True, raise AuditFailedError on failure. If False, just return result.
 
     Returns:
@@ -360,7 +362,10 @@ def audit_audio_competition(
         AuditFailedError: If strict=True and audit fails
     """
     # Check if audit should be skipped
-    if os.getenv("KAGGLE_AGENTS_SKIP_AUDIT", "0").lower() in ("1", "true"):
+    if (
+        not strict
+        and os.getenv("KAGGLE_AGENTS_SKIP_AUDIT", "0").lower() in ("1", "true")
+    ):
         return AudioAuditResult(
             audio_files_found=0,
             audio_extensions=set(),
@@ -392,43 +397,16 @@ def audit_audio_competition(
     if working_dir.exists() and working_dir.is_dir():
         search_dirs.append(working_dir)
 
-    # Common audio directory patterns to search
-    audio_dir_patterns = [
-        "src_wavs",
-        "wavs",
-        "audio",
-        "audio_files",
-        "raw_audio",
-        "train_audio",
-        "train",
-        "train2",  # for whale competition (non-standard naming)
-        "test2",   # for whale competition (non-standard naming)
-        "essential_data",
-    ]
-
     # Search for audio files
     actual_audio_source = None
-    for search_dir in search_dirs:
+    for search_dir in dict.fromkeys(search_dirs):
         files = find_audio_files(search_dir)
         if files:
             audio_files.extend(files)
             extensions_found.update(f.suffix.lower() for f in files)
-            actual_audio_source = search_dir
-            break
-
-        # Try common subdirectories
-        for pattern in audio_dir_patterns:
-            subdir = search_dir / pattern
-            if subdir.exists():
-                files = find_audio_files(subdir)
-                if files:
-                    audio_files.extend(files)
-                    extensions_found.update(f.suffix.lower() for f in files)
-                    actual_audio_source = subdir
-                    break
-
-        if audio_files:
-            break
+            if actual_audio_source is None:
+                actual_audio_source = search_dir
+    audio_files = sorted(set(audio_files))
 
     # Count train vs test samples if possible (only for directories)
     train_samples = 0
@@ -461,7 +439,20 @@ def audit_audio_competition(
     failure_reason = None
     is_valid = True
 
-    if len(audio_files) < min_audio_files:
+    expected_paths = [Path(path) for path in expected_file_paths or []]
+    missing_expected_paths = [
+        str(path)
+        for path in expected_paths
+        if not path.is_file() or path.suffix.lower() not in AUDIO_EXTENSIONS
+    ]
+
+    if missing_expected_paths:
+        failure_reason = (
+            "INCOMPLETE AUDIO COVERAGE: expected public-contract paths are "
+            f"missing or not recognized audio; sample={missing_expected_paths[:5]}"
+        )
+        is_valid = False
+    elif len(audio_files) < max(1, min_audio_files):
         failure_reason = (
             f"INSUFFICIENT AUDIO DATA: Only {len(audio_files)} audio files found "
             f"(minimum required: {min_audio_files}). "

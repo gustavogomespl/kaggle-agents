@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import math
 import os
-import re
 from typing import TYPE_CHECKING, Any
 
+from ...core.config import is_metric_minimization
 from ...utils.csv_utils import read_csv_auto
 
 
@@ -18,124 +18,171 @@ if TYPE_CHECKING:
     from ...core.state import KaggleState
 
 
+def _finite_score(value: Any) -> float | None:
+    """Coerce a finite trusted score while excluding booleans."""
+    if isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
+
+
+def _metric_name(state: KaggleState) -> str:
+    """Resolve the declared metric name without consulting generated output."""
+    metric_contract = state.get("metric_contract") or {}
+    if hasattr(metric_contract, "to_dict"):
+        metric_contract = metric_contract.to_dict()
+    if isinstance(metric_contract, dict) and metric_contract.get("metric_name"):
+        return str(metric_contract["metric_name"]).strip().lower()
+
+    competition_info = state.get("competition_info")
+    if isinstance(competition_info, dict):
+        return str(competition_info.get("evaluation_metric") or "").strip().lower()
+    return str(getattr(competition_info, "evaluation_metric", "") or "").strip().lower()
+
+
+def _metric_direction(state: KaggleState, metric_name: str) -> str:
+    """Resolve a known metric direction, otherwise fail closed."""
+    explicit = str(state.get("metric_direction") or "").strip().lower()
+    if explicit in {"minimize", "maximize"}:
+        return explicit
+
+    metric_contract = state.get("metric_contract") or {}
+    if hasattr(metric_contract, "to_dict"):
+        metric_contract = metric_contract.to_dict()
+    if isinstance(metric_contract, dict):
+        lower_better = metric_contract.get("is_lower_better")
+        if isinstance(lower_better, bool):
+            return "minimize" if lower_better else "maximize"
+
+    if not metric_name:
+        return "unknown"
+    if is_metric_minimization(metric_name):
+        return "minimize"
+    known_maximize = (
+        "auc",
+        "accuracy",
+        "f1",
+        "precision",
+        "recall",
+        "average_precision",
+        "map",
+        "r2",
+        "dice",
+        "iou",
+    )
+    if any(name in metric_name for name in known_maximize):
+        return "maximize"
+    return "unknown"
+
+
+def _trusted_available_scores(state: KaggleState) -> dict[str, float]:
+    """Intersect recomputed scores with explicit OOF eligibility."""
+    explicit = state.get("trusted_component_scores")
+    availability = state.get("oof_availability")
+    if not isinstance(explicit, dict) or not isinstance(availability, dict):
+        return {}
+
+    scores: dict[str, float] = {}
+    for name, value in explicit.items():
+        component_name = str(name)
+        if availability.get(name) is not True and availability.get(component_name) is not True:
+            continue
+        raw_score = value
+        if isinstance(value, dict):
+            raw_score = value.get("score", value.get("cv_score"))
+        score = _finite_score(raw_score)
+        if score is not None:
+            scores[component_name] = score
+    return scores
+
+
 class DetectionMixin:
     """Mixin providing detection methods for meta-evaluation."""
 
     def _check_performance_gap_for_debug(self, state: KaggleState) -> dict[str, Any]:
         """
-        Inner Loop Refinement: Detect when one model performs drastically worse.
-
-        Triggers a dedicated debug iteration when:
-        - Two or more models exist
-        - Performance gap > 1.0 (for logloss-like metrics)
-
-        This prevents moving forward with broken models in the ensemble.
+        Compare trusted OOF scores and emit non-blocking diagnostic guidance.
 
         Args:
             state: Current workflow state
 
         Returns:
-            Dictionary with trigger_debug, worst_model, gap, debug_hints
+            Advisory comparison. A natural score gap never pauses the workflow.
         """
-        dev_results = state.get("development_results", [])
-        ablation_plan = state.get("ablation_plan", [])
-
-        if not dev_results:
-            return {"trigger_debug": False}
-
-        model_scores = {}
-
-        for i, result in enumerate(dev_results):
-            # Get component info
-            component = ablation_plan[i] if i < len(ablation_plan) else None
-            component_type = component.component_type if component else "unknown"
-            component_name = component.name if component else f"component_{i}"
-
-            if component_type != "model":
-                continue
-
-            # Try to extract score from stdout
-            # DevelopmentResult is a dataclass - use getattr for safety
-            stdout = getattr(result, "stdout", "") or ""
-
-            # Look for common score patterns
-            patterns = [
-                r"(?:CV|Validation|Val|OOF).*?(?:Score|Loss|logloss|LogLoss|RMSE|MAE|AUC).*?:\s*([\d.]+)",
-                r"(?:Score|Loss|logloss|LogLoss).*?:\s*([\d.]+)",
-                r"Final.*?(?:Score|Loss|Validation Performance).*?:\s*([\d.]+)",
-            ]
-
-            for pattern in patterns:
-                matches = re.findall(pattern, stdout, re.IGNORECASE)
-                if matches:
-                    try:
-                        model_scores[component_name] = float(matches[-1])
-                        break
-                    except ValueError:
-                        continue
-
-        # Need at least 2 models to compare
+        model_scores = _trusted_available_scores(state)
         if len(model_scores) < 2:
-            return {"trigger_debug": False, "model_scores": model_scores}
-
-        scores = list(model_scores.values())
-        max_gap = max(scores) - min(scores)
-
-        # For logloss (lower is better), gap > 1.0 is HUGE
-        if max_gap > 1.0:
-            # FIX: Respect metric direction when identifying best/worst models
-            from ...core.config import is_metric_minimization
-
-            competition_info = state.get("competition_info")
-            metric_name = ""
-            if competition_info:
-                metric_name = getattr(competition_info, "evaluation_metric", "") or ""
-            is_minimize = is_metric_minimization(metric_name) if metric_name else True
-
-            if is_minimize:
-                # For minimize metrics (logloss, rmse): highest score = worst
-                worst_model = max(model_scores, key=model_scores.get)
-                best_model = min(model_scores, key=model_scores.get)
-            else:
-                # For maximize metrics (accuracy, auc): lowest score = worst
-                worst_model = min(model_scores, key=model_scores.get)
-                best_model = max(model_scores, key=model_scores.get)
-
-            debug_hints = [
-                "Check if LabelEncoder class order is consistent with other models",
-                "Verify class_weight='balanced' is appropriate for this metric",
-                "Compare data preprocessing between models",
-                "Check if same train/val splits are used (random_state)",
-                "Verify the objective function matches the competition metric",
-                "Check for data type mismatches (categorical vs numeric)",
-            ]
-
-            print("\n   📊 PERFORMANCE GAP DETECTED:")
-            print(f"      Worst: {worst_model} = {model_scores[worst_model]:.4f}")
-            print(f"      Best: {best_model} = {model_scores[best_model]:.4f}")
-            print(f"      Gap: {max_gap:.2f}")
-
-            return {
-                "trigger_debug": True,
-                "worst_model": worst_model,
-                "best_model": best_model,
-                "gap": max_gap,
-                "model_scores": model_scores,
-                "debug_hints": debug_hints,
-                "action": "PAUSE_AND_DEBUG",
-            }
-
-        if max_gap > 0.5:
-            # Moderate gap - warning only
-            print(f"\n   ⚠️  Moderate performance gap ({max_gap:.2f}) between models")
             return {
                 "trigger_debug": False,
-                "gap": max_gap,
                 "model_scores": model_scores,
-                "warning": f"Moderate gap of {max_gap:.2f} detected",
+                "abstained": True,
+                "reason": "fewer_than_two_trusted_oof_scores",
+                "advisory_only": True,
             }
 
-        return {"trigger_debug": False, "model_scores": model_scores}
+        metric_name = _metric_name(state)
+        direction = _metric_direction(state, metric_name)
+        if direction == "unknown":
+            return {
+                "trigger_debug": False,
+                "model_scores": model_scores,
+                "abstained": True,
+                "reason": "metric_direction_unavailable",
+                "advisory_only": True,
+            }
+
+        if direction == "minimize":
+            best_model = min(model_scores, key=model_scores.get)
+            worst_model = max(model_scores, key=model_scores.get)
+        else:
+            best_model = max(model_scores, key=model_scores.get)
+            worst_model = min(model_scores, key=model_scores.get)
+
+        directed_regret = (
+            model_scores[worst_model] - model_scores[best_model]
+            if direction == "minimize"
+            else model_scores[best_model] - model_scores[worst_model]
+        )
+        scale = max(
+            abs(model_scores[best_model]),
+            abs(model_scores[worst_model]),
+            1e-12,
+        )
+        normalized_regret = max(0.0, directed_regret) / scale
+        significant_regret = normalized_regret >= 0.5
+
+        result: dict[str, Any] = {
+            "trigger_debug": False,
+            "model_scores": model_scores,
+            "abstained": False,
+            "advisory_only": True,
+            "metric_name": metric_name,
+            "metric_direction": direction,
+            "best_model": best_model,
+            "worst_model": worst_model,
+            "gap": normalized_regret,
+            "absolute_gap": directed_regret,
+            "normalized_regret": normalized_regret,
+            "significant_regret": significant_regret,
+        }
+        if significant_regret:
+            result.update(
+                {
+                    "warning": (
+                        "Large normalized regret in trusted OOF scores; inspect "
+                        "fold diagnostics before deciding whether to revise the model."
+                    ),
+                    "debug_hints": [
+                        "Compare identical OOF folds and metric implementations",
+                        "Verify prediction/label alignment using canonical IDs",
+                        "Inspect fold-level variance before changing the model",
+                    ],
+                    "action": "ADVISORY_REVIEW",
+                }
+            )
+        return result
 
     def _detect_stagnation(self, state: KaggleState) -> dict[str, Any]:
         """
@@ -178,7 +225,11 @@ class DetectionMixin:
                 # IterationMemory is a dataclass, use attribute access (not dict.get())
                 improvement = getattr(memory, "score_improvement", 0)
                 if isinstance(improvement, (int, float)):
-                    recent_improvements.append(abs(float(improvement)))
+                    # Direction is already normalized by
+                    # calculate_score_improvement: positive means better.
+                    # A large regression must trigger exploration, not look
+                    # like progress because of an absolute value.
+                    recent_improvements.append(float(improvement))
 
             if recent_improvements:
                 avg_improvement = sum(recent_improvements) / len(recent_improvements)
@@ -189,8 +240,12 @@ class DetectionMixin:
                 if avg_improvement < stagnation_threshold:
                     result["stagnated"] = True
                     result["trigger_sota_search"] = True
-                    result["reason"] = f"stagnation: avg_improvement={avg_improvement:.4f} < {stagnation_threshold}"
-                    print(f"\n   📉 STAGNATION DETECTED: avg improvement {avg_improvement:.4f} over last {len(recent_improvements)} iterations")
+                    result["reason"] = (
+                        f"stagnation: avg_improvement={avg_improvement:.4f} < {stagnation_threshold}"
+                    )
+                    print(
+                        f"\n   📉 STAGNATION DETECTED: avg improvement {avg_improvement:.4f} over last {len(recent_improvements)} iterations"
+                    )
 
         # Check score gap: far from target after minimum iterations
         # NOTE: This runs INDEPENDENTLY of stagnation check, even in early iterations
@@ -200,16 +255,24 @@ class DetectionMixin:
 
             if target_score and isinstance(target_score, (int, float)) and float(target_score) > 0:
                 try:
-                    score_gap = abs(float(target_score) - float(current_score)) / float(target_score)
+                    score_gap = abs(float(target_score) - float(current_score)) / float(
+                        target_score
+                    )
                     result["score_gap"] = score_gap
 
                     if score_gap > score_gap_threshold:
                         result["trigger_sota_search"] = True
                         if result["reason"]:
-                            result["reason"] += f" AND score_gap={score_gap:.1%} > {score_gap_threshold:.0%}"
+                            result["reason"] += (
+                                f" AND score_gap={score_gap:.1%} > {score_gap_threshold:.0%}"
+                            )
                         else:
-                            result["reason"] = f"score_gap: {score_gap:.1%} > {score_gap_threshold:.0%}"
-                        print(f"\n   📊 SCORE GAP DETECTED: {score_gap:.1%} from target after {current_iteration} iterations")
+                            result["reason"] = (
+                                f"score_gap: {score_gap:.1%} > {score_gap_threshold:.0%}"
+                            )
+                        print(
+                            f"\n   📊 SCORE GAP DETECTED: {score_gap:.1%} from target after {current_iteration} iterations"
+                        )
                 except (TypeError, ValueError):
                     pass
 
@@ -234,46 +297,32 @@ class DetectionMixin:
         Returns:
             Diagnostic dict if undertrained, None otherwise
         """
-        from ...core.config import is_metric_minimization
-
-        dev_results = state.get("development_results", [])
-        if not dev_results:
-            return None
-
-        # Get the best CV score from successful results
-        # Note: DevelopmentResult doesn't have cv_score attribute - extract from stdout
-        cv_scores = []
-        for result in dev_results:
-            if result.success and result.stdout:
-                # Extract CV score from stdout (pattern: "Final Validation Performance: X.XXXX")
-                match = re.search(r"Final Validation Performance[:\s]+([0-9.]+)", result.stdout)
-                if match:
-                    try:
-                        cv_scores.append(float(match.group(1)))
-                    except ValueError:
-                        pass
-
-        if not cv_scores:
-            return None
-
-        # Determine metric and its direction
-        competition_info = state.get("competition_info")
-        metric_name = ""
-        problem_type = ""
-        n_classes = 2
-
-        if competition_info:
-            metric_name = str(getattr(competition_info, "evaluation_metric", "")).lower()
-            problem_type = str(getattr(competition_info, "problem_type", "")).lower()
-
-        # Determine if we're minimizing or maximizing
-        is_minimize = is_metric_minimization(metric_name) if metric_name else True
-
-        # Get best score based on metric direction
-        if is_minimize:
-            best_cv_score = min(cv_scores)
+        metric_name = _metric_name(state)
+        normalized_metric = metric_name.replace("-", "_").replace(" ", "_")
+        if "logloss" in normalized_metric or "log_loss" in normalized_metric:
+            metric_kind = "logloss"
+            is_minimize = True
+        elif "auc" in normalized_metric:
+            metric_kind = "auc"
+            is_minimize = False
+        elif "accuracy" in normalized_metric:
+            metric_kind = "accuracy"
+            is_minimize = False
         else:
-            best_cv_score = max(cv_scores)
+            # Random baselines are not comparable for unbounded regression
+            # metrics (RMSE/MAE) or undeclared/custom metrics.
+            return None
+
+        trusted_scores = [
+            score
+            for field in ("best_single_model_score", "baseline_cv_score")
+            if (score := _finite_score(state.get(field))) is not None
+        ]
+        if not trusted_scores:
+            return None
+        best_cv_score = min(trusted_scores) if is_minimize else max(trusted_scores)
+
+        n_classes = 2
 
         # Try to infer n_classes from sample submission
         sample_submission_path = state.get("sample_submission_path")
@@ -286,53 +335,38 @@ class DetectionMixin:
             except Exception:
                 pass
 
-        # Calculate random baselines based on metric type
-        if is_minimize:
-            # Minimization metrics (log_loss, RMSE, etc.)
-            random_baselines = {
-                "multiclass": -math.log(1 / max(n_classes, 2)),  # log_loss for random
-                "binary": 0.693,  # -log(0.5) for binary log_loss
-            }
-            baseline_key = "multiclass" if n_classes > 2 else "binary"
-            baseline = random_baselines.get(baseline_key, 4.0)
-
-            # For minimization: score > threshold * baseline means undertrained
+        try:
             threshold = float(os.environ.get("KAGGLE_AGENTS_UNDERTRAINED_THRESHOLD", "0.85"))
+        except ValueError:
+            threshold = 0.85
+        threshold = min(max(threshold, 0.0), 1.0)
+
+        if metric_kind == "logloss":
+            if best_cv_score < 0:
+                return None
+            baseline = math.log(max(n_classes, 2))
             is_undertrained = best_cv_score > baseline * threshold
-            comparison_msg = f"Score {best_cv_score:.4f} is too high (within {int((1-threshold)*100)}% of random baseline {baseline:.4f})"
+            comparison_msg = (
+                f"Trusted score {best_cv_score:.4f} is near or worse than "
+                f"the random log-loss baseline {baseline:.4f}"
+            )
         else:
-            # Maximization metrics (accuracy, F1, AUC, etc.)
-            random_baselines = {
-                "accuracy_multiclass": 1.0 / max(n_classes, 2),  # random accuracy
-                "accuracy_binary": 0.5,
-                "auc": 0.5,  # random AUC
-                "f1": 0.0,  # worst F1
-            }
-
-            # Determine appropriate baseline
-            if "auc" in metric_name or "roc" in metric_name:
-                baseline = 0.5
-            elif "f1" in metric_name or "precision" in metric_name or "recall" in metric_name:
-                baseline = 0.0
-            else:
-                # Default to accuracy baseline
-                baseline = 1.0 / max(n_classes, 2)
-
-            # For maximization: score < threshold * optimal means undertrained
-            # Use a different threshold logic: if score is close to random baseline
-            threshold = float(os.environ.get("KAGGLE_AGENTS_UNDERTRAINED_THRESHOLD", "0.85"))
-            # For maximize metrics, undertrained means score is within 15% above baseline
-            # e.g., for binary accuracy: baseline=0.5, threshold=0.85 → 0.5 + 0.15*(1-0.5) = 0.575
+            if not 0.0 <= best_cv_score <= 1.0:
+                return None
+            baseline = 0.5 if metric_kind == "auc" else 1.0 / max(n_classes, 2)
             undertrained_ceiling = baseline + (1 - threshold) * (1.0 - baseline)
             is_undertrained = best_cv_score < undertrained_ceiling
-            comparison_msg = f"Score {best_cv_score:.4f} is too low (below {undertrained_ceiling:.4f}, near random baseline {baseline:.4f})"
+            comparison_msg = (
+                f"Trusted score {best_cv_score:.4f} is near the random "
+                f"{metric_kind} baseline {baseline:.4f}"
+            )
 
         if is_undertrained:
             direction = "minimize" if is_minimize else "maximize"
             print(f"   ⚠️ UNDERTRAINED MODEL DETECTED ({direction}): {comparison_msg}")
             return {
                 "type": "UNDERTRAINED_MODEL",
-                "severity": "critical",
+                "severity": "warning",
                 "cv_score": best_cv_score,
                 "random_baseline": baseline,
                 "n_classes": n_classes,
@@ -346,8 +380,14 @@ class DetectionMixin:
                     "Ensure data augmentation isn't too aggressive",
                     "Verify class order alignment between predictions and ground truth labels",
                 ],
-                "planner_directive": "CRITICAL: Current model is near-random. Prioritize training convergence over new features.",
-                "developer_directive": "CRITICAL: Model is undertrained. Check preprocessing, increase epochs, verify label encoding.",
+                "planner_directive": (
+                    "ADVISORY: trusted classification performance is near "
+                    "random; inspect convergence before adding complexity."
+                ),
+                "developer_directive": (
+                    "ADVISORY: inspect preprocessing, convergence, and label "
+                    "alignment using trusted OOF diagnostics."
+                ),
             }
 
         return None

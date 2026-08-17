@@ -21,6 +21,18 @@ class DevelopmentResult:
     artifacts_created: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     run_fidelity: Literal["full", "debug"] = "full"
+    # True when this result was reused from an earlier iteration instead of
+    # being re-executed. Such a result was already judged when it first ran, so
+    # re-judging it would compare a component against the baseline it set.
+    reused_from_cache: bool = False
+    # Structured failure classification carried out of the executor. A
+    # ``harness`` origin with ``retryable=False`` means the generator-owned
+    # preamble failed: no candidate rewrite can repair it, so neither retry
+    # level may spend budget on it.
+    failure_origin: Literal["agent", "harness", "infrastructure"] | None = None
+    retryable: bool = True
+    header_sha256: str | None = None
+    contract_fingerprint: str | None = None
 
 
 @dataclass
@@ -41,6 +53,13 @@ class CodeAttempt:
     execution_time: float = 0.0
     run_fidelity: Literal["full", "debug"] = "full"
     timestamp: datetime = field(default_factory=datetime.now)
+    # Same classification as DevelopmentResult, recorded per attempt so the
+    # attempt ledger can tell an invalid harness attempt apart from a real
+    # candidate defect.
+    failure_origin: Literal["agent", "harness", "infrastructure"] | None = None
+    retryable: bool = True
+    header_sha256: str | None = None
+    contract_fingerprint: str | None = None
 
 
 @dataclass

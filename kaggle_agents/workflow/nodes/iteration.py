@@ -1,9 +1,26 @@
 """Iteration control and performance evaluation nodes for the Kaggle Agents workflow."""
 
+import math
 from datetime import datetime
 from typing import Any
 
 from ...core.state import KaggleState
+from ...utils.run_budget import (
+    FINALIZATION_RESERVE_S,
+    budget_exhausted,
+    format_remaining,
+)
+
+
+def _finite_score(value: Any) -> float | None:
+    """Return a finite score without manufacturing a target or observation."""
+    if isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if math.isfinite(score) else None
 
 
 def iteration_control_node(state: KaggleState) -> dict[str, Any]:
@@ -39,20 +56,27 @@ def iteration_control_node(state: KaggleState) -> dict[str, Any]:
     print(f"\nIteration: {new_iteration}/{max_iterations}")
     print(f"   Best Score: {best_score:.4f}")
     print(f"   Target: Top {target_percentile}%")
+    print(f"   Budget remaining: {format_remaining(state)}")
 
-    # Check if we should continue
-    should_continue = new_iteration < max_iterations
+    # Check if we should continue. Iterations alone do not bound cost, so the
+    # wall-clock budget is a second, independent stop condition. It reserves
+    # time for the closing stages of the iteration it would otherwise start.
+    out_of_budget = budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S)
+    should_continue = new_iteration < max_iterations and not out_of_budget
 
     # Check if goal achieved
     # Note: In real scenario, would check actual percentile
     # For now, continue until max iterations
 
     termination_reason = None
-    if not should_continue:
+    if out_of_budget:
+        termination_reason = "wall_clock_budget_exhausted"
+    elif not should_continue:
         termination_reason = "max_iterations_reached"
 
-    # Reset component index for refinement iterations (iteration > 1)
-    # This ensures new components from refined plan are implemented
+    # Every continuation creates a new plan. Reset the component cursor before
+    # routing back to the planner so the first refinement plan is not mistaken
+    # for an already-completed plan.
     updates = {
         "current_iteration": new_iteration,
         "should_continue": should_continue,
@@ -60,8 +84,7 @@ def iteration_control_node(state: KaggleState) -> dict[str, Any]:
         "last_updated": datetime.now(),
     }
 
-    # If this is a refinement iteration (> 1), reset component index and skip flag
-    if new_iteration > 1:
+    if should_continue:
         print("   🔄 Starting refinement iteration - resetting component index")
         updates["current_component_index"] = 0
         # Reset skip_remaining_components so new iteration can run all components
@@ -84,24 +107,25 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     print("= PERFORMANCE EVALUATION")
     print("=" * 60)
 
-    current_score = state.get("best_score", 0.0)
+    current_score = _finite_score(state.get("best_score"))
     # Fallback: when no Kaggle submission has occurred (best_score == 0),
     # use the best available CV score from component development
-    if current_score == 0.0:
-        current_score = (
-            state.get("best_single_model_score")
-            or state.get("baseline_cv_score")
-            or 0.0
-        )
-    # Dynamic target_score from state (set by MLE-bench or config), fallback to top 20% threshold
-    target_score = state.get("target_score")
+    if current_score is None or current_score == 0.0:
+        current_score = _finite_score(state.get("best_single_model_score"))
+    if current_score is None:
+        current_score = _finite_score(state.get("baseline_cv_score"))
+    if current_score is None:
+        current_score = 0.0
+    run_mode = str(state.get("run_mode", "")).lower()
+    metric_contract = state.get("metric_contract") or {}
+    if not isinstance(metric_contract, dict):
+        metric_contract = {}
+
+    # A target is optional in MLE-bench. The held-out test score is unavailable
+    # during the run, so absence must not be converted into a synthetic 1.0.
+    target_score = _finite_score(state.get("target_score"))
     if target_score is None:
-        target_score = 1.0
-    elif isinstance(target_score, str):
-        try:
-            target_score = float(target_score)
-        except ValueError:
-            target_score = 1.0
+        target_score = _finite_score(metric_contract.get("target_score"))
     current_iteration = state.get("current_iteration", 0)
     max_iterations = state.get("max_iterations", 10)
 
@@ -133,12 +157,27 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     except Exception:
         metric_name = ""
 
-    minimize = is_metric_minimization(metric_name)
-    gap = (current_score - target_score) if minimize else (target_score - current_score)
+    contract_direction = metric_contract.get("is_lower_better")
+    minimize = (
+        contract_direction
+        if isinstance(contract_direction, bool)
+        else is_metric_minimization(metric_name)
+    )
+    gap = None
+    if target_score is not None:
+        gap = (
+            current_score - target_score
+            if minimize
+            else target_score - current_score
+        )
 
     print(f"\nCurrent Score: {current_score:.4f}")
-    print(f"Target Score:  {target_score:.4f}")
-    print(f"Gap:           {gap:.4f} ({'minimize' if minimize else 'maximize'})")
+    if target_score is None:
+        print("Target Score:  not configured")
+        print(f"Gap:           not available ({'minimize' if minimize else 'maximize'})")
+    else:
+        print(f"Target Score:  {target_score:.4f}")
+        print(f"Gap:           {gap:.4f} ({'minimize' if minimize else 'maximize'})")
 
     # Analyze component performance
     dev_results = state.get("development_results", [])
@@ -154,23 +193,56 @@ def performance_evaluation_node(state: KaggleState) -> dict[str, Any]:
     needs_refinement = False
     refinement_reason = None
 
-    if minimize:
-        target_achieved = current_score <= target_score
-    else:
-        target_achieved = current_score >= target_score
+    target_achieved = False
+    if target_score is not None:
+        target_achieved = (
+            current_score <= target_score
+            if minimize
+            else current_score >= target_score
+        )
 
-    if target_achieved:
+    if budget_exhausted(state, reserve_s=FINALIZATION_RESERVE_S):
+        print("\n⏳ Wall-clock budget exhausted - no further refinement")
+        needs_refinement = False
+        refinement_reason = "wall_clock_budget_exhausted"
+    elif target_achieved:
         comparator = "<=" if minimize else ">="
         print(f"\n🎉 Target achieved! ({current_score:.4f} {comparator} {target_score:.4f})")
         needs_refinement = False
     elif current_iteration >= max_iterations:
         print(f"\n⏱️  Max iterations reached ({current_iteration}/{max_iterations})")
         needs_refinement = False
+    elif target_score is None:
+        # With no declared target, keep refining only while the iteration
+        # budget remains. CV/OOF improvement is useful guidance, not a
+        # fabricated stopping threshold.
+        baseline_score = _finite_score(state.get("baseline_cv_score"))
+        cv_improvement = (
+            baseline_score - current_score
+            if minimize and baseline_score is not None
+            else current_score - baseline_score
+            if baseline_score is not None
+            else None
+        )
+        needs_refinement = True
+        reason_prefix = "mlebench_" if run_mode == "mlebench" else ""
+        if cv_improvement is not None and cv_improvement > 0:
+            refinement_reason = f"{reason_prefix}cv_improved_budget_remaining"
+            print(
+                "\n🔄 Refinement without a configured target: CV/OOF improved "
+                f"by {cv_improvement:.4f}; iteration budget remains"
+            )
+        else:
+            refinement_reason = f"{reason_prefix}cv_budget_remaining"
+            print(
+                "\n🔄 Refinement: no target configured; "
+                "continue within the iteration budget using CV/OOF guidance"
+            )
     else:
         # Check if we have room for improvement
         improvement_potential = gap
 
-        if improvement_potential > 0.001:  # 0.1% gap
+        if improvement_potential is not None and improvement_potential > 0.001:
             print(f"\n🔄 Refinement needed (gap: {improvement_potential:.4f})")
             needs_refinement = True
             refinement_reason = "score_below_target"

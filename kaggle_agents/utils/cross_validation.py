@@ -34,8 +34,8 @@ def _detect_group_column(df: pd.DataFrame, group_col: str | None = None) -> str 
     """
     Auto-detect group column for GroupKFold to prevent data leakage.
 
-    In medical imaging competitions (like RANZCR), multiple images from the same
-    patient must NOT be split between train and validation sets.
+    When multiple rows belong to the same subject, that subject must not be
+    split between train and validation sets.
 
     Args:
         df: Training dataframe

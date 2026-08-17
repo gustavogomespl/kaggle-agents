@@ -35,27 +35,109 @@ def _compute_metric_score(
 
     if problem_type == "classification":
         preds = np.clip(preds, 1e-15, 1 - 1e-15)
-        if preds.ndim > 1 and preds.shape[1] > 1:
-            preds = preds / preds.sum(axis=1, keepdims=True)
+        multi_output = (
+            np.asarray(y_true).ndim == 2
+            and np.asarray(y_true).shape[1] > 1
+        )
+        if multi_output:
+            if preds.shape != np.asarray(y_true).shape:
+                raise ValueError(
+                    "Multi-output audit prediction/target shape mismatch"
+                )
+            if "auc" in metric:
+                from sklearn.metrics import roc_auc_score
 
-        if "auc" in metric:
-            from sklearn.metrics import roc_auc_score
-
-            if preds.ndim > 1 and preds.shape[1] > 1:
-                score = roc_auc_score(y_true, preds, multi_class="ovr", average="weighted")
+                score = float(
+                    np.mean(
+                        [
+                            roc_auc_score(
+                                np.asarray(y_true)[:, column],
+                                preds[:, column],
+                            )
+                            for column in range(preds.shape[1])
+                        ]
+                    )
+                )
             else:
+                score = float(
+                    np.mean(
+                        [
+                            log_loss(
+                                np.asarray(y_true)[:, column],
+                                preds[:, column],
+                                labels=[0, 1],
+                            )
+                            for column in range(preds.shape[1])
+                        ]
+                    )
+                )
+        elif preds.ndim > 1 and preds.shape[1] > 1:
+            preds = preds / preds.sum(axis=1, keepdims=True)
+            if "auc" in metric:
+                from sklearn.metrics import roc_auc_score
+
+                score = roc_auc_score(
+                    y_true,
+                    preds,
+                    multi_class="ovr",
+                    average="weighted",
+                )
+            else:
+                score = log_loss(y_true, preds)
+        else:
+            if "auc" in metric:
+                from sklearn.metrics import roc_auc_score
+
                 score = roc_auc_score(y_true, preds)
-        else:
-            score = log_loss(y_true, preds)
+            else:
+                score = log_loss(y_true, preds)
     else:
-        if preds.ndim > 1:
-            preds = preds.ravel()
-        if "mae" in metric:
-            score = mean_absolute_error(y_true, preds)
-        elif "mse" in metric:
-            score = mean_squared_error(y_true, preds)
+        targets = np.asarray(y_true)
+        if targets.ndim == 2 and targets.shape[1] > 1:
+            if preds.shape != targets.shape:
+                raise ValueError(
+                    "Multi-target audit prediction/target shape mismatch"
+                )
+            if "mae" in metric:
+                score = np.mean(
+                    [
+                        mean_absolute_error(
+                            targets[:, column],
+                            preds[:, column],
+                        )
+                        for column in range(targets.shape[1])
+                    ]
+                )
+            elif "mse" in metric and "rmse" not in metric:
+                score = np.mean(
+                    [
+                        mean_squared_error(
+                            targets[:, column],
+                            preds[:, column],
+                        )
+                        for column in range(targets.shape[1])
+                    ]
+                )
+            else:
+                score = np.mean(
+                    [
+                        np.sqrt(
+                            mean_squared_error(
+                                targets[:, column],
+                                preds[:, column],
+                            )
+                        )
+                        for column in range(targets.shape[1])
+                    ]
+                )
         else:
-            score = np.sqrt(mean_squared_error(y_true, preds))
+            preds = preds.ravel()
+            if "mae" in metric:
+                score = mean_absolute_error(y_true, preds)
+            elif "mse" in metric:
+                score = mean_squared_error(y_true, preds)
+            else:
+                score = np.sqrt(mean_squared_error(y_true, preds))
 
     if is_metric_minimization(metric):
         return score

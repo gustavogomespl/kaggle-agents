@@ -24,17 +24,13 @@ def extract_domain_specific_patterns(
     Returns:
         Dictionary with extracted patterns for the domain
     """
-    from ...utils.text_normalization import AMBIGUOUS_CLASSES, DETERMINISTIC_CLASSES
-
     if domain != "seq_to_seq":
         return {}
 
     patterns: dict[str, Any] = {
         "uses_hybrid_lookup": False,
         "uses_lookup_baseline": False,
-        "lookup_coverage_estimate": 0.0,
-        "deterministic_classes": list(DETERMINISTIC_CLASSES),
-        "ambiguous_classes": list(AMBIGUOUS_CLASSES),
+        "lookup_coverage_estimate": None,
         "neural_models": set(),
         "recommended_utilities": set(),
     }
@@ -45,7 +41,6 @@ def extract_domain_specific_patterns(
             strategy_lower = strategy.lower()
             if any(kw in strategy_lower for kw in ["lookup", "dictionary", "hybrid"]):
                 patterns["uses_hybrid_lookup"] = True
-                patterns["lookup_coverage_estimate"] = 0.80
 
         for model in sol.models_used:
             model_lower = model.lower()
@@ -101,40 +96,29 @@ def format_domain_insights(domain: str, domain_patterns: dict[str, Any]) -> str:
 
 
 def format_seq2seq_insights(patterns: dict[str, Any]) -> str:
-    """Format seq2seq-specific insights for text normalization competitions."""
-    from ...utils.text_normalization import AMBIGUOUS_CLASSES, DETERMINISTIC_CLASSES
-
-    # Use imported constants for complete class lists
-    deterministic_str = ", ".join(sorted(DETERMINISTIC_CLASSES))
-    ambiguous_str = ", ".join(sorted(AMBIGUOUS_CLASSES))
-
-    insights = f"""## DOMAIN-SPECIFIC INSIGHTS (CRITICAL FOR seq_to_seq)
+    """Format validation-gated insights for generic seq2seq tasks."""
+    insights = """## DOMAIN-SPECIFIC INSIGHTS (CRITICAL FOR seq_to_seq)
 
 ### SEQ2SEQ / TEXT NORMALIZATION PATTERNS
 
-**CRITICAL: HYBRID LOOKUP-FIRST STRATEGY**
-SOTA solutions show that lookup-based approaches handle 80%+ of tokens deterministically.
-This is a PROVEN pattern - you MUST include a lookup-first component.
-
-**Class Categories (from text_normalization.py):**
-- DETERMINISTIC (use rules/lookup): {deterministic_str}
-- AMBIGUOUS (use neural): {ambiguous_str}
+**VALIDATE A HYBRID LOOKUP-FIRST CANDIDATE**
+Repeated transformations can make lookup efficient, but neither coverage nor
+class behavior may be assumed. Learn routing rules from the training split and
+measure them out of fold.
 
 **RECOMMENDED ARCHITECTURE:**
-1. **Component 1 (Lookup Baseline)**: Handle deterministic classes with O(1) lookup
+1. **Component 1 (Validated Lookup Baseline)**
    - Use `LookupBaseline` from `kaggle_agents/utils/text_normalization.py`
-   - Expected coverage: 80%+ of tokens
-   - Impact: 0.30-0.40
+   - Infer repeated mappings and simple transformations from supplied rows
+   - Report OOF confident coverage and accuracy
 
-2. **Component 2 (Neural Seq2Seq)**: Handle ambiguous classes only
-   - Train ONLY on ~20% of data (ambiguous tokens)
+2. **Component 2 (Neural Seq2Seq)**
+   - Train on rows rejected by the OOF confidence router
    - Use T5-small with `get_neural_training_config()` for time-aware training
-   - Impact: 0.20-0.30
 
 3. **Component 3 (Hybrid Pipeline)**: Combine lookup + neural
    - Use `create_hybrid_pipeline()` utility
-   - Lookup first, neural fallback for ambiguous
-   - Impact: 0.10-0.15
+   - Accept lookup predictions only when their learned confidence passes
 
 **AVAILABLE UTILITIES (USE THESE!):**
 ```python
@@ -142,22 +126,18 @@ from kaggle_agents.utils.text_normalization import (
     LookupBaseline,              # Frequency-based lookup table
     create_hybrid_pipeline,      # Returns lookup + ambiguous_df + neural_config
     get_neural_training_config,  # Time-aware training config with max_steps guard
-    DETERMINISTIC_CLASSES,       # Complete set of deterministic classes
-    AMBIGUOUS_CLASSES,           # Complete set of ambiguous classes
 )
 ```
 
 **MANDATORY FOR SEQ2SEQ:**
-- At least ONE component must use `LookupBaseline` or equivalent lookup approach
-- At least ONE component must generate the actual "after" text (not just predict class)
+- Evaluate lookup against a pure-neural baseline; keep it only if OOF metrics justify it
+- At least ONE component must generate the detected target text (not just predict context/class)
 - Neural training MUST use `max_steps` guard to prevent timeout
-- Component impacts must be REALISTIC (sum should be ≤ 0.70 for a 3-component plan)
 """
 
     # Add detected patterns if any
     if patterns.get("uses_hybrid_lookup"):
-        coverage = patterns.get("lookup_coverage_estimate", 0.8)
-        insights += f"\n**DETECTED FROM SOTA:** Hybrid lookup strategy confirmed (est. {coverage:.0%} coverage)"
+        insights += "\n**DETECTED IN ALLOWED REFERENCES:** A hybrid lookup strategy was used; revalidate its coverage locally"
 
     if patterns.get("neural_models"):
         models = ", ".join(patterns["neural_models"])

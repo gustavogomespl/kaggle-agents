@@ -53,13 +53,11 @@ print(f"[LOG:INFO] Classes: {le.classes_} (n={n_classes})")
 # ==========================================
 # STEP 2: CV loop uses PRE-ENCODED labels
 # ==========================================
-for fold_idx in range(n_folds):
-    train_mask = folds != fold_idx
-    val_mask = folds == fold_idx
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
 
     # y is ALREADY encoded - no transform needed inside loop
-    y_train = y_encoded[train_mask]
-    y_val = y_encoded[val_mask]  # Safe: all classes known from full fit
+    y_train = y_encoded[train_idx]
+    y_val = y_encoded[val_idx]  # Safe: all classes known from full fit
 
     model.fit(X_train, y_train)
     # LightGBM won't fail because y_val classes are subset of y_train's encoder
@@ -68,8 +66,8 @@ for fold_idx in range(n_folds):
 **WRONG PATTERN (CAUSES CRASHES)**:
 ```python
 # ❌ WRONG: Fitting LabelEncoder inside each fold
-for fold_idx in range(n_folds):
-    y_train, y_val = y[train_mask], y[val_mask]
+for fold_idx, train_idx, val_idx in iter_canonical_cv_splits():
+    y_train, y_val = y[train_idx], y[val_idx]
 
     le = LabelEncoder()
     y_train_enc = le.fit_transform(y_train)  # Only sees this fold's classes!
@@ -93,8 +91,13 @@ Ensure target and class_order have the SAME type:
 # Check target type
 print(f"Target dtype: {y.dtype}, sample values: {y[:3]}")
 
-# If sample_submission columns are strings but y is int:
-class_order = sample_sub.columns[1:].tolist()
+# Wide target columns declare class order; a single label column does not:
+submission_targets = list(SUBMISSION_TARGET_COLS)
+class_order = (
+    submission_targets
+    if len(submission_targets) > 1
+    else le.classes_.tolist()
+)
 
 # Option 1: Convert y to string to match class_order
 y = y.astype(str)
@@ -248,48 +251,24 @@ params = {
 model = lgb.LGBMClassifier(**params)
 ```
 
-### 5. Submission Format Detection and Generation (CRITICAL)
-**ALWAYS detect submission format BEFORE generating submission!**
+### 5. Submission Generation (CRITICAL)
+**Use the injected schema-aware helper; it already knows the template roles.**
 
 ```python
-sample_sub = pd.read_csv(sample_submission_path)
-submission_cols = sample_sub.columns[1:].tolist()  # All columns except ID
-print(f"[LOG:INFO] Submission columns: {submission_cols}")
-
-# === FORMAT DETECTION ===
-if len(submission_cols) == 1:
-    # LABEL FORMAT: Single column for class labels (TPS, most classification)
-    # Example: Id,Cover_Type or Id,target
-    target_col = submission_cols[0]
-    print(f"[LOG:INFO] Label format detected - target column: {target_col}")
-
-    # For classification: convert probabilities to class labels
-    if predictions.ndim == 2:
-        # Multiclass: argmax to get predicted class index
-        predicted_labels = le.inverse_transform(np.argmax(predictions, axis=1))
-        sample_sub[target_col] = predicted_labels
-    else:
-        # Binary or regression: use predictions directly
-        sample_sub[target_col] = predictions
-
-elif len(submission_cols) > 1:
-    # WIDE FORMAT: Multiple columns for class probabilities
-    # Example: Id,class_0,class_1,class_2,...
-    print(f"[LOG:INFO] Wide format detected - {len(submission_cols)} probability columns")
-
-    # Assign probabilities to each class column
-    for i, col in enumerate(submission_cols):
-        if predictions.ndim == 2:
-            sample_sub[col] = predictions[:, i]
-        else:
-            # 1D predictions: replicate for each column (unusual)
-            sample_sub[col] = predictions
-
-sample_sub.to_csv(OUTPUT_DIR / 'submission.csv', index=False)
-print(f"[LOG:INFO] Submission saved with {len(submission_cols)} target column(s)")
+sample_rows = len(pd.read_csv(SAMPLE_SUBMISSION_PATH, usecols=[SUBMISSION_TARGET_COLS[0]]))
+predictions = np.asarray(predictions)
+if predictions.ndim == 1:
+    predictions = predictions.reshape(-1, 1)
+expected_shape = (sample_rows, len(SUBMISSION_TARGET_COLS))
+if predictions.shape != expected_shape:
+    raise ValueError(
+        f"Submission prediction shape {predictions.shape} != {expected_shape}"
+    )
+write_submission(predictions)  # pass test_ids=... only when reordering is needed
 ```
 
-**CRITICAL**: Do NOT assume submission format - always check `len(sample_sub.columns[1:])`!
+**CRITICAL**: Do NOT infer roles from `columns[1:]`, assign template columns by
+position, or call `to_csv` for submission.csv.
 
 ### 6. Optuna Hyperparameter Tuning
 ```python
@@ -332,19 +311,79 @@ for chunk in chunks:
 
 ALWAYS validate row count after feature engineering:
 ```python
-assert len(train_engineered) >= len(train_original) * 0.95, \\
-    f"CRITICAL: Data loss detected {len(train_original)} → {len(train_engineered)}"
+if len(train_engineered) != len(train_original):
+    raise ValueError(
+        f"Feature engineering changed row count: "
+        f"{len(train_original)} -> {len(train_engineered)}"
+    )
+if ID_COL in train_original.columns and ID_COL in train_engineered.columns:
+    if not np.array_equal(
+        train_engineered[ID_COL].to_numpy(),
+        train_original[ID_COL].to_numpy(),
+    ):
+        raise ValueError("Feature engineering changed canonical row order")
+elif not train_engineered.index.equals(train_original.index):
+    raise ValueError("Feature engineering changed canonical row alignment")
 ```
 
 ### 8. Regression Model Output
-For regression tasks, ensure predictions are in valid range:
-```python
-# Clip predictions to valid range (example for positive targets)
-predictions = np.clip(predictions, 0, None)
+Preserve the learned prediction scale by default. Apply bounds only when the
+injected metric or data contract explicitly requires them (for example, a
+non-negative lower bound for RMSLE). Never derive clipping bounds from a target
+column name, competition identity, or assumed real-world semantics.
 
-# For specific domains (e.g., taxi fares, prices):
-predictions = np.clip(predictions, min_valid, max_valid)
+```python
+def validate_regression_predictions(predictions, explicit_bounds=None):
+    predictions = np.asarray(predictions, dtype=np.float64)
+    if not np.all(np.isfinite(predictions)):
+        raise ValueError("Regression predictions contain NaN or Inf")
+    if explicit_bounds is not None:
+        lower, upper = explicit_bounds
+        if lower is not None:
+            predictions = np.maximum(predictions, lower)
+        if upper is not None:
+            predictions = np.minimum(predictions, upper)
+    return predictions
 ```
+
+### 9. TabFM: Zero-Shot Tabular Foundation Model (STRONG stagnation breaker)
+TabFM is an OPTIONAL tabular foundation-model arm. Its score and artifacts are
+valid only when they were produced by the real TabFM implementation. A tree
+model or any other estimator trained under the TabFM component name is a false
+attribution and is forbidden.
+
+```python
+# Dependency setup may fail this optional component; it must never change model
+# identity. Installation is allowed only when the active runtime policy permits.
+try:
+    from tabfm import tabfm_v1_0_0
+except ImportError:
+    raise RuntimeError("TabFM unavailable; prune tabfm_zero_shot") from None
+
+model = tabfm_v1_0_0.load()  # sklearn-compatible; uses GPU if available
+model.fit(X_ctx, y_ctx)      # 'fit' = context ingestion (no weight updates)
+proba = model.predict_proba(X_val)  # or model.predict(X_val) for regression
+```
+
+MANDATORY MODEL-IDENTITY CONTRACT:
+- On import, load, compatibility, fit, or predict failure: log the cause, raise
+  `RuntimeError`, and let the planner mark/prune `tabfm_zero_shot`.
+- NEVER train LightGBM, XGBoost, CatBoost, sklearn, or another estimator in this
+  component. A substitute belongs in its own separately named component.
+- Write `oof_tabfm_zero_shot.npy` and `test_tabfm_zero_shot.npy` only after
+  genuine TabFM inference succeeds and all alignment/finite checks pass.
+- Do not reuse stale TabFM-named artifacts after a failed attempt.
+
+HARD LIMITS (check BEFORE using; on violation fail/prune this component):
+- Classification: at most 10 classes (multi-label NOT supported).
+- Context size: ICL context should be <= ~50,000 rows. For larger training
+  sets, subsample ONLY the fit() context (stratified for classification):
+  `ctx = train_fold.sample(n=50_000, random_state=42)` — this does NOT violate
+  the no-sampling rule in section 7, because predictions are still produced
+  for ALL validation/test rows (only the in-context examples are subsampled).
+- OOF contract still applies: iterate the canonical folds, fit() on the
+  (subsampled) train-fold context, predict the FULL validation fold, save
+  models/oof_{name}.npy and models/test_{name}.npy exactly like other models.
 """
 
 MULTI_LABEL_CONSTRAINTS = """## MULTI-LABEL CLASSIFICATION (target_type="multi_label")

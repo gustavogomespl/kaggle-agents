@@ -15,6 +15,7 @@ from .dataclasses import ExecutionProgress, ExecutionResult
 from .executor import CodeExecutor
 from .process import (
     ENABLE_RESOURCE_LIMITS,
+    build_subprocess_env,
     kill_process_tree,
     set_resource_limits,
     start_new_process_group,
@@ -64,6 +65,7 @@ __all__ = [
     "validate_code_syntax",
     # Process utilities
     "ENABLE_RESOURCE_LIMITS",
+    "build_subprocess_env",
     "set_resource_limits",
     "start_new_process_group",
     "kill_process_tree",

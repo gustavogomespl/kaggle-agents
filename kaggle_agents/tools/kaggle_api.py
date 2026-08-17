@@ -9,8 +9,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from kaggle.api.kaggle_api_extended import KaggleApi
-
 
 class KaggleAPIClient:
     """Client for interacting with Kaggle API.
@@ -24,15 +22,19 @@ class KaggleAPIClient:
 
     def __init__(self):
         """Initialize Kaggle API client with authentication."""
-        self.api = KaggleApi()
         try:
+            # Import lazily: the Kaggle package authenticates at import time and
+            # may call exit(1) when credentials are unavailable.
+            from kaggle.api.kaggle_api_extended import KaggleApi  # noqa: PLC0415
+
+            self.api = KaggleApi()
             self.api.authenticate()
-        except Exception as e:
+        except (Exception, SystemExit) as e:
             raise RuntimeError(
                 f"Kaggle API authentication failed: {e!s}\n"
                 "Ensure KAGGLE_USERNAME and KAGGLE_KEY are set, "
                 "or ~/.kaggle/kaggle.json exists with credentials."
-            )
+            ) from e
 
     def _analyze_directory(self, dir_path: Path) -> tuple[str, dict[str, Any]]:
         """Analyze directory contents to determine data type.
@@ -147,7 +149,7 @@ class KaggleAPIClient:
         Uses: api.competition_download_files(competition, path, force, quiet)
 
         Args:
-            competition: Competition URL suffix (e.g., 'titanic')
+            competition: Competition URL suffix (e.g., 'competition-slug')
             path: Download destination directory
             quiet: Suppress progress output
 
@@ -202,7 +204,7 @@ class KaggleAPIClient:
         Note: The Kaggle API doesn't have a direct competition_view method.
 
         Args:
-            competition: Competition URL suffix (e.g., 'titanic')
+            competition: Competition URL suffix (e.g., 'competition-slug')
 
         Returns:
             Dictionary with competition information:
@@ -260,7 +262,7 @@ class KaggleAPIClient:
         Uses: api.competition_submit(file_name, message, competition, quiet)
 
         Args:
-            competition: Competition URL suffix (e.g., 'titanic')
+            competition: Competition URL suffix (e.g., 'competition-slug')
             file_path: Path to submission CSV file
             message: Submission description/message
             quiet: Suppress progress output
@@ -300,7 +302,7 @@ class KaggleAPIClient:
         Uses: api.competition_leaderboard_view(id)
 
         Args:
-            competition: Competition URL suffix (e.g., 'titanic')
+            competition: Competition URL suffix (e.g., 'competition-slug')
             top_n: Number of top entries to return (max available entries)
 
         Returns:
@@ -347,7 +349,7 @@ class KaggleAPIClient:
         Uses: api.competition_submissions(id)
 
         Args:
-            competition: Competition URL suffix (e.g., 'titanic')
+            competition: Competition URL suffix (e.g., 'competition-slug')
 
         Returns:
             List of user's submissions with:

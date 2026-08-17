@@ -10,18 +10,32 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...core.state import KaggleState
+    from .target_source import DeveloperTargetSource
 
 
 class DeveloperUtilsMixin:
     """Mixin providing utility methods."""
 
-    def _get_dataset_info(self, working_dir: Path, state: "KaggleState" = None) -> str:
+    def _get_dataset_info(
+        self,
+        working_dir: Path,
+        state: "KaggleState" = None,
+        *,
+        target_source: "DeveloperTargetSource | None" = None,
+    ) -> str:
         """
         Read dataset columns and file system structure to provide to LLM.
+
+        The summary may describe neutral features, but it may NOT select a
+        target: target paths and semantics come only from ``target_source``.
+        This method used to pick the first ``train_labels.csv``/``metadata.csv``
+        it found and announce a "contract target column" from it, which is a
+        second, competing target decision.
 
         Args:
             working_dir: Working directory containing data files
             state: Current state (optional)
+            target_source: The one resolved target decision for this component
 
         Returns:
             Formatted string with dataset information including file system structure
@@ -33,16 +47,46 @@ class DeveloperUtilsMixin:
         if state:
             data_files = state.get("data_files", {}) if isinstance(state, dict) else {}
 
-        # 1. FILE SYSTEM STRUCTURE (CRITICAL for non-tabular competitions)
+        # 1. FILE SYSTEM STRUCTURE (CRITICAL for non-tabular datasets)
         info_parts.append("**FILE SYSTEM STRUCTURE (Use this to build paths):**")
-        data_dirs_to_check = [
-            "train", "test", "audio", "images", "train_images", "test_images",
-            "essential_data", "supplemental_data", "data", "train_audio", "test_audio"
-        ]
+        preferred_dir_names = {
+            name: index
+            for index, name in enumerate(
+                (
+                    "train",
+                    "test",
+                    "data",
+                    "audio",
+                    "images",
+                    "train_images",
+                    "test_images",
+                    "train_audio",
+                    "test_audio",
+                )
+            )
+        }
+        try:
+            data_dirs_to_check = sorted(
+                (
+                    path
+                    for path in working_dir.iterdir()
+                    if (
+                        path.is_dir()
+                        and not path.name.startswith(".")
+                        and path.name.lower() not in {"canonical", "models"}
+                    )
+                ),
+                key=lambda path: (
+                    preferred_dir_names.get(path.name.lower(), len(preferred_dir_names)),
+                    path.name.lower(),
+                ),
+            )
+        except (PermissionError, OSError):
+            data_dirs_to_check = []
 
         found_dirs = []
-        for dirname in data_dirs_to_check:
-            dir_path = working_dir / dirname
+        for dir_path in data_dirs_to_check:
+            dirname = dir_path.name
             if dir_path.exists() and dir_path.is_dir():
                 try:
                     files = [f for f in dir_path.rglob("*") if f.is_file()]
@@ -96,18 +140,29 @@ class DeveloperUtilsMixin:
                 info_parts.append(f"- `{csv_path.name}` (at {csv_path.parent.name}/): {len(columns)} columns")
                 info_parts.append(f"  - Columns: {', '.join(columns)}")
 
-                # Detect target column
+                # Report only the target role the resolved decision declares.
+                # Guessing from names such as "species", from the last column,
+                # or from a second contract read here encodes task-shaped
+                # priors and can contradict the authoritative target source.
+                canonical_metadata = (
+                    target_source.canonical_metadata
+                    if target_source is not None and target_source.canonical_authoritative
+                    else {}
+                )
                 target_col = "UNKNOWN"
-                if state and state.get("target_col"):
+                declared_target = canonical_metadata.get("target_col")
+                if isinstance(declared_target, str) and declared_target:
+                    target_col = declared_target
+                elif target_source is None and state and state.get("target_col"):
                     target_col = state["target_col"]
-                else:
-                    target_candidates = [
-                        c for c in columns
-                        if c.lower() in ["target", "label", "y", "class", "species", "category"]
-                    ]
-                    target_col = target_candidates[0] if target_candidates else columns[-1] if len(columns) > 1 else "UNKNOWN"
 
-                info_parts.append(f"  - Likely target column: `{target_col}`")
+                info_parts.append(f"  - Contract target column: `{target_col}`")
+                declared_targets = canonical_metadata.get("target_cols")
+                if isinstance(declared_targets, list) and declared_targets:
+                    info_parts.append(
+                        "  - Ordered contract target columns: "
+                        f"`{declared_targets}`"
+                    )
 
                 # Show sample values for ID column (usually first column)
                 if columns:
@@ -128,16 +183,16 @@ class DeveloperUtilsMixin:
             if _analyze_csv(train_csv_path):
                 csv_found = True
 
-        # Second: Check standard CSV names in working directory root
+        # Second: the conventional training table only. Falling back to
+        # "train_labels.csv"/"metadata.csv" here was a filename-derived target
+        # decision competing with the resolved target source.
         if not csv_found:
-            for csv_name in ["train.csv", "train_labels.csv", "metadata.csv"]:
-                csv_path = working_dir / csv_name
-                if _analyze_csv(csv_path):
-                    csv_found = True
-                    break
+            csv_path = working_dir / "train.csv"
+            if _analyze_csv(csv_path):
+                csv_found = True
 
-        # Third: Scan for CSVs inside discovered data directories (CRITICAL for MLSP-2013-Birds)
-        # The training labels might be inside essential_data/, supplemental_data/, etc.
+        # Third: Scan for CSVs inside the data directories discovered above.
+        # This covers arbitrary nested layouts without privileging dataset names.
         if not csv_found and found_dirs:
             info_parts.append("  - No CSV at root, scanning inside data directories...")
             for dirname, count, extensions in found_dirs:
@@ -226,7 +281,10 @@ class DeveloperUtilsMixin:
         """
         # Audio domain: Provide essential templates for audio processing
         # These are critical because audio competitions often have non-standard formats
-        if domain == "audio" and component_type in ("model", "preprocessing"):
+        if domain in {"audio", "audio_classification"} and component_type in (
+            "model",
+            "preprocessing",
+        ):
             try:
                 from ...prompts.templates.audio_template import (
                     AUDIO_CONFIG_TEMPLATE,

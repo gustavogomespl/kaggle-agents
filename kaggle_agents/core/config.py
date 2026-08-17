@@ -20,6 +20,14 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _default_use_responses_api() -> bool:
+    """Responses API on for api.openai.com; off for OpenAI-compatible gateways."""
+    explicit = os.getenv("OPENAI_USE_RESPONSES_API")
+    if explicit is not None:
+        return explicit.lower() == "true"
+    return not (os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE"))
+
+
 @dataclass
 class LLMConfig:
     """LLM provider and model configuration."""
@@ -41,13 +49,17 @@ class LLMConfig:
     evaluator_provider: Literal["openai", "anthropic", "gemini"] | None = field(
         default_factory=lambda: os.getenv("EVALUATOR_PROVIDER")
     )
-    temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.7")))
+    # Low default temperature reduces variance (it does not make LLM calls deterministic).
+    temperature: float = field(default_factory=lambda: float(os.getenv("LLM_TEMPERATURE", "0.1")))
     max_tokens: int = field(
         default_factory=lambda: int(os.getenv("LLM_MAX_TOKENS", "8192"))
     )  # Safe default
     timeout: int = 120  # seconds
     # OpenAI Responses API - enables new API features (structured outputs, web search, etc.)
-    use_responses_api: bool = True
+    # Auto-inferred: a custom OPENAI_BASE_URL means an OpenAI-COMPATIBLE gateway
+    # (e.g. OpenRouter), where chat completions is the battle-tested path.
+    # Override explicitly with OPENAI_USE_RESPONSES_API=true|false if needed.
+    use_responses_api: bool = field(default_factory=lambda: _default_use_responses_api())
 
 
 @dataclass
@@ -59,6 +71,59 @@ class SearchConfig:
     embedding_model: str = "text-embedding-ada-002"
     vector_store_path: str = ".chromadb"
     search_depth: Literal["quick", "moderate", "thorough"] = "moderate"
+    # Target-blind protocol: MLE-bench switches to cross-competition queries
+    # and filters sources that identify the target (tools/kaggle_search.py).
+    # This legacy value remains for configuration compatibility only. Regular
+    # Kaggle already allows same-competition retrieval; MLE-bench ignores the
+    # value and always remains target-blind.
+    allow_same_competition_sources: bool = field(
+        default_factory=lambda: os.getenv(
+            "KAGGLE_AGENTS_ALLOW_SAME_COMP_SOURCES", "false"
+        ).lower()
+        == "true"
+    )
+
+
+@dataclass
+class AblationTogglesConfig:
+    """Component on/off switches for system-level ablation studies.
+
+    Each flag removes one architectural component so its contribution to the
+    final score can be measured (paper experiments). All components are
+    enabled by default; set the env var to "true" to ablate.
+    """
+
+    disable_search: bool = field(
+        default_factory=lambda: os.getenv("KAGGLE_AGENTS_ABLATE_SEARCH", "false").lower()
+        == "true"
+    )  # Search-First retrieval -> domain-heuristic fallback only
+    disable_robustness: bool = field(
+        default_factory=lambda: os.getenv("KAGGLE_AGENTS_ABLATE_ROBUSTNESS", "false").lower()
+        == "true"
+    )  # skip the 7 guardrail validation modules
+    disable_meta_evaluator: bool = field(
+        default_factory=lambda: os.getenv(
+            "KAGGLE_AGENTS_ABLATE_META_EVALUATOR", "false"
+        ).lower()
+        == "true"
+    )  # skip meta-evaluation (also disables SOTA-search/curriculum recovery routes)
+    disable_ensemble: bool = field(
+        default_factory=lambda: os.getenv("KAGGLE_AGENTS_ABLATE_ENSEMBLE", "false").lower()
+        == "true"
+    )  # skip ensembling (best single-model submission is kept)
+
+    def disabled_components(self) -> list[str]:
+        """Names of components currently ablated (for telemetry/reporting)."""
+        return [
+            name
+            for name, flag in (
+                ("search", self.disable_search),
+                ("robustness", self.disable_robustness),
+                ("meta_evaluator", self.disable_meta_evaluator),
+                ("ensemble", self.disable_ensemble),
+            )
+            if flag
+        ]
 
 
 @dataclass
@@ -224,6 +289,20 @@ class IterationConfig:
     """Configuration for iteration and convergence."""
 
     max_iterations: int = field(default_factory=lambda: int(os.getenv("MAX_ITERATIONS", "2")))
+
+    # Wall-clock budget for the agent on a single task, in seconds. Iteration
+    # counts alone do not bound cost: each iteration carries a retry ladder
+    # whose worst case runs for hours. 0 disables the deadline.
+    # 7h is the restricted protocol used on a single Colab GPU.
+    #
+    # Enforcement is cooperative: stages check the clock before starting new
+    # work and component timeouts are clamped to what remains, but no watchdog
+    # kills a component mid-execution, so a run can overrun by at most one
+    # component timeout.
+    run_wall_clock_budget_s: int = field(
+        default_factory=lambda: int(os.getenv("KAGGLE_AGENTS_RUN_BUDGET_S", str(7 * 3600)))
+    )
+
     target_percentile: float = 20.0  # top 20%
     early_stopping: bool = True
     patience: int = 3  # iterations without improvement
@@ -379,6 +458,7 @@ class AgentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     search: SearchConfig = field(default_factory=SearchConfig)
     ablation: AblationConfig = field(default_factory=AblationConfig)
+    ablation_toggles: AblationTogglesConfig = field(default_factory=AblationTogglesConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     dspy: DSPyConfig = field(default_factory=DSPyConfig)
     iteration: IterationConfig = field(default_factory=IterationConfig)
@@ -496,6 +576,14 @@ def reset_config() -> None:
 
 
 # ==================== Convenience Functions ====================
+
+
+def get_run_seed(default: int = 42) -> int:
+    """Return the experiment seed shared by folds, generated code, and telemetry."""
+    try:
+        return int(os.getenv("RUN_SEED", str(default)))
+    except (TypeError, ValueError):
+        return default
 
 
 def get_llm(temperature: float | None = None, max_tokens: int | None = None):
@@ -697,6 +785,41 @@ def is_metric_minimization(metric_name: str) -> bool:
     ]
 
     return any(metric in metric_lower for metric in minimize_metrics)
+
+
+def metric_reads_rows_as_distribution(metric_name: str) -> bool:
+    """Whether the graded metric interprets each row as one probability vector.
+
+    Only likelihood-style losses do. A ranking metric such as AUC scores each
+    prediction column independently, so rows that do not sum to 1 are not a
+    defect there: rejecting them discards a submission the grader would have
+    accepted and scored.
+
+    Args:
+        metric_name: Name of the evaluation metric (e.g. 'auc', 'log_loss')
+
+    Returns:
+        True when unnormalized rows would actually degrade the graded score.
+
+    Examples:
+        >>> metric_reads_rows_as_distribution('multi class log loss')
+        True
+        >>> metric_reads_rows_as_distribution('auc')
+        False
+    """
+    if not metric_name:
+        return False
+
+    metric_lower = str(metric_name).lower()
+    distribution_metrics = (
+        "logloss",
+        "log_loss",
+        "log loss",
+        "cross_entropy",
+        "cross entropy",
+        "crossentropy",
+    )
+    return any(metric in metric_lower for metric in distribution_metrics)
 
 
 def calculate_score_improvement(new_score: float, baseline_score: float, metric_name: str) -> float:

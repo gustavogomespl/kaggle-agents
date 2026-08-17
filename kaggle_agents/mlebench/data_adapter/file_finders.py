@@ -39,12 +39,7 @@ class FileFinderMixin:
         recursive: bool = True,
     ) -> list[Path]:
         """
-        Find label files in directory (CSV and TXT formats).
-
-        This handles non-standard formats like MLSP 2013 Birds which uses:
-        - rec_labels_test_hidden.txt (multi-label training labels)
-        - rec_id2filename.txt (maps rec_id -> audio filename)
-        - CVfolds_2.txt (cross-validation fold assignments)
+        Find likely label and split-metadata files from semantic filename hints.
 
         Args:
             directory: Directory to search in
@@ -53,45 +48,35 @@ class FileFinderMixin:
         Returns:
             List of label file paths found
         """
-        label_patterns = [
-            # Standard CSV patterns
-            "**/train_labels.csv",
-            "**/labels.csv",
-            "**/train.csv",
-            # Non-standard TXT patterns (MLSP 2013 Birds, etc.)
-            "**/rec_labels*.txt",
-            "**/*_labels*.txt",
-            "**/labels*.txt",
-            "**/CVfolds*.txt",
-            "**/rec_id2filename*.txt",
-            "**/*2filename*.txt",
-            # Additional patterns for other non-standard formats
-            "**/train_metadata*.txt",
-            "**/metadata*.txt",
-        ]
+        semantic_hints = (
+            "train",
+            "label",
+            "target",
+            "annotation",
+            "fold",
+            "mapping",
+            "filename",
+            "metadata",
+        )
+        iterator = directory.rglob("*") if recursive else directory.glob("*")
+        found_files: list[Path] = []
+        try:
+            for match in iterator:
+                if not match.is_file() or match.suffix.lower() not in {".csv", ".txt", ".tsv"}:
+                    continue
+                normalized_name = match.stem.lower().replace("-", "_")
+                if normalized_name.startswith("sample"):
+                    continue
+                if any(hint in normalized_name for hint in semantic_hints):
+                    found_files.append(match)
+        except (OSError, PermissionError):
+            return []
 
-        if not recursive:
-            # Convert to non-recursive patterns
-            label_patterns = [p.replace("**/", "") for p in label_patterns]
-
-        found_files = []
-        for pattern in label_patterns:
-            try:
-                matches = list(directory.glob(pattern))
-                for match in matches:
-                    if match.is_file() and match not in found_files:
-                        found_files.append(match)
-            except Exception:
-                continue
-
-        return found_files
+        return sorted(set(found_files))
 
     def _find_audio_source_dir(self, directory: Path) -> Path | None:
         """
-        Find the directory containing source audio files.
-
-        Handles non-standard structures like MLSP 2013 Birds where audio is in:
-        - essential_data/src_wavs/
+        Find the directory containing the strongest local concentration of audio.
 
         Args:
             directory: Parent directory to search in
@@ -101,35 +86,28 @@ class FileFinderMixin:
         """
         audio_exts = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aiff", ".aif"}
 
-        # Common audio source directory patterns
-        audio_dir_patterns = [
-            "src_wavs",
-            "wavs",
-            "audio",
-            "audio_files",
-            "raw_audio",
-            "train_audio",
-        ]
+        best_dir: Path | None = None
+        best_count = 0
+        candidate_dirs = [directory]
+        try:
+            candidate_dirs.extend(path for path in directory.rglob("*") if path.is_dir())
+        except (OSError, PermissionError):
+            pass
 
-        # First check direct subdirectories
-        for subdir_name in audio_dir_patterns:
-            subdir = directory / subdir_name
-            if subdir.is_dir():
-                # Verify it contains audio files
-                sample_files = list(subdir.glob("*"))[:20]
-                if any(f.suffix.lower() in audio_exts for f in sample_files if f.is_file()):
-                    return subdir
-
-        # Then recursively search for directories with audio files
-        for subdir in directory.rglob("*"):
-            if not subdir.is_dir():
+        for candidate in candidate_dirs:
+            try:
+                audio_count = sum(
+                    1
+                    for index, path in enumerate(candidate.iterdir())
+                    if index < 500 and path.is_file() and path.suffix.lower() in audio_exts
+                )
+            except (OSError, PermissionError):
                 continue
-            # Check if this directory contains audio files
-            sample_files = list(subdir.glob("*"))[:20]
-            if any(f.suffix.lower() in audio_exts for f in sample_files if f.is_file()):
-                return subdir
+            if audio_count > best_count:
+                best_count = audio_count
+                best_dir = candidate
 
-        return None
+        return best_dir
 
     def _find_first_zip(self, directory: Path, kind: str) -> Path | None:
         """Find a likely train/test ZIP in a directory."""
@@ -180,8 +158,7 @@ class FileFinderMixin:
                 if candidate.exists():
                     return candidate
 
-            # If subdir itself contains data files (wav, csv, txt, png, etc.), return it
-            # Added .txt for non-standard label formats (MLSP 2013 Birds)
+            # If the subdirectory itself contains data files, return it.
             data_extensions = {
                 ".csv",
                 ".txt",  # Label files

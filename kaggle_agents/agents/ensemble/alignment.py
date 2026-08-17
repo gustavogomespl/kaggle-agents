@@ -47,7 +47,10 @@ def validate_oof_alignment(
 
         if class_order_path.exists():
             try:
-                saved_order = np.load(class_order_path, allow_pickle=True).tolist()
+                saved_order = np.load(
+                    class_order_path,
+                    allow_pickle=False,
+                ).tolist()
                 if not class_orders_match(saved_order, expected_class_order):
                     skip_reasons.append(
                         f"{name}: Class order mismatch - "
@@ -64,7 +67,10 @@ def validate_oof_alignment(
             global_class_order = models_dir / "class_order.npy"
             if global_class_order.exists():
                 try:
-                    saved_order = np.load(global_class_order, allow_pickle=True).tolist()
+                    saved_order = np.load(
+                        global_class_order,
+                        allow_pickle=False,
+                    ).tolist()
                     if not class_orders_match(saved_order, expected_class_order):
                         skip_reasons.append(
                             f"{name}: Global class order mismatch - "
@@ -89,7 +95,7 @@ def validate_oof_alignment(
         train_ids_path = models_dir / f"train_ids_{name}.npy"
         if train_ids_path.exists():
             try:
-                saved_ids = np.load(train_ids_path, allow_pickle=True)
+                saved_ids = np.load(train_ids_path, allow_pickle=False)
                 if not np.array_equal(saved_ids, train_ids):
                     skip_reasons.append(f"{name}: Train IDs mismatch (row order differs)")
                     continue
@@ -190,13 +196,13 @@ def load_and_align_oof(
     Returns:
         Tuple of (aligned_oof, valid_mask) - mask is True where alignment succeeded
     """
-    oof = np.load(oof_path)
+    oof = np.load(oof_path, allow_pickle=False)
 
     if not train_ids_path.exists():
         print(f"      [LOG:WARNING] No train_ids file for {oof_path.name}, assuming aligned")
         return oof, np.ones(len(oof), dtype=bool)
 
-    train_ids = np.load(train_ids_path, allow_pickle=True)
+    train_ids = np.load(train_ids_path, allow_pickle=False)
 
     if len(train_ids) != len(oof):
         raise ValueError(f"train_ids length {len(train_ids)} != oof length {len(oof)}")
