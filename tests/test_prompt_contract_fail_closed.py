@@ -17,8 +17,8 @@ from kaggle_agents.prompts.templates.builders.model import (
 from kaggle_agents.prompts.templates.builders.optuna import (
     build_optuna_tuning_instructions,
 )
-from kaggle_agents.prompts.templates.constraints.base import BASE_CONSTRAINTS
 from kaggle_agents.prompts.templates.constraints.audio import AUDIO_CONSTRAINTS
+from kaggle_agents.prompts.templates.constraints.base import BASE_CONSTRAINTS
 from kaggle_agents.prompts.templates.constraints.image import IMAGE_CONSTRAINTS
 from kaggle_agents.prompts.templates.constraints.loader import (
     get_constraints_for_domain,
@@ -28,6 +28,11 @@ from kaggle_agents.prompts.templates.constraints.tabular import TABULAR_CONSTRAI
 from kaggle_agents.prompts.templates.developer.component_guidance import (
     COMPONENT_GUIDANCE,
 )
+from kaggle_agents.prompts.templates.developer.fix_debug import (
+    DEBUG_CODE_PROMPT,
+    FIX_CODE_PROMPT,
+)
+from kaggle_agents.prompts.templates.planner_prompts import get_domain_guidance
 
 
 def test_base_requires_canonical_folds_instead_of_a_global_splitter() -> None:
@@ -53,6 +58,68 @@ def test_component_guidance_uses_canonical_target_and_submission_roles() -> None
     assert "sample_sub.columns[0]" not in guidance
     assert "sample_sub.columns[1:]" not in guidance
     assert "StratifiedKFold CV" not in guidance
+
+
+def test_seq2seq_planner_guidance_keeps_text_as_text() -> None:
+    guidance = get_domain_guidance("seq_to_seq")
+
+    assert "exact-match" in guidance
+    assert "one class per unique target string" in guidance
+    assert "regression target" in guidance
+    assert "lookup" in guidance.lower()
+
+
+def test_audio_planner_guidance_requires_id_safe_file_alignment() -> None:
+    guidance = get_domain_guidance("audio_classification")
+
+    assert "RECORD_ID_TO_INPUT_PATH" in guidance
+    assert "arbitrary glob order" in guidance
+    assert "canonical test-ID order" in guidance
+
+
+def test_seq2seq_developer_constraints_override_tabular_examples() -> None:
+    constraints = get_constraints_for_domain("seq_to_seq")
+
+    assert "CANONICAL TASK CONTRACT OVERRIDES" in constraints
+    assert "DO NOT APPLY TABULAR MODEL GUIDANCE" in constraints
+    assert "STOP: ignore every remaining tabular section below" in constraints
+    assert "exact-match" in constraints
+    assert "one class per unique target string" in constraints
+    assert "regression target" in constraints
+
+
+def test_base_limits_validation_scores_to_predictive_components() -> None:
+    assert "Only model and ensemble components" in BASE_CONSTRAINTS
+    assert "Preprocessing and feature-engineering components" in BASE_CONSTRAINTS
+    assert "do not print a validation score" in BASE_CONSTRAINTS
+
+
+def test_retry_prompts_do_not_force_model_behavior_on_preprocessing() -> None:
+    rendered_prompts = (
+        FIX_CODE_PROMPT.format(
+            code="print('x')",
+            error="timeout",
+            error_type="timeout",
+            meta_feedback="",
+            paths="",
+        ),
+        DEBUG_CODE_PROMPT.format(
+            code="print('x')",
+            issue="timeout",
+            stdout="",
+            stderr="",
+            meta_feedback="",
+            paths="",
+        ),
+    )
+
+    for prompt in rendered_prompts:
+        assert "Only model and ensemble components" in prompt
+        assert "Preprocessing and feature-engineering components" in prompt
+        assert "MUST NOT add model training" in prompt
+        assert "Read the injected `COMPONENT_NAME`" in prompt
+        assert "If the role is unclear" in prompt
+        assert "MUST preserve `print(f\"Final Validation Performance" not in prompt
 
 
 def test_tabular_prompt_requires_exact_rows_and_wide_prediction_shape() -> None:

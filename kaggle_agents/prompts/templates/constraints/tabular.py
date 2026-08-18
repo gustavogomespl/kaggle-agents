@@ -4,6 +4,13 @@ Tabular data constraints for tree models and structured data.
 
 TABULAR_CONSTRAINTS = """## TABULAR DATA REQUIREMENTS:
 
+### 0. Task-Contract Guard
+When canonical metadata defines seq2seq, text normalization, or text output:
+- STOP: ignore every remaining tabular section below.
+- DO NOT APPLY TABULAR MODEL GUIDANCE. Keep string outputs and the declared
+  exact-match/sequence metric; never create one class per unique target string
+  or replace text with a regression target.
+
 ### 1. Verify Tabular Features Exist
 LightGBM, XGBoost, CatBoost need REAL tabular features.
 If train.csv only has [id, label] -> It's an IMAGE competition!

@@ -392,6 +392,17 @@ For NLP competitions, prioritize:
 - Ensemble of different models
 - Text preprocessing (cleaning, tokenization)
 """,
+    "seq_to_seq": """
+For seq-to-sequence and text-normalization tasks:
+- Keep canonical targets and predictions as text; use the declared sequence
+  metric (exact-match when the metric is accuracy).
+- Never encode one class per unique target string or coerce text into a
+  regression target. Do not use tree models as surrogate text generators.
+- Start with fold-local lookup, identity, and rule candidates; use a
+  text-generating model only for unresolved rows.
+- Preserve canonical row and submission-ID order, and fail on ambiguous target
+  semantics instead of guessing.
+""",
     "time_series": """
 For time series competitions, prioritize:
 - Lag features and rolling statistics
@@ -506,6 +517,12 @@ feature matrices before re-extracting features.
 If `cv_folds_used` is True, treat `train_rec_ids` and `test_rec_ids` as
 legacy state keys containing semantic record IDs.
 Do NOT infer train/test from sample_submission.csv!
+
+## ID-SAFE AUDIO ALIGNMENT
+Use injected `RECORD_ID_TO_INPUT_PATH` (or injected train/test path arrays) and
+require one-to-one file coverage. Never use arbitrary glob order as prediction
+order. Accumulate test predictions in canonical test-ID order; an unresolved
+test audio file invalidates the component.
 
 ## TARGET STRUCTURE
 Infer the target structure from the training labels and submission columns:

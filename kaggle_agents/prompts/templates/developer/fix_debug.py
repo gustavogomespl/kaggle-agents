@@ -26,7 +26,11 @@ FIX_CODE_PROMPT = """Fix this code error.
 {paths}
 
 ## CRITICAL REQUIREMENTS (DO NOT REMOVE):
-1. MUST preserve `print(f"Final Validation Performance: {{score:.6f}}")` - Meta-Evaluator depends on this exact string
+1. Only model and ensemble components preserve or print `Final Validation Performance`.
+   Read the injected `COMPONENT_NAME` and original code to determine the role.
+   Preprocessing and feature-engineering components MUST NOT add model training
+   or a validation score. If the role is unclear, do not add either one;
+   preserve the original component intent and plain status logs.
 2. MUST preserve soft-deadline pattern with `_check_deadline()` calls
 3. The code above ALREADY DEFINES write_submission, save_component_artifacts,
    validate_probabilities and the CANONICAL_* constants in its injected header.
@@ -34,6 +38,11 @@ FIX_CODE_PROMPT = """Fix this code error.
    never import them, never assign over their names: a script that redefines
    a helper is rejected before execution and the attempt is lost.
 4. For FileNotFoundError: Use the EXACT paths from "Correct Data Paths" section above. DO NOT hardcode 'train.csv' or 'test.csv'.
+5. Preserve the canonical task formulation while fixing. For seq2seq/text
+   targets, keep string outputs and the declared exact-match/sequence metric;
+   never use a regression target or one class per unique target string. For
+   audio/media, preserve injected ID-to-path mapping and canonical test order;
+   never use arbitrary glob order.
 
 Fix the issue while preserving the component's intent. Return complete fixed code."""
 
@@ -61,7 +70,11 @@ DEBUG_CODE_PROMPT = """Debug this code that failed.
 {paths}
 
 ## CRITICAL REQUIREMENTS (DO NOT REMOVE):
-1. MUST preserve `print(f"Final Validation Performance: {{score:.6f}}")` - Meta-Evaluator depends on this exact string
+1. Only model and ensemble components preserve or print `Final Validation Performance`.
+   Read the injected `COMPONENT_NAME` and original code to determine the role.
+   Preprocessing and feature-engineering components MUST NOT add model training
+   or a validation score. If the role is unclear, do not add either one;
+   preserve the original component intent and plain status logs.
 2. MUST preserve soft-deadline pattern with `_check_deadline()` calls
 3. The code above ALREADY DEFINES write_submission, save_component_artifacts,
    validate_probabilities and the CANONICAL_* constants in its injected header.
@@ -69,6 +82,11 @@ DEBUG_CODE_PROMPT = """Debug this code that failed.
    never import them, never assign over their names: a script that redefines
    a helper is rejected before execution and the attempt is lost.
 4. For FileNotFoundError or path issues: Use the EXACT paths from "Correct Data Paths" section above. DO NOT hardcode 'train.csv' or 'test.csv'.
+5. Preserve the canonical task formulation while debugging. For seq2seq/text
+   targets, keep string outputs and the declared exact-match/sequence metric;
+   never use a regression target or one class per unique target string. For
+   audio/media, preserve injected ID-to-path mapping and canonical test order;
+   never use arbitrary glob order.
 
 Analyze the output, fix logic errors or missing imports, and return the complete debugged code."""
 

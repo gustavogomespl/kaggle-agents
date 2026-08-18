@@ -12,11 +12,13 @@ crashing the whole run before a single component is generated.
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from kaggle_agents.utils.data_contract import (
     _is_independent_test_schema,
+    _resolve_single_target_class_order,
     _resolve_supervised_target_contract,
 )
 from kaggle_agents.utils.target_inference import TargetInferenceError
@@ -69,7 +71,10 @@ def _sparse_multiclass_image_workspace(tmp_path: Path, rows: int = 42) -> dict:
     pd.DataFrame(
         {
             "id": train_ids,
-            "breed": ["ant", "moose", "zebra"] * (rows // 3),
+            "breed": [
+                ("ant", "moose", "zebra")[index % 3]
+                for index in range(rows)
+            ],
         }
     ).to_csv(tmp_path / "train.csv", index=False)
     pd.DataFrame(
@@ -144,6 +149,22 @@ class TestIndependentTestSchemaDetection:
 
 
 class TestTargetResolutionWithTemplateAsTestSchema:
+    @pytest.mark.parametrize(
+        ("declared_order", "error"),
+        [
+            (["zebra", "ant", "ant"], "unique"),
+            (["zebra", "ant", "unknown"], "exactly cover"),
+        ],
+    )
+    def test_public_class_order_must_exactly_match_observed_labels(
+        self, declared_order: list[str], error: str
+    ) -> None:
+        with pytest.raises(ValueError, match=error):
+            _resolve_single_target_class_order(
+                np.asarray(["ant", "moose", "zebra"]),
+                declared_order,
+            )
+
     def test_sparse_multiclass_label_values_resolve_wide_submission(
         self, tmp_path: Path
     ) -> None:
@@ -327,8 +348,6 @@ class TestCanonicalNodeForImageLabelsCsv:
     def test_the_graded_test_rows_stay_in_template_order(
         self, tmp_path: Path
     ) -> None:
-        import numpy as np
-
         state = _image_workspace(tmp_path)
 
         canonical_data_preparation_node(state)

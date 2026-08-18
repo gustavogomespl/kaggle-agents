@@ -6,6 +6,15 @@ These are the core requirements that every generated code must follow.
 
 BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
 
+### 0. Canonical Task Contract Precedence
+- CANONICAL TASK CONTRACT OVERRIDES generic domain examples and model advice.
+- For seq2seq/text-normalization targets, keep targets and predictions as text
+  and use the declared sequence metric (exact-match for accuracy). Never encode
+  one class per unique target string or coerce target text into a regression
+  target.
+- Preserve the declared component role. Preprocessing and feature-engineering
+  components must not train models or report predictive validation scores.
+
 ### 1. Cross-Validation
 - Define `RUN_SEED = int(os.getenv("RUN_SEED", "42"))` once and use it everywhere
 - Load the injected `CANONICAL_FOLDS_PATH`, `CANONICAL_TRAIN_IDS_PATH`, and
@@ -31,7 +40,9 @@ BASE_CONSTRAINTS = """## CORE REQUIREMENTS (ALL DOMAINS):
   implicit class-column order.
 
 ### 2. Output Requirements
-- Print "Final Validation Performance: {score:.6f}" at end (CRITICAL for evaluation)
+- Only model and ensemble components print
+  "Final Validation Performance: {score:.6f}" at the end.
+- Preprocessing and feature-engineering components do not print a validation score.
 - For probability metrics only, clamp probabilities to `[0, 1]` before saving
 - For regression, preserve the prediction scale (RMSLE alone requires non-negative values)
 - Match sample_submission.csv exactly: columns, IDs, shape
