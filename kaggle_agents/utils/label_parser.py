@@ -467,6 +467,7 @@ def infer_filename_label_table(
     file_paths: list[Path] | tuple[Path, ...],
     *,
     explicit_pattern: str | None = None,
+    expected_num_classes: int | None = None,
 ) -> pd.DataFrame:
     """Build a canonical label table from filenames using auditable evidence.
 
@@ -475,6 +476,13 @@ def infer_filename_label_table(
     Without an explicit pattern, inference is deliberately conservative: the
     immediate parent directory and the final delimiter-separated stem token
     are considered, and exactly one repeated class partition must remain.
+
+    ``expected_num_classes`` is public-template evidence (one class per
+    prediction column, or two for a single probability column). It is only a
+    tie-breaker: when several repeated partitions survive, the unique one
+    whose class count matches is selected. It never admits a partition the
+    repeated-structure rules rejected, and ties among matching partitions
+    still fail closed.
 
     This avoids assigning targets from a benchmark-shaped filename regex. If
     the filenames do not provide a unique structural interpretation, callers
@@ -563,6 +571,26 @@ def infer_filename_label_table(
         for source, values in viable.items():
             unique_partitions.setdefault(tuple(values), []).append(source)
 
+        # Template-evidence tie-break: among distinct repeated partitions,
+        # keep the one whose class count the submission template proves.
+        # A repeated non-target token (a capture date shared by many clips)
+        # is exactly what creates this ambiguity, and its class count almost
+        # never matches the template's.
+        class_count_matched = False
+        if (
+            len(unique_partitions) > 1
+            and expected_num_classes is not None
+            and int(expected_num_classes) >= 2
+        ):
+            matching = {
+                targets_key: sources
+                for targets_key, sources in unique_partitions.items()
+                if len(set(targets_key)) == int(expected_num_classes)
+            }
+            if len(matching) == 1:
+                unique_partitions = matching
+                class_count_matched = True
+
         if len(unique_partitions) != 1:
             sources = sorted(viable)
             reason = "none" if not sources else ", ".join(sources)
@@ -575,6 +603,8 @@ def infer_filename_label_table(
         target_tuple, evidence_sources = next(iter(unique_partitions.items()))
         targets = list(target_tuple)
         evidence = "+".join(sorted(evidence_sources))
+        if class_count_matched:
+            evidence += f"+expected_class_count={int(expected_num_classes)}"
         mode = "unique_filename_structure"
 
     record_ids = [path.stem for path in paths]

@@ -5,9 +5,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from kaggle_agents.agents.developer.code_generator import CodeGeneratorMixin
 from kaggle_agents.agents.planner.fallback_plans.audio import (
     create_audio_fallback_plan,
 )
+from kaggle_agents.core.state import AblationComponent, CompetitionInfo
 from kaggle_agents.mlebench.data_adapter.detection import DetectionMixin
 from kaggle_agents.prompts.templates.audio_template import get_audio_config
 from kaggle_agents.prompts.templates.builders.context import (
@@ -61,6 +63,158 @@ def test_filename_target_inference_rejects_unique_identifier_suffixes(tmp_path) 
 
     with pytest.raises(ValueError, match="not uniquely supported"):
         infer_filename_label_table(paths)
+
+
+def test_ambiguous_partitions_resolved_by_expected_class_count(tmp_path) -> None:
+    """Template-backed class counts break leading/terminal token ties.
+
+    Capture timestamps repeat (several clips per session), so the leading
+    stem token forms a second "viable" partition next to the terminal binary
+    label and conservative inference fails closed. The public submission
+    template proves how many classes the task has; that evidence selects the
+    matching partition without lowering the repeated-structure bar.
+    """
+    names = [
+        "20240101_000000_recA_1.wav",
+        "20240101_000130_recB_0.wav",
+        "20240102_000000_recC_1.wav",
+        "20240102_000130_recD_0.wav",
+        "20240103_000000_recE_1.wav",
+        "20240103_000130_recF_0.wav",
+    ]
+    paths = _files(tmp_path, names)
+
+    with pytest.raises(ValueError, match="not uniquely supported"):
+        infer_filename_label_table(paths)
+
+    table = infer_filename_label_table(paths, expected_num_classes=2)
+    assert table["target"].tolist() == ["1", "0", "1", "0", "1", "0"]
+    assert "expected_class_count" in table.attrs["target_inference"]["evidence"]
+
+
+def test_expected_class_count_cannot_pick_between_equal_size_partitions(
+    tmp_path,
+) -> None:
+    paths = _files(
+        tmp_path,
+        [
+            "group_one/a_cat.wav",
+            "group_one/b_cat.wav",
+            "group_one/c_dog.wav",
+            "group_one/d_dog.wav",
+            "group_two/e_cat.wav",
+            "group_two/f_cat.wav",
+            "group_two/g_dog.wav",
+            "group_two/h_dog.wav",
+        ],
+    )
+
+    with pytest.raises(ValueError, match="viable interpretations"):
+        infer_filename_label_table(paths, expected_num_classes=2)
+
+
+def test_audio_fallback_disambiguates_with_binary_probability_template(
+    tmp_path,
+) -> None:
+    """End to end: timestamped stems + binary template still yield a contract."""
+    train_dir = tmp_path / "train"
+    test_dir = tmp_path / "test"
+    _files(
+        train_dir,
+        [
+            "20240101_000000_recA_1.wav",
+            "20240101_000130_recB_0.wav",
+            "20240102_000000_recC_1.wav",
+            "20240102_000130_recD_0.wav",
+            "20240103_000000_recE_1.wav",
+            "20240103_000130_recF_0.wav",
+        ],
+    )
+    _files(test_dir, ["t_1.wav", "t_2.wav"])
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("clip,probability\nt_1,0\nt_2,0\n", encoding="utf-8")
+
+    updates = canonical_data_preparation_node(
+        {
+            "working_directory": str(tmp_path),
+            "data_files": {
+                "data_type": "audio",
+                "train": str(train_dir),
+                "test": str(test_dir),
+                "sample_submission": str(sample),
+            },
+            "submission_contract": {
+                "id_col": "clip",
+                "target_cols": ["probability"],
+            },
+            "sample_submission_path": str(sample),
+        }
+    )
+
+    assert updates["canonical_data_prepared"] is True
+    y = np.load(tmp_path / "canonical" / "y.npy", allow_pickle=True)
+    assert sorted({str(value) for value in y}) == ["0", "1"]
+
+
+def test_mlebench_audio_header_defines_canonical_flag_when_contract_absent(
+    tmp_path,
+) -> None:
+    """The injected preamble must define the flag its own contract references.
+
+    In mlebench mode without a canonical contract the header tells candidates
+    to check ``CANONICAL_FOLDS_AVAILABLE`` before touching CANONICAL_*, but the
+    flag itself was only injected outside mlebench mode — so every candidate
+    died on NameError instead of the intended clear data-contract error.
+    """
+
+    class _HeaderGen(CodeGeneratorMixin):
+        use_dspy = False
+        config = SimpleNamespace()
+        llm = SimpleNamespace(invoke=lambda _messages: SimpleNamespace(content=""))
+
+        @staticmethod
+        def _get_dataset_info(*_args, **_kwargs) -> str:
+            return ""
+
+    train_dir = tmp_path / "train"
+    test_dir = tmp_path / "test"
+    _files(train_dir, ["clip_a.wav"])
+    _files(test_dir, ["clip_b.wav"])
+    sample = tmp_path / "sample_submission.csv"
+    sample.write_text("clip,probability\nclip_b,0\n", encoding="utf-8")
+
+    state = {
+        "working_directory": str(tmp_path),
+        "run_mode": "mlebench",
+        "current_train_path": str(train_dir),
+        "current_test_path": str(test_dir),
+        "sample_submission_path": str(sample),
+        "data_files": {
+            "data_type": "audio",
+            "train": str(train_dir),
+            "test": str(test_dir),
+            "sample_submission": str(sample),
+        },
+        "submission_contract": {"id_col": "clip", "target_cols": ["probability"]},
+        "failed_contract_fingerprints": {},
+    }
+    component = AblationComponent("model_a", "model", "train a model")
+    info = CompetitionInfo("demo", "", "auc", "binary_classification")
+
+    prepared = _HeaderGen()._prepare_generated_contract(
+        component,
+        info,
+        tmp_path,
+        "audio",
+        state,
+    )
+
+    header = prepared.path_header
+    assert header.count("CANONICAL_FOLDS_AVAILABLE = False") == 1
+    assert "CANONICAL_FOLDS_AVAILABLE = True" not in header
+    # ensure_folds is the live-mode escape hatch; mlebench stays fail-closed.
+    assert "def ensure_folds" not in header
+    compile(header, "<injected-header>", "exec")
 
 
 def test_filename_target_inference_rejects_ambiguous_partitions(tmp_path) -> None:

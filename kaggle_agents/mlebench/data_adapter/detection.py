@@ -179,6 +179,7 @@ class DetectionMixin:
         media_dir: Path,
         extensions: frozenset[str],
         explicit_pattern: str | None = None,
+        expected_num_classes: int | None = None,
     ) -> tuple[list[str], list[str], list[Path]]:
         """Extract labels only from explicit or uniquely inferred structure.
 
@@ -186,6 +187,8 @@ class DetectionMixin:
             media_dir: Directory containing media files with labels in filenames
             extensions: Lowercase suffixes that count as media files
             explicit_pattern: Dataset-derived regex with one target capture group
+            expected_num_classes: Template-proven class count, used only to
+                break ties between multiple repeated partitions
 
         Returns:
             Tuple of (ids, labels, paths) where:
@@ -201,6 +204,7 @@ class DetectionMixin:
         label_table = infer_filename_label_table(
             media_files,
             explicit_pattern=explicit_pattern,
+            expected_num_classes=expected_num_classes,
         )
         return (
             label_table["record_id"].tolist(),
@@ -227,6 +231,7 @@ class DetectionMixin:
         n_folds: int = 5,
         explicit_pattern: str | None = None,
         test_ids: list[str] | None = None,
+        expected_num_classes: int | None = None,
     ) -> dict:
         """Audio entry point for filename-derived canonical artifacts."""
         return self.create_canonical_from_media_filenames(
@@ -237,6 +242,7 @@ class DetectionMixin:
             n_folds=n_folds,
             explicit_pattern=explicit_pattern,
             test_ids=test_ids,
+            expected_num_classes=expected_num_classes,
         )
 
     def create_canonical_from_image_filenames(
@@ -246,6 +252,7 @@ class DetectionMixin:
         n_folds: int = 5,
         explicit_pattern: str | None = None,
         test_ids: list[str] | None = None,
+        expected_num_classes: int | None = None,
     ) -> dict:
         """Image entry point for filename-derived canonical artifacts.
 
@@ -262,6 +269,7 @@ class DetectionMixin:
             n_folds=n_folds,
             explicit_pattern=explicit_pattern,
             test_ids=test_ids,
+            expected_num_classes=expected_num_classes,
         )
 
     def create_canonical_from_media_filenames(  # noqa: PLR0913
@@ -274,6 +282,7 @@ class DetectionMixin:
         n_folds: int = 5,
         explicit_pattern: str | None = None,
         test_ids: list[str] | None = None,
+        expected_num_classes: int | None = None,
     ) -> dict:
         """Own the canonical directory it writes, from a clean slate.
 
@@ -298,6 +307,7 @@ class DetectionMixin:
                 n_folds=n_folds,
                 explicit_pattern=explicit_pattern,
                 test_ids=test_ids,
+                expected_num_classes=expected_num_classes,
             )
         except BaseException:
             shutil.rmtree(canonical_dir, ignore_errors=True)
@@ -316,6 +326,7 @@ class DetectionMixin:
         n_folds: int = 5,
         explicit_pattern: str | None = None,
         test_ids: list[str] | None = None,
+        expected_num_classes: int | None = None,
     ) -> dict:
         """Create canonical artifacts from evidence-backed filename targets.
 
@@ -343,6 +354,7 @@ class DetectionMixin:
                 media_dir,
                 extensions,
                 explicit_pattern=explicit_pattern,
+                expected_num_classes=expected_num_classes,
             )
         except ValueError as exc:
             return {"success": False, "error": str(exc)}

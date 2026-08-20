@@ -2156,7 +2156,25 @@ print("="*60)
         if (
             data_type in ("audio", "audio_classification")
             and not has_canonical
-            and run_mode != "mlebench"
+            and run_mode == "mlebench"
+        ):
+            # mlebench stays fail-closed: no locally generated folds. But the
+            # header's own audio contract tells candidates to check this flag,
+            # so it must exist — otherwise every candidate dies on NameError
+            # instead of the intended clear data-contract error, and the
+            # fixer/debugger budget is burned reproducing a harness bug.
+            path_header += '''
+# === CANONICAL CONTRACT ABSENT (FAIL-CLOSED) ===
+# No canonical contract was prepared for this run, so CANONICAL_* data does
+# not exist. When this flag is False, components that need canonical targets
+# or folds MUST raise a clear data-contract error immediately; never infer
+# targets from an assumed filename convention or generate local folds.
+CANONICAL_FOLDS_AVAILABLE = False
+# === END CANONICAL CONTRACT ABSENT ===
+'''
+        elif (
+            data_type in ("audio", "audio_classification")
+            and not has_canonical
         ):
             path_header += '''
 # === CANONICAL_DIR FALLBACK (Dynamic Folds) ===

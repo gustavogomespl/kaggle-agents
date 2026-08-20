@@ -163,6 +163,12 @@ class SubmissionValidationMixin:
             str(problem_type or "").strip().lower().replace("-", "_")
         )
         is_multiclass = "multiclass" in normalized_problem_type
+        # Free-text targets legitimately contain empty strings — the training
+        # target itself can be empty — so a blank cell there is a scoreable
+        # prediction, not file corruption.
+        is_free_text = "seq2seq" in normalized_problem_type or (
+            "seq_to_seq" in normalized_problem_type
+        )
 
         # Roles, not positions: a template may put the prediction first and echo
         # the test input after it. Comparing the prediction column against the
@@ -206,6 +212,7 @@ class SubmissionValidationMixin:
             )
             submission_rows = 0
             sample_rows = 0
+            blank_label_rows = 0
             template_unchanged = True
             for sub_chunk, sample_chunk in zip_longest(
                 submission_chunks,
@@ -253,10 +260,12 @@ class SubmissionValidationMixin:
                         )
 
                 if label_prediction_format:
-                    if sub_chunk[pred_cols[0]].eq("").any():
+                    blank_labels = int(sub_chunk[pred_cols[0]].eq("").sum())
+                    if blank_labels and not is_free_text:
                         return False, (
                             f"Blank label values in column: {pred_cols[0]}"
                         )
+                    blank_label_rows += blank_labels
                     if template_unchanged:
                         template_unchanged = sub_chunk[pred_cols].equals(
                             sample_chunk[pred_cols]
@@ -311,6 +320,15 @@ class SubmissionValidationMixin:
             return False, (
                 f"Row count mismatch: expected {sample_rows}, "
                 f"got {submission_rows}"
+            )
+        # A column of nothing but blanks is a broken pipeline, not predictions.
+        if (
+            label_prediction_format
+            and submission_rows
+            and blank_label_rows == submission_rows
+        ):
+            return False, (
+                f"All label values are blank in column: {pred_cols[0]}"
             )
         if submission_rows and template_unchanged:
             return False, (

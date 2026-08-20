@@ -175,6 +175,52 @@ def _resolve_filename_image_test_ids(
     return test_ids
 
 
+def _expected_class_count_from_template(
+    submission_contract: dict[str, Any],
+    data_files: dict[str, Any],
+    working_dir: Path,
+    sample_submission_path: str | None,
+) -> int | None:
+    """Class count the public submission template proves, if any.
+
+    Several prediction columns are a one-hot template: one class per column.
+    A single prediction column whose sample values are all numeric within
+    [0, 1] is a positive-class probability, which implies a binary target.
+    Anything else returns ``None`` and filename-label inference keeps its
+    fully conservative behavior. This is used only to break ties between
+    multiple repeated filename partitions, never to admit new ones.
+    """
+    target_cols = [
+        str(column)
+        for column in (submission_contract.get("target_cols") or [])
+        if isinstance(column, str) and column
+    ]
+    if len(target_cols) > 1:
+        return len(target_cols)
+    if len(target_cols) != 1:
+        return None
+
+    sample_submission = Path(
+        data_files.get("sample_submission")
+        or sample_submission_path
+        or working_dir / "sample_submission.csv"
+    )
+    if not sample_submission.is_file():
+        return None
+    try:
+        column = pd.read_csv(sample_submission, usecols=target_cols)[target_cols[0]]
+    except Exception:
+        return None
+    values = pd.to_numeric(column, errors="coerce")
+    if (
+        len(values)
+        and bool(values.notna().all())
+        and bool(((values >= 0) & (values <= 1)).all())
+    ):
+        return 2
+    return None
+
+
 def _media_fallback_state_updates(
     result: dict[str, Any],
     test_ids: list[str],
@@ -477,6 +523,12 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                         n_folds=5,
                         explicit_pattern=_filename_label_pattern_from_state(state),
                         test_ids=test_ids,
+                        expected_num_classes=_expected_class_count_from_template(
+                            submission_contract,
+                            data_files,
+                            working_dir,
+                            state.get("sample_submission_path"),
+                        ),
                     )
                     if image_train_dir.is_dir()
                     else {"success": False, "error": f"Missing {image_train_dir}"}
@@ -552,6 +604,12 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                         n_folds=5,
                         explicit_pattern=filename_label_pattern,
                         test_ids=test_ids,
+                        expected_num_classes=_expected_class_count_from_template(
+                            submission_contract,
+                            data_files,
+                            working_dir,
+                            state.get("sample_submission_path"),
+                        ),
                     )
 
                 if result.get("success"):
@@ -686,6 +744,14 @@ def canonical_data_preparation_node(state: KaggleState) -> dict[str, Any]:
                             n_folds=5,
                             explicit_pattern=filename_label_pattern,
                             test_ids=fallback_test_ids,
+                            expected_num_classes=(
+                                _expected_class_count_from_template(
+                                    submission_contract,
+                                    data_files,
+                                    working_dir,
+                                    state.get("sample_submission_path"),
+                                )
+                            ),
                         )
                     )
 
