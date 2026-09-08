@@ -1,0 +1,45 @@
+\begin{table}[!htbp]
+\centering
+\caption{\textbf{Resultados históricos por competição.} R1 é piloto; R2 e
+R3 são coortes posteriores com busca; \emph{Sem busca} é um contraste
+exploratório. A semente 42 é confirmada apenas para R2, R3 e sem busca, e os
+limites de iteração variam. Assim, as colunas não constituem uma comparação
+causal. inv. = sem submissão válida: \emph{Right Whale Redux} e
+\emph{SIIM-ISIC} foram bloqueadas pelo \emph{gate} de robustez; em
+\emph{SIIM-ISIC} também houve esgotamento do prazo.}
+\label{tab:resultados}
+\scriptsize\renewcommand{\arraystretch}{0.92}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{@{}p{4.0cm}l rl rl rl rl@{}}
+\toprule
+Competição & Métr. & \multicolumn{2}{c}{Piloto R1} &
+\multicolumn{2}{c}{Coorte R2} & \multicolumn{2}{c}{Coorte R3} &
+\multicolumn{2}{c}{Sem busca}\\
+\cmidrule(lr){3-4}\cmidrule(lr){5-6}\cmidrule(lr){7-8}\cmidrule(lr){9-10}
+ & & score & med. & score & med. & score & med. & score & med.\\
+\midrule
+aerial-cactus-identification & auc\,$\uparrow$ & 1,0000 & Ouro & 1,0000 & Ouro & 0,9999 & -- & 1,0000 & Ouro\\
+aptos2019-blindness-detection & quadratic\_weighted\_kappa\,$\uparrow$ & 0,8596 & -- & 0,8678 & -- & 0,8846 & -- & 0,8884 & --\\
+denoising-dirty-documents & rmse\,$\downarrow$ & 0,0208 & Prata & 0,0127 & Ouro & 0,0151 & Ouro & 0,0144 & Ouro\\
+detecting-insults-in-social-commentary & auc\,$\uparrow$ & 0,9381 & Ouro & 0,9113 & Ouro & 0,9104 & Ouro & 0,9144 & Ouro\\
+dog-breed-identification & log\_loss\,$\downarrow$ & 0,4292 & -- & 0,6236 & -- & 0,3320 & -- & 0,7124 & --\\
+dogs-vs-cats-redux-kernels-edition & log\_loss\,$\downarrow$ & 0,0170 & Ouro & 0,0139 & Ouro & 0,0153 & Ouro & 0,0136 & Ouro\\
+histopathologic-cancer-detection & auc\,$\uparrow$ & 0,9938 & Ouro & 0,9972 & Ouro & 0,9886 & Ouro & 0,9953 & Ouro\\
+jigsaw-toxic-comment-classification-challenge & auc\,$\uparrow$ & 0,9864 & Bronze & 0,9777 & -- & 0,9727 & -- & 0,9724 & --\\
+leaf-classification & log\_loss\,$\downarrow$ & 0,0378 & -- & 0,0462 & -- & 0,0044 & Prata & 0,0311 & --\\
+mlsp-2013-birds & auc\,$\uparrow$ & 0,4943 & -- & 0,5000 & -- & 0,5538 & -- & 0,5508 & --\\
+new-york-city-taxi-fare-prediction & rmse\,$\downarrow$ & 5,2454 & -- & 5,0278 & -- & 4,3534 & -- & 4,2277 & --\\
+nomad2018-predict-transparent-conductors & rmsle\,$\downarrow$ & 0,0594 & Prata & 0,0589 & Prata & 0,0597 & Prata & 0,0605 & Prata\\
+plant-pathology-2020-fgvc7 & auc\,$\uparrow$ & 0,9936 & Ouro & 0,9991 & Ouro & 0,9979 & Ouro & 0,9923 & Ouro\\
+random-acts-of-pizza & auc\,$\uparrow$ & 0,7870 & Prata & 0,7907 & Prata & 0,7972 & Prata & 0,7780 & Prata\\
+ranzcr-clip-catheter-line-classification & auc\,$\uparrow$ & 0,9383 & -- & 0,8530 & -- & 0,8612 & -- & 0,8658 & --\\
+siim-isic-melanoma-classification & auc\,$\uparrow$ & 0,8002 & -- & 0,8697 & -- & 0,8865 & -- & inv. & --\\
+spooky-author-identification & log\_loss\,$\downarrow$ & 0,2847 & Bronze & 0,2890 & Bronze & 0,2849 & Bronze & 0,3807 & --\\
+tabular-playground-series-dec-2021 & accuracy\,$\uparrow$ & 0,9592 & Ouro & 0,9632 & Ouro & 0,9633 & Ouro & 0,9591 & Ouro\\
+tabular-playground-series-may-2022 & auc\,$\uparrow$ & 0,9871 & -- & 0,9945 & -- & 0,9944 & -- & 0,9963 & --\\
+text-normalization-challenge-english-language & accuracy\,$\uparrow$ & 0,9906 & Bronze & 0,9906 & Bronze & 0,9904 & Bronze & 0,9906 & Bronze\\
+text-normalization-challenge-russian-language & accuracy\,$\uparrow$ & 0,9700 & -- & 0,9735 & -- & 0,9735 & -- & 0,9735 & --\\
+the-icml-2013-whale-challenge-right-whale-redux & auc\,$\uparrow$ & 0,9781 & Prata & 0,9797 & Prata & 0,9519 & Prata & inv. & --\\
+\bottomrule
+\end{tabular}}
+\end{table}
